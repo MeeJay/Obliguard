@@ -2,7 +2,7 @@ import type { Server as SocketIOServer } from 'socket.io';
 import * as fs from 'fs';
 import * as path from 'path';
 import { db } from '../db';
-import type { AgentApiKey, AgentDevice, AgentThresholds } from '@obliview/shared';
+import type { AgentApiKey, AgentDevice, AgentGroupConfig, AgentThresholds } from '@obliview/shared';
 import { DEFAULT_AGENT_THRESHOLDS, SOCKET_EVENTS } from '@obliview/shared';
 import { heartbeatService } from './heartbeat.service';
 import { logger } from '../utils/logger';
@@ -39,11 +39,16 @@ interface AgentDeviceRow {
   status: string;
   heartbeat_monitoring: boolean;
   check_interval_seconds: number;
+  agent_max_missed_pushes: number | null;  // migration 021
   approved_by: number | null;
   approved_at: Date | null;
   group_id: number | null;
   created_at: Date;
   updated_at: Date;
+  // migration 025
+  sensor_display_names: unknown;
+  // migration 026
+  override_group_settings: boolean;
 }
 
 function rowToApiKey(row: AgentApiKeyRow): AgentApiKey {
@@ -58,7 +63,25 @@ function rowToApiKey(row: AgentApiKeyRow): AgentApiKey {
   };
 }
 
-function rowToDevice(row: AgentDeviceRow): AgentDevice {
+function rowToDevice(row: AgentDeviceRow, groupConfig?: AgentGroupConfig | null): AgentDevice {
+  const override = row.override_group_settings ?? false;
+
+  // Compute effective (resolved) settings, honouring group inheritance when override=false.
+  let resolvedSettings: AgentDevice['resolvedSettings'];
+  if (!override && groupConfig) {
+    resolvedSettings = {
+      checkIntervalSeconds: groupConfig.pushIntervalSeconds ?? row.check_interval_seconds,
+      heartbeatMonitoring:  groupConfig.heartbeatMonitoring  ?? (row.heartbeat_monitoring ?? true),
+      maxMissedPushes:      groupConfig.maxMissedPushes      ?? (row.agent_max_missed_pushes ?? 2),
+    };
+  } else {
+    resolvedSettings = {
+      checkIntervalSeconds: row.check_interval_seconds,
+      heartbeatMonitoring:  row.heartbeat_monitoring ?? true,
+      maxMissedPushes:      row.agent_max_missed_pushes ?? 2,
+    };
+  }
+
   return {
     id: row.id,
     uuid: row.uuid,
@@ -76,7 +99,20 @@ function rowToDevice(row: AgentDeviceRow): AgentDevice {
     groupId: row.group_id,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
+    sensorDisplayNames: (row.sensor_display_names as Record<string, string> | null) ?? null,
+    overrideGroupSettings: override,
+    resolvedSettings,
   };
+}
+
+/** Fetch the agent_group_config for a group (null if group not found or has no config). */
+async function getGroupAgentConfig(groupId: number): Promise<AgentGroupConfig | null> {
+  const g = await db('monitor_groups').where({ id: groupId }).select('agent_group_config').first() as
+    { agent_group_config: unknown } | undefined;
+  if (!g?.agent_group_config) return null;
+  return (typeof g.agent_group_config === 'string'
+    ? JSON.parse(g.agent_group_config)
+    : g.agent_group_config) as AgentGroupConfig;
 }
 
 // ============================================================
@@ -187,22 +223,36 @@ export const agentService = {
   // ── Devices ─────────────────────────────────────────────
 
   async listDevices(status?: AgentDevice['status']): Promise<AgentDevice[]> {
-    const query = db('agent_devices').orderBy('created_at', 'desc');
-    if (status) query.where({ status });
-    const rows = await query as AgentDeviceRow[];
-    return rows.map(rowToDevice);
+    // LEFT JOIN to fetch agent_group_config in one round-trip so resolvedSettings
+    // can be computed without N+1 queries.
+    const query = db('agent_devices as d')
+      .leftJoin('monitor_groups as g', 'g.id', 'd.group_id')
+      .select('d.*', db.raw('g.agent_group_config as _group_agent_config'))
+      .orderBy('d.created_at', 'desc');
+    if (status) query.where({ 'd.status': status });
+    const rows = await query as (AgentDeviceRow & { _group_agent_config: unknown })[];
+    return rows.map((r) => {
+      const gc = r._group_agent_config
+        ? (typeof r._group_agent_config === 'string'
+          ? JSON.parse(r._group_agent_config)
+          : r._group_agent_config) as AgentGroupConfig
+        : null;
+      return rowToDevice(r, gc);
+    });
   },
 
   async getDeviceById(id: number): Promise<AgentDevice | null> {
     const row = await db('agent_devices').where({ id }).first() as AgentDeviceRow | undefined;
     if (!row) return null;
-    return rowToDevice(row);
+    const groupConfig = row.group_id ? await getGroupAgentConfig(row.group_id) : null;
+    return rowToDevice(row, groupConfig);
   },
 
   async getDeviceByUuid(uuid: string): Promise<AgentDevice | null> {
     const row = await db('agent_devices').where({ uuid }).first() as AgentDeviceRow | undefined;
     if (!row) return null;
-    return rowToDevice(row);
+    const groupConfig = row.group_id ? await getGroupAgentConfig(row.group_id) : null;
+    return rowToDevice(row, groupConfig);
   },
 
   async updateDevice(id: number, data: {
@@ -213,6 +263,8 @@ export const agentService = {
     approvedAt?: Date;
     name?: string | null;
     heartbeatMonitoring?: boolean;
+    sensorDisplayNames?: Record<string, string> | null;
+    overrideGroupSettings?: boolean;
   }): Promise<AgentDevice | null> {
     const update: Record<string, unknown> = { updated_at: new Date() };
     if (data.status !== undefined) update.status = data.status;
@@ -222,13 +274,16 @@ export const agentService = {
     if (data.approvedAt !== undefined) update.approved_at = data.approvedAt;
     if (data.name !== undefined) update.name = data.name;
     if (data.heartbeatMonitoring !== undefined) update.heartbeat_monitoring = data.heartbeatMonitoring;
+    if (data.sensorDisplayNames !== undefined) update.sensor_display_names = data.sensorDisplayNames;
+    if (data.overrideGroupSettings !== undefined) update.override_group_settings = data.overrideGroupSettings;
 
     const [row] = await db('agent_devices')
       .where({ id })
       .update(update)
       .returning('*') as AgentDeviceRow[];
     if (!row) return null;
-    const device = rowToDevice(row);
+    const groupConfig = row.group_id ? await getGroupAgentConfig(row.group_id) : null;
+    const device = rowToDevice(row, groupConfig);
 
     // Broadcast so the sidebar can update name/status/group without polling
     if (_io) {

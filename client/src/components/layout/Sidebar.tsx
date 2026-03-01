@@ -21,6 +21,7 @@ import {
   Cpu,
   Server,
   ArrowLeftRight,
+  PackageOpen,
 } from 'lucide-react';
 import { cn } from '@/utils/cn';
 import { useAuthStore } from '@/store/authStore';
@@ -161,12 +162,13 @@ interface NavItem {
 }
 
 const navItems: NavItem[] = [
-  { label: 'Dashboard', path: '/', icon: <LayoutDashboard size={18} /> },
-  { label: 'Groups', path: '/groups', icon: <FolderTree size={18} />, adminOnly: true },
-  { label: 'Notifications', path: '/notifications', icon: <Bell size={18} />, adminOnly: true },
-  { label: 'Users', path: '/admin/users', icon: <Users size={18} />, adminOnly: true },
-  { label: 'Agents', path: '/admin/agents', icon: <Cpu size={18} />, adminOnly: true },
-  { label: 'Settings', path: '/settings', icon: <Settings size={18} />, adminOnly: true },
+  { label: 'Dashboard',       path: '/',                     icon: <LayoutDashboard size={18} /> },
+  { label: 'Groups',          path: '/groups',               icon: <FolderTree size={18} />,  adminOnly: true },
+  { label: 'Notifications',   path: '/notifications',        icon: <Bell size={18} />,        adminOnly: true },
+  { label: 'Users',           path: '/admin/users',          icon: <Users size={18} />,       adminOnly: true },
+  { label: 'Agents',          path: '/admin/agents',         icon: <Cpu size={18} />,         adminOnly: true },
+  { label: 'Import / Export', path: '/admin/import-export',  icon: <PackageOpen size={18} />, adminOnly: true },
+  { label: 'Settings',        path: '/settings',             icon: <Settings size={18} />,    adminOnly: true },
 ];
 
 // ── Main Sidebar ──────────────────────────────────────────────────────────────

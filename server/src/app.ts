@@ -5,7 +5,7 @@ import cookieParser from 'cookie-parser';
 import session from 'express-session';
 import connectPgSimple from 'connect-pg-simple';
 import path from 'path';
-import { readFileSync } from 'fs';
+import { readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 
 // Read server version from package.json at startup.
@@ -83,6 +83,29 @@ export function createApp() {
   // Health check (public — also used by login page to display server version)
   app.get('/health', (_req, res) => {
     res.json({ status: 'ok', version: serverVersion, timestamp: new Date().toISOString() });
+  });
+
+  // Desktop app downloads — serves pre-built binaries from desktop-app/dist/.
+  // Whitelist prevents directory traversal; graceful 404 if a file isn't built yet.
+  const DESKTOP_FILES: Record<string, string> = {
+    'Obliview.exe': 'Obliview.exe', // Windows binary
+    'Obliview.zip': 'Obliview.zip', // macOS .app bundle zipped with ditto
+  };
+  // __dirname = server/dist/src  →  ../../../../desktop-app/dist = project-root/desktop-app/dist
+  const desktopDistDir = path.resolve(__dirname, '../../../../desktop-app/dist');
+
+  app.get('/downloads/:filename', (req, res) => {
+    const mapped = DESKTOP_FILES[req.params.filename];
+    if (!mapped) {
+      res.status(404).json({ error: 'Not found' });
+      return;
+    }
+    const filePath = path.join(desktopDistDir, mapped);
+    if (!existsSync(filePath)) {
+      res.status(404).json({ error: 'File not yet available' });
+      return;
+    }
+    res.download(filePath, mapped);
   });
 
   // Serve static client build in production

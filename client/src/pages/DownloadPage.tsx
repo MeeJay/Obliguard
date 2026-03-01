@@ -5,7 +5,6 @@ interface Platform {
   icon: React.ReactNode;
   description: string;
   filename: string;
-  ext: string;
   note?: string;
 }
 
@@ -14,26 +13,19 @@ const PLATFORMS: Platform[] = [
     name: 'Windows',
     icon: <Monitor size={28} />,
     description: 'Windows 10 / 11 (64-bit)',
-    filename: 'Obliview-Setup',
-    ext: '.exe',
+    filename: 'Obliview.exe',
     note: 'Requires WebView2 (included with Windows 10 1803+ or Edge Chromium)',
   },
   {
     name: 'macOS',
     icon: <Apple size={28} />,
-    description: 'macOS 12 Monterey or later',
-    filename: 'Obliview',
-    ext: '.dmg',
-    note: 'Universal binary — supports Intel and Apple Silicon',
+    description: 'macOS 10.13 or later',
+    filename: 'Obliview.zip',
+    note: 'Extract the zip and move Obliview.app to your Applications folder. Right-click → Open on first launch (Gatekeeper).',
   },
 ];
 
-/** Base URL for release assets. Set VITE_DESKTOP_RELEASE_URL in .env to override. */
-const RELEASE_BASE = (import.meta.env.VITE_DESKTOP_RELEASE_URL as string | undefined) ?? '';
-
 export function DownloadPage() {
-  const hasReleases = RELEASE_BASE !== '';
-
   return (
     <div className="mx-auto max-w-2xl px-4 py-12">
       {/* Header */}
@@ -70,46 +62,35 @@ export function DownloadPage() {
 
       {/* Download cards */}
       <div className="grid gap-4 sm:grid-cols-2">
-        {PLATFORMS.map((p) => {
-          const href = hasReleases ? `${RELEASE_BASE}/${p.filename}${p.ext}` : undefined;
-          return (
-            <div
-              key={p.name}
-              className="flex flex-col rounded-xl border border-border bg-bg-secondary p-6"
-            >
-              <div className="mb-4 flex items-center gap-3 text-text-primary">
-                <span className="text-text-secondary">{p.icon}</span>
-                <div>
-                  <div className="font-semibold">{p.name}</div>
-                  <div className="text-xs text-text-muted">{p.description}</div>
-                </div>
-              </div>
-
-              {p.note && (
-                <p className="mb-4 text-xs text-text-muted leading-relaxed">{p.note}</p>
-              )}
-
-              <div className="mt-auto">
-                {href ? (
-                  <a
-                    href={href}
-                    download
-                    className="flex w-full items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2.5 text-sm font-medium text-white transition-opacity hover:opacity-90"
-                  >
-                    <Download size={14} />
-                    Download {p.filename}{p.ext}
-                  </a>
-                ) : (
-                  <div className="flex flex-col gap-2">
-                    <div className="rounded-lg border border-border bg-bg-tertiary px-4 py-2.5 text-center text-sm text-text-muted">
-                      Coming soon
-                    </div>
-                  </div>
-                )}
+        {PLATFORMS.map((p) => (
+          <div
+            key={p.name}
+            className="flex flex-col rounded-xl border border-border bg-bg-secondary p-6"
+          >
+            <div className="mb-4 flex items-center gap-3 text-text-primary">
+              <span className="text-text-secondary">{p.icon}</span>
+              <div>
+                <div className="font-semibold">{p.name}</div>
+                <div className="text-xs text-text-muted">{p.description}</div>
               </div>
             </div>
-          );
-        })}
+
+            {p.note && (
+              <p className="mb-4 text-xs text-text-muted leading-relaxed">{p.note}</p>
+            )}
+
+            <div className="mt-auto">
+              <a
+                href={`/downloads/${p.filename}`}
+                download={p.filename}
+                className="flex w-full items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2.5 text-sm font-medium text-white transition-opacity hover:opacity-90"
+              >
+                <Download size={14} />
+                Download {p.filename}
+              </a>
+            </div>
+          </div>
+        ))}
       </div>
 
       {/* Build-it-yourself note */}
@@ -119,9 +100,14 @@ export function DownloadPage() {
           Build from source
         </div>
         <p className="text-sm text-text-secondary leading-relaxed">
-          The desktop app lives in the <code className="rounded bg-bg-tertiary px-1.5 py-0.5 text-xs font-mono text-text-primary">desktop-app/</code> directory of the Obliview repository.
-          It is a Go application using the native OS webview (WebView2 on Windows, WKWebView on macOS).
-          Run <code className="rounded bg-bg-tertiary px-1.5 py-0.5 text-xs font-mono text-text-primary">go build -o obliview .</code> inside that directory to compile it locally.
+          The desktop app lives in the{' '}
+          <code className="rounded bg-bg-tertiary px-1.5 py-0.5 text-xs font-mono text-text-primary">desktop-app/</code>{' '}
+          directory of the Obliview repository.
+          It is a Go application using the native OS webview (WebView2 on Windows, WKWebView on macOS).{' '}
+          On Windows run{' '}
+          <code className="rounded bg-bg-tertiary px-1.5 py-0.5 text-xs font-mono text-text-primary">build_icon_and_obliview.ps1</code>,{' '}
+          on macOS run{' '}
+          <code className="rounded bg-bg-tertiary px-1.5 py-0.5 text-xs font-mono text-text-primary">./build-mac.sh</code>.
         </p>
       </div>
 

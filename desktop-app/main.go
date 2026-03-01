@@ -6,6 +6,9 @@ import (
 	webview "github.com/webview/webview_go"
 )
 
+// defaultW / defaultH — initial window content size on first launch.
+const defaultW, defaultH = 1280, 800
+
 // overlayJS is injected on every page load via w.Init().
 //
 // Safety guards:
@@ -125,6 +128,21 @@ const overlayJS = `(function(){
   }else{
     injectGear();
   }
+
+  /* ── Window-size persistence ──────────────────────────────────────── */
+  // Debounced resize listener: after the user stops dragging the window
+  // edge, call the Go binding so the new size is remembered across restarts.
+  // Uses window.innerWidth/innerHeight which matches the content-area size
+  // that webview.SetSize() expects (both use logical/CSS pixels).
+  var __ov_rs_t=null;
+  window.addEventListener('resize',function(){
+    clearTimeout(__ov_rs_t);
+    __ov_rs_t=setTimeout(function(){
+      if(typeof window.__go_saveSize==='function'){
+        window.__go_saveSize(window.innerWidth,window.innerHeight).catch(function(){});
+      }
+    },600);
+  });
 })();`
 
 // setupHTML is shown on first launch when no URL has been saved yet.
@@ -189,20 +207,44 @@ function err(m){
 func main() {
 	cfg, _ := loadConfig()
 
+	// Restore saved content-area dimensions, falling back to defaults on first run.
+	winW, winH := defaultW, defaultH
+	if cfg.Width >= 400 && cfg.Height >= 300 {
+		winW, winH = cfg.Width, cfg.Height
+	} else {
+		// Initialise so the first save (URL change or close) records a valid size.
+		cfg.Width, cfg.Height = defaultW, defaultH
+	}
+
 	w := webview.New(false)
 	defer w.Destroy()
 
 	w.SetTitle("Obliview")
-	w.SetSize(1280, 800, webview.HintNone)
+	w.SetSize(winW, winH, webview.HintNone)
 
 	// Apply the app icon to the window (title bar on Windows, Dock on macOS).
+	// On macOS this also installs the standard Edit + App menu so that keyboard
+	// shortcuts such as Cmd+C, Cmd+Q, Cmd+V … work inside WKWebView.
 	applyWindowIcon(w.Window())
 
 	// __go_saveURL is callable from JS on both the setup page and the gear dialog.
 	// It persists the URL to disk; the JS side then does window.location.replace(url).
+	// We update cfg in-place so that Width/Height are not overwritten.
 	if err := w.Bind("__go_saveURL", func(url string) {
-		if err := saveConfig(&Config{URL: url}); err != nil {
+		cfg.URL = url
+		if err := saveConfig(cfg); err != nil {
 			fmt.Println("[obliview] error saving config:", err)
+		}
+	}); err != nil {
+		fmt.Println("[obliview] bind error:", err)
+	}
+
+	// __go_saveSize is called from overlayJS (debounced resize listener).
+	// It keeps cfg up-to-date in memory; the final saveConfig below persists it.
+	if err := w.Bind("__go_saveSize", func(width, height float64) {
+		if width >= 400 && height >= 300 {
+			cfg.Width = int(width)
+			cfg.Height = int(height)
 		}
 	}); err != nil {
 		fmt.Println("[obliview] bind error:", err)
@@ -220,4 +262,9 @@ func main() {
 	}
 
 	w.Run()
+
+	// Window closed — persist the final config (URL + last-known window size).
+	if err := saveConfig(cfg); err != nil {
+		fmt.Println("[obliview] error saving config on exit:", err)
+	}
 }

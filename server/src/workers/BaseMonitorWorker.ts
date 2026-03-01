@@ -4,6 +4,7 @@ import { SOCKET_EVENTS } from '@obliview/shared';
 import { heartbeatService } from '../services/heartbeat.service';
 import { monitorService } from '../services/monitor.service';
 import { notificationService } from '../services/notification.service';
+import { remediationService } from '../services/remediation.service';
 import { groupService } from '../services/group.service';
 import { groupNotificationService } from '../services/groupNotification.service';
 import { permissionService } from '../services/permission.service';
@@ -292,6 +293,17 @@ export abstract class BaseMonitorWorker {
     } catch (error) {
       logger.error(error, `Failed to send notifications for monitor ${this.config.id}`);
     }
+
+    // Trigger remediations (fire-and-forget — must not throw)
+    remediationService.triggerForMonitor(
+      this.config.id,
+      this.config.name,
+      this.config.url as string | undefined,
+      this.config.type,
+      this.config.groupId,
+      oldStatus,
+      newStatus,
+    ).catch(err => logger.error(err, `Remediation trigger failed for monitor ${this.config.id}`));
   }
 
   /**

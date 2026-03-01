@@ -69,6 +69,12 @@ COPY --from=go-agent-builder /build/dist/obliview-agent-darwin-arm64  ./agent/di
 # If absent, the /api/agent/installer/windows.msi endpoint returns 404.
 COPY agent/dist/ ./agent/dist/
 
+# Desktop app release binaries (build on Windows: build_icon_and_obliview.ps1 → dist/Obliview.exe)
+#                              (build on macOS:   desktop-app/build-mac.sh   → dist/Obliview.zip)
+# If absent, the /downloads/:filename endpoint returns 404 (no hard failure).
+RUN mkdir -p ./desktop-app/dist
+COPY desktop-app/dist/ ./desktop-app/dist/
+
 COPY server/docker-entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 

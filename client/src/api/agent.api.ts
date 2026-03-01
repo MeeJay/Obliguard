@@ -45,6 +45,8 @@ export const agentApi = {
       agentThresholds?: AgentThresholds;
       name?: string | null;
       heartbeatMonitoring?: boolean;
+      sensorDisplayNames?: Record<string, string> | null;
+      overrideGroupSettings?: boolean;
     },
   ): Promise<AgentDevice> {
     const res = await apiClient.patch<ApiResponse<AgentDevice>>(`/agent/devices/${id}`, data);

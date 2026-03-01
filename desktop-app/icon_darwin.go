@@ -20,6 +20,66 @@ static void apply_dock_icon(const unsigned char *data, int len) {
 		}
 	}
 }
+
+// setup_macos_menu installs a minimal NSMenu on NSApp so that the standard
+// macOS keyboard shortcuts are dispatched correctly to WKWebView.
+//
+// Without a main menu, NSApplication has no key-equivalent bindings and
+// simply beeps when the user presses Cmd+C, Cmd+V, Cmd+Q, etc.  Adding a
+// proper Application menu (Quit) and Edit menu (Cut/Copy/Paste/Select All/
+// Undo/Redo) restores the expected behaviour for a native GUI app.
+static void setup_macos_menu(void) {
+	@autoreleasepool {
+		NSMenu *mainMenu = [NSMenu new];
+
+		// ── Application menu (index 0 — title is ignored by macOS) ──────────
+		NSMenuItem *appItem = [mainMenu addItemWithTitle:@"Application"
+		                                          action:nil
+		                                   keyEquivalent:@""];
+		NSMenu *appMenu = [NSMenu new];
+		[appItem setSubmenu:appMenu];
+
+		[appMenu addItemWithTitle:@"Quit Obliview"
+		                   action:@selector(terminate:)
+		            keyEquivalent:@"q"];
+
+		// ── Edit menu ────────────────────────────────────────────────────────
+		NSMenuItem *editItem = [mainMenu addItemWithTitle:@"Edit"
+		                                           action:nil
+		                                    keyEquivalent:@""];
+		NSMenu *editMenu = [[NSMenu alloc] initWithTitle:@"Edit"];
+		[editItem setSubmenu:editMenu];
+
+		[editMenu addItemWithTitle:@"Undo"
+		                    action:@selector(undo:)
+		             keyEquivalent:@"z"];
+
+		// Redo: Cmd+Shift+Z
+		NSMenuItem *redo = [[NSMenuItem alloc] initWithTitle:@"Redo"
+		                                              action:@selector(redo:)
+		                                       keyEquivalent:@"z"];
+		[redo setKeyEquivalentModifierMask:NSEventModifierFlagCommand |
+		                                   NSEventModifierFlagShift];
+		[editMenu addItem:redo];
+
+		[editMenu addItem:[NSMenuItem separatorItem]];
+
+		[editMenu addItemWithTitle:@"Cut"
+		                    action:@selector(cut:)
+		             keyEquivalent:@"x"];
+		[editMenu addItemWithTitle:@"Copy"
+		                    action:@selector(copy:)
+		             keyEquivalent:@"c"];
+		[editMenu addItemWithTitle:@"Paste"
+		                    action:@selector(paste:)
+		             keyEquivalent:@"v"];
+		[editMenu addItemWithTitle:@"Select All"
+		                    action:@selector(selectAll:)
+		             keyEquivalent:@"a"];
+
+		[NSApp setMainMenu:mainMenu];
+	}
+}
 */
 import "C"
 import (
@@ -38,4 +98,8 @@ func applyWindowIcon(_ unsafe.Pointer) {
 		return
 	}
 	C.apply_dock_icon((*C.uchar)(unsafe.Pointer(&logoPNG[0])), C.int(len(logoPNG)))
+
+	// Install the standard macOS menu so that Cmd+C, Cmd+V, Cmd+Q, etc. work
+	// inside WKWebView.  Must be called after webview.New() has initialised NSApp.
+	C.setup_macos_menu()
 }

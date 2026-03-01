@@ -1,6 +1,6 @@
 {
   "name": "@obliview/server",
-  "version": "1.0.27",
+  "version": "1.0.29",
   "private": true,
   "main": "dist/src/index.js",
   "scripts": {
@@ -14,6 +14,7 @@
   },
   "dependencies": {
     "@obliview/shared": "*",
+    "@types/ssh2": "^1.15.5",
     "bcrypt": "^5.1.1",
     "connect-pg-simple": "^9.0.1",
     "cookie-parser": "^1.4.6",
@@ -31,6 +32,7 @@
     "pino-pretty": "^11.0.0",
     "playwright-chromium": "^1.58.2",
     "socket.io": "^4.7.4",
+    "ssh2": "^1.17.0",
     "undici": "^7.21.0",
     "zod": "^3.22.4"
   },

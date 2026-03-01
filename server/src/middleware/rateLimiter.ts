@@ -14,7 +14,7 @@ import rateLimit from 'express-rate-limit';
 //   - Unauthenticated requests (login page, public health endpoint, etc.) still
 //     get rate-limited to defend against enumeration / DDoS.
 export const apiLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
+  windowMs: 5 * 60 * 1000, // 5 minutes (shorter window = faster recovery)
   max: 500,
   standardHeaders: true,
   legacyHeaders: false,
@@ -22,6 +22,12 @@ export const apiLimiter = rateLimit({
     // ── Authenticated dashboard users ──────────────────────────────────────
     // Session is populated by the time this limiter runs (middleware order in app.ts).
     !!req.session?.userId ||
+    // ── Public informational endpoints ─────────────────────────────────────
+    // Health check is polled by the login page to show the server version;
+    // rate-limiting it would block the login page's UI, not improve security.
+    req.path === '/health' ||
+    // Auth state probe — returns 401 for unauthenticated callers, no info leak.
+    req.path === '/api/auth/me' ||
     // ── Machine-to-machine endpoints ───────────────────────────────────────
     // Agent pushes (X-API-Key authenticated, high-frequency — up to 1 req/2s per agent).
     req.path.startsWith('/api/agent/push') ||
@@ -45,9 +51,14 @@ export const apiLimiter = rateLimit({
 //   b) An attacker cannot brute-force a single account faster than the limit allows.
 //   c) req.body is available here because authLimiter is applied per-route in
 //      auth.routes.ts, after express.json() has already run globally.
+//
+// skipSuccessfulRequests: successful logins (HTTP 200) do not count toward the
+// limit, so a legitimate user who eventually gets their password right is not
+// penalised for earlier typos.  Only failed attempts (4xx) accumulate.
 export const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 30,
+  windowMs: 5 * 60 * 1000, // 5 minutes — resets quickly after an accidental lock-out
+  max: 20,                  // 20 failed attempts per 5-minute window per IP+username
+  skipSuccessfulRequests: true,
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: (req) => {
@@ -58,6 +69,6 @@ export const authLimiter = rateLimit({
   },
   message: {
     success: false,
-    error: 'Too many login attempts, please try again later',
+    error: 'Too many login attempts, please try again in 5 minutes',
   },
 });

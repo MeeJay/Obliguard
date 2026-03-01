@@ -462,4 +462,123 @@ export interface AgentDevice {
   groupId: number | null;
   createdAt: string;
   updatedAt: string;
+  /**
+   * Map of sensorKey → human-readable display name.
+   * Key format: "temp:<raw_label>" — matches threshold override keys.
+   * Example: { "temp:acpitz-acpi-0": "Motherboard", "temp:CPU Package": "CPU" }
+   */
+  sensorDisplayNames: Record<string, string> | null;
+  /**
+   * When false the device inherits checkIntervalSeconds, heartbeatMonitoring and
+   * maxMissedPushes from the parent group's agent_group_config.
+   * The existing checkIntervalSeconds field holds the device-level value and is
+   * used when overrideGroupSettings = true.
+   */
+  overrideGroupSettings: boolean;
+  /** Resolved effective settings (accounts for group inheritance when override=false) */
+  resolvedSettings: {
+    checkIntervalSeconds: number;
+    heartbeatMonitoring: boolean;
+    maxMissedPushes: number;
+  };
+}
+
+// ============================================
+// Remediation types
+// ============================================
+export type RemediationActionType = 'webhook' | 'n8n' | 'script' | 'docker_restart' | 'ssh';
+export type RemediationTrigger   = 'down' | 'up' | 'both';
+export type RemediationRunStatus = 'success' | 'failed' | 'timeout' | 'cooldown_skip';
+export type OverrideModeR        = 'merge' | 'replace' | 'exclude';
+
+/** Config shapes stored in remediation_actions.config (JSONB) */
+export interface WebhookRemediationConfig {
+  platform?: 'n8n' | 'make' | 'zapier' | null;
+  url: string;
+  method?: 'GET' | 'POST' | 'PUT' | 'PATCH';
+  headers?: Record<string, string>;
+  bodyExtra?: Record<string, unknown>;
+  timeoutMs?: number;
+}
+
+export interface ScriptRemediationConfig {
+  script: string;
+  shell?: string;
+  timeoutMs?: number;
+}
+
+export interface DockerRestartRemediationConfig {
+  containerName: string;
+  socketPath?: string;
+}
+
+export interface SshRemediationConfig {
+  host: string;
+  port?: number;
+  username: string;
+  authType: 'password' | 'key';
+  /** AES-256-GCM encrypted credential — never returned in plaintext */
+  credentialEnc?: string;
+  command: string;
+  timeoutMs?: number;
+}
+
+export interface RemediationAction {
+  id: number;
+  name: string;
+  type: RemediationActionType;
+  config: WebhookRemediationConfig | ScriptRemediationConfig | DockerRestartRemediationConfig | SshRemediationConfig;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RemediationBinding {
+  id: number;
+  actionId: number;
+  scope: 'global' | 'group' | 'monitor';
+  scopeId: number | null;
+  overrideMode: OverrideModeR;
+  triggerOn: RemediationTrigger;
+  cooldownSeconds: number;
+}
+
+export interface ResolvedRemediationBinding extends RemediationBinding {
+  action: RemediationAction;
+  inheritedFrom?: 'global' | 'group';  // present when not directly bound at this scope
+}
+
+export interface RemediationRun {
+  id: number;
+  actionId: number;
+  monitorId: number;
+  triggeredBy: 'down' | 'up';
+  status: RemediationRunStatus;
+  output: string | null;
+  error: string | null;
+  durationMs: number | null;
+  triggeredAt: string;
+  actionName?: string;  // joined
+}
+
+export interface CreateRemediationActionRequest {
+  name: string;
+  type: RemediationActionType;
+  config: Record<string, unknown>;
+  enabled?: boolean;
+}
+
+export interface UpdateRemediationActionRequest {
+  name?: string;
+  config?: Record<string, unknown>;
+  enabled?: boolean;
+}
+
+export interface AddRemediationBindingRequest {
+  actionId: number;
+  scope: 'global' | 'group' | 'monitor';
+  scopeId?: number | null;
+  overrideMode?: OverrideModeR;
+  triggerOn?: RemediationTrigger;
+  cooldownSeconds?: number;
 }

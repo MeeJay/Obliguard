@@ -9,6 +9,8 @@ import usersRoutes from './users.routes';
 import profileRoutes from './profile.routes';
 import teamsRoutes from './teams.routes';
 import agentRoutes from './agent.routes';
+import importExportRoutes from './importExport.routes';
+import remediationRoutes from './remediation.routes';
 
 const router = Router();
 
@@ -22,5 +24,7 @@ router.use('/users', usersRoutes);
 router.use('/profile', profileRoutes);
 router.use('/teams', teamsRoutes);
 router.use('/agent', agentRoutes);
+router.use('/admin', importExportRoutes);
+router.use('/remediation', remediationRoutes);
 
 export { router as routes };

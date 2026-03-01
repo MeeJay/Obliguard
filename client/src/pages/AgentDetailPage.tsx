@@ -640,19 +640,68 @@ function InterfacesCard({ metrics }: { metrics: AgentMetrics }) {
 // Temperatures Section (bottom)
 // ─────────────────────────────────────────────────────────────────────────────
 
-function TempsSection({ metrics }: { metrics: AgentMetrics }) {
+function TempsSection({
+  metrics, sensorDisplayNames, onRename,
+}: {
+  metrics: AgentMetrics;
+  sensorDisplayNames: Record<string, string> | null;
+  onRename: (key: string, name: string) => Promise<void>;
+}) {
   const temps = metrics.temps;
+  const [editingSensor, setEditingSensor] = useState<string | null>(null);
+  const [sensorNameValue, setSensorNameValue] = useState('');
+  const [savingSensor, setSavingSensor] = useState(false);
+
   if (!temps || temps.length === 0) return null;
   const max = Math.max(...temps.map(t => t.celsius), 80);
+
+  const handleStartEdit = (key: string, currentName: string) => {
+    setEditingSensor(key); setSensorNameValue(currentName);
+  };
+  const handleSaveSensor = async () => {
+    if (!editingSensor) return;
+    setSavingSensor(true);
+    try { await onRename(editingSensor, sensorNameValue.trim()); setEditingSensor(null); }
+    catch { /* ignore */ } finally { setSavingSensor(false); }
+  };
+
   return (
     <SectionCard icon={<Thermometer size={14} />} title="Temperatures" accent="text-rose-400">
       <div className="flex-1 overflow-y-auto divide-y divide-border min-h-0">
         {temps.map((t) => {
+          const key = `temp:${t.label}`;
+          const displayName = sensorDisplayNames?.[key] ?? t.label;
           const pct = (t.celsius / max) * 100;
           const color = t.celsius >= 90 ? 'bg-red-500' : t.celsius >= 75 ? 'bg-yellow-500' : 'bg-rose-400';
+          const isEditing = editingSensor === key;
           return (
-            <div key={t.label} className="flex items-center gap-3 px-4 py-2.5">
-              <span className="text-xs text-text-secondary flex-1 truncate">{t.label}</span>
+            <div key={t.label} className="flex items-center gap-3 px-4 py-2.5 group">
+              {isEditing ? (
+                <span className="flex items-center gap-1 flex-1 min-w-0">
+                  <input type="text" value={sensorNameValue} autoFocus
+                    onChange={e => setSensorNameValue(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter') void handleSaveSensor(); if (e.key === 'Escape') setEditingSensor(null); }}
+                    placeholder={t.label}
+                    className="flex-1 min-w-0 rounded border border-border bg-bg-tertiary px-2 py-0.5 text-xs text-text-primary focus:outline-none focus:ring-1 focus:ring-accent placeholder:text-text-muted" />
+                  <button onClick={() => void handleSaveSensor()} disabled={savingSensor}
+                    className="p-0.5 rounded text-status-up hover:bg-bg-hover transition-colors disabled:opacity-50" title="Save">
+                    <Check size={11} />
+                  </button>
+                  <button onClick={() => setEditingSensor(null)}
+                    className="p-0.5 rounded text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors" title="Cancel">
+                    <X size={11} />
+                  </button>
+                </span>
+              ) : (
+                <span className="flex items-center gap-1 text-xs text-text-secondary flex-1 min-w-0">
+                  <span className="truncate">{displayName}</span>
+                  <button onClick={() => handleStartEdit(key, displayName)}
+                    className="p-0.5 rounded text-text-muted opacity-0 group-hover:opacity-100 hover:text-text-primary hover:bg-bg-hover transition-all shrink-0"
+                    title="Rename sensor">
+                    <Pencil size={10} />
+                  </button>
+                </span>
+              )}
               <div className="w-40 shrink-0"><Bar pct={pct} color={color} /></div>
               <span className="text-sm tabular-nums font-semibold text-text-primary w-14 text-right shrink-0">
                 {t.celsius.toFixed(0)}°C
@@ -670,8 +719,13 @@ function TempsSection({ metrics }: { metrics: AgentMetrics }) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function OverviewView({
-  metrics, violations,
-}: { metrics: AgentMetrics; violations: string[] }) {
+  metrics, violations, sensorDisplayNames, onRename,
+}: {
+  metrics: AgentMetrics;
+  violations: string[];
+  sensorDisplayNames: Record<string, string> | null;
+  onRename: (key: string, name: string) => Promise<void>;
+}) {
   const hasCpuVio = violations.some(v => v.toLowerCase().includes('cpu'));
   const hasMemVio = violations.some(v => v.toLowerCase().includes('mem') || v.toLowerCase().includes('ram'));
   const hasDiskVio = violations.some(v => v.toLowerCase().includes('disk'));
@@ -759,7 +813,7 @@ function OverviewView({
       {hasTemp && (
         <>
           <div style={{ height: heights.bottom }}>
-            <TempsSection metrics={metrics} />
+            <TempsSection metrics={metrics} sensorDisplayNames={sensorDisplayNames} onRename={onRename} />
           </div>
           {/* Resize handle BELOW the temperature section */}
           <ResizeHandle onResize={onBottomResize} />
@@ -775,12 +829,13 @@ function OverviewView({
 
 function ChartCard({
   icon, title, accent, data, id, yMin, yMax, color, unit, latestLabel, height = 110,
-  timestamps, period,
+  timestamps, period, titleSuffix,
 }: {
-  icon: React.ReactNode; title: string; accent: string;
+  icon: React.ReactNode; title: React.ReactNode; accent: string;
   data: number[]; id: string; yMin?: number; yMax?: number;
   color: string; unit: string; latestLabel?: string; height?: number;
   timestamps?: string[]; period?: 'realtime' | '1h' | '24h';
+  titleSuffix?: React.ReactNode;
 }) {
   const latest = data[data.length - 1];
   // Time axis labels: show start, middle, end timestamps
@@ -792,9 +847,9 @@ function ChartCard({
     timeLabels.push(fmt(timestamps[timestamps.length - 1]));
   }
   return (
-    <div className="rounded-xl border border-border bg-bg-secondary overflow-hidden">
+    <div className="rounded-xl border border-border bg-bg-secondary overflow-hidden group">
       <div className="flex items-center justify-between px-4 py-2.5 border-b border-border">
-        <div className={`flex items-center gap-2 text-sm font-bold ${accent}`}>{icon} {title}</div>
+        <div className={`flex items-center gap-2 text-sm font-bold ${accent}`}>{icon} {title}{titleSuffix}</div>
         {latest !== undefined && (
           <span className="text-sm font-bold tabular-nums text-text-primary">
             {latestLabel ?? `${latest.toFixed(1)}${unit}`}
@@ -1250,9 +1305,30 @@ function OthersView({ history, period }: { history: AgentPushSnapshot[]; period:
 // Temperatures View
 // ─────────────────────────────────────────────────────────────────────────────
 
-function TempsView({ history, period }: { history: AgentPushSnapshot[]; period: 'realtime' | '1h' | '24h' }) {
+function TempsView({
+  history, period, sensorDisplayNames, onRename,
+}: {
+  history: AgentPushSnapshot[];
+  period: 'realtime' | '1h' | '24h';
+  sensorDisplayNames: Record<string, string> | null;
+  onRename: (key: string, name: string) => Promise<void>;
+}) {
   const timestamps = history.map(h => h.receivedAt);
   const sensorLabels = Array.from(new Set(history.flatMap(h => (h.metrics.temps ?? []).map(t => t.label))));
+  const [editingSensor, setEditingSensor] = useState<string | null>(null);
+  const [sensorNameValue, setSensorNameValue] = useState('');
+  const [savingSensor, setSavingSensor] = useState(false);
+
+  const handleStartEdit = (key: string, currentName: string) => {
+    setEditingSensor(key); setSensorNameValue(currentName);
+  };
+  const handleSaveSensor = async () => {
+    if (!editingSensor) return;
+    setSavingSensor(true);
+    try { await onRename(editingSensor, sensorNameValue.trim()); setEditingSensor(null); }
+    catch { /* ignore */ } finally { setSavingSensor(false); }
+  };
+
   if (sensorLabels.length === 0) return (
     <div className="rounded-xl border border-dashed border-border p-8 text-center text-text-muted text-sm">
       No temperature data available.
@@ -1261,17 +1337,44 @@ function TempsView({ history, period }: { history: AgentPushSnapshot[]; period: 
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
       {sensorLabels.map(label => {
+        const key = `temp:${label}`;
+        const displayName = sensorDisplayNames?.[key] ?? label;
         const data = history.map(h => (h.metrics.temps ?? []).find(t => t.label === label)?.celsius ?? 0);
         if (data.length < 2) return null;
         const maxTemp = Math.max(...data, 80);
         const latestTemp = data[data.length - 1];
         const color = latestTemp >= 90 ? '#ef4444' : latestTemp >= 75 ? '#eab308' : '#f87171';
         const accent = latestTemp >= 90 ? 'text-red-400' : latestTemp >= 75 ? 'text-yellow-400' : 'text-rose-400';
+        const isEditing = editingSensor === key;
+        const titleNode: React.ReactNode = isEditing ? (
+          <span className="flex items-center gap-1 font-normal">
+            <input type="text" value={sensorNameValue} autoFocus
+              onChange={e => setSensorNameValue(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') void handleSaveSensor(); if (e.key === 'Escape') setEditingSensor(null); }}
+              placeholder={label}
+              className="w-28 rounded border border-border bg-bg-tertiary px-2 py-0.5 text-xs text-text-primary focus:outline-none focus:ring-1 focus:ring-accent placeholder:text-text-muted" />
+            <button onClick={() => void handleSaveSensor()} disabled={savingSensor}
+              className="p-0.5 rounded text-status-up hover:bg-bg-hover transition-colors disabled:opacity-50" title="Save">
+              <Check size={11} />
+            </button>
+            <button onClick={() => setEditingSensor(null)}
+              className="p-0.5 rounded text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors" title="Cancel">
+              <X size={11} />
+            </button>
+          </span>
+        ) : displayName;
+        const titleSuffix: React.ReactNode = isEditing ? null : (
+          <button onClick={() => handleStartEdit(key, displayName)}
+            className="ml-1 p-0.5 rounded text-text-muted opacity-0 group-hover:opacity-100 hover:text-text-primary hover:bg-bg-hover transition-all"
+            title="Rename sensor">
+            <Pencil size={10} />
+          </button>
+        );
         return (
-          <ChartCard key={label} icon={<Thermometer size={13} />} title={label} accent={accent}
+          <ChartCard key={label} icon={<Thermometer size={13} />} title={titleNode} accent={accent}
             data={data} id={`temp-${label}`} yMin={0} yMax={maxTemp} color={color} unit="°C"
             latestLabel={`${latestTemp.toFixed(0)}°C`}
-            timestamps={timestamps} period={period} />
+            timestamps={timestamps} period={period} titleSuffix={titleSuffix} />
         );
       })}
     </div>
@@ -1521,21 +1624,34 @@ function AgentSettingsSection({
   onDeviceUpdate: (d: AgentDevice) => void;
   onThresholdsUpdate: (t: AgentThresholds) => void;
 }) {
-  const [interval, setIntervalVal] = useState(device.checkIntervalSeconds ?? 60);
-  const [heartbeat, setHeartbeat] = useState(device.heartbeatMonitoring ?? true);
-  const [saving, setSaving] = useState(false);
+  const [override, setOverride] = useState(device.overrideGroupSettings ?? false);
+  // Effective (resolved) values shown in the form — may come from group when override=OFF
+  const resolvedInterval  = device.resolvedSettings?.checkIntervalSeconds  ?? device.checkIntervalSeconds  ?? 60;
+  const resolvedHeartbeat = device.resolvedSettings?.heartbeatMonitoring   ?? device.heartbeatMonitoring   ?? true;
+  const [interval, setIntervalVal] = useState(resolvedInterval);
+  const [heartbeat, setHeartbeat]  = useState(resolvedHeartbeat);
+  const [saving, setSaving]        = useState(false);
   const [showThresholdModal, setShowThresholdModal] = useState(false);
+  const inGroup = !!device.groupId;
 
   // Sync when device changes from outside
-  useEffect(() => { setIntervalVal(device.checkIntervalSeconds ?? 60); }, [device.checkIntervalSeconds]);
-  useEffect(() => { setHeartbeat(device.heartbeatMonitoring ?? true); }, [device.heartbeatMonitoring]);
+  useEffect(() => { setOverride(device.overrideGroupSettings ?? false); }, [device.overrideGroupSettings]);
+  useEffect(() => { setIntervalVal(device.resolvedSettings?.checkIntervalSeconds  ?? device.checkIntervalSeconds  ?? 60); },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [device.resolvedSettings?.checkIntervalSeconds, device.checkIntervalSeconds]);
+  useEffect(() => { setHeartbeat(device.resolvedSettings?.heartbeatMonitoring ?? device.heartbeatMonitoring ?? true); },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [device.resolvedSettings?.heartbeatMonitoring, device.heartbeatMonitoring]);
 
   const handleSave = async () => {
     setSaving(true);
     try {
       const updated = await agentApi.updateDevice(device.id, {
-        checkIntervalSeconds: Math.max(1, Math.min(86400, interval)),
-        heartbeatMonitoring: heartbeat,
+        overrideGroupSettings: override,
+        ...(override ? {
+          checkIntervalSeconds: Math.max(1, Math.min(86400, interval)),
+          heartbeatMonitoring: heartbeat,
+        } : {}),
       });
       onDeviceUpdate(updated);
     } catch { /* ignore */ }
@@ -1547,14 +1663,36 @@ function AgentSettingsSection({
     onThresholdsUpdate(t);
   };
 
-  const dirty = interval !== (device.checkIntervalSeconds ?? 60) || heartbeat !== (device.heartbeatMonitoring ?? true);
+  const origOverride  = device.overrideGroupSettings ?? false;
+  const origInterval  = device.resolvedSettings?.checkIntervalSeconds  ?? device.checkIntervalSeconds  ?? 60;
+  const origHeartbeat = device.resolvedSettings?.heartbeatMonitoring   ?? device.heartbeatMonitoring   ?? true;
+  const dirty = override !== origOverride
+    || (override && (interval !== origInterval || heartbeat !== origHeartbeat));
 
   return (
     <div className="rounded-xl border border-border bg-bg-secondary p-5">
-      <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wide mb-4 flex items-center gap-1.5">
-        <Settings2 size={12} /> Agent Settings
-      </h3>
-      <div className="space-y-4">
+      {/* Header with override toggle */}
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wide flex items-center gap-1.5">
+          <Settings2 size={12} /> Agent Settings
+        </h3>
+        {inGroup && (
+          <button
+            type="button"
+            onClick={() => setOverride(v => !v)}
+            className={cn(
+              'flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border transition-colors',
+              override
+                ? 'bg-accent/10 border-accent/40 text-accent hover:bg-accent/20'
+                : 'bg-bg-tertiary border-border text-text-muted hover:text-text-primary hover:bg-bg-hover',
+            )}
+            title={override ? 'Click to inherit group settings' : 'Click to override group settings'}>
+            {override ? 'Overriding' : 'Inherited from group'}
+          </button>
+        )}
+      </div>
+
+      <div className={cn('space-y-4', !override && inGroup && 'opacity-60')}>
         {/* Push Interval */}
         <div className="flex items-center justify-between gap-4">
           <div>
@@ -1563,8 +1701,9 @@ function AgentSettingsSection({
           </div>
           <div className="flex items-center gap-2">
             <input type="number" value={interval} min={1} max={86400}
+              disabled={!override && inGroup}
               onChange={e => setIntervalVal(Number(e.target.value))}
-              className="w-24 rounded-lg border border-border bg-bg-tertiary px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:ring-1 focus:ring-accent text-right" />
+              className="w-24 rounded-lg border border-border bg-bg-tertiary px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:ring-1 focus:ring-accent text-right disabled:cursor-not-allowed" />
             <span className="text-xs text-text-muted">s</span>
           </div>
         </div>
@@ -1575,7 +1714,7 @@ function AgentSettingsSection({
             <div className="text-sm font-medium text-text-primary">Heartbeat Monitoring</div>
             <div className="text-xs text-text-muted">Alert when agent goes offline</div>
           </div>
-          <Switch on={heartbeat} onChange={setHeartbeat} />
+          <Switch on={heartbeat} onChange={setHeartbeat} disabled={!override && inGroup} />
         </div>
 
         {/* Alert Thresholds */}
@@ -1746,6 +1885,15 @@ export function AgentDetailPage() {
     finally { setSavingName(false); }
   };
 
+  const handleSaveSensorName = async (key: string, name: string) => {
+    const current = device?.sensorDisplayNames ?? {};
+    const updated: Record<string, string> = name
+      ? { ...current, [key]: name }
+      : Object.fromEntries(Object.entries(current).filter(([k]) => k !== key));
+    const updatedDevice = await agentApi.updateDevice(id, { sensorDisplayNames: updated });
+    if (updatedDevice) setDevice(updatedDevice);
+  };
+
   // ── Loading / not found ──────────────────────────────────────────────────
 
   if (loading) return (
@@ -1892,12 +2040,12 @@ export function AgentDetailPage() {
         )}
 
         {/* View content */}
-        {m && view === 'overview' && <OverviewView metrics={m} violations={violations} />}
+        {m && view === 'overview' && <OverviewView metrics={m} violations={violations} sensorDisplayNames={device.sensorDisplayNames ?? null} onRename={handleSaveSensorName} />}
         {view === 'cpu'    && <CpuView    metrics={m ?? {}} history={displayData} period={period} />}
         {view === 'ram'    && <RamView    history={displayData} period={period} />}
         {view === 'gpu'    && <GpuView    history={displayData} period={period} />}
         {view === 'others' && <OthersView history={displayData} period={period} />}
-        {view === 'temps'  && <TempsView  history={displayData} period={period} />}
+        {view === 'temps'  && <TempsView  history={displayData} period={period} sensorDisplayNames={device.sensorDisplayNames ?? null} onRename={handleSaveSensorName} />}
 
         {/* ── Agent Settings Section ── */}
         <AgentSettingsSection
