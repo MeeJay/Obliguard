@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  installer.wxs — WiX v4 source for the Obliview Windows installer
-  ─────────────────────────────────────────────────────────────────
+  installer.wxs - WiX v4 source for the Obliview Windows installer
+
   Requirements:
-    dotnet tool install --global wix
-    wix extension add WixToolset.UI.wixext        (optional — for UI)
+    dotnet tool install -global wix
+    wix extension add WixToolset.UI.wixext  (optional, for UI)
 
   Build (from desktop-app/ directory):
     wix build installer.wxs -o dist\ObliviewSetup.msi
@@ -69,11 +69,11 @@
     <StandardDirectory Id="ProgramMenuFolder" />
 
     <!-- Feature tree -->
-    <Feature Id="Main" Title="Obliview" Level="1" Absent="disallow">
+    <Feature Id="Main" Title="Obliview" Level="1" AllowAbsent="no">
       <ComponentRef Id="MainExecutable" />
     </Feature>
 
-    <Feature Id="DesktopIcon" Title="Desktop shortcut" Level="1" Absent="allow">
+    <Feature Id="DesktopIcon" Title="Desktop shortcut" Level="1" AllowAbsent="yes">
       <ComponentRef Id="DesktopShortcutComponent" />
     </Feature>
 
