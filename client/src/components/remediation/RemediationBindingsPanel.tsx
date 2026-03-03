@@ -6,6 +6,11 @@ import type {
   ResolvedRemediationBinding,
   RemediationTrigger,
   OverrideModeR,
+  RemediationActionType,
+  WebhookRemediationConfig,
+  ScriptRemediationConfig,
+  DockerRestartRemediationConfig,
+  SshRemediationConfig,
 } from '@obliview/shared';
 import { remediationApi } from '../../api/remediation.api';
 import { cn } from '../../utils/cn';
@@ -32,12 +37,32 @@ const OVERRIDE_LABELS: Record<OverrideModeR, string> = {
 };
 
 const ACTION_TYPE_SHORT: Record<string, string> = {
-  webhook: 'Webhook',
-  n8n:     'N8N',
-  script:  'Script',
+  webhook:        'Webhook',
+  n8n:            'N8N',
+  script:         'Script',
   docker_restart: 'Docker',
-  ssh:     'SSH',
+  ssh:            'SSH',
 };
+
+const ACTION_TYPE_LABELS: Record<RemediationActionType, string> = {
+  webhook:        'Generic Webhook',
+  n8n:            'N8N Workflow',
+  script:         'Custom Script',
+  docker_restart: 'Docker Restart',
+  ssh:            'SSH Command',
+};
+
+const ACTION_TYPE_DESCRIPTIONS: Record<RemediationActionType, string> = {
+  webhook:        'HTTP request to any endpoint',
+  n8n:            'Trigger an N8N workflow via webhook',
+  script:         'Run a shell script on the server',
+  docker_restart: 'Restart a Docker container',
+  ssh:            'Run a command on a remote host via SSH',
+};
+
+const ACTION_TYPES = Object.keys(ACTION_TYPE_LABELS) as RemediationActionType[];
+
+type AnyConfig = Record<string, unknown>;
 
 // ─── ResolvedEntry type (server returns extra source fields) ───────────────────
 
@@ -47,28 +72,211 @@ type ResolvedEntry = ResolvedRemediationBinding & {
   isDirect: boolean;
 };
 
+// ─── Inline config forms ───────────────────────────────────────────────────────
+
+const inputCls = 'w-full rounded-lg border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-1 focus:ring-accent';
+const labelCls = 'block text-xs font-medium text-text-secondary mb-1';
+
+function WebhookForm({
+  config, onChange, isN8n,
+}: {
+  config: Partial<WebhookRemediationConfig>;
+  onChange: (c: Partial<WebhookRemediationConfig>) => void;
+  isN8n?: boolean;
+}) {
+  return (
+    <div className="space-y-3">
+      <div>
+        <label className={labelCls}>{isN8n ? 'N8N Webhook URL' : 'URL'} <span className="text-red-400">*</span></label>
+        <input type="url" required value={config.url ?? ''} onChange={e => onChange({ ...config, url: e.target.value })}
+          placeholder="https://..." className={inputCls} />
+      </div>
+      {!isN8n && (
+        <div>
+          <label className={labelCls}>Method</label>
+          <select value={config.method ?? 'POST'}
+            onChange={e => onChange({ ...config, method: e.target.value as WebhookRemediationConfig['method'] })}
+            className={inputCls}>
+            {['POST', 'GET', 'PUT', 'PATCH'].map(m => <option key={m} value={m}>{m}</option>)}
+          </select>
+        </div>
+      )}
+      <div>
+        <label className={labelCls}>Timeout (ms)</label>
+        <input type="number" min={1000} max={60000} value={String(config.timeoutMs ?? 10000)}
+          onChange={e => onChange({ ...config, timeoutMs: Number(e.target.value) })} className={inputCls} />
+      </div>
+      <div>
+        <label className={labelCls}>Extra Headers <span className="font-normal text-text-muted">(JSON object)</span></label>
+        <textarea rows={2}
+          value={config.headers ? JSON.stringify(config.headers, null, 2) : ''}
+          onChange={e => { try { onChange({ ...config, headers: JSON.parse(e.target.value || '{}') }); } catch { /* ignore */ } }}
+          placeholder='{"Authorization": "Bearer "}'
+          className={cn(inputCls, 'resize-y font-mono text-xs')} />
+      </div>
+      {!isN8n && (
+        <div>
+          <label className={labelCls}>Extra Body Fields <span className="font-normal text-text-muted">(JSON object merged into payload)</span></label>
+          <textarea rows={3}
+            value={config.bodyExtra ? JSON.stringify(config.bodyExtra, null, 2) : ''}
+            onChange={e => { try { onChange({ ...config, bodyExtra: e.target.value ? JSON.parse(e.target.value) : undefined }); } catch { /* ignore */ } }}
+            placeholder='{"customField": "value"}'
+            className={cn(inputCls, 'resize-y font-mono text-xs')} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ScriptForm({
+  config, onChange,
+}: {
+  config: Partial<ScriptRemediationConfig>;
+  onChange: (c: Partial<ScriptRemediationConfig>) => void;
+}) {
+  return (
+    <div className="space-y-3">
+      <div>
+        <label className={labelCls}>Script <span className="text-red-400">*</span></label>
+        <textarea rows={6} required value={config.script ?? ''}
+          onChange={e => onChange({ ...config, script: e.target.value })}
+          placeholder={'#!/bin/bash\nsystemctl restart nginx'}
+          className={cn(inputCls, 'resize-y font-mono text-xs')} />
+      </div>
+      <div>
+        <label className={labelCls}>Timeout (ms)</label>
+        <input type="number" min={1000} max={300000} value={String(config.timeoutMs ?? 30000)}
+          onChange={e => onChange({ ...config, timeoutMs: Number(e.target.value) })} className={inputCls} />
+      </div>
+    </div>
+  );
+}
+
+function DockerForm({
+  config, onChange,
+}: {
+  config: Partial<DockerRestartRemediationConfig>;
+  onChange: (c: Partial<DockerRestartRemediationConfig>) => void;
+}) {
+  return (
+    <div className="space-y-3">
+      <div>
+        <label className={labelCls}>Container Name <span className="text-red-400">*</span></label>
+        <input required value={config.containerName ?? ''}
+          onChange={e => onChange({ ...config, containerName: e.target.value })}
+          placeholder="my-nginx" className={inputCls} />
+      </div>
+      <div>
+        <label className={labelCls}>Docker Socket Path</label>
+        <input value={config.socketPath ?? '/var/run/docker.sock'}
+          onChange={e => onChange({ ...config, socketPath: e.target.value })}
+          placeholder="/var/run/docker.sock" className={inputCls} />
+      </div>
+    </div>
+  );
+}
+
+function SshForm({
+  config, onChange,
+}: {
+  config: Partial<SshRemediationConfig & { credential?: string }>;
+  onChange: (c: Partial<SshRemediationConfig & { credential?: string }>) => void;
+}) {
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-3 gap-3">
+        <div className="col-span-2">
+          <label className={labelCls}>Host <span className="text-red-400">*</span></label>
+          <input required value={config.host ?? ''} onChange={e => onChange({ ...config, host: e.target.value })}
+            placeholder="192.168.1.10" className={inputCls} />
+        </div>
+        <div>
+          <label className={labelCls}>Port</label>
+          <input type="number" min={1} max={65535} value={String(config.port ?? 22)}
+            onChange={e => onChange({ ...config, port: Number(e.target.value) })} className={inputCls} />
+        </div>
+      </div>
+      <div>
+        <label className={labelCls}>Username <span className="text-red-400">*</span></label>
+        <input required value={config.username ?? ''} onChange={e => onChange({ ...config, username: e.target.value })}
+          placeholder="root" className={inputCls} />
+      </div>
+      <div>
+        <label className={labelCls}>Auth Type</label>
+        <select value={config.authType ?? 'password'}
+          onChange={e => onChange({ ...config, authType: e.target.value as 'password' | 'key' })}
+          className={inputCls}>
+          <option value="password">Password</option>
+          <option value="key">Private Key</option>
+        </select>
+      </div>
+      <div>
+        <label className={labelCls}>{config.authType === 'key' ? 'Private Key' : 'Password'}</label>
+        {config.authType === 'key' ? (
+          <textarea rows={4} value={config.credential ?? ''}
+            onChange={e => onChange({ ...config, credential: e.target.value })}
+            placeholder={'-----BEGIN OPENSSH PRIVATE KEY-----\n...'}
+            className={cn(inputCls, 'resize-y font-mono text-xs')} />
+        ) : (
+          <input type="password" autoComplete="new-password" value={config.credential ?? ''}
+            onChange={e => onChange({ ...config, credential: e.target.value })} className={inputCls} />
+        )}
+      </div>
+      <div>
+        <label className={labelCls}>Command <span className="text-red-400">*</span></label>
+        <input required value={config.command ?? ''} onChange={e => onChange({ ...config, command: e.target.value })}
+          placeholder="sudo systemctl restart nginx" className={inputCls} />
+      </div>
+      <div>
+        <label className={labelCls}>Timeout (ms)</label>
+        <input type="number" min={1000} max={60000} value={String(config.timeoutMs ?? 15000)}
+          onChange={e => onChange({ ...config, timeoutMs: Number(e.target.value) })} className={inputCls} />
+      </div>
+      <p className="text-xs text-text-muted">Credentials are stored encrypted (AES-256-GCM) on the server.</p>
+    </div>
+  );
+}
+
 // ─── Add Binding Modal ────────────────────────────────────────────────────────
 
 function AddBindingModal({
   actions,
   onAdd,
+  onAddWithNew,
   onClose,
 }: {
   actions: RemediationAction[];
   onAdd: (actionId: number, triggerOn: RemediationTrigger, overrideMode: OverrideModeR, cooldownSeconds: number) => Promise<unknown>;
+  onAddWithNew: (name: string, type: RemediationActionType, config: AnyConfig, triggerOn: RemediationTrigger, overrideMode: OverrideModeR, cooldownSeconds: number) => Promise<unknown>;
   onClose: () => void;
 }) {
+  // Tab: 'select' = pick existing action, 'create' = inline action creation
+  const [tab, setTab] = useState<'select' | 'create'>(actions.length === 0 ? 'create' : 'select');
+
+  // Select-tab state
   const [selectedId, setSelectedId] = useState<number | null>(actions[0]?.id ?? null);
+
+  // Create-tab state
+  const [newName, setNewName]       = useState('');
+  const [newType, setNewType]       = useState<RemediationActionType>('webhook');
+  const [newConfig, setNewConfig]   = useState<AnyConfig>({ method: 'POST', timeoutMs: 10000 });
+
+  // Shared binding config
   const [triggerOn, setTriggerOn]   = useState<RemediationTrigger>('down');
   const [overrideMode, setMode]     = useState<OverrideModeR>('merge');
   const [cooldown, setCooldown]     = useState(300);
   const [saving, setSaving]         = useState(false);
 
   const handleSave = async () => {
-    if (!selectedId) return;
     setSaving(true);
     try {
-      await onAdd(selectedId, triggerOn, overrideMode, cooldown);
+      if (tab === 'select') {
+        if (!selectedId) return;
+        await onAdd(selectedId, triggerOn, overrideMode, cooldown);
+      } else {
+        if (!newName.trim()) { toast.error('Action name is required'); setSaving(false); return; }
+        await onAddWithNew(newName.trim(), newType, newConfig, triggerOn, overrideMode, cooldown);
+      }
       onClose();
     } catch {
       toast.error('Failed to add binding');
@@ -77,76 +285,180 @@ function AddBindingModal({
     }
   };
 
+  const renderConfigForm = () => {
+    switch (newType) {
+      case 'webhook': return <WebhookForm config={newConfig as Partial<WebhookRemediationConfig>} onChange={c => setNewConfig(c as AnyConfig)} />;
+      case 'n8n':     return <WebhookForm config={newConfig as Partial<WebhookRemediationConfig>} onChange={c => setNewConfig(c as AnyConfig)} isN8n />;
+      case 'script':  return <ScriptForm config={newConfig as Partial<ScriptRemediationConfig>} onChange={c => setNewConfig(c as AnyConfig)} />;
+      case 'docker_restart': return <DockerForm config={newConfig as Partial<DockerRestartRemediationConfig>} onChange={c => setNewConfig(c as AnyConfig)} />;
+      case 'ssh':     return <SshForm config={newConfig as Partial<SshRemediationConfig & { credential?: string }>} onChange={c => setNewConfig(c as AnyConfig)} />;
+      default: return null;
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-      <div className="w-full max-w-sm rounded-xl border border-border bg-bg-primary shadow-2xl">
-        <div className="flex items-center justify-between px-5 py-4 border-b border-border">
-          <h3 className="text-sm font-semibold text-text-primary">Add Remediation Binding</h3>
+      <div className="w-full max-w-lg rounded-xl border border-border bg-bg-primary shadow-2xl max-h-[90vh] flex flex-col">
+
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 py-4 border-b border-border shrink-0">
+          <h3 className="text-sm font-semibold text-text-primary flex items-center gap-2">
+            <ShieldCheck size={15} /> Add Remediation Binding
+          </h3>
           <button onClick={onClose} className="text-text-muted hover:text-text-primary text-xl leading-none">×</button>
         </div>
-        <div className="p-5 space-y-4">
-          {/* Action selector */}
-          <div>
-            <label className="block text-xs font-medium text-text-secondary mb-1.5">Action</label>
-            <select value={selectedId ?? ''} onChange={e => setSelectedId(Number(e.target.value))}
-              className="w-full rounded-lg border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-1 focus:ring-accent">
-              {actions.map(a => (
-                <option key={a.id} value={a.id}>
-                  {a.name} ({ACTION_TYPE_SHORT[a.type] ?? a.type})
-                </option>
-              ))}
-            </select>
-            {actions.length === 0 && (
-              <p className="text-xs text-text-muted mt-1">No actions — create one in Admin → Remediations</p>
-            )}
-          </div>
 
-          {/* Trigger */}
-          <div>
-            <label className="block text-xs font-medium text-text-secondary mb-1.5">Trigger</label>
-            <div className="flex rounded-lg border border-border overflow-hidden text-xs">
-              {(['down', 'up', 'both'] as RemediationTrigger[]).map(t => (
-                <button key={t} type="button" onClick={() => setTriggerOn(t)}
-                  className={cn('flex-1 py-1.5 font-medium transition-colors',
-                    triggerOn === t ? 'bg-accent text-white' : 'text-text-secondary hover:bg-bg-hover')}>
-                  {TRIGGER_LABELS[t]}
-                </button>
-              ))}
+        {/* Tabs */}
+        <div className="flex border-b border-border shrink-0">
+          <button type="button" onClick={() => setTab('select')}
+            className={cn(
+              'flex-1 px-4 py-2.5 text-xs font-medium transition-colors',
+              tab === 'select'
+                ? 'border-b-2 border-accent text-accent'
+                : 'text-text-secondary hover:text-text-primary',
+            )}>
+            Select Existing{actions.length > 0 ? ` (${actions.length})` : ''}
+          </button>
+          <button type="button" onClick={() => setTab('create')}
+            className={cn(
+              'flex-1 px-4 py-2.5 text-xs font-medium transition-colors',
+              tab === 'create'
+                ? 'border-b-2 border-accent text-accent'
+                : 'text-text-secondary hover:text-text-primary',
+            )}>
+            Create New
+          </button>
+        </div>
+
+        <div className="overflow-y-auto flex-1 p-5 space-y-4">
+
+          {/* ── Select existing ── */}
+          {tab === 'select' && (
+            <div>
+              <label className={labelCls}>Action</label>
+              {actions.length > 0 ? (
+                <select value={selectedId ?? ''} onChange={e => setSelectedId(Number(e.target.value))}
+                  className={inputCls}>
+                  {actions.map(a => (
+                    <option key={a.id} value={a.id}>
+                      {a.name} ({ACTION_TYPE_SHORT[a.type] ?? a.type})
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <div className="rounded-lg border border-dashed border-border p-4 text-center">
+                  <p className="text-xs text-text-muted">No actions yet.</p>
+                  <button type="button" onClick={() => setTab('create')}
+                    className="mt-1.5 text-xs text-accent hover:underline">
+                    Create one now →
+                  </button>
+                </div>
+              )}
             </div>
-          </div>
+          )}
 
-          {/* Override mode */}
-          <div>
-            <label className="block text-xs font-medium text-text-secondary mb-1.5">Override Mode</label>
-            <div className="flex rounded-lg border border-border overflow-hidden text-xs">
-              {(['merge', 'replace', 'exclude'] as OverrideModeR[]).map(m => (
-                <button key={m} type="button" onClick={() => setMode(m)}
-                  className={cn('flex-1 py-1.5 font-medium transition-colors',
-                    overrideMode === m ? 'bg-accent text-white' : 'text-text-secondary hover:bg-bg-hover')}>
-                  {OVERRIDE_LABELS[m]}
-                </button>
-              ))}
+          {/* ── Create new ── */}
+          {tab === 'create' && (
+            <div className="space-y-4">
+              {/* Name */}
+              <div>
+                <label className={labelCls}>Name <span className="text-red-400">*</span></label>
+                <input required value={newName} onChange={e => setNewName(e.target.value)}
+                  placeholder="Restart Nginx" className={inputCls} />
+              </div>
+
+              {/* Type selector */}
+              <div>
+                <label className={labelCls}>Action Type</label>
+                <div className="grid grid-cols-1 gap-1.5">
+                  {ACTION_TYPES.map(t => (
+                    <label key={t} className={cn(
+                      'flex items-start gap-3 p-2.5 rounded-lg border cursor-pointer transition-colors',
+                      newType === t
+                        ? 'border-accent bg-accent/5'
+                        : 'border-border hover:border-accent/50 hover:bg-bg-hover',
+                    )}>
+                      <input type="radio" name="newActionType" value={t} checked={newType === t}
+                        onChange={() => { setNewType(t); setNewConfig({}); }}
+                        className="mt-0.5 accent-accent" />
+                      <div>
+                        <div className="text-xs font-medium text-text-primary">{ACTION_TYPE_LABELS[t]}</div>
+                        <div className="text-[11px] text-text-muted">{ACTION_TYPE_DESCRIPTIONS[t]}</div>
+                      </div>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              {/* Config form */}
+              <div className="border-t border-border pt-4">
+                <p className="text-xs font-medium text-text-muted uppercase tracking-wide mb-3">
+                  {ACTION_TYPE_LABELS[newType]} Configuration
+                </p>
+                {renderConfigForm()}
+              </div>
             </div>
-          </div>
+          )}
 
-          {/* Cooldown */}
-          <div>
-            <label className="block text-xs font-medium text-text-secondary mb-1.5">Cooldown (seconds)</label>
-            <input type="number" min={0} max={86400} value={cooldown}
-              onChange={e => setCooldown(Number(e.target.value))}
-              className="w-full rounded-lg border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-1 focus:ring-accent" />
-            <p className="text-xs text-text-muted mt-1">Minimum time between executions (0 = no cooldown)</p>
+          {/* ── Binding configuration (always visible) ── */}
+          <div className="border-t border-border pt-4 space-y-4">
+            <p className="text-xs font-medium text-text-muted uppercase tracking-wide">Binding Configuration</p>
+
+            {/* Trigger */}
+            <div>
+              <label className={labelCls}>Trigger</label>
+              <div className="flex rounded-lg border border-border overflow-hidden text-xs">
+                {(['down', 'up', 'both'] as RemediationTrigger[]).map(t => (
+                  <button key={t} type="button" onClick={() => setTriggerOn(t)}
+                    className={cn('flex-1 py-1.5 font-medium transition-colors',
+                      triggerOn === t ? 'bg-accent text-white' : 'text-text-secondary hover:bg-bg-hover')}>
+                    {TRIGGER_LABELS[t]}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Override mode */}
+            <div>
+              <label className={labelCls}>Override Mode</label>
+              <div className="flex rounded-lg border border-border overflow-hidden text-xs">
+                {(['merge', 'replace', 'exclude'] as OverrideModeR[]).map(m => (
+                  <button key={m} type="button" onClick={() => setMode(m)}
+                    className={cn('flex-1 py-1.5 font-medium transition-colors',
+                      overrideMode === m ? 'bg-accent text-white' : 'text-text-secondary hover:bg-bg-hover')}>
+                    {OVERRIDE_LABELS[m]}
+                  </button>
+                ))}
+              </div>
+              <p className="text-xs text-text-muted mt-1">
+                {overrideMode === 'merge'   && 'Merge: adds to inherited bindings from parent scopes.'}
+                {overrideMode === 'replace' && 'Replace: overrides all inherited bindings at this scope.'}
+                {overrideMode === 'exclude' && 'Exclude: disables an inherited action at this scope.'}
+              </p>
+            </div>
+
+            {/* Cooldown */}
+            <div>
+              <label className={labelCls}>Cooldown (seconds)</label>
+              <input type="number" min={0} max={86400} value={cooldown}
+                onChange={e => setCooldown(Number(e.target.value))}
+                className={inputCls} />
+              <p className="text-xs text-text-muted mt-1">Minimum time between executions (0 = no cooldown)</p>
+            </div>
           </div>
         </div>
-        <div className="flex justify-end gap-2 px-5 py-4 border-t border-border">
+
+        {/* Footer */}
+        <div className="flex justify-end gap-2 px-5 py-4 border-t border-border shrink-0">
           <button onClick={onClose}
             className="px-4 py-2 text-sm rounded-lg border border-border text-text-secondary hover:bg-bg-hover transition-colors">
             Cancel
           </button>
-          <button onClick={() => void handleSave()} disabled={saving || !selectedId}
+          <button onClick={() => void handleSave()}
+            disabled={saving || (tab === 'select' && !selectedId)}
             className="px-4 py-2 text-sm rounded-lg bg-accent text-white hover:bg-accent/90 disabled:opacity-60 transition-colors flex items-center gap-1.5">
             {saving && <Loader2 size={13} className="animate-spin" />}
-            Add Binding
+            {tab === 'create' ? 'Create & Bind' : 'Add Binding'}
           </button>
         </div>
       </div>
@@ -167,12 +479,12 @@ export function RemediationBindingsPanel({
   groupId?: number | null;
   title?: string;
 }) {
-  const [resolved, setResolved]   = useState<ResolvedEntry[]>([]);
+  const [resolved, setResolved]     = useState<ResolvedEntry[]>([]);
   const [allActions, setAllActions] = useState<RemediationAction[]>([]);
-  const [directMap, setDirectMap] = useState<Map<number, RemediationBinding>>(new Map());
+  const [directMap, setDirectMap]   = useState<Map<number, RemediationBinding>>(new Map());
   const [overrideMode, setOverrideMode] = useState<'merge' | 'replace'>('merge');
-  const [loading, setLoading]     = useState(true);
-  const [showAdd, setShowAdd]     = useState(false);
+  const [loading, setLoading]       = useState(true);
+  const [showAdd, setShowAdd]       = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -216,6 +528,30 @@ export function RemediationBindingsPanel({
     });
     await load();
     toast.success('Binding added');
+    return binding;
+  };
+
+  const handleAddWithNew = async (
+    name: string,
+    type: RemediationActionType,
+    config: AnyConfig,
+    triggerOn: RemediationTrigger,
+    ovMode: OverrideModeR,
+    cooldownSeconds: number,
+  ) => {
+    // 1. Create the action globally
+    const newAction = await remediationApi.createAction({ name, type, config, enabled: true });
+    // 2. Immediately bind it at the current scope
+    const binding = await remediationApi.addBinding({
+      actionId: newAction.id,
+      scope,
+      scopeId,
+      overrideMode: ovMode,
+      triggerOn,
+      cooldownSeconds,
+    });
+    await load();
+    toast.success('Action created and bound');
     return binding;
   };
 
@@ -330,9 +666,9 @@ export function RemediationBindingsPanel({
                 {/* Status icon */}
                 <span className={cn(
                   'shrink-0',
-                  isDirect    ? 'text-accent'       :
-                  isExcluded  ? 'text-orange-400'   :
-                  isInherited ? 'text-text-muted'   : 'text-text-muted',
+                  isDirect    ? 'text-accent'     :
+                  isExcluded  ? 'text-orange-400' :
+                  isInherited ? 'text-text-muted' : 'text-text-muted',
                 )}>
                   <ShieldCheck size={13} />
                 </span>
@@ -382,8 +718,8 @@ export function RemediationBindingsPanel({
                   {isInherited && !isExcluded && (
                     <button onClick={() => void handleExclude(actionId)}
                       className="text-xs px-2 py-0.5 rounded border border-border text-text-muted hover:bg-bg-hover transition-colors"
-                      title="Exclude at this scope (unbind)">
-                      Unbind
+                      title="Exclude at this scope — disable this inherited action here">
+                      Exclude
                     </button>
                   )}
                   {isExcluded && (
@@ -405,6 +741,7 @@ export function RemediationBindingsPanel({
         <AddBindingModal
           actions={allActions.filter(a => a.enabled)}
           onAdd={handleAdd}
+          onAddWithNew={handleAddWithNew}
           onClose={() => setShowAdd(false)}
         />
       )}

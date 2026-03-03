@@ -159,6 +159,7 @@ export class MonitorWorkerManager {
       timeoutMs: resolved[SETTINGS_KEYS.TIMEOUT].source !== 'default'
         ? resolved[SETTINGS_KEYS.TIMEOUT].value
         : (monitor.timeoutMs ?? resolved[SETTINGS_KEYS.TIMEOUT].value),
+      notificationCooldownSeconds: resolved[SETTINGS_KEYS.NOTIFICATION_COOLDOWN].value,
       upsideDown: monitor.upsideDown,
       // Pass all monitor properties for type-specific workers
       url: monitor.url,

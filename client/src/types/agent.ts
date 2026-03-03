@@ -38,9 +38,10 @@ export interface AgentFan {
 export interface AgentMetrics {
   cpu?: {
     percent: number;
-    cores?: number[];      // per-logical-processor percentages
-    model?: string;        // CPU model string
-    freqMhz?: number;      // base/current clock speed
+    cores?: number[];           // per-logical-processor percentages
+    model?: string;             // CPU model string
+    freqMhz?: number;           // base/current clock speed
+    coreClocksMhz?: number[];   // per-physical-core effective clock (Windows/LHM)
   };
   memory?: {
     totalMb: number;

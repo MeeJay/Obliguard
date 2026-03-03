@@ -23,6 +23,7 @@ import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { PeriodSelector } from '@/components/common/PeriodSelector';
 import { SettingsPanel } from '@/components/settings/SettingsPanel';
 import { NotificationBindingsPanel } from '@/components/notifications/NotificationBindingsPanel';
+import { RemediationBindingsPanel } from '@/components/remediation/RemediationBindingsPanel';
 import toast from 'react-hot-toast';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -669,6 +670,17 @@ export function GroupDetailPage() {
             scope="group"
             scopeId={groupId}
             title="Notification Channels"
+          />
+        </div>
+      )}
+
+      {/* Remediation Bindings (admin only) */}
+      {isAdmin() && (
+        <div className="mt-6">
+          <RemediationBindingsPanel
+            scope="group"
+            scopeId={groupId}
+            title="Remediations"
           />
         </div>
       )}

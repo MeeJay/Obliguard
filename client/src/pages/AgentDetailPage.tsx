@@ -7,8 +7,9 @@ import {
   Pencil, Check, X, LayoutDashboard,
   MemoryStick, Wifi, RotateCcw,
 } from 'lucide-react';
-import type { AgentDevice, AgentThresholds, AgentMetricThreshold, AgentTempThreshold } from '@obliview/shared';
+import type { AgentDevice, AgentThresholds, AgentMetricThreshold, AgentTempThreshold, AgentDisplayConfig } from '@obliview/shared';
 import { DEFAULT_AGENT_THRESHOLDS } from '@obliview/shared';
+import { AgentDisplayConfigModal } from '../components/agent/AgentDisplayConfigModal';
 import { agentApi } from '../api/agent.api';
 import { monitorsApi } from '../api/monitors.api';
 import type { AgentMetrics, AgentPushSnapshot } from '../types/agent';
@@ -23,6 +24,27 @@ import { cn } from '../utils/cn';
 
 type View = 'overview' | 'cpu' | 'ram' | 'gpu' | 'others' | 'temps';
 const MAX_HISTORY = 60;
+
+const DEFAULT_DISPLAY_CONFIG: AgentDisplayConfig = {
+  cpu: { groupCoreThreads: false, hiddenCores: [], tempSensor: null, hiddenCharts: [] },
+  ram: { hideUsed: false, hideFree: false, hideSwap: false, hiddenCharts: [] },
+  gpu: { hiddenRows: [], hiddenCharts: [] },
+  drives: { hiddenMounts: [], renames: {}, combineReadWrite: false },
+  network: { hiddenInterfaces: [], renames: {}, combineInOut: false },
+  temps: { hiddenLabels: [] },
+};
+
+function mergeDisplayConfig(saved: AgentDisplayConfig | null): AgentDisplayConfig {
+  if (!saved) return DEFAULT_DISPLAY_CONFIG;
+  return {
+    cpu: { ...DEFAULT_DISPLAY_CONFIG.cpu, ...saved.cpu },
+    ram: { ...DEFAULT_DISPLAY_CONFIG.ram, ...saved.ram },
+    gpu: { ...DEFAULT_DISPLAY_CONFIG.gpu, ...saved.gpu },
+    drives: { ...DEFAULT_DISPLAY_CONFIG.drives, ...saved.drives },
+    network: { ...DEFAULT_DISPLAY_CONFIG.network, ...saved.network },
+    temps: { ...DEFAULT_DISPLAY_CONFIG.temps, ...saved.temps },
+  };
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Section height persistence (drag-to-resize, stored in localStorage)
@@ -196,9 +218,11 @@ function downsample(snapshots: AgentPushSnapshot[], n: number): AgentPushSnapsho
 
 function SparkChart({
   data, id, yMin = 0, yMax = 100, color, height = 100, timestamps, unit = '', period = 'realtime',
+  data2, color2, legend,
 }: {
   data: number[]; id: string; yMin?: number; yMax?: number; color: string; height?: number;
   timestamps?: string[]; unit?: string; period?: 'realtime' | '1h' | '24h';
+  data2?: number[]; color2?: string; legend?: [string, string];
 }) {
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
@@ -211,6 +235,7 @@ function SparkChart({
   const toX = (i: number) => PL + (i / (data.length - 1)) * cW;
   const toY = (v: number) => PT + cH - ((Math.min(yMax, Math.max(yMin, v)) - yMin) / range) * cH;
   const pts = data.map((v, i) => `${toX(i)},${toY(v)}`).join(' ');
+  const pts2 = data2 && data2.length >= 2 ? data2.map((v, i) => `${toX(i)},${toY(v)}`).join(' ') : null;
   const areaD = [`M ${PL} ${PT + cH}`, ...data.map((v, i) => `L ${toX(i)} ${toY(v)}`), `L ${PL + cW} ${PT + cH}`, 'Z'].join(' ');
   const gridYs = [yMin, yMin + range / 2, yMax];
   const handleMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
@@ -240,6 +265,17 @@ function SparkChart({
       ))}
       <path d={areaD} fill={`url(#${gradId})`} clipPath={`url(#clip-${id})`} />
       <polyline points={pts} fill="none" stroke={color} strokeWidth="1.8" clipPath={`url(#clip-${id})`} />
+      {pts2 && color2 && (
+        <polyline points={pts2} fill="none" stroke={color2} strokeWidth="1.5" clipPath={`url(#clip-${id})`} />
+      )}
+      {legend && (
+        <g>
+          <rect x={6} y={4} width={12} height={2} rx="1" fill={color} />
+          <text x={22} y={9} fill="rgba(255,255,255,0.7)" fontSize="9" fontFamily="monospace">{legend[0]}</text>
+          <rect x={6} y={16} width={12} height={2} rx="1" fill={color2 ?? color} />
+          <text x={22} y={21} fill="rgba(255,255,255,0.7)" fontSize="9" fontFamily="monospace">{legend[1]}</text>
+        </g>
+      )}
       {hoverIdx !== null && hX !== null && hY !== null && hVal !== null && (
         <g>
           <line x1={hX} y1={PT} x2={hX} y2={PT + cH} stroke="rgba(255,255,255,0.25)" strokeWidth="0.8" strokeDasharray="2,2" />
@@ -269,16 +305,28 @@ function SparkChart({
 // ─────────────────────────────────────────────────────────────────────────────
 
 function SectionCard({
-  icon, title, accent, subtitle, children, className,
+  icon, title, accent, subtitle, children, className, onConfig,
 }: {
   icon: React.ReactNode; title: string; accent: string;
   subtitle?: string; children: React.ReactNode; className?: string;
+  onConfig?: () => void;
 }) {
   return (
     <div className={cn('rounded-xl border border-border bg-bg-secondary overflow-hidden flex flex-col h-full', className)}>
       <div className="px-4 pt-3 pb-2 border-b border-border shrink-0">
-        <div className={`flex items-center gap-2 text-sm font-bold ${accent}`}>
-          {icon} {title}
+        <div className="flex items-center justify-between">
+          <div className={`flex items-center gap-2 text-sm font-bold ${accent}`}>
+            {icon} {title}
+          </div>
+          {onConfig && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onConfig(); }}
+              className="text-text-muted hover:text-text-secondary transition-colors p-0.5 rounded hover:bg-bg-hover"
+              title="Configure display"
+            >
+              <Settings2 size={13} />
+            </button>
+          )}
         </div>
         {subtitle && <div className="text-xs text-text-muted mt-0.5 truncate">{subtitle}</div>}
       </div>
@@ -328,7 +376,11 @@ function ResizeHandle({ onResize }: { onResize: (dy: number) => void }) {
 // CPU Card (Overview) — arc left, per-core scrollable right
 // ─────────────────────────────────────────────────────────────────────────────
 
-function CpuCard({ metrics, violating }: { metrics: AgentMetrics; violating: boolean }) {
+function CpuCard({ metrics, violating, displayConfig, onConfig }: {
+  metrics: AgentMetrics; violating: boolean;
+  displayConfig: import('@obliview/shared').AgentDisplayConfig;
+  onConfig?: () => void;
+}) {
   const cpu = metrics.cpu;
   if (!cpu) return null;
   const pct = cpu.percent;
@@ -336,7 +388,7 @@ function CpuCard({ metrics, violating }: { metrics: AgentMetrics; violating: boo
   const cores = cpu.cores ?? [];
   return (
     <SectionCard icon={<Cpu size={14} />} title="CPU" accent="text-cyan-400"
-      subtitle={cpu.model || undefined}>
+      subtitle={cpu.model || undefined} onConfig={onConfig}>
       {/* flex row: gauge left | scrollable 2-col core grid right
            min-h-0 on the row is required so the flex-1 child can overflow-y-auto */}
       <div className="flex gap-0 flex-1 overflow-hidden min-h-0">
@@ -363,38 +415,107 @@ function CpuCard({ metrics, violating }: { metrics: AgentMetrics; violating: boo
         {/* Divider */}
         <div className="w-px bg-border shrink-0" />
 
-        {/* Right: 2-column thread grid (1 core per row = 2 threads side-by-side)
-             — grows to fill available card height (flex-1 min-h-0, no max-h)
-             — scrollbar appears only when cores exceed the visible area          */}
+        {/* Right: core grid */}
         <div className="flex-1 min-w-0 overflow-y-auto py-2 px-3 min-h-0">
-          {cores.length > 0 ? (
-            <div className="flex flex-col gap-y-[10px]">
-              {Array.from({ length: Math.ceil(cores.length / 2) }, (_, coreIdx) => (
-                <div key={coreIdx} className="grid grid-cols-2 gap-x-3">
-                  {[0, 1].map(t => {
-                    const threadIdx = coreIdx * 2 + t;
-                    const threadPct = cores[threadIdx];
-                    if (threadPct === undefined) return null;
-                    const coreNum = coreIdx + 1;
-                    const threadNum = t + 1;
+          {cores.length > 0 ? (() => {
+            const coreClocks = cpu.coreClocksMhz;
+            const maxClock = coreClocks && coreClocks.length > 0
+              ? Math.max(...coreClocks.filter(v => v > 0), 1)
+              : 0;
+
+            if (displayConfig.cpu.groupCoreThreads) {
+              // Grouped mode: 1 item per physical core with 2 stacked mini-bars
+              const physicalCores = Math.ceil(cores.length / 2);
+              return (
+                <div className="flex flex-col gap-y-[10px]">
+                  {Array.from({ length: physicalCores }, (_, coreIdx) => {
+                    if (displayConfig.cpu.hiddenCores.includes(coreIdx)) return null;
+                    const t1 = cores[coreIdx * 2] ?? 0;
+                    const t2 = cores[coreIdx * 2 + 1];
+                    const clockMhz = coreClocks?.[coreIdx];
+                    const clockPct = clockMhz && maxClock > 0 ? (clockMhz / maxClock) * 100 : 0;
+                    const maxPct = Math.max(t1, t2 ?? 0);
                     return (
-                      <div key={t} className="flex items-center gap-1.5 min-w-0">
-                        <span className="text-[11px] font-mono text-text-muted/80 w-[36px] shrink-0">
-                          C{coreNum}:{threadNum}
+                      <div key={coreIdx} className="flex items-center gap-1.5 min-w-0">
+                        <span className="text-[11px] font-mono text-text-muted/80 w-[22px] shrink-0">
+                          C{coreIdx}
                         </span>
-                        <div className="flex-1 min-w-0">
-                          <Bar pct={threadPct} color={usageBarClass(threadPct)} h="h-[6px]" />
+                        <div className="flex-1 min-w-0 flex flex-col gap-[2px]">
+                          <Bar pct={t1} color={usageBarClass(t1)} h="h-[4px]" />
+                          {t2 !== undefined && <Bar pct={t2} color={usageBarClass(t2)} h="h-[4px]" />}
+                          {clockMhz !== undefined && clockMhz > 0 && (
+                            <div className="mt-[2px] flex items-center gap-1 min-w-0">
+                              <div className="flex-1 min-w-0 bg-surface-2 rounded-full h-[2px] overflow-hidden">
+                                <div className="h-full bg-cyan-500/50 rounded-full" style={{ width: `${Math.min(clockPct, 100)}%` }} />
+                              </div>
+                              <span className="text-[8px] tabular-nums text-cyan-400/70 shrink-0 w-[34px] text-right">
+                                {(clockMhz / 1000).toFixed(2)} GHz
+                              </span>
+                            </div>
+                          )}
                         </div>
                         <span className="text-[11px] tabular-nums text-text-secondary w-[26px] text-right shrink-0">
-                          {threadPct.toFixed(0)}%
+                          {maxPct.toFixed(0)}%
                         </span>
                       </div>
                     );
                   })}
                 </div>
-              ))}
-            </div>
-          ) : (
+              );
+            }
+
+            // Non-grouped mode: 2-column thread grid
+            return (
+              <div className="flex flex-col gap-y-[10px]">
+                {Array.from({ length: Math.ceil(cores.length / 2) }, (_, coreIdx) => {
+                  if (displayConfig.cpu.hiddenCores.includes(coreIdx)) return null;
+                  const clockMhz = coreClocks?.[coreIdx];
+                  const clockPct = clockMhz && maxClock > 0 ? (clockMhz / maxClock) * 100 : 0;
+                  return (
+                    <div key={coreIdx}>
+                      {/* Thread load bars (2 threads per physical core) */}
+                      <div className="grid grid-cols-2 gap-x-3">
+                        {[0, 1].map(t => {
+                          const threadIdx = coreIdx * 2 + t;
+                          const threadPct = cores[threadIdx];
+                          if (threadPct === undefined) return null;
+                          const coreNum = coreIdx;
+                          const threadNum = t + 1;
+                          return (
+                            <div key={t} className="flex items-center gap-1.5 min-w-0">
+                              <span className="text-[11px] font-mono text-text-muted/80 w-[36px] shrink-0">
+                                C{coreNum}:{threadNum}
+                              </span>
+                              <div className="flex-1 min-w-0">
+                                <Bar pct={threadPct} color={usageBarClass(threadPct)} h="h-[6px]" />
+                              </div>
+                              <span className="text-[11px] tabular-nums text-text-secondary w-[26px] text-right shrink-0">
+                                {threadPct.toFixed(0)}%
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      {/* Mini clock bar — visible only when LHM provides per-core data */}
+                      {clockMhz !== undefined && clockMhz > 0 && (
+                        <div className="mt-[3px] flex items-center gap-1 min-w-0">
+                          <div className="flex-1 min-w-0 bg-surface-2 rounded-full h-[3px] overflow-hidden">
+                            <div
+                              className="h-full bg-cyan-500/50 rounded-full transition-[width] duration-300"
+                              style={{ width: `${Math.min(clockPct, 100)}%` }}
+                            />
+                          </div>
+                          <span className="text-[9px] tabular-nums text-cyan-400/70 shrink-0 w-[38px] text-right">
+                            {(clockMhz / 1000).toFixed(2)} GHz
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })() : (
             /* Fallback when no per-core data: single overall bar */
             <div className="flex items-center gap-2 pt-2">
               <span className="text-[10px] text-text-muted w-24 shrink-0">Overall</span>
@@ -412,26 +533,29 @@ function CpuCard({ metrics, violating }: { metrics: AgentMetrics; violating: boo
 // RAM Card (Overview) — arc left, breakdown right
 // ─────────────────────────────────────────────────────────────────────────────
 
-function RamCard({ metrics, violating }: { metrics: AgentMetrics; violating: boolean }) {
+function RamCard({ metrics, violating, displayConfig, onConfig }: {
+  metrics: AgentMetrics; violating: boolean;
+  displayConfig: import('@obliview/shared').AgentDisplayConfig;
+  onConfig?: () => void;
+}) {
   const mem = metrics.memory;
   if (!mem) return null;
   const color = usageSvgColor(mem.percent, violating);
   const freeM = mem.totalMb - mem.usedMb;
 
-  const rows: Array<{ label: string; value: string; pct?: number }> = [
-    { label: 'Used', value: fmtMb(mem.usedMb), pct: mem.percent },
-    { label: 'Free', value: fmtMb(freeM) },
-  ];
+  const rows: Array<{ label: string; value: string; pct?: number }> = [];
+  if (!displayConfig.ram.hideUsed) rows.push({ label: 'Used', value: fmtMb(mem.usedMb), pct: mem.percent });
+  if (!displayConfig.ram.hideFree) rows.push({ label: 'Free', value: fmtMb(freeM) });
   if (mem.cachedMb) rows.push({ label: 'Cached', value: fmtMb(mem.cachedMb), pct: (mem.cachedMb / mem.totalMb) * 100 });
   if (mem.buffersMb) rows.push({ label: 'Buffers', value: fmtMb(mem.buffersMb), pct: (mem.buffersMb / mem.totalMb) * 100 });
-  if (mem.swapTotalMb && mem.swapUsedMb !== undefined) {
+  if (!displayConfig.ram.hideSwap && mem.swapTotalMb && mem.swapUsedMb !== undefined) {
     const swapPct = mem.swapTotalMb > 0 ? (mem.swapUsedMb / mem.swapTotalMb) * 100 : 0;
     rows.push({ label: 'Swap', value: `${fmtMb(mem.swapUsedMb)} / ${fmtMb(mem.swapTotalMb)}`, pct: swapPct });
   }
 
   return (
     <SectionCard icon={<MonitorDot size={14} />} title="RAM" accent="text-violet-400"
-      subtitle={`Total: ${fmtMb(mem.totalMb)}`}>
+      subtitle={`Total: ${fmtMb(mem.totalMb)}`} onConfig={onConfig}>
       <div className="flex gap-0 flex-1 overflow-hidden">
         {/* Left: arc */}
         <div className="flex flex-col items-center justify-center px-4 py-3 shrink-0 gap-1">
@@ -467,11 +591,15 @@ function RamCard({ metrics, violating }: { metrics: AgentMetrics; violating: boo
 // GPU Card (Overview)
 // ─────────────────────────────────────────────────────────────────────────────
 
-function GpuCard({ metrics }: { metrics: AgentMetrics }) {
+function GpuCard({ metrics, displayConfig, onConfig }: {
+  metrics: AgentMetrics;
+  displayConfig: import('@obliview/shared').AgentDisplayConfig;
+  onConfig?: () => void;
+}) {
   const gpus = metrics.gpus;
   if (!gpus || gpus.length === 0) {
     return (
-      <SectionCard icon={<MonitorDot size={14} />} title="GPU" accent="text-pink-400">
+      <SectionCard icon={<MonitorDot size={14} />} title="GPU" accent="text-pink-400" onConfig={onConfig}>
         <div className="flex-1 flex flex-col items-center justify-center gap-2 py-8 text-text-muted">
           <MonitorDot size={28} className="opacity-30" />
           <span className="text-xs">Aucune donnée GPU</span>
@@ -480,20 +608,28 @@ function GpuCard({ metrics }: { metrics: AgentMetrics }) {
     );
   }
   const gpu = gpus[0];
-  const vramPct = (gpu.vramUsedMb / gpu.vramTotalMb) * 100;
+  const vramPct = gpu.vramTotalMb > 0 ? (gpu.vramUsedMb / gpu.vramTotalMb) * 100 : 0;
   const color = usageSvgColor(gpu.utilizationPct);
-  const rows: Array<{ label: string; pct: number; displayValue?: string }> = gpu.engines && gpu.engines.length > 0
-    ? gpu.engines
-    : [
-        { label: '3D', pct: gpu.utilizationPct },
-        { label: 'VRAM', pct: vramPct },
-        ...(gpu.tempCelsius !== undefined
-          ? [{ label: 'Temp', pct: (gpu.tempCelsius / 120) * 100, displayValue: `${gpu.tempCelsius.toFixed(0)}°C` }]
-          : []),
-      ];
+
+  // Engine utilization rows: use per-engine data when available, else show 3D overall.
+  const engineRows: Array<{ label: string; pct: number; displayValue?: string }> =
+    gpu.engines && gpu.engines.length > 0
+      ? gpu.engines
+      : [{ label: '3D', pct: gpu.utilizationPct }];
+
+  // VRAM and Temp are always appended regardless of whether engine rows are present.
+  const allRows: Array<{ label: string; pct: number; displayValue?: string }> = [
+    ...engineRows,
+    { label: 'VRAM', pct: vramPct, displayValue: `${fmtMb(gpu.vramUsedMb)} / ${fmtMb(gpu.vramTotalMb)}` },
+    ...(gpu.tempCelsius !== undefined
+      ? [{ label: 'Temp', pct: (gpu.tempCelsius / 120) * 100, displayValue: `${gpu.tempCelsius.toFixed(0)}°C` }]
+      : []),
+  ];
+
+  const rows = allRows.filter(r => !displayConfig.gpu.hiddenRows.includes(r.label));
 
   return (
-    <SectionCard icon={<MonitorDot size={14} />} title="GPU" accent="text-pink-400" subtitle={gpu.model}>
+    <SectionCard icon={<MonitorDot size={14} />} title="GPU" accent="text-pink-400" subtitle={gpu.model} onConfig={onConfig}>
       <div className="flex gap-0 flex-1 overflow-hidden">
         <div className="flex flex-col items-center justify-center px-4 py-3 shrink-0 gap-1">
           <div className="relative" style={{ width: 112, height: 64 }}>
@@ -531,20 +667,71 @@ function GpuCard({ metrics }: { metrics: AgentMetrics }) {
 // Drives Card
 // ─────────────────────────────────────────────────────────────────────────────
 
-function DrivesCard({ metrics, violating }: { metrics: AgentMetrics; violating: boolean }) {
+function DrivesCard({ metrics, violating, displayConfig, onConfig, onRenameMount }: {
+  metrics: AgentMetrics; violating: boolean;
+  displayConfig: import('@obliview/shared').AgentDisplayConfig;
+  onConfig?: () => void;
+  onRenameMount?: (mount: string, name: string) => Promise<void>;
+}) {
+  const [editingMount, setEditingMount] = useState<string | null>(null);
+  const [mountNameValue, setMountNameValue] = useState('');
+  const [savingMount, setSavingMount] = useState(false);
+
   const disks = metrics.disks;
   if (!disks || disks.length === 0) return null;
-  // Sort fullest first
+  // Sort fullest first, then filter hidden mounts
   const sorted = [...disks].sort((a, b) => b.percent - a.percent);
+  const visibleDisks = sorted.filter(d => !displayConfig.drives.hiddenMounts.includes(d.mount));
+  const displayName = (mount: string) => displayConfig.drives.renames[mount] ?? mount;
+
+  const handleSaveMount = async (mount: string) => {
+    if (!onRenameMount) return;
+    setSavingMount(true);
+    try { await onRenameMount(mount, mountNameValue.trim()); setEditingMount(null); }
+    catch { /* ignore */ } finally { setSavingMount(false); }
+  };
+
   return (
-    <SectionCard icon={<HardDrive size={14} />} title="Drives" accent="text-emerald-400">
+    <SectionCard icon={<HardDrive size={14} />} title="Drives" accent="text-emerald-400" onConfig={onConfig}>
       <div className="flex-1 overflow-y-auto divide-y divide-border min-h-0">
-        {sorted.map((d) => {
+        {visibleDisks.map((d) => {
           const vio = violating && d.percent >= 90;
+          const isEditing = editingMount === d.mount;
+          const name = displayName(d.mount);
           return (
-            <div key={d.mount} className="px-4 py-2.5 space-y-1">
-              <div className="flex items-center justify-between">
-                <span className="text-sm font-medium text-text-secondary truncate max-w-[120px]">{d.mount}</span>
+            <div key={d.mount} className="px-4 py-2.5 space-y-1 group">
+              <div className="flex items-center justify-between gap-2">
+                {/* Left: mount name with inline edit */}
+                {isEditing ? (
+                  <span className="flex items-center gap-1 min-w-0 flex-1">
+                    <input type="text" value={mountNameValue} autoFocus
+                      onChange={e => setMountNameValue(e.target.value)}
+                      onKeyDown={e => { if (e.key === 'Enter') void handleSaveMount(d.mount); if (e.key === 'Escape') setEditingMount(null); }}
+                      placeholder={d.mount}
+                      className="flex-1 min-w-0 rounded border border-border bg-bg-tertiary px-2 py-0.5 text-xs text-text-primary focus:outline-none focus:ring-1 focus:ring-accent placeholder:text-text-muted" />
+                    <button onClick={() => void handleSaveMount(d.mount)} disabled={savingMount}
+                      className="p-0.5 rounded text-status-up hover:bg-bg-hover transition-colors disabled:opacity-50 shrink-0" title="Save">
+                      <Check size={11} />
+                    </button>
+                    <button onClick={() => setEditingMount(null)}
+                      className="p-0.5 rounded text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors shrink-0" title="Cancel">
+                      <X size={11} />
+                    </button>
+                  </span>
+                ) : (
+                  <span className="flex items-center gap-1 min-w-0 flex-1">
+                    <span className="text-sm font-medium text-text-secondary truncate max-w-[120px]">{name}</span>
+                    {onRenameMount && (
+                      <button
+                        onClick={() => { setEditingMount(d.mount); setMountNameValue(name); }}
+                        className="p-0.5 rounded text-text-muted opacity-0 group-hover:opacity-100 hover:text-text-primary hover:bg-bg-hover transition-all shrink-0"
+                        title="Rename">
+                        <Pencil size={10} />
+                      </button>
+                    )}
+                  </span>
+                )}
+                {/* Right: stats */}
                 <div className="flex items-center gap-2 shrink-0">
                   {(d.readBytesPerSec !== undefined || d.writeBytesPerSec !== undefined) && (
                     <span className="text-xs text-text-muted flex gap-1">
@@ -602,36 +789,91 @@ function FansCard({ metrics }: { metrics: AgentMetrics }) {
 // Interfaces Card
 // ─────────────────────────────────────────────────────────────────────────────
 
-function InterfacesCard({ metrics }: { metrics: AgentMetrics }) {
+function InterfacesCard({ metrics, displayConfig, onConfig, onRenameInterface }: {
+  metrics: AgentMetrics;
+  displayConfig: import('@obliview/shared').AgentDisplayConfig;
+  onConfig?: () => void;
+  onRenameInterface?: (iface: string, name: string) => Promise<void>;
+}) {
+  const [editingIface, setEditingIface] = useState<string | null>(null);
+  const [ifaceNameValue, setIfaceNameValue] = useState('');
+  const [savingIface, setSavingIface] = useState(false);
+
   const net = metrics.network;
   if (!net) return null;
-  const ifaces = (net.interfaces && net.interfaces.length > 0
+
+  const netRenames = displayConfig.network.renames ?? {};
+  const displayIfaceName = (name: string) => netRenames[name] ?? name;
+
+  const allIfaces = (net.interfaces && net.interfaces.length > 0
     ? net.interfaces
     : [{ name: 'Total', inBytesPerSec: net.inBytesPerSec, outBytesPerSec: net.outBytesPerSec }]
   ).slice().sort((a, b) => (b.inBytesPerSec + b.outBytesPerSec) - (a.inBytesPerSec + a.outBytesPerSec));
-  const maxBps = Math.max(...ifaces.flatMap(i => [i.inBytesPerSec, i.outBytesPerSec]), 1048576);
+  const visibleIfaces = allIfaces.filter(i => !displayConfig.network.hiddenInterfaces.includes(i.name));
+  const maxBps = Math.max(...visibleIfaces.flatMap(i => [i.inBytesPerSec, i.outBytesPerSec]), 1048576);
+
+  const handleSaveIface = async (name: string) => {
+    if (!onRenameInterface) return;
+    setSavingIface(true);
+    try { await onRenameInterface(name, ifaceNameValue.trim()); setEditingIface(null); }
+    catch { /* ignore */ } finally { setSavingIface(false); }
+  };
+
   return (
-    <SectionCard icon={<Network size={14} />} title="Interfaces" accent="text-orange-400">
+    <SectionCard icon={<Network size={14} />} title="Interfaces" accent="text-orange-400" onConfig={onConfig}>
       <div className="flex-1 overflow-y-auto divide-y divide-border min-h-0">
-        {ifaces.map((iface) => (
-          <div key={iface.name} className="px-4 py-2.5 space-y-1.5">
-            <span className="text-xs font-medium text-text-secondary">{iface.name}</span>
-            <div className="flex items-center gap-2">
-              <ArrowDownToLine size={11} className="text-sky-400 shrink-0" />
-              <div className="flex-1"><Bar pct={(iface.inBytesPerSec / maxBps) * 100} color="bg-sky-400" /></div>
-              <span className="text-[13px] tabular-nums text-text-secondary w-20 text-right shrink-0">
-                {fmtNetBits(iface.inBytesPerSec)}
-              </span>
+        {visibleIfaces.map((iface) => {
+          const isEditing = editingIface === iface.name;
+          const displayedName = displayIfaceName(iface.name);
+          return (
+            <div key={iface.name} className="px-4 py-2.5 space-y-1.5 group">
+              {/* Interface name with inline edit */}
+              {isEditing ? (
+                <span className="flex items-center gap-1 min-w-0">
+                  <input type="text" value={ifaceNameValue} autoFocus
+                    onChange={e => setIfaceNameValue(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter') void handleSaveIface(iface.name); if (e.key === 'Escape') setEditingIface(null); }}
+                    placeholder={iface.name}
+                    className="flex-1 min-w-0 rounded border border-border bg-bg-tertiary px-2 py-0.5 text-xs text-text-primary focus:outline-none focus:ring-1 focus:ring-accent placeholder:text-text-muted" />
+                  <button onClick={() => void handleSaveIface(iface.name)} disabled={savingIface}
+                    className="p-0.5 rounded text-status-up hover:bg-bg-hover transition-colors disabled:opacity-50 shrink-0" title="Save">
+                    <Check size={11} />
+                  </button>
+                  <button onClick={() => setEditingIface(null)}
+                    className="p-0.5 rounded text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors shrink-0" title="Cancel">
+                    <X size={11} />
+                  </button>
+                </span>
+              ) : (
+                <span className="flex items-center gap-1 min-w-0">
+                  <span className="text-xs font-medium text-text-secondary truncate">{displayedName}</span>
+                  {onRenameInterface && (
+                    <button
+                      onClick={() => { setEditingIface(iface.name); setIfaceNameValue(displayedName); }}
+                      className="p-0.5 rounded text-text-muted opacity-0 group-hover:opacity-100 hover:text-text-primary hover:bg-bg-hover transition-all shrink-0"
+                      title="Rename">
+                      <Pencil size={10} />
+                    </button>
+                  )}
+                </span>
+              )}
+              <div className="flex items-center gap-2">
+                <ArrowDownToLine size={11} className="text-sky-400 shrink-0" />
+                <div className="flex-1"><Bar pct={(iface.inBytesPerSec / maxBps) * 100} color="bg-sky-400" /></div>
+                <span className="text-[13px] tabular-nums text-text-secondary w-20 text-right shrink-0">
+                  {fmtNetBits(iface.inBytesPerSec)}
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <ArrowUpFromLine size={11} className="text-orange-400 shrink-0" />
+                <div className="flex-1"><Bar pct={(iface.outBytesPerSec / maxBps) * 100} color="bg-orange-400" /></div>
+                <span className="text-[13px] tabular-nums text-text-secondary w-20 text-right shrink-0">
+                  {fmtNetBits(iface.outBytesPerSec)}
+                </span>
+              </div>
             </div>
-            <div className="flex items-center gap-2">
-              <ArrowUpFromLine size={11} className="text-orange-400 shrink-0" />
-              <div className="flex-1"><Bar pct={(iface.outBytesPerSec / maxBps) * 100} color="bg-orange-400" /></div>
-              <span className="text-[13px] tabular-nums text-text-secondary w-20 text-right shrink-0">
-                {fmtNetBits(iface.outBytesPerSec)}
-              </span>
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </SectionCard>
   );
@@ -642,11 +884,13 @@ function InterfacesCard({ metrics }: { metrics: AgentMetrics }) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function TempsSection({
-  metrics, sensorDisplayNames, onRename,
+  metrics, sensorDisplayNames, onRename, displayConfig, onConfig,
 }: {
   metrics: AgentMetrics;
   sensorDisplayNames: Record<string, string> | null;
   onRename: (key: string, name: string) => Promise<void>;
+  displayConfig: import('@obliview/shared').AgentDisplayConfig;
+  onConfig?: () => void;
 }) {
   const temps = metrics.temps;
   const [editingSensor, setEditingSensor] = useState<string | null>(null);
@@ -654,7 +898,9 @@ function TempsSection({
   const [savingSensor, setSavingSensor] = useState(false);
 
   if (!temps || temps.length === 0) return null;
-  const max = Math.max(...temps.map(t => t.celsius), 80);
+  const visibleTemps = temps.filter(t => !displayConfig.temps.hiddenLabels.includes(t.label));
+  if (visibleTemps.length === 0) return null;
+  const max = Math.max(...visibleTemps.map(t => t.celsius), 80);
 
   const handleStartEdit = (key: string, currentName: string) => {
     setEditingSensor(key); setSensorNameValue(currentName);
@@ -667,9 +913,9 @@ function TempsSection({
   };
 
   return (
-    <SectionCard icon={<Thermometer size={14} />} title="Temperatures" accent="text-rose-400">
+    <SectionCard icon={<Thermometer size={14} />} title="Temperatures" accent="text-rose-400" onConfig={onConfig}>
       <div className="flex-1 overflow-y-auto divide-y divide-border min-h-0">
-        {temps.map((t) => {
+        {visibleTemps.map((t) => {
           const key = `temp:${t.label}`;
           const displayName = sensorDisplayNames?.[key] ?? t.label;
           const pct = (t.celsius / max) * 100;
@@ -720,12 +966,17 @@ function TempsSection({
 // ─────────────────────────────────────────────────────────────────────────────
 
 function OverviewView({
-  metrics, violations, sensorDisplayNames, onRename,
+  metrics, violations, sensorDisplayNames, onRename, displayConfig, openConfigModal,
+  onRenameMount, onRenameInterface,
 }: {
   metrics: AgentMetrics;
   violations: string[];
   sensorDisplayNames: Record<string, string> | null;
   onRename: (key: string, name: string) => Promise<void>;
+  displayConfig: import('@obliview/shared').AgentDisplayConfig;
+  openConfigModal: (section: 'cpu' | 'ram' | 'gpu' | 'drives' | 'network' | 'temps') => void;
+  onRenameMount: (mount: string, name: string) => Promise<void>;
+  onRenameInterface: (iface: string, name: string) => Promise<void>;
 }) {
   const hasCpuVio = violations.some(v => v.toLowerCase().includes('cpu'));
   const hasMemVio = violations.some(v => v.toLowerCase().includes('mem') || v.toLowerCase().includes('ram'));
@@ -752,7 +1003,7 @@ function OverviewView({
       >
         <div className="h-full flex flex-col overflow-hidden min-h-0">
           {metrics.cpu
-            ? <CpuCard metrics={metrics} violating={hasCpuVio} />
+            ? <CpuCard metrics={metrics} violating={hasCpuVio} displayConfig={displayConfig} onConfig={() => openConfigModal('cpu')} />
             : <SectionCard icon={<Cpu size={14} />} title="CPU" accent="text-cyan-400">
                 <div className="flex-1 flex items-center justify-center text-text-muted text-xs">Aucune donnée</div>
               </SectionCard>
@@ -760,14 +1011,14 @@ function OverviewView({
         </div>
         <div className="h-full flex flex-col overflow-hidden min-h-0">
           {metrics.memory
-            ? <RamCard metrics={metrics} violating={hasMemVio} />
+            ? <RamCard metrics={metrics} violating={hasMemVio} displayConfig={displayConfig} onConfig={() => openConfigModal('ram')} />
             : <SectionCard icon={<MonitorDot size={14} />} title="RAM" accent="text-violet-400">
                 <div className="flex-1 flex items-center justify-center text-text-muted text-xs">Aucune donnée</div>
               </SectionCard>
           }
         </div>
         <div className="h-full flex flex-col overflow-hidden min-h-0">
-          <GpuCard metrics={metrics} />
+          <GpuCard metrics={metrics} displayConfig={displayConfig} onConfig={() => openConfigModal('gpu')} />
         </div>
       </div>
 
@@ -788,7 +1039,7 @@ function OverviewView({
           >
             {(metrics.disks?.length ?? 0) > 0 && (
               <div className="h-full flex flex-col overflow-hidden min-h-0">
-                <DrivesCard metrics={metrics} violating={hasDiskVio} />
+                <DrivesCard metrics={metrics} violating={hasDiskVio} displayConfig={displayConfig} onConfig={() => openConfigModal('drives')} onRenameMount={onRenameMount} />
               </div>
             )}
             {hasFans && (
@@ -798,7 +1049,7 @@ function OverviewView({
             )}
             {hasNet && (
               <div className="h-full flex flex-col overflow-hidden min-h-0">
-                <InterfacesCard metrics={metrics} />
+                <InterfacesCard metrics={metrics} displayConfig={displayConfig} onConfig={() => openConfigModal('network')} onRenameInterface={onRenameInterface} />
               </div>
             )}
           </div>
@@ -814,7 +1065,8 @@ function OverviewView({
       {hasTemp && (
         <>
           <div style={{ height: heights.bottom }}>
-            <TempsSection metrics={metrics} sensorDisplayNames={sensorDisplayNames} onRename={onRename} />
+            <TempsSection metrics={metrics} sensorDisplayNames={sensorDisplayNames} onRename={onRename}
+              displayConfig={displayConfig} onConfig={() => openConfigModal('temps')} />
           </div>
           {/* Resize handle BELOW the temperature section */}
           <ResizeHandle onResize={onBottomResize} />
@@ -830,13 +1082,14 @@ function OverviewView({
 
 function ChartCard({
   icon, title, accent, data, id, yMin, yMax, color, unit, latestLabel, height = 110,
-  timestamps, period, titleSuffix,
+  timestamps, period, titleSuffix, data2, color2, legend,
 }: {
   icon: React.ReactNode; title: React.ReactNode; accent: string;
   data: number[]; id: string; yMin?: number; yMax?: number;
   color: string; unit: string; latestLabel?: string; height?: number;
   timestamps?: string[]; period?: 'realtime' | '1h' | '24h';
   titleSuffix?: React.ReactNode;
+  data2?: number[]; color2?: string; legend?: [string, string];
 }) {
   const latest = data[data.length - 1];
   // Time axis labels: show start, middle, end timestamps
@@ -859,7 +1112,7 @@ function ChartCard({
       </div>
       <div className="p-3 pb-2">
         <SparkChart data={data} id={id} yMin={yMin} yMax={yMax} color={color} height={height}
-          timestamps={timestamps} unit={unit} period={period} />
+          timestamps={timestamps} unit={unit} period={period} data2={data2} color2={color2} legend={legend} />
         <div className="flex justify-between text-[10px] text-text-muted mt-1 px-0.5">
           {timeLabels.length >= 2 ? (
             <>
@@ -885,7 +1138,10 @@ function ChartCard({
 
 const CPU_CORES_HEIGHT_KEY = 'bk:agent-cpu-cores-height';
 
-function CpuView({ metrics, history, period }: { metrics: AgentMetrics; history: AgentPushSnapshot[]; period: 'realtime' | '1h' | '24h' }) {
+function CpuView({ metrics, history, period, displayConfig }: {
+  metrics: AgentMetrics; history: AgentPushSnapshot[]; period: 'realtime' | '1h' | '24h';
+  displayConfig: import('@obliview/shared').AgentDisplayConfig;
+}) {
   const cpu = metrics.cpu;
   const vendor = cpu?.model ? extractVendor(cpu.model) : '';
   const threads = cpu?.cores?.length ?? 0;
@@ -914,14 +1170,22 @@ function CpuView({ metrics, history, period }: { metrics: AgentMetrics; history:
   const loadData = history.map(h => h.metrics.cpu?.percent ?? 0);
   const loadAvgData = history.map(h => h.metrics.loadAvg ?? 0);
   const freqData = history.map(h => h.metrics.cpu?.freqMhz ?? 0).filter((_, i) => history[i].metrics.cpu?.freqMhz !== undefined);
-  // Average temp per sample
-  const tempData = history.map(h => {
-    const temps = h.metrics.temps;
-    if (!temps || temps.length === 0) return 0;
-    const cpuTemps = temps.filter(t => /cpu|core|package/i.test(t.label));
-    const arr = cpuTemps.length > 0 ? cpuTemps : temps;
-    return arr.reduce((s, t) => s + t.celsius, 0) / arr.length;
-  }).filter((_v, i) => history[i].metrics.temps && history[i].metrics.temps!.length > 0);
+  // Temperature: specific sensor if configured, otherwise average CPU temps
+  const tempData = (() => {
+    if (displayConfig.cpu.tempSensor) {
+      return history.map(h => {
+        const sensor = h.metrics.temps?.find(t => t.label === displayConfig.cpu.tempSensor);
+        return sensor?.celsius ?? 0;
+      }).filter((_v, i) => history[i].metrics.temps && history[i].metrics.temps!.length > 0);
+    }
+    return history.map(h => {
+      const temps = h.metrics.temps;
+      if (!temps || temps.length === 0) return 0;
+      const cpuTemps = temps.filter(t => /cpu|core|package/i.test(t.label));
+      const arr = cpuTemps.length > 0 ? cpuTemps : temps;
+      return arr.reduce((s, t) => s + t.celsius, 0) / arr.length;
+    }).filter((_v, i) => history[i].metrics.temps && history[i].metrics.temps!.length > 0);
+  })();
 
   return (
     <div className="space-y-4">
@@ -995,7 +1259,7 @@ function CpuView({ metrics, history, period }: { metrics: AgentMetrics; history:
                     >
                       {/* Core header */}
                       <div className="flex items-baseline justify-between">
-                        <span className="text-xs font-bold text-cyan-400/80 tracking-wide">C{cIdx + 1}</span>
+                        <span className="text-xs font-bold text-cyan-400/80 tracking-wide">C{cIdx}</span>
                         <span className={`text-[11px] tabular-nums font-semibold ${usageTextClass(avgPct)}`}>
                           {avgPct.toFixed(0)}%
                         </span>
@@ -1039,18 +1303,18 @@ function CpuView({ metrics, history, period }: { metrics: AgentMetrics; history:
             data={loadData} id="cpu-load" yMin={0} yMax={100} color="#22d3ee" unit="%"
             timestamps={timestamps} period={period} />
         )}
-        {loadAvgData.some(v => v > 0) && (
+        {!displayConfig.cpu.hiddenCharts.includes('load-avg') && loadAvgData.some(v => v > 0) && (
           <ChartCard icon={<Activity size={13} />} title="Load Average" accent="text-sky-400"
             data={loadAvgData} id="load-avg" yMin={0} yMax={Math.max(...loadAvgData, 1)} color="#38bdf8" unit=""
             timestamps={timestamps} period={period} />
         )}
-        {tempData.length >= 2 && (
-          <ChartCard icon={<Thermometer size={13} />} title="Avg Temperature" accent="text-rose-400"
+        {!displayConfig.cpu.hiddenCharts.includes('temp') && tempData.length >= 2 && (
+          <ChartCard icon={<Thermometer size={13} />} title={displayConfig.cpu.tempSensor ? displayConfig.cpu.tempSensor : 'Avg Temperature'} accent="text-rose-400"
             data={tempData} id="cpu-temp" yMin={20} yMax={100} color="#f87171" unit="°C"
             latestLabel={`${tempData[tempData.length - 1].toFixed(1)}°C`}
             timestamps={timestamps.slice(0, tempData.length)} period={period} />
         )}
-        {freqData.length >= 2 && (
+        {!displayConfig.cpu.hiddenCharts.includes('freq') && freqData.length >= 2 && (
           <ChartCard icon={<Cpu size={13} />} title="Clock Speed" accent="text-violet-400"
             data={freqData} id="cpu-freq"
             yMin={Math.min(...freqData) * 0.9}
@@ -1076,7 +1340,10 @@ function CpuView({ metrics, history, period }: { metrics: AgentMetrics; history:
 // RAM View
 // ─────────────────────────────────────────────────────────────────────────────
 
-function RamView({ history, period }: { history: AgentPushSnapshot[]; period: 'realtime' | '1h' | '24h' }) {
+function RamView({ history, period, displayConfig }: {
+  history: AgentPushSnapshot[]; period: 'realtime' | '1h' | '24h';
+  displayConfig: import('@obliview/shared').AgentDisplayConfig;
+}) {
   const timestamps = history.map(h => h.receivedAt);
   const memPct = history.map(h => h.metrics.memory?.percent ?? 0);
   const memUsedMB = history.map(h => h.metrics.memory?.usedMb ?? 0);
@@ -1115,18 +1382,18 @@ function RamView({ history, period }: { history: AgentPushSnapshot[]; period: 'r
         </div>
       )}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {memPct.length >= 2 && (
+        {!displayConfig.ram.hiddenCharts.includes('pct') && memPct.length >= 2 && (
           <ChartCard icon={<MemoryStick size={13} />} title="Memory Usage" accent="text-violet-400"
             data={memPct} id="ram-pct" yMin={0} yMax={100} color="#a78bfa" unit="%"
             timestamps={timestamps} period={period} />
         )}
-        {memUsedMB.length >= 2 && (
+        {!displayConfig.ram.hiddenCharts.includes('used-mb') && memUsedMB.length >= 2 && (
           <ChartCard icon={<MemoryStick size={13} />} title="Memory Used" accent="text-violet-400"
             data={memUsedMB} id="ram-used" yMin={0} yMax={maxMem} color="#8b5cf6" unit=" MB"
             latestLabel={fmtMb(memUsedMB[memUsedMB.length - 1])}
             timestamps={timestamps} period={period} />
         )}
-        {hasSwap && swapUsed.length >= 2 && (
+        {!displayConfig.ram.hiddenCharts.includes('swap') && hasSwap && swapUsed.length >= 2 && (
           <ChartCard icon={<MemoryStick size={13} />} title="Swap Used" accent="text-purple-400"
             data={swapUsed} id="swap-used" yMin={0} yMax={maxSwap} color="#7c3aed" unit=" MB"
             latestLabel={fmtMb(swapUsed[swapUsed.length - 1])}
@@ -1146,7 +1413,10 @@ function RamView({ history, period }: { history: AgentPushSnapshot[]; period: 'r
 // GPU View
 // ─────────────────────────────────────────────────────────────────────────────
 
-function GpuView({ history, period }: { history: AgentPushSnapshot[]; period: 'realtime' | '1h' | '24h' }) {
+function GpuView({ history, period, displayConfig }: {
+  history: AgentPushSnapshot[]; period: 'realtime' | '1h' | '24h';
+  displayConfig: import('@obliview/shared').AgentDisplayConfig;
+}) {
   const timestamps = history.map(h => h.receivedAt);
   // Collect unique GPU names across history
   const gpuNames = Array.from(new Set(history.flatMap(h => (h.metrics.gpus ?? []).map(g => g.model))));
@@ -1178,18 +1448,18 @@ function GpuView({ history, period }: { history: AgentPushSnapshot[]; period: 'r
               )}
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {utilData.length >= 2 && (
+              {!displayConfig.gpu.hiddenCharts.includes('util') && utilData.length >= 2 && (
                 <ChartCard icon={<MonitorDot size={13} />} title="GPU Utilization" accent="text-indigo-400"
                   data={utilData} id={`gpu-${gi}-util`} yMin={0} yMax={100} color="#818cf8" unit="%"
                   timestamps={timestamps} period={period} />
               )}
-              {vramUsed.length >= 2 && (
+              {!displayConfig.gpu.hiddenCharts.includes('vram') && vramUsed.length >= 2 && (
                 <ChartCard icon={<MonitorDot size={13} />} title="VRAM Used" accent="text-indigo-400"
                   data={vramUsed} id={`gpu-${gi}-vram`} yMin={0} yMax={maxVram} color="#6366f1" unit=" MB"
                   latestLabel={fmtMb(vramUsed[vramUsed.length - 1])}
                   timestamps={timestamps} period={period} />
               )}
-              {hasTempData && tempData.length >= 2 && (
+              {!displayConfig.gpu.hiddenCharts.includes('temp') && hasTempData && tempData.length >= 2 && (
                 <ChartCard icon={<Thermometer size={13} />} title="GPU Temperature" accent="text-rose-400"
                   data={tempData} id={`gpu-${gi}-temp`} yMin={20} yMax={100} color="#f87171" unit="°C"
                   latestLabel={`${tempData[tempData.length - 1].toFixed(0)}°C`}
@@ -1212,11 +1482,20 @@ function GpuView({ history, period }: { history: AgentPushSnapshot[]; period: 'r
 // Others View (Disks + Interfaces)
 // ─────────────────────────────────────────────────────────────────────────────
 
-function OthersView({ history, period }: { history: AgentPushSnapshot[]; period: 'realtime' | '1h' | '24h' }) {
+function OthersView({ history, period, displayConfig }: {
+  history: AgentPushSnapshot[]; period: 'realtime' | '1h' | '24h';
+  displayConfig: import('@obliview/shared').AgentDisplayConfig;
+}) {
   const timestamps = history.map(h => h.receivedAt);
   // Collect unique disk mounts and interface names
-  const mounts = Array.from(new Set(history.flatMap(h => (h.metrics.disks ?? []).map(d => d.mount))));
-  const ifaceNames = Array.from(new Set(history.flatMap(h => (h.metrics.network?.interfaces ?? []).map(i => i.name))));
+  const allMounts = Array.from(new Set(history.flatMap(h => (h.metrics.disks ?? []).map(d => d.mount))));
+  const mounts = allMounts.filter(m => !displayConfig.drives.hiddenMounts.includes(m));
+  const displayMountName = (mount: string) => displayConfig.drives.renames[mount] ?? mount;
+
+  const allIfaceNames = Array.from(new Set(history.flatMap(h => (h.metrics.network?.interfaces ?? []).map(i => i.name))));
+  const ifaceNames = allIfaceNames.filter(n => !displayConfig.network.hiddenInterfaces.includes(n));
+  const displayIfaceName = (name: string) => (displayConfig.network.renames ?? {})[name] ?? name;
+
   const hasIO = mounts.some(mount =>
     history.some(h => {
       const d = (h.metrics.disks ?? []).find(d => d.mount === mount);
@@ -1245,16 +1524,33 @@ function OthersView({ history, period }: { history: AgentPushSnapshot[]; period:
               const hasWrite = writeData.some(v => v > 0);
               if (!hasRead && !hasWrite) return [];
               const maxIO = Math.max(...readData, ...writeData, 1);
+              const mountDisplayName = displayMountName(mount);
+              const safeId = mount.replace(/\//g, '-');
+
+              if (displayConfig.drives.combineReadWrite) {
+                const latestRead = readData[readData.length - 1] ?? 0;
+                const latestWrite = writeData[writeData.length - 1] ?? 0;
+                return [
+                  readData.length >= 2 && (
+                    <ChartCard key={`${mount}-rw`} icon={<HardDrive size={13} />} title={`${mountDisplayName} I/O`} accent="text-emerald-400"
+                      data={readData} id={`disk${safeId}-rw`} yMin={0} yMax={maxIO} color="#34d399" unit=" B/s"
+                      data2={writeData} color2="#f59e0b" legend={['Read', 'Write']}
+                      latestLabel={`↑${fmtBps(latestRead)} ↓${fmtBps(latestWrite)}`}
+                      timestamps={timestamps} period={period} />
+                  ),
+                ].filter(Boolean);
+              }
+
               return [
                 hasRead && readData.length >= 2 && (
-                  <ChartCard key={`${mount}-r`} icon={<HardDrive size={13} />} title={`${mount} Read`} accent="text-emerald-400"
-                    data={readData} id={`disk-${mount}-r`.replace(/\//g, '-')} yMin={0} yMax={maxIO} color="#34d399" unit=" B/s"
+                  <ChartCard key={`${mount}-r`} icon={<HardDrive size={13} />} title={`${mountDisplayName} Read`} accent="text-emerald-400"
+                    data={readData} id={`disk${safeId}-r`} yMin={0} yMax={maxIO} color="#34d399" unit=" B/s"
                     latestLabel={fmtBps(readData[readData.length - 1])}
                     timestamps={timestamps} period={period} />
                 ),
                 hasWrite && writeData.length >= 2 && (
-                  <ChartCard key={`${mount}-w`} icon={<HardDrive size={13} />} title={`${mount} Write`} accent="text-amber-400"
-                    data={writeData} id={`disk-${mount}-w`.replace(/\//g, '-')} yMin={0} yMax={maxIO} color="#fbbf24" unit=" B/s"
+                  <ChartCard key={`${mount}-w`} icon={<HardDrive size={13} />} title={`${mountDisplayName} Write`} accent="text-amber-400"
+                    data={writeData} id={`disk${safeId}-w`} yMin={0} yMax={maxIO} color="#fbbf24" unit=" B/s"
                     latestLabel={fmtBps(writeData[writeData.length - 1])}
                     timestamps={timestamps} period={period} />
                 ),
@@ -1275,15 +1571,31 @@ function OthersView({ history, period }: { history: AgentPushSnapshot[]; period:
               const outData = history.map(h => (h.metrics.network?.interfaces ?? []).find(i => i.name === name)?.outBytesPerSec ?? 0);
               if (!inData.some(v => v > 0) && !outData.some(v => v > 0)) return [];
               const maxNet = Math.max(...inData, ...outData, 1);
+
+              const ifaceDisplayName = displayIfaceName(name);
+              if (displayConfig.network.combineInOut) {
+                const latestIn = inData[inData.length - 1] ?? 0;
+                const latestOut = outData[outData.length - 1] ?? 0;
+                return [
+                  inData.length >= 2 && (
+                    <ChartCard key={`${name}-io`} icon={<Network size={13} />} title={`${ifaceDisplayName} I/O`} accent="text-sky-400"
+                      data={inData} id={`net-${name}-io`} yMin={0} yMax={maxNet} color="#38bdf8" unit=" B/s"
+                      data2={outData} color2="#fb923c" legend={['IN', 'OUT']}
+                      latestLabel={`↓${fmtBps(latestIn)} ↑${fmtBps(latestOut)}`}
+                      timestamps={timestamps} period={period} />
+                  ),
+                ].filter(Boolean);
+              }
+
               return [
                 inData.length >= 2 && (
-                  <ChartCard key={`${name}-in`} icon={<ArrowDownToLine size={13} />} title={`${name} ↓`} accent="text-sky-400"
+                  <ChartCard key={`${name}-in`} icon={<ArrowDownToLine size={13} />} title={`${ifaceDisplayName} ↓`} accent="text-sky-400"
                     data={inData} id={`net-${name}-in`} yMin={0} yMax={maxNet} color="#38bdf8" unit=" B/s"
                     latestLabel={fmtBps(inData[inData.length - 1])}
                     timestamps={timestamps} period={period} />
                 ),
                 outData.length >= 2 && (
-                  <ChartCard key={`${name}-out`} icon={<ArrowUpFromLine size={13} />} title={`${name} ↑`} accent="text-orange-400"
+                  <ChartCard key={`${name}-out`} icon={<ArrowUpFromLine size={13} />} title={`${ifaceDisplayName} ↑`} accent="text-orange-400"
                     data={outData} id={`net-${name}-out`} yMin={0} yMax={maxNet} color="#fb923c" unit=" B/s"
                     latestLabel={fmtBps(outData[outData.length - 1])}
                     timestamps={timestamps} period={period} />
@@ -1944,6 +2256,35 @@ export function AgentDetailPage() {
   const [nameValue, setNameValue] = useState('');
   const [savingName, setSavingName] = useState(false);
 
+  // Display configuration
+  const [displayConfig, setDisplayConfig] = useState<AgentDisplayConfig>(() => DEFAULT_DISPLAY_CONFIG);
+  const [configModalSection, setConfigModalSection] = useState<'cpu' | 'ram' | 'gpu' | 'drives' | 'network' | 'temps'>('cpu');
+  const [configModalOpen, setConfigModalOpen] = useState(false);
+
+  const openConfigModal = (section: 'cpu' | 'ram' | 'gpu' | 'drives' | 'network' | 'temps') => {
+    setConfigModalSection(section);
+    setConfigModalOpen(true);
+  };
+
+  const saveDisplayConfig = async (newConfig: AgentDisplayConfig) => {
+    await agentApi.updateDevice(id, { displayConfig: newConfig });
+    setDisplayConfig(newConfig);
+  };
+
+  const handleRenameMount = async (mount: string, name: string) => {
+    const newRenames = { ...displayConfig.drives.renames };
+    if (name && name !== mount) { newRenames[mount] = name; } else { delete newRenames[mount]; }
+    const newConfig = { ...displayConfig, drives: { ...displayConfig.drives, renames: newRenames } };
+    await saveDisplayConfig(newConfig);
+  };
+
+  const handleRenameInterface = async (iface: string, name: string) => {
+    const newRenames = { ...(displayConfig.network.renames ?? {}) };
+    if (name && name !== iface) { newRenames[iface] = name; } else { delete newRenames[iface]; }
+    const newConfig = { ...displayConfig, network: { ...displayConfig.network, renames: newRenames } };
+    await saveDisplayConfig(newConfig);
+  };
+
   const loadData = useCallback(async () => {
     try {
       const [dev, snap] = await Promise.all([agentApi.getDeviceById(id), agentApi.getDeviceMetrics(id)]);
@@ -1971,6 +2312,11 @@ export function AgentDetailPage() {
     setLastPush(null);
     setLoading(true);
   }, [id]);
+
+  // Sync displayConfig when device loads / changes
+  useEffect(() => {
+    if (device) setDisplayConfig(mergeDisplayConfig(device.displayConfig ?? null));
+  }, [device?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { loadData(); }, [loadData]);
 
@@ -2179,6 +2525,18 @@ export function AgentDetailPage() {
             {loadingHistory && (
               <span className="text-xs text-text-muted animate-pulse">Loading…</span>
             )}
+            {/* Display config button — for non-overview detail views */}
+            {view !== 'overview' && (
+              <button
+                onClick={() => {
+                  const section = view === 'cpu' ? 'cpu' : view === 'ram' ? 'ram' : view === 'gpu' ? 'gpu' : view === 'others' ? 'drives' : 'temps';
+                  openConfigModal(section as 'cpu' | 'ram' | 'gpu' | 'drives' | 'network' | 'temps');
+                }}
+                className="p-2 rounded-lg text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors"
+                title="Display Configuration">
+                <Settings2 size={15} />
+              </button>
+            )}
             <button onClick={() => void loadData()}
               className="p-2 rounded-lg text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors" title="Refresh">
               <RefreshCw size={15} />
@@ -2203,11 +2561,11 @@ export function AgentDetailPage() {
         )}
 
         {/* View content */}
-        {m && view === 'overview' && <OverviewView metrics={m} violations={violations} sensorDisplayNames={device.sensorDisplayNames ?? null} onRename={handleSaveSensorName} />}
-        {view === 'cpu'    && <CpuView    metrics={m ?? {}} history={displayData} period={period} />}
-        {view === 'ram'    && <RamView    history={displayData} period={period} />}
-        {view === 'gpu'    && <GpuView    history={displayData} period={period} />}
-        {view === 'others' && <OthersView history={displayData} period={period} />}
+        {m && view === 'overview' && <OverviewView metrics={m} violations={violations} sensorDisplayNames={device.sensorDisplayNames ?? null} onRename={handleSaveSensorName} displayConfig={displayConfig} openConfigModal={openConfigModal} onRenameMount={handleRenameMount} onRenameInterface={handleRenameInterface} />}
+        {view === 'cpu'    && <CpuView    metrics={m ?? {}} history={displayData} period={period} displayConfig={displayConfig} />}
+        {view === 'ram'    && <RamView    history={displayData} period={period} displayConfig={displayConfig} />}
+        {view === 'gpu'    && <GpuView    history={displayData} period={period} displayConfig={displayConfig} />}
+        {view === 'others' && <OthersView history={displayData} period={period} displayConfig={displayConfig} />}
         {view === 'temps'  && <TempsView  history={displayData} period={period} sensorDisplayNames={device.sensorDisplayNames ?? null} onRename={handleSaveSensorName} />}
 
         {/* ── Agent Settings Section ── */}
@@ -2250,6 +2608,24 @@ export function AgentDetailPage() {
           ))}
         </nav>
       </div>
+
+      {/* ── Display Configuration Modal ── */}
+      <AgentDisplayConfigModal
+        open={configModalOpen}
+        onClose={() => setConfigModalOpen(false)}
+        initialSection={configModalSection}
+        config={displayConfig}
+        onSave={saveDisplayConfig}
+        onRenameSensor={handleSaveSensorName}
+        availableThreadCount={m?.cpu?.cores?.length ?? 0}
+        availableMounts={Array.from(new Set(history.flatMap(h => (h.metrics.disks ?? []).map(d => d.mount))))}
+        availableInterfaces={Array.from(new Set(history.flatMap(h => (h.metrics.network?.interfaces ?? []).map(i => i.name))))}
+        availableTemps={Array.from(new Set(history.flatMap(h => (h.metrics.temps ?? []).map(t => t.label))))}
+        availableGpuRows={Array.from(new Set(
+          history.flatMap(h => (h.metrics.gpus ?? []).flatMap(g => (g.engines ?? []).map(e => e.label)))
+        ))}
+        sensorDisplayNames={device.sensorDisplayNames ?? {}}
+      />
     </div>
   );
 }

@@ -55,14 +55,27 @@ if (-not (Test-Path 'logo.ico')) {
 }
 Write-Host "  logo.ico: OK"
 
-# ── Step 2: Build the Go binary ─────────────────────────────────────────────
-Write-Host "`n=== Step 2: Building $ExeName ===" -ForegroundColor Cyan
+# ── Step 2: Embed the app icon into the exe via a Windows resource file ──────
+Write-Host "`n=== Step 2: Embedding icon resource ===" -ForegroundColor Cyan
+# rsrc generates a .syso file from logo.ico; go build picks it up automatically.
+# Using a pinned version for reproducible builds.
+$sysoFile = 'obliview.syso'
+go run github.com/akavel/rsrc@v0.10.2 -ico logo.ico -o $sysoFile
+if ($LASTEXITCODE -ne 0) { Write-Error "rsrc failed — icon will not be embedded." }
+Write-Host "  Icon resource: $sysoFile"
+
+# ── Step 3: Build the Go binary ─────────────────────────────────────────────
+Write-Host "`n=== Step 3: Building $ExeName ===" -ForegroundColor Cyan
 
 $env:CGO_ENABLED = '1'
 # -H windowsgui   suppresses the console window that would otherwise flash on launch.
 # -X main.appVersion injects the version string so React can detect outdated clients.
 go build -ldflags "-H windowsgui -X main.appVersion=$Version" -o $ExeName .
-if ($LASTEXITCODE -ne 0) { Write-Error "go build failed." }
+if ($LASTEXITCODE -ne 0) {
+    Remove-Item $sysoFile -ErrorAction SilentlyContinue
+    Write-Error "go build failed."
+}
+Remove-Item $sysoFile -ErrorAction SilentlyContinue
 
 # Move to dist/
 if (-not (Test-Path $DistDir)) { New-Item -ItemType Directory -Path $DistDir | Out-Null }
@@ -71,8 +84,8 @@ Copy-Item $ExeName (Join-Path $DistDir $ExeName) -Force
 $exeSize = (Get-Item $ExeName).Length / 1MB
 Write-Host ("  Built: {0} ({1:F1} MB)" -f $ExeName, $exeSize)
 
-# ── Step 3: Build the MSI with WiX ──────────────────────────────────────────
-Write-Host "`n=== Step 3: Building $MsiName ===" -ForegroundColor Cyan
+# ── Step 4: Build the MSI with WiX ──────────────────────────────────────────
+Write-Host "`n=== Step 4: Building $MsiName ===" -ForegroundColor Cyan
 
 # WiX reads the version from installer.wxs — replace the placeholder at build time.
 $wxsContent = Get-Content $WxsFile -Raw

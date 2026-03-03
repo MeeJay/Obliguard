@@ -69,6 +69,10 @@ COPY --from=go-agent-builder /build/dist/obliview-agent-darwin-arm64  ./agent/di
 # If absent, the /api/agent/installer/windows.msi endpoint returns 404.
 COPY agent/dist/ ./agent/dist/
 
+# Desktop app VERSION file (read by GET /api/agent/desktop-version to drive the update banner).
+# Must be present — without it the endpoint returns 0.0.0 and the banner never fires.
+COPY desktop-app/VERSION ./desktop-app/
+
 # Desktop app release binaries (build on Windows: build_icon_and_obliview.ps1 → dist/Obliview.exe)
 #                              (build on macOS:   desktop-app/build-mac.sh   → dist/Obliview.zip)
 # If absent, the /downloads/:filename endpoint returns 404 (no hard failure).

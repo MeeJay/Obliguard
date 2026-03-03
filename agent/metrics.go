@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"math"
 	"os/exec"
@@ -21,10 +22,11 @@ import (
 // ── Metric types ───────────────────────────────────────────────────────────────
 
 type CPUMetrics struct {
-	Percent float64   `json:"percent"`
-	Cores   []float64 `json:"cores,omitempty"`
-	Model   string    `json:"model,omitempty"`
-	FreqMHz float64   `json:"freqMhz,omitempty"`
+	Percent        float64   `json:"percent"`
+	Cores          []float64 `json:"cores,omitempty"`
+	Model          string    `json:"model,omitempty"`
+	FreqMHz        float64   `json:"freqMhz,omitempty"`
+	CoreClocksMHz  []float64 `json:"coreClocksMhz,omitempty"` // per-physical-core effective clock (LHM, Windows)
 }
 
 type MemMetrics struct {
@@ -63,12 +65,18 @@ type TempSensor struct {
 	Celsius float64 `json:"celsius"`
 }
 
+type EngineMetrics struct {
+	Label string  `json:"label"`
+	Pct   float64 `json:"pct"`
+}
+
 type GPUMetrics struct {
-	Model          string  `json:"model"`
-	UtilizationPct float64 `json:"utilizationPct"`
-	VRAMUsedMB     uint64  `json:"vramUsedMb"`
-	VRAMTotalMB    uint64  `json:"vramTotalMb"`
-	TempCelsius    float64 `json:"tempCelsius,omitempty"`
+	Model          string          `json:"model"`
+	UtilizationPct float64         `json:"utilizationPct"`
+	VRAMUsedMB     uint64          `json:"vramUsedMb"`
+	VRAMTotalMB    uint64          `json:"vramTotalMb"`
+	TempCelsius    float64         `json:"tempCelsius,omitempty"`
+	Engines        []EngineMetrics `json:"engines,omitempty"` // per-engine utilization (3D, Copy, Encode, Decode)
 }
 
 type Metrics struct {
@@ -261,7 +269,7 @@ func collectNvidiaGPUs() []GPUMetrics {
 	}
 	for _, p := range paths {
 		out, err := exec.Command(p,
-			"--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu",
+			"--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu,utilization.encoder,utilization.decoder",
 			"--format=csv,noheader,nounits",
 		).Output()
 		if err != nil {
@@ -298,6 +306,20 @@ func parseNvidiaSMI(raw string) []GPUMetrics {
 			if t, err := strconv.ParseFloat(strings.TrimSpace(parts[4]), 64); err == nil && t > 0 {
 				g.TempCelsius = t
 			}
+		}
+		// Engine utilization: encoder (parts[5]) and decoder (parts[6])
+		// nvidia-smi returns "N/A" when unsupported — ParseFloat returns 0 in that case.
+		var encodePct, decodePct float64
+		if len(parts) >= 6 {
+			encodePct, _ = strconv.ParseFloat(strings.TrimSpace(parts[5]), 64)
+		}
+		if len(parts) >= 7 {
+			decodePct, _ = strconv.ParseFloat(strings.TrimSpace(parts[6]), 64)
+		}
+		g.Engines = []EngineMetrics{
+			{Label: "3D", Pct: math.Round(util*10) / 10},
+			{Label: "Encode", Pct: math.Round(encodePct*10) / 10},
+			{Label: "Decode", Pct: math.Round(decodePct*10) / 10},
 		}
 		gpus = append(gpus, g)
 	}
@@ -362,11 +384,14 @@ func collectWindowsGPUs() []GPUMetrics {
 	// so we prefer the PDH Local Budget value for total VRAM.
 	const script = `$ErrorActionPreference='SilentlyContinue'
 $util=try{[math]::Round(((Get-Counter '\GPU Engine(*engtype_3D*)\Utilization Percentage').CounterSamples|Measure-Object CookedValue -Sum).Sum,1)}catch{0}
+$copy=try{[math]::Round(((Get-Counter '\GPU Engine(*engtype_Copy*)\Utilization Percentage').CounterSamples|Measure-Object CookedValue -Sum).Sum,1)}catch{0}
+$venc=try{[math]::Round(((Get-Counter '\GPU Engine(*engtype_VideoEncode*)\Utilization Percentage').CounterSamples|Measure-Object CookedValue -Sum).Sum,1)}catch{0}
+$vdec=try{[math]::Round(((Get-Counter '\GPU Engine(*engtype_VideoDecode*)\Utilization Percentage').CounterSamples|Measure-Object CookedValue -Sum).Sum,1)}catch{0}
 $vramUsedMB=try{[math]::Round(((Get-Counter '\GPU Local Adapter Memory(*)\Local Usage').CounterSamples|Measure-Object CookedValue -Sum).Sum/1MB,0)}catch{0}
 $vramTotalMB=try{[math]::Round(((Get-Counter '\GPU Local Adapter Memory(*)\Local Budget').CounterSamples|Measure-Object CookedValue -Sum).Sum/1MB,0)}catch{0}
 $tempRaw=try{((Get-Counter '\GPU Thermal Zone(*)\Temperature').CounterSamples|Where-Object{$_.CookedValue -gt 0}|Measure-Object CookedValue -Maximum).Maximum}catch{0}
 $gpus=Get-WmiObject Win32_VideoController|Where-Object{$_.PNPDeviceID -match '^PCI'}
-foreach($g in $gpus){$vt=if($vramTotalMB -gt 0){$vramTotalMB}else{[math]::Round($g.AdapterRAM/1MB,0)};Write-Output "$($g.Caption)|$util|$vramUsedMB|$vt|$tempRaw"}`
+foreach($g in $gpus){$vt=if($vramTotalMB -gt 0){$vramTotalMB}else{[math]::Round($g.AdapterRAM/1MB,0)};Write-Output "$($g.Caption)|$util|$vramUsedMB|$vt|$tempRaw|$copy|$venc|$vdec"}`
 
 	out, err := exec.Command("powershell.exe",
 		"-NoProfile", "-NonInteractive", "-Command", script,
@@ -415,6 +440,23 @@ foreach($g in $gpus){$vt=if($vramTotalMB -gt 0){$vramTotalMB}else{[math]::Round(
 					gpu.TempCelsius = math.Round(celsius*10) / 10
 				}
 			}
+		}
+		// Per-engine utilization: 3D, Copy, VideoEncode, VideoDecode (parts[5-7]).
+		var copyPct, vencPct, vdecPct float64
+		if len(parts) >= 6 {
+			copyPct, _ = strconv.ParseFloat(strings.TrimSpace(parts[5]), 64)
+		}
+		if len(parts) >= 7 {
+			vencPct, _ = strconv.ParseFloat(strings.TrimSpace(parts[6]), 64)
+		}
+		if len(parts) >= 8 {
+			vdecPct, _ = strconv.ParseFloat(strings.TrimSpace(parts[7]), 64)
+		}
+		gpu.Engines = []EngineMetrics{
+			{Label: "3D", Pct: math.Round(util*10) / 10},
+			{Label: "Copy", Pct: math.Round(copyPct*10) / 10},
+			{Label: "Encode", Pct: math.Round(vencPct*10) / 10},
+			{Label: "Decode", Pct: math.Round(vdecPct*10) / 10},
 		}
 		gpus = append(gpus, gpu)
 	}
@@ -686,8 +728,10 @@ func collectMetrics() Metrics {
 		}
 	}
 
-	// 2. Platform-specific extras: NVMe temps + ASUS ATK (Windows),
+	// 2. Platform-specific extras: NVMe temps + LHM + ASUS ATK (Windows),
 	//    no-op on Linux/macOS where gopsutil already covers hardware sensors.
+	//    Side-effect on Windows: collectPlatformTemps → collectLHMByDLL caches
+	//    per-core clock speeds in lhmCoreClocksVal for use below.
 	for _, t := range collectPlatformTemps() {
 		if seen[t.Label] {
 			continue
@@ -696,8 +740,44 @@ func collectMetrics() Metrics {
 		m.Temps = append(m.Temps, t)
 	}
 
+	// Per-core effective clock speeds from LHM (Windows only; stub returns nil).
+	if m.CPU != nil {
+		if clocks := collectLHMCoreClocks(); len(clocks) > 0 {
+			m.CPU.CoreClocksMHz = clocks
+		}
+	}
+
 	// ── GPU ────────────────────────────────────────────────────────────────────
 	m.GPUs = collectGPUs()
+
+	// Add GPU temperatures to the Temps list so they appear alongside other
+	// hardware sensors. Works for all vendors (NVIDIA, AMD, Intel) on all
+	// platforms — no duplication: the `seen` map above prevents double entries.
+	for i, gpu := range m.GPUs {
+		if gpu.TempCelsius <= 0 {
+			continue
+		}
+		// Build a snake_case label from the GPU model name.
+		name := strings.ToLower(gpu.Model)
+		for _, ch := range []string{" ", "/", "\\", "-", ".", "(", ")", ":", ","} {
+			name = strings.ReplaceAll(name, ch, "_")
+		}
+		for strings.Contains(name, "__") {
+			name = strings.ReplaceAll(name, "__", "_")
+		}
+		name = strings.Trim(name, "_")
+		label := "gpu_" + name
+		if i > 0 {
+			label = fmt.Sprintf("gpu_%s_%d", name, i+1)
+		}
+		if !seen[label] {
+			seen[label] = true
+			m.Temps = append(m.Temps, TempSensor{
+				Label:   label,
+				Celsius: math.Round(gpu.TempCelsius*10) / 10,
+			})
+		}
+	}
 
 	return m
 }

@@ -219,7 +219,7 @@ export async function updateDevice(req: Request, res: Response): Promise<void> {
   const id = Number(req.params.id);
   const {
     status, groupId, checkIntervalSeconds, agentThresholds, name,
-    heartbeatMonitoring, sensorDisplayNames, overrideGroupSettings,
+    heartbeatMonitoring, sensorDisplayNames, overrideGroupSettings, displayConfig,
   } = req.body as {
     status?: 'approved' | 'refused' | 'pending' | 'suspended';
     groupId?: number | null;
@@ -229,6 +229,7 @@ export async function updateDevice(req: Request, res: Response): Promise<void> {
     heartbeatMonitoring?: boolean;
     sensorDisplayNames?: Record<string, string> | null;
     overrideGroupSettings?: boolean;
+    displayConfig?: import('@obliview/shared').AgentDisplayConfig | null;
   };
 
   // Special handling for approval
@@ -280,6 +281,7 @@ export async function updateDevice(req: Request, res: Response): Promise<void> {
     heartbeatMonitoring,
     sensorDisplayNames,
     overrideGroupSettings,
+    displayConfig,
   });
 
   if (!device) {

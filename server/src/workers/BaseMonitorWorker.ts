@@ -32,6 +32,8 @@ export interface MonitorConfig {
   maxRetries: number;
   timeoutMs: number;
   upsideDown: boolean;
+  /** Minimum seconds between repeated problem notifications (0 = disabled) */
+  notificationCooldownSeconds: number;
   [key: string]: unknown;
 }
 
@@ -44,6 +46,8 @@ export abstract class BaseMonitorWorker {
   protected previousStatus: MonitorStatus = 'pending';
   /** The last status that was officially confirmed and notified (survives retries) */
   protected confirmedStatus: MonitorStatus = 'pending';
+  /** Unix-ms timestamp of the last problem notification sent (for cooldown check) */
+  protected lastProblemNotifiedAt: number = 0;
 
   constructor(config: MonitorConfig, io: SocketIOServer) {
     this.config = config;
@@ -73,8 +77,10 @@ export abstract class BaseMonitorWorker {
   private scheduleNext(): void {
     if (!this.isRunning) return;
 
+    // Use shorter retry interval while in the retry window for both 'down' and 'alert'.
+    const isRetryableStatus = this.previousStatus === 'down' || this.previousStatus === 'alert';
     const interval =
-      this.previousStatus === 'down' && this.retryCount <= this.config.maxRetries
+      isRetryableStatus && this.retryCount <= this.config.maxRetries
         ? this.config.retryIntervalSeconds
         : this.config.intervalSeconds;
 
@@ -110,11 +116,16 @@ export abstract class BaseMonitorWorker {
       // SSL statuses are deterministic (not transient) — no retries needed
       const isSslStatus = result.status === 'ssl_warning' || result.status === 'ssl_expired';
 
-      // Determine if we are in the retry period (down but retries not exhausted)
-      if (result.status === 'down') {
+      // 'down' AND 'alert' both go through the retry mechanism:
+      //   • retryCount accumulates on consecutive failures
+      //   • notification fires only after retryCount > maxRetries (confirmed problem)
+      //   • this prevents spurious notifications on transient failures / brief threshold spikes
+      const isRetryableStatus = result.status === 'down' || result.status === 'alert';
+
+      if (isRetryableStatus) {
         this.retryCount++;
       }
-      const isRetrying = result.status === 'down' && this.retryCount <= this.config.maxRetries;
+      const isRetrying = isRetryableStatus && this.retryCount <= this.config.maxRetries;
 
       // 1. Store heartbeat (with retry flag)
       const heartbeat = await heartbeatService.create({
@@ -149,15 +160,15 @@ export abstract class BaseMonitorWorker {
       //    confirmedStatus tracks the last "officially notified" state.
       //    previousStatus tracks the raw last-check status (used for scheduleNext timing).
 
-      if (result.status === 'down') {
+      if (isRetryableStatus) {
         if (this.retryCount > this.config.maxRetries) {
-          // Retries exhausted — confirmed DOWN
-          if (this.confirmedStatus !== 'down') {
+          // Retries exhausted — confirmed problem (DOWN or ALERT)
+          if (this.confirmedStatus !== result.status) {
             await this.handleStatusChange(result.status, result.message);
-            this.confirmedStatus = 'down';
+            this.confirmedStatus = result.status;
           }
         }
-        // During retry period: do NOT update confirmedStatus
+        // During retry period: do NOT update confirmedStatus — wait for the threshold to be met
       } else if (isSslStatus) {
         // SSL statuses fire immediately with no retries
         this.retryCount = 0;
@@ -166,7 +177,7 @@ export abstract class BaseMonitorWorker {
           this.confirmedStatus = result.status;
         }
       } else {
-        // Status is UP or other non-down/non-ssl (includes 'alert', 'inactive')
+        // Status is UP or other non-retryable/non-ssl (e.g. 'inactive')
         if (this.confirmedStatus !== result.status && this.confirmedStatus !== 'pending') {
           await this.handleStatusChange(result.status, result.message);
         }
@@ -231,6 +242,27 @@ export abstract class BaseMonitorWorker {
       return;
     }
 
+    // ── Notification cooldown ──────────────────────────────────────────────────
+    // Applies to problem statuses only (not recovery → 'up').
+    // Prevents notification spam when a monitor flaps repeatedly.
+    const isProblemStatus = (s: string) =>
+      s === 'down' || s === 'ssl_expired' || s === 'ssl_warning' || s === 'alert';
+
+    if (isProblemStatus(newStatus)) {
+      const cooldownMs = (this.config.notificationCooldownSeconds ?? 0) * 1000;
+      if (cooldownMs > 0) {
+        const elapsed = Date.now() - this.lastProblemNotifiedAt;
+        if (elapsed < cooldownMs) {
+          logger.info(
+            `Monitor "${this.config.name}" (id: ${this.config.id}): ` +
+            `notification suppressed — cooldown active (${Math.round((cooldownMs - elapsed) / 1000)}s remaining)`,
+          );
+          return;
+        }
+      }
+      this.lastProblemNotifiedAt = Date.now();
+    }
+
     // Trigger notifications
     try {
       // Check if this monitor is covered by a group with groupNotifications
@@ -238,10 +270,6 @@ export abstract class BaseMonitorWorker {
         this.config.id,
         this.config.groupId,
       );
-
-      // Statuses that represent a problem (non-up, non-pending, non-paused, non-inactive)
-      const isProblemStatus = (s: string) =>
-        s === 'down' || s === 'ssl_expired' || s === 'ssl_warning' || s === 'alert';
 
       if (groupNotifGroupId !== null) {
         // ── Grouped notifications mode ──

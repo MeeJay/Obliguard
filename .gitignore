@@ -3,6 +3,7 @@ dist/
 !agent/dist/
 agent/dist/*.exe
 agent/bin/*.exe
+!desktop-app/dist/
 .env
 *.log
 .DS_Store

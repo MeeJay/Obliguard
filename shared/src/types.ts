@@ -471,6 +471,56 @@ export interface AgentApiKey {
   deviceCount?: number;
 }
 
+/**
+ * Per-device UI display preferences stored in agent_devices.display_config (JSONB).
+ * All fields are optional; missing fields fall back to defaults (everything visible).
+ */
+export interface AgentDisplayConfig {
+  cpu: {
+    /** Show 2 stacked mini-bars per physical core instead of 2-column thread grid */
+    groupCoreThreads: boolean;
+    /** Physical core indices (0-based) to hide from the overview card */
+    hiddenCores: number[];
+    /** Temperature sensor label to use for the CPU temp chart (null = average all) */
+    tempSensor: string | null;
+    /** Detail-page chart IDs to hide: 'load-avg' | 'temp' | 'freq' */
+    hiddenCharts: string[];
+  };
+  ram: {
+    hideUsed: boolean;
+    hideFree: boolean;
+    hideSwap: boolean;
+    /** Detail-page chart IDs to hide: 'pct' | 'used-mb' | 'swap' */
+    hiddenCharts: string[];
+  };
+  gpu: {
+    /** Row labels to hide from the overview card (e.g. 'Copy', 'Encode', 'VRAM') */
+    hiddenRows: string[];
+    /** Detail-page chart IDs to hide: 'util' | 'vram' | 'temp' */
+    hiddenCharts: string[];
+  };
+  drives: {
+    /** Mount paths to hide from the overview card */
+    hiddenMounts: string[];
+    /** mount → custom display name */
+    renames: Record<string, string>;
+    /** Detail page: combine Read+Write into one dual-series chart */
+    combineReadWrite: boolean;
+  };
+  network: {
+    /** Interface names to hide from the overview card */
+    hiddenInterfaces: string[];
+    /** interface name → custom display name */
+    renames: Record<string, string>;
+    /** Detail page: combine IN+OUT into one dual-series chart */
+    combineInOut: boolean;
+  };
+  temps: {
+    /** Sensor labels to hide from the overview card */
+    hiddenLabels: string[];
+  };
+}
+
 export interface AgentDevice {
   id: number;
   uuid: string;
@@ -516,6 +566,8 @@ export interface AgentDevice {
   };
   /** Parent group's agent_thresholds — used as the "inherited" baseline in the threshold editor */
   groupThresholds?: AgentThresholds | null;
+  /** Per-device UI display preferences (hidden cores, renamed drives, combined charts, etc.) */
+  displayConfig: AgentDisplayConfig | null;
 }
 
 // ============================================

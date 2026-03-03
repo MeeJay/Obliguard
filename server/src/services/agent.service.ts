@@ -2,7 +2,7 @@ import type { Server as SocketIOServer } from 'socket.io';
 import * as fs from 'fs';
 import * as path from 'path';
 import { db } from '../db';
-import type { AgentApiKey, AgentDevice, AgentGroupConfig, AgentThresholds } from '@obliview/shared';
+import type { AgentApiKey, AgentDevice, AgentDisplayConfig, AgentGroupConfig, AgentThresholds } from '@obliview/shared';
 import { DEFAULT_AGENT_THRESHOLDS, SOCKET_EVENTS } from '@obliview/shared';
 import { heartbeatService } from './heartbeat.service';
 import { notificationService } from './notification.service';
@@ -50,6 +50,8 @@ interface AgentDeviceRow {
   sensor_display_names: unknown;
   // migration 026
   override_group_settings: boolean;
+  // migration 032
+  display_config: unknown;
 }
 
 function rowToApiKey(row: AgentApiKeyRow): AgentApiKey {
@@ -104,6 +106,9 @@ function rowToDevice(row: AgentDeviceRow, groupConfig?: AgentGroupConfig | null,
     overrideGroupSettings: override,
     resolvedSettings,
     groupThresholds: groupThresholds ?? null,
+    displayConfig: (typeof row.display_config === 'string'
+      ? JSON.parse(row.display_config)
+      : (row.display_config as AgentDisplayConfig | null)) ?? null,
   };
 }
 
@@ -292,6 +297,7 @@ export const agentService = {
     heartbeatMonitoring?: boolean;
     sensorDisplayNames?: Record<string, string> | null;
     overrideGroupSettings?: boolean;
+    displayConfig?: AgentDisplayConfig | null;
   }): Promise<AgentDevice | null> {
     const update: Record<string, unknown> = { updated_at: new Date() };
     if (data.status !== undefined) update.status = data.status;
@@ -303,6 +309,7 @@ export const agentService = {
     if (data.heartbeatMonitoring !== undefined) update.heartbeat_monitoring = data.heartbeatMonitoring;
     if (data.sensorDisplayNames !== undefined) update.sensor_display_names = data.sensorDisplayNames;
     if (data.overrideGroupSettings !== undefined) update.override_group_settings = data.overrideGroupSettings;
+    if (data.displayConfig !== undefined) update.display_config = data.displayConfig;
 
     const [row] = await db('agent_devices')
       .where({ id })

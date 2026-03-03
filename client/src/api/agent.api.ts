@@ -1,5 +1,5 @@
 import apiClient from './client';
-import type { AgentApiKey, AgentDevice, AgentThresholds, ApiResponse } from '@obliview/shared';
+import type { AgentApiKey, AgentDevice, AgentDisplayConfig, AgentThresholds, ApiResponse } from '@obliview/shared';
 import type { AgentPushSnapshot } from '../types/agent';
 
 export const agentApi = {
@@ -47,6 +47,7 @@ export const agentApi = {
       heartbeatMonitoring?: boolean;
       sensorDisplayNames?: Record<string, string> | null;
       overrideGroupSettings?: boolean;
+      displayConfig?: AgentDisplayConfig | null;
     },
   ): Promise<AgentDevice> {
     const res = await apiClient.patch<ApiResponse<AgentDevice>>(`/agent/devices/${id}`, data);

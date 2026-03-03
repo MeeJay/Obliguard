@@ -39,7 +39,7 @@
                 Name="Obliview"
                 WorkingDirectory="INSTALLFOLDER"
                 Icon="AppIcon"
-                Advertise="yes" />
+                Advertise="no" />
           </File>
         </Component>
 
