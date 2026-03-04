@@ -159,6 +159,10 @@ EOF
 
   rm -f "$DMG_OUT" "$DMG_TMP"
 
+  # Detach any lingering volume from a previous failed build (e.g. after an
+  # AppleScript timeout that prevented hdiutil detach from running).
+  hdiutil detach "/Volumes/$APPNAME" -force 2>/dev/null || true
+
   hdiutil create \
     -srcfolder "$DMG_STAGING" \
     -volname "$APPNAME" \
@@ -166,8 +170,11 @@ EOF
     -o "$DMG_TMP"
 
   local MOUNT_POINT
+  # hdiutil output is tab-delimited; use -F'\t' so volume names containing
+  # spaces (e.g. "Obliview 1" when a previous mount was not ejected) are
+  # captured correctly as a single field instead of being split by awk.
   MOUNT_POINT=$(hdiutil attach -readwrite -noverify -noautoopen "$DMG_TMP" \
-    | awk '/\/Volumes\//{print $NF}')
+    | awk -F'\t' '/\/Volumes\//{print $NF}')
 
   if [ -z "$MOUNT_POINT" ]; then
     echo "  ERROR: Could not mount DMG for $ARCH"
