@@ -52,6 +52,9 @@ interface AgentDeviceRow {
   override_group_settings: boolean;
   // migration 032
   display_config: unknown;
+  // migration 033
+  pending_command: string | null;
+  uninstall_commanded_at: Date | null;
 }
 
 function rowToApiKey(row: AgentApiKeyRow): AgentApiKey {
@@ -105,10 +108,13 @@ function rowToDevice(row: AgentDeviceRow, groupConfig?: AgentGroupConfig | null,
     sensorDisplayNames: (row.sensor_display_names as Record<string, string> | null) ?? null,
     overrideGroupSettings: override,
     resolvedSettings,
+    groupSettings: groupConfig ?? null,
     groupThresholds: groupThresholds ?? null,
     displayConfig: (typeof row.display_config === 'string'
       ? JSON.parse(row.display_config)
       : (row.display_config as AgentDisplayConfig | null)) ?? null,
+    pendingCommand: row.pending_command ?? null,
+    uninstallCommandedAt: row.uninstall_commanded_at ? row.uninstall_commanded_at.toISOString() : null,
   };
 }
 
@@ -195,6 +201,11 @@ export interface AgentPushResponse {
   config?: { checkIntervalSeconds: number };
   /** Piggybacked on every ok/pending response so agents update without an extra round-trip. */
   latestVersion?: string;
+  /**
+   * One-shot command for the agent to execute (e.g. 'uninstall').
+   * Cleared from DB as soon as it is included in a push response.
+   */
+  command?: string;
 }
 
 // ── In-memory snapshot: indexed by deviceId ─────────────────
@@ -338,6 +349,76 @@ export const agentService = {
     await db('monitors').where({ agent_device_id: id }).del();
     const count = await db('agent_devices').where({ id }).del();
     return count > 0;
+  },
+
+  // ── Bulk operations ──────────────────────────────────────────────────────
+
+  async bulkDeleteDevices(ids: number[]): Promise<void> {
+    if (ids.length === 0) return;
+    await db('monitors').whereIn('agent_device_id', ids).del();
+    await db('agent_devices').whereIn('id', ids).del();
+    // Broadcast deletion events so the frontend updates in real-time
+    if (_io) {
+      for (const id of ids) {
+        _io.to('role:admin').emit(SOCKET_EVENTS.AGENT_DEVICE_DELETED, { deviceId: id });
+      }
+    }
+  },
+
+  async bulkUpdateDevices(ids: number[], data: {
+    groupId?: number | null;
+    heartbeatMonitoring?: boolean;
+    overrideGroupSettings?: boolean;
+    status?: 'approved' | 'suspended';
+  }): Promise<void> {
+    if (ids.length === 0) return;
+    const update: Record<string, unknown> = { updated_at: new Date() };
+    if (data.groupId !== undefined)             update.group_id               = data.groupId;
+    if (data.heartbeatMonitoring !== undefined)  update.heartbeat_monitoring   = data.heartbeatMonitoring;
+    if (data.overrideGroupSettings !== undefined) update.override_group_settings = data.overrideGroupSettings;
+    if (data.status !== undefined)               update.status                 = data.status;
+    await db('agent_devices').whereIn('id', ids).update(update);
+    // Notify frontend of each updated device
+    if (_io) {
+      for (const id of ids) {
+        _io.to('role:admin').emit(SOCKET_EVENTS.AGENT_DEVICE_UPDATED, { deviceId: id });
+      }
+    }
+  },
+
+  /** Queue a command to be delivered to a device on its next push. */
+  async sendCommand(id: number, command: string): Promise<boolean> {
+    const count = await db('agent_devices')
+      .where({ id })
+      .update({ pending_command: command, updated_at: new Date() });
+    return count > 0;
+  },
+
+  /** Queue a command for multiple devices at once. */
+  async bulkSendCommand(ids: number[], command: string): Promise<void> {
+    if (ids.length === 0) return;
+    await db('agent_devices')
+      .whereIn('id', ids)
+      .update({ pending_command: command, updated_at: new Date() });
+  },
+
+  /**
+   * Cleanup job: auto-delete devices whose 'uninstall' command was delivered
+   * more than 10 minutes ago (they've had enough time to uninstall and stop pushing).
+   * Should be called periodically (e.g. every 5 minutes).
+   */
+  async cleanupUninstalledDevices(): Promise<void> {
+    const cutoff = new Date(Date.now() - 10 * 60 * 1000); // 10 minutes ago
+    const rows = await db('agent_devices')
+      .whereNotNull('uninstall_commanded_at')
+      .where('uninstall_commanded_at', '<', cutoff)
+      .select('id') as { id: number }[];
+
+    if (rows.length === 0) return;
+
+    const ids = rows.map(r => r.id);
+    await this.bulkDeleteDevices(ids);
+    logger.info(`Agent cleanup: auto-deleted ${ids.length} device(s) after uninstall command.`);
   },
 
   /** Suspend a device: set status=suspended + pause the agent monitor */
@@ -532,12 +613,27 @@ export const agentService = {
       return { status: 'unauthorized' };
     }
 
+    // Consume any pending command: clear from DB and include in response once.
+    // For 'uninstall', also record the delivery timestamp so the cleanup job can
+    // auto-delete the device after ~10 minutes of silence.
+    let pendingCommand: string | undefined;
+    if (device.pendingCommand) {
+      pendingCommand = device.pendingCommand;
+      const commandUpdate: Record<string, unknown> = { pending_command: null, updated_at: new Date() };
+      if (pendingCommand === 'uninstall') {
+        commandUpdate.uninstall_commanded_at = new Date();
+      }
+      await db('agent_devices').where({ id: device.id }).update(commandUpdate);
+    }
+
     // Handle pending devices
     if (device.status === 'pending') {
       return {
         status: 'pending',
-        config: { checkIntervalSeconds: device.checkIntervalSeconds },
+        // Use resolvedSettings so group-inherited intervals are honoured.
+        config: { checkIntervalSeconds: device.resolvedSettings.checkIntervalSeconds },
         latestVersion: this.getAgentVersion().version,
+        ...(pendingCommand ? { command: pendingCommand } : {}),
       };
     }
 
@@ -547,8 +643,10 @@ export const agentService = {
 
       return {
         status: 'ok',
-        config: { checkIntervalSeconds: device.checkIntervalSeconds },
+        // Use resolvedSettings so group-inherited intervals are honoured.
+        config: { checkIntervalSeconds: device.resolvedSettings.checkIntervalSeconds },
         latestVersion: this.getAgentVersion().version,
+        ...(pendingCommand ? { command: pendingCommand } : {}),
       };
     }
 
@@ -573,7 +671,12 @@ export const agentService = {
       return;
     }
 
-    const thresholds: AgentThresholds = monitor.agent_thresholds ?? DEFAULT_AGENT_THRESHOLDS;
+    // Threshold hierarchy: agent's explicitly saved thresholds always win;
+    // group thresholds are the default when the agent has none;
+    // system defaults are the last resort.
+    // Note: overrideGroupSettings controls checkInterval/heartbeat/maxMissedPushes only.
+    const thresholds: AgentThresholds =
+      monitor.agent_thresholds ?? device.groupThresholds ?? DEFAULT_AGENT_THRESHOLDS;
     const m = payload.metrics;
 
     // Evaluate each threshold and build violation list

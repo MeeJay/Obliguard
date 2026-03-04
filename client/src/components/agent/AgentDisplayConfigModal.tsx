@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { X, Settings2, Pencil, Check } from 'lucide-react';
 import type { AgentDisplayConfig } from '@obliview/shared';
+import { prettifySensorLabel } from '../../utils/sensorLabels';
 
 type Section = 'cpu' | 'ram' | 'gpu' | 'drives' | 'network' | 'temps';
 
@@ -62,12 +63,13 @@ function ToggleRow({
 
 // ── CPU Tab ───────────────────────────────────────────────────────────────────
 function CpuTab({
-  draft, onChange, availableThreadCount, availableTemps,
+  draft, onChange, availableThreadCount, availableTemps, sensorDisplayNames,
 }: {
   draft: AgentDisplayConfig;
   onChange: (d: AgentDisplayConfig) => void;
   availableThreadCount: number;
   availableTemps: string[];
+  sensorDisplayNames: Record<string, string>;
 }) {
   const physicalCores = Math.ceil(availableThreadCount / 2);
   const hiddenChartMap: Array<{ id: string; label: string }> = [
@@ -123,7 +125,7 @@ function CpuTab({
         >
           <option value="">— Average —</option>
           {availableTemps.map(label => (
-            <option key={label} value={label}>{label}</option>
+            <option key={label} value={label}>{sensorDisplayNames[`temp:${label}`] ?? prettifySensorLabel(label)}</option>
           ))}
         </select>
       </div>
@@ -464,7 +466,7 @@ function TempsTab({
         <div className="space-y-1">
           {availableTemps.map(label => {
             const key = `temp:${label}`;
-            const displayName = sensorDisplayNames[key] ?? label;
+            const displayName = sensorDisplayNames[key] ?? prettifySensorLabel(label);
             const visible = !draft.temps.hiddenLabels.includes(label);
             const isEditing = editingSensor === key;
             return (
@@ -594,6 +596,7 @@ export function AgentDisplayConfigModal({
                 onChange={setDraft}
                 availableThreadCount={availableThreadCount}
                 availableTemps={availableTemps}
+                sensorDisplayNames={sensorDisplayNames}
               />
             )}
             {activeSection === 'ram' && (

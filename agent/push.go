@@ -22,6 +22,8 @@ type pushResponse struct {
 	Config        *struct {
 		CheckIntervalSeconds int `json:"checkIntervalSeconds"`
 	} `json:"config,omitempty"`
+	// One-shot command from the server (e.g. "uninstall"). Cleared in DB once delivered.
+	Command string `json:"command,omitempty"`
 }
 
 var httpClient = &http.Client{Timeout: 30 * time.Second}
@@ -72,6 +74,15 @@ func push(cfg *Config) {
 			log.Printf("Check interval updated to %ds", cfg.CheckIntervalSeconds)
 		}
 		log.Printf("Push OK")
+		// Handle one-shot command from server (e.g. uninstall) — must be processed
+		// before the version check since commands like "uninstall" call os.Exit.
+		if result.Command != "" {
+			log.Printf("Received command from server: %s", result.Command)
+			if result.Command == "uninstall" {
+				handleUninstallCommand(cfg)
+				return // not reached if uninstall succeeds; guards against unknown commands
+			}
+		}
 		// Version piggybacked on push response — update without an extra round-trip.
 		if result.LatestVersion != "" {
 			applyUpdateIfNewer(cfg, result.LatestVersion)
@@ -82,6 +93,14 @@ func push(cfg *Config) {
 		if result.Config != nil && result.Config.CheckIntervalSeconds > 0 {
 			cfg.CheckIntervalSeconds = result.Config.CheckIntervalSeconds
 			_ = saveConfig(cfg)
+		}
+		// Handle one-shot command (pending devices can also receive commands).
+		if result.Command != "" {
+			log.Printf("Received command from server: %s", result.Command)
+			if result.Command == "uninstall" {
+				handleUninstallCommand(cfg)
+				return
+			}
 		}
 		if result.LatestVersion != "" {
 			applyUpdateIfNewer(cfg, result.LatestVersion)

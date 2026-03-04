@@ -58,6 +58,9 @@ export function desktopVersion(_req: Request, res: Response): void {
 }
 
 const ALLOWED_AGENT_BINARIES: Record<string, string> = {
+  // Windows: full MSI installer (handles service, PawnIO driver, etc.)
+  'obliview-agent.msi':             'obliview-agent.msi',
+  // Windows: bare exe (kept for manual / legacy use)
   'obliview-agent.exe':             'obliview-agent.exe',
   'obliview-agent-linux-amd64':     'obliview-agent-linux-amd64',
   'obliview-agent-linux-arm64':     'obliview-agent-linux-arm64',
@@ -319,6 +322,63 @@ export async function getDeviceMetrics(req: Request, res: Response): Promise<voi
 export async function deleteDevice(req: Request, res: Response): Promise<void> {
   const id = Number(req.params.id);
   const ok = await agentService.deleteDevice(id);
+  if (!ok) {
+    res.status(404).json({ success: false, error: 'Device not found' });
+    return;
+  }
+  res.json({ success: true });
+}
+
+// ── Admin: Bulk Device Operations ────────────────────────────────────────────
+
+export async function bulkDeleteDevices(req: Request, res: Response): Promise<void> {
+  const { deviceIds } = req.body as { deviceIds: number[] };
+  if (!Array.isArray(deviceIds) || deviceIds.length === 0) {
+    res.status(400).json({ success: false, error: 'deviceIds array required' });
+    return;
+  }
+  await agentService.bulkDeleteDevices(deviceIds);
+  res.json({ success: true });
+}
+
+export async function bulkUpdateDevices(req: Request, res: Response): Promise<void> {
+  const { deviceIds, groupId, heartbeatMonitoring, overrideGroupSettings, status } = req.body as {
+    deviceIds: number[];
+    groupId?: number | null;
+    heartbeatMonitoring?: boolean;
+    overrideGroupSettings?: boolean;
+    status?: 'approved' | 'suspended';
+  };
+  if (!Array.isArray(deviceIds) || deviceIds.length === 0) {
+    res.status(400).json({ success: false, error: 'deviceIds array required' });
+    return;
+  }
+  await agentService.bulkUpdateDevices(deviceIds, { groupId, heartbeatMonitoring, overrideGroupSettings, status });
+  res.json({ success: true });
+}
+
+export async function bulkDeviceCommand(req: Request, res: Response): Promise<void> {
+  const { deviceIds, command } = req.body as { deviceIds: number[]; command: string };
+  if (!Array.isArray(deviceIds) || deviceIds.length === 0) {
+    res.status(400).json({ success: false, error: 'deviceIds array required' });
+    return;
+  }
+  if (!command) {
+    res.status(400).json({ success: false, error: 'command required' });
+    return;
+  }
+  await agentService.bulkSendCommand(deviceIds, command);
+  res.json({ success: true });
+}
+
+export async function sendDeviceCommand(req: Request, res: Response): Promise<void> {
+  const id = Number(req.params.id);
+  const { command } = req.body as { command: string };
+  if (!command) {
+    res.status(400).json({ success: false, error: 'command required' });
+    return;
+  }
+  const ok = await agentService.sendCommand(id, command);
   if (!ok) {
     res.status(404).json({ success: false, error: 'Device not found' });
     return;

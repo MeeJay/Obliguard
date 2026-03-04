@@ -8,7 +8,7 @@ import { logger } from './utils/logger';
 import { authService } from './services/auth.service';
 import { MonitorWorkerManager } from './workers/MonitorWorkerManager';
 import { heartbeatService } from './services/heartbeat.service';
-import { setAgentServiceIO } from './services/agent.service';
+import { setAgentServiceIO, agentService } from './services/agent.service';
 
 async function main() {
   // 1. Run pending migrations
@@ -62,10 +62,22 @@ async function main() {
     }
   }, RETENTION_INTERVAL_MS);
 
-  // 9. Graceful shutdown
+  // 9. Agent cleanup job — auto-delete devices whose uninstall command was delivered
+  //    more than 10 minutes ago (they've had enough time to uninstall and stop pushing).
+  const AGENT_CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // every 5 minutes
+  const agentCleanupTimer = setInterval(async () => {
+    try {
+      await agentService.cleanupUninstalledDevices();
+    } catch (err) {
+      logger.error(err, 'Agent cleanup job failed');
+    }
+  }, AGENT_CLEANUP_INTERVAL_MS);
+
+  // 10. Graceful shutdown
   const shutdown = async (signal: string) => {
     logger.info(`Received ${signal}, shutting down...`);
     clearInterval(retentionTimer);
+    clearInterval(agentCleanupTimer);
     await workerManager.stopAll();
     server.close();
     await db.destroy();

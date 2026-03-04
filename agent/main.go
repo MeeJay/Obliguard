@@ -215,15 +215,17 @@ func applyUpdateIfNewer(cfg *Config, remoteVersion string) {
 
 	log.Printf("Auto-update: new version available %s → %s, downloading...", agentVersion, remoteVersion)
 
-	// Windows binary has no platform suffix (obliview-agent.exe vs obliview-agent-os-arch).
+	// On Windows we download the full MSI so that the installer handles all
+	// dependencies (PawnIO kernel driver, service registration, etc.).
+	// On other platforms we download the bare binary.
 	var filename string
 	if runtime.GOOS == "windows" {
-		filename = "obliview-agent.exe"
+		filename = "obliview-agent.msi"
 	} else {
 		filename = fmt.Sprintf("obliview-agent-%s-%s", runtime.GOOS, runtime.GOARCH)
 	}
 
-	client := &http.Client{Timeout: 60 * time.Second} // larger timeout for binary download
+	client := &http.Client{Timeout: 120 * time.Second} // larger timeout for MSI download
 	dlResp, err := client.Get(cfg.ServerURL + "/api/agent/download/" + filename)
 	if err != nil {
 		log.Printf("Auto-update: download request failed: %v", err)
@@ -235,69 +237,93 @@ func applyUpdateIfNewer(cfg *Config, remoteVersion string) {
 		return
 	}
 
-	exePath, err := os.Executable()
-	if err != nil {
-		log.Printf("Auto-update: cannot resolve executable path: %v", err)
-		return
-	}
-
-	tmpPath := exePath + ".new"
-	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
-	if err != nil {
-		log.Printf("Auto-update: cannot write temp file: %v", err)
-		return
-	}
-
-	if _, err := io.Copy(f, dlResp.Body); err != nil {
-		f.Close()
-		os.Remove(tmpPath)
-		log.Printf("Auto-update: download write error: %v", err)
-		return
-	}
-	f.Close()
-
 	if runtime.GOOS == "windows" {
-		// On Windows we cannot overwrite a running exe directly.
-		// Write a batch script that waits for the service to stop,
-		// moves the new binary in place, then restarts the service.
-		if err := applyWindowsUpdate(exePath, tmpPath); err != nil {
-			os.Remove(tmpPath)
-			log.Printf("Auto-update: Windows update failed: %v", err)
+		// Save MSI to a temp path — it does not need to be next to the exe.
+		msiPath := filepath.Join(os.TempDir(), "obliview-agent-update.msi")
+		f, err := os.OpenFile(msiPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+		if err != nil {
+			log.Printf("Auto-update: cannot write MSI temp file: %v", err)
+			return
+		}
+		if _, err := io.Copy(f, dlResp.Body); err != nil {
+			f.Close()
+			os.Remove(msiPath)
+			log.Printf("Auto-update: MSI download write error: %v", err)
+			return
+		}
+		f.Close()
+
+		// Launch msiexec via a detached batch script — the script outlives the
+		// service process. msiexec will stop the service, install the new version
+		// (including any updated dependencies such as PawnIO), then restart it.
+		if err := applyWindowsMSIUpdate(msiPath, cfg.ServerURL, cfg.APIKey); err != nil {
+			os.Remove(msiPath)
+			log.Printf("Auto-update: Windows MSI update failed: %v", err)
 			return
 		}
 	} else {
-		// Unix: atomic rename replaces the running binary in place.
+		// Unix: write the new binary then atomically rename it over the running one.
+		exePath, err := os.Executable()
+		if err != nil {
+			log.Printf("Auto-update: cannot resolve executable path: %v", err)
+			return
+		}
+		tmpPath := exePath + ".new"
+		f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+		if err != nil {
+			log.Printf("Auto-update: cannot write temp file: %v", err)
+			return
+		}
+		if _, err := io.Copy(f, dlResp.Body); err != nil {
+			f.Close()
+			os.Remove(tmpPath)
+			log.Printf("Auto-update: download write error: %v", err)
+			return
+		}
+		f.Close()
 		if err := os.Rename(tmpPath, exePath); err != nil {
 			os.Remove(tmpPath)
 			log.Printf("Auto-update: rename failed: %v", err)
 			return
 		}
+		log.Printf("Auto-update: updated to v%s, restarting...", remoteVersion)
+		// Unix: exec into the new binary in-place (same PID, works without a service manager).
+		restartWithNewBinary(exePath)
+		return // not reached; restartWithNewBinary always exits
 	}
 
-	log.Printf("Auto-update: updated to v%s, restarting...", remoteVersion)
-	restartWithNewBinary(exePath)
+	// Windows: the detached batch script handles the restart via msiexec.
+	// Exit here so the exe file is unlocked before msiexec tries to overwrite it.
+	log.Printf("Auto-update: MSI update to v%s initiated — service will restart shortly...", remoteVersion)
+	restartWithNewBinary("") // Windows version ignores the argument and calls os.Exit(0)
 }
 
-// applyWindowsUpdate schedules a Windows service update via a detached batch
-// script. Since the running exe cannot be overwritten while in use, the script:
-//  1. Waits a few seconds for the service process to fully exit
-//  2. Moves the downloaded binary over the old exe
-//  3. Restarts the ObliviewAgent service via sc.exe
-func applyWindowsUpdate(exePath, newBinary string) error {
-	scriptPath := filepath.Join(os.TempDir(), "obliview-update.bat")
+// applyWindowsMSIUpdate launches a detached batch script that runs msiexec
+// silently. The script is used instead of calling msiexec directly so that it
+// outlives the service process (the agent exits immediately after Start()).
+//
+// msiexec /quiet handles the full install sequence:
+//  1. Stop the ObliviewAgent service (WiX <ServiceControl Stop="both">)
+//  2. Overwrite obliview-agent.exe and any other packaged files
+//  3. Run deferred custom actions (e.g. PawnIO kernel driver installation)
+//  4. Restart the ObliviewAgent service with the new binary
+//
+// SERVERURL and APIKEY are forwarded so that the service arguments in the MSI
+// are populated even when config.json already exists (belt-and-suspenders).
+func applyWindowsMSIUpdate(msiPath, serverURL, apiKey string) error {
+	logPath := filepath.Join(os.TempDir(), "obliview-update.log")
+	scriptPath := filepath.Join(os.TempDir(), "obliview-msi-update.bat")
 	script := fmt.Sprintf(
 		"@echo off\r\n"+
-			"timeout /t 4 /nobreak >nul\r\n"+
-			"sc stop ObliviewAgent >nul 2>&1\r\n"+
 			"timeout /t 2 /nobreak >nul\r\n"+
-			"move /y \"%s\" \"%s\" >nul\r\n"+
-			"sc start ObliviewAgent\r\n"+
-			"del /q \"%s\"\r\n",
-		newBinary, exePath, scriptPath)
-	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
-		return fmt.Errorf("write update script: %w", err)
+			"msiexec /i \"%s\" /quiet /norestart SERVERURL=\"%s\" APIKEY=\"%s\" /l*v \"%s\"\r\n"+
+			"del /q \"%s\"\r\n"+
+			"del /q \"%%~f0\"\r\n",
+		msiPath, serverURL, apiKey, logPath, msiPath)
+	if err := os.WriteFile(scriptPath, []byte(script), 0644); err != nil {
+		return fmt.Errorf("write MSI update script: %w", err)
 	}
-	// Launch the script detached — it outlives the current process.
+	// Start the batch script detached; it will outlive the current service process.
 	return exec.Command("cmd", "/c", scriptPath).Start()
 }
 

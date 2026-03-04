@@ -22,13 +22,13 @@ export class AgentMonitorWorker extends BaseMonitorWorker {
     // from every code path (offline watchdog, normal push, device state changes).
     let result: CheckResult;
 
-    // Fetch device for status + check interval + heartbeat_monitoring + max_missed_pushes
+    // Fetch device for status + raw settings + override flag
     const device = await db('agent_devices')
       .where({ id: agentDeviceId })
-      .select('check_interval_seconds', 'status', 'heartbeat_monitoring', 'group_id', 'agent_max_missed_pushes')
+      .select('check_interval_seconds', 'status', 'heartbeat_monitoring', 'group_id', 'agent_max_missed_pushes', 'override_group_settings')
       .first() as {
         check_interval_seconds: number; status: string; heartbeat_monitoring: boolean;
-        group_id: number | null; agent_max_missed_pushes: number | null;
+        group_id: number | null; agent_max_missed_pushes: number | null; override_group_settings: boolean;
       } | undefined;
 
     if (!device) {
@@ -43,24 +43,34 @@ export class AgentMonitorWorker extends BaseMonitorWorker {
       // Check for a recent push
       const snapshot = agentPushData.get(agentDeviceId);
 
-      // Resolve maxMissedPushes: device > group > system default (2)
-      let maxMissedPushes = device.agent_max_missed_pushes ?? null;
-      if (maxMissedPushes === null && device.group_id !== null) {
+      // Resolve effective settings — when override_group_settings is false and the
+      // device belongs to a group, the group's agent_group_config takes precedence.
+      // This mirrors the same logic as rowToDevice / resolvedSettings in agent.service.ts.
+      let effectiveCheckInterval = device.check_interval_seconds;
+      let effectiveHeartbeatMonitoring = device.heartbeat_monitoring ?? true;
+      let effectiveMaxMissedPushes: number | null = device.agent_max_missed_pushes ?? null;
+
+      if (!device.override_group_settings && device.group_id !== null) {
         const groupRow = await db('monitor_groups')
           .where({ id: device.group_id })
           .select('agent_group_config')
-          .first() as { agent_group_config: { maxMissedPushes?: number | null } | string | null } | undefined;
+          .first() as { agent_group_config: unknown } | undefined;
         const cfg = typeof groupRow?.agent_group_config === 'string'
           ? JSON.parse(groupRow.agent_group_config)
-          : groupRow?.agent_group_config;
-        maxMissedPushes = cfg?.maxMissedPushes ?? null;
+          : groupRow?.agent_group_config as { pushIntervalSeconds?: number | null; heartbeatMonitoring?: boolean | null; maxMissedPushes?: number | null } | null | undefined;
+        if (cfg) {
+          if (cfg.pushIntervalSeconds != null)  effectiveCheckInterval        = cfg.pushIntervalSeconds;
+          if (cfg.heartbeatMonitoring  != null)  effectiveHeartbeatMonitoring = cfg.heartbeatMonitoring;
+          if (cfg.maxMissedPushes      != null)  effectiveMaxMissedPushes     = cfg.maxMissedPushes;
+        }
       }
-      const effectiveMaxMissed = maxMissedPushes ?? 2;
-      const maxStaleMs = device.check_interval_seconds * effectiveMaxMissed * 1000;
+
+      const effectiveMaxMissed = effectiveMaxMissedPushes ?? 2;
+      const maxStaleMs = effectiveCheckInterval * effectiveMaxMissed * 1000;
 
       if (!snapshot) {
         // No push received yet
-        result = device.heartbeat_monitoring
+        result = effectiveHeartbeatMonitoring
           ? { status: 'down', message: 'Waiting for first agent push...' }
           : { status: 'inactive', message: 'No data received (heartbeat monitoring disabled)' };
       } else {
@@ -69,7 +79,7 @@ export class AgentMonitorWorker extends BaseMonitorWorker {
           const ageSec = Math.round(ageMs / 1000);
           const ageMins = Math.floor(ageSec / 60);
           const timeLabel = ageMins > 0 ? `${ageMins}m ${ageSec % 60}s` : `${ageSec}s`;
-          result = device.heartbeat_monitoring
+          result = effectiveHeartbeatMonitoring
             ? { status: 'down', message: `Device offline (last seen ${timeLabel} ago)` }
             : { status: 'inactive', message: `No data received for ${timeLabel} (heartbeat monitoring disabled)` };
         } else {

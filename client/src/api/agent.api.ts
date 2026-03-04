@@ -72,6 +72,35 @@ export const agentApi = {
     await apiClient.delete(`/agent/devices/${id}`);
   },
 
+  // ── Device commands ───────────────────────────────────────────────────────
+
+  /** Queue a one-shot command for the agent (delivered on next push). */
+  async sendCommand(id: number, command: string): Promise<void> {
+    await apiClient.post(`/agent/devices/${id}/command`, { command });
+  },
+
+  // ── Bulk device operations ────────────────────────────────────────────────
+
+  async bulkDeleteDevices(deviceIds: number[]): Promise<void> {
+    await apiClient.delete('/agent/devices/bulk', { data: { deviceIds } });
+  },
+
+  async bulkSendCommand(deviceIds: number[], command: string): Promise<void> {
+    await apiClient.post('/agent/devices/bulk-command', { deviceIds, command });
+  },
+
+  async bulkUpdateDevices(
+    deviceIds: number[],
+    data: {
+      groupId?: number | null;
+      heartbeatMonitoring?: boolean;
+      overrideGroupSettings?: boolean;
+      status?: 'approved' | 'suspended';
+    },
+  ): Promise<void> {
+    await apiClient.patch('/agent/devices/bulk', { deviceIds, ...data });
+  },
+
   // ── Agent version ─────────────────────────────────────────────────────────
 
   async getVersion(): Promise<{ version: string; downloadUrl: string }> {

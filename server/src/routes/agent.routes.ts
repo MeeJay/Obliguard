@@ -19,6 +19,10 @@ import {
   updateDevice,
   deleteDevice,
   getDeviceMetrics,
+  sendDeviceCommand,
+  bulkDeleteDevices,
+  bulkUpdateDevices,
+  bulkDeviceCommand,
 } from '../controllers/agent.controller';
 
 const router = Router();
@@ -49,10 +53,17 @@ router.get('/keys', requireAuth, requireRole('admin'), listKeys);
 router.post('/keys', requireAuth, requireRole('admin'), createKey);
 router.delete('/keys/:id', requireAuth, requireRole('admin'), deleteKey);
 
+// ⚠️ Bulk routes MUST be declared before /:id routes — otherwise Express matches
+//    "bulk" as a device ID and the wrong handler fires.
+router.delete('/devices/bulk',        requireAuth, requireRole('admin'), bulkDeleteDevices);
+router.patch('/devices/bulk',         requireAuth, requireRole('admin'), bulkUpdateDevices);
+router.post('/devices/bulk-command',  requireAuth, requireRole('admin'), bulkDeviceCommand);
+
 router.get('/devices', requireAuth, requireRole('admin'), listDevices);
 router.get('/devices/:id', requireAuth, requireRole('admin'), getDevice);
 router.get('/devices/:id/metrics', requireAuth, requireRole('admin'), getDeviceMetrics);
 router.patch('/devices/:id', requireAuth, requireRole('admin'), updateDevice);
 router.delete('/devices/:id', requireAuth, requireRole('admin'), deleteDevice);
+router.post('/devices/:id/command', requireAuth, requireRole('admin'), sendDeviceCommand);
 
 export default router;

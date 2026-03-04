@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import {
   Plus,
@@ -15,7 +15,11 @@ import {
   ExternalLink,
   Pencil,
   PauseCircle,
+  PowerOff,
+  X,
+  Settings2,
 } from 'lucide-react';
+import { SOCKET_EVENTS } from '@obliview/shared';
 import type { AgentApiKey, AgentDevice, MonitorGroup } from '@obliview/shared';
 import { agentApi } from '@/api/agent.api';
 import { groupsApi } from '@/api/groups.api';
@@ -27,6 +31,8 @@ import toast from 'react-hot-toast';
 
 type Tab = 'keys' | 'devices';
 type DeviceStatusFilter = 'pending' | 'approved' | 'refused' | 'suspended' | 'all';
+/** 'keep' = no change; null = remove from group; number = assign to group */
+type GroupSelection = 'keep' | null | number;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -98,6 +104,47 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
+// ── TriStateCheckbox ──────────────────────────────────────────────────────────
+
+/**
+ * Tri-state checkbox: true / false / null (indeterminate = mixed values across selection).
+ * Any click resolves the indeterminate state to true or false.
+ */
+function TriStateCheckbox({
+  value,
+  onChange,
+  label,
+  description,
+}: {
+  value: boolean | null;
+  onChange: (v: boolean) => void;
+  label: string;
+  description?: string;
+}) {
+  const ref = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (ref.current) {
+      ref.current.indeterminate = value === null;
+    }
+  }, [value]);
+
+  return (
+    <label className="flex items-start gap-3 cursor-pointer group">
+      <input
+        ref={ref}
+        type="checkbox"
+        checked={value === true}
+        onChange={e => onChange(e.target.checked)}
+        className="mt-0.5 accent-accent w-4 h-4"
+      />
+      <div>
+        <p className="text-sm font-medium text-text-primary group-hover:text-accent transition-colors">{label}</p>
+        {description && <p className="text-xs text-text-muted leading-relaxed">{description}</p>}
+      </div>
+    </label>
+  );
+}
+
 // ── ApproveModal ──────────────────────────────────────────────────────────────
 
 function ApproveModal({
@@ -112,11 +159,7 @@ function ApproveModal({
   onCancel: () => void;
 }) {
   const [selectedGroupId, setSelectedGroupId] = useState<number | null>(null);
-
-  // Only show agent-kind groups in the picker
   const agentGroups = groups.filter(g => g.kind === 'agent');
-
-  // When a group is selected, show its thresholds (if any) as a preview note
   const selectedGroup = agentGroups.find(g => g.id === selectedGroupId);
   const hasGroupThresholds = selectedGroup?.agentThresholds != null;
 
@@ -163,23 +206,37 @@ function ApproveModal({
 
 function EditAgentModal({
   device,
+  groups,
   onSave,
   onCancel,
 }: {
   device: AgentDevice;
-  onSave: (data: { name: string | null; heartbeatMonitoring: boolean; suspended: boolean }) => void;
+  groups: MonitorGroup[];
+  onSave: (data: {
+    name: string | null;
+    groupId?: number | null;
+    heartbeatMonitoring: boolean;
+    overrideGroupSettings: boolean;
+    suspended: boolean;
+  }) => void;
   onCancel: () => void;
 }) {
   const [name, setName] = useState(device.name ?? '');
+  const [groupId, setGroupId] = useState<number | null>(device.groupId ?? null);
   const [heartbeatMonitoring, setHeartbeatMonitoring] = useState(device.heartbeatMonitoring);
+  const [overrideGroupSettings, setOverrideGroupSettings] = useState(device.overrideGroupSettings);
   const [suspended, setSuspended] = useState(device.status === 'suspended');
   const [saving, setSaving] = useState(false);
+
+  const agentGroups = groups.filter(g => g.kind === 'agent');
 
   const handleSave = async () => {
     setSaving(true);
     onSave({
       name: name.trim() || null,
+      groupId,
       heartbeatMonitoring,
+      overrideGroupSettings,
       suspended,
     });
   };
@@ -205,6 +262,21 @@ function EditAgentModal({
             <p className="text-xs text-text-muted mt-1">Leave empty to use hostname</p>
           </div>
 
+          {/* Group */}
+          <div>
+            <label className="block text-sm font-medium text-text-secondary mb-1">Agent Group</label>
+            <select
+              value={groupId ?? ''}
+              onChange={e => setGroupId(e.target.value === '' ? null : Number(e.target.value))}
+              className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
+            >
+              <option value="">— No group —</option>
+              {agentGroups.map(g => (
+                <option key={g.id} value={g.id}>{g.name}</option>
+              ))}
+            </select>
+          </div>
+
           {/* Heartbeat monitoring toggle */}
           <label className="flex items-start gap-3 cursor-pointer group">
             <input
@@ -218,8 +290,25 @@ function EditAgentModal({
                 Heartbeat monitoring
               </p>
               <p className="text-xs text-text-muted leading-relaxed">
-                When enabled: alert if agent goes offline (DOWN).{' '}
-                When disabled: no notification, shown as inactive/grey (e.g. workstation).
+                Alert if agent goes offline (DOWN). Disable for workstations.
+              </p>
+            </div>
+          </label>
+
+          {/* Override group settings */}
+          <label className="flex items-start gap-3 cursor-pointer group">
+            <input
+              type="checkbox"
+              checked={overrideGroupSettings}
+              onChange={e => setOverrideGroupSettings(e.target.checked)}
+              className="mt-0.5 accent-accent w-4 h-4"
+            />
+            <div>
+              <p className="text-sm font-medium text-text-primary group-hover:text-accent transition-colors">
+                Override group settings
+              </p>
+              <p className="text-xs text-text-muted leading-relaxed">
+                Use this device's own thresholds and push interval instead of the group's.
               </p>
             </div>
           </label>
@@ -252,6 +341,133 @@ function EditAgentModal({
   );
 }
 
+// ── BulkEditAgentModal ────────────────────────────────────────────────────────
+
+function BulkEditAgentModal({
+  devices,
+  groups,
+  onSave,
+  onCancel,
+}: {
+  devices: AgentDevice[];
+  groups: MonitorGroup[];
+  onSave: (data: {
+    groupId?: number | null;
+    heartbeatMonitoring?: boolean;
+    overrideGroupSettings?: boolean;
+    status?: 'approved' | 'suspended';
+  }) => void;
+  onCancel: () => void;
+}) {
+  const agentGroups = groups.filter(g => g.kind === 'agent');
+
+  // Compute initial tri-state values: single value if all same, null if mixed
+  const allSameHeartbeat = devices.every(d => d.heartbeatMonitoring === devices[0].heartbeatMonitoring);
+  const allSameOverride = devices.every(d => d.overrideGroupSettings === devices[0].overrideGroupSettings);
+
+  const [groupSelection, setGroupSelection] = useState<GroupSelection>('keep');
+  const [heartbeatMonitoring, setHeartbeatMonitoring] = useState<boolean | null>(
+    allSameHeartbeat ? devices[0].heartbeatMonitoring : null,
+  );
+  const [overrideGroupSettings, setOverrideGroupSettings] = useState<boolean | null>(
+    allSameOverride ? devices[0].overrideGroupSettings : null,
+  );
+  const [statusAction, setStatusAction] = useState<'no-change' | 'approved' | 'suspended'>('no-change');
+  const [saving, setSaving] = useState(false);
+
+  const handleSave = async () => {
+    const data: {
+      groupId?: number | null;
+      heartbeatMonitoring?: boolean;
+      overrideGroupSettings?: boolean;
+      status?: 'approved' | 'suspended';
+    } = {};
+
+    if (groupSelection !== 'keep') data.groupId = groupSelection;
+    if (heartbeatMonitoring !== null) data.heartbeatMonitoring = heartbeatMonitoring;
+    if (overrideGroupSettings !== null) data.overrideGroupSettings = overrideGroupSettings;
+    if (statusAction !== 'no-change') data.status = statusAction;
+
+    setSaving(true);
+    onSave(data);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+      <div className="w-full max-w-sm rounded-xl border border-border bg-bg-primary shadow-2xl p-6">
+        <h2 className="text-base font-semibold text-text-primary mb-1">
+          Edit {devices.length} Agent{devices.length !== 1 ? 's' : ''}
+        </h2>
+        <p className="text-xs text-text-muted mb-5">
+          Only changed fields will be applied. Mixed values show as indeterminate (—).
+        </p>
+
+        <div className="space-y-4">
+          {/* Group */}
+          <div>
+            <label className="block text-sm font-medium text-text-secondary mb-1">Agent Group</label>
+            <select
+              value={
+                groupSelection === 'keep' ? '__keep__'
+                : groupSelection === null ? ''
+                : String(groupSelection)
+              }
+              onChange={e => {
+                const v = e.target.value;
+                if (v === '__keep__') setGroupSelection('keep');
+                else if (v === '') setGroupSelection(null);
+                else setGroupSelection(Number(v));
+              }}
+              className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
+            >
+              <option value="__keep__">— Keep current —</option>
+              <option value="">— No group —</option>
+              {agentGroups.map(g => (
+                <option key={g.id} value={g.id}>{g.name}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* Heartbeat monitoring */}
+          <TriStateCheckbox
+            value={heartbeatMonitoring}
+            onChange={setHeartbeatMonitoring}
+            label="Heartbeat monitoring"
+            description="Alert if agent goes offline (DOWN). Disable for workstations."
+          />
+
+          {/* Override group settings */}
+          <TriStateCheckbox
+            value={overrideGroupSettings}
+            onChange={setOverrideGroupSettings}
+            label="Override group settings"
+            description="Use each device's own thresholds and push interval instead of the group's."
+          />
+
+          {/* Status */}
+          <div>
+            <label className="block text-sm font-medium text-text-secondary mb-1">Status</label>
+            <select
+              value={statusAction}
+              onChange={e => setStatusAction(e.target.value as 'no-change' | 'approved' | 'suspended')}
+              className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
+            >
+              <option value="no-change">— No change —</option>
+              <option value="approved">Approve all</option>
+              <option value="suspended">Suspend all</option>
+            </select>
+          </div>
+        </div>
+
+        <div className="flex gap-2 mt-6">
+          <Button onClick={handleSave} loading={saving} className="flex-1">Apply</Button>
+          <Button variant="secondary" onClick={onCancel} className="flex-1">Cancel</Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main Page ─────────────────────────────────────────────────────────────────
 
 export function AdminAgentPage() {
@@ -270,6 +486,11 @@ export function AdminAgentPage() {
   const [approvingDevice, setApprovingDevice] = useState<AgentDevice | null>(null);
   const [editingDevice, setEditingDevice] = useState<AgentDevice | null>(null);
 
+  // ── Bulk select state ────────────────────────────────────────────────────────
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [showBulkEditModal, setShowBulkEditModal] = useState(false);
+  const selectAllRef = useRef<HTMLInputElement>(null);
+
   const loadAll = useCallback(async () => {
     try {
       const [k, d] = await Promise.all([
@@ -286,7 +507,6 @@ export function AdminAgentPage() {
   const loadGroups = useCallback(async () => {
     try {
       const tree = await groupsApi.tree();
-      // Flatten tree to flat list
       const flat: MonitorGroup[] = [];
       const flatten = (nodes: typeof tree) => {
         for (const n of nodes) {
@@ -306,11 +526,12 @@ export function AdminAgentPage() {
     loadGroups();
   }, [loadAll, loadGroups]);
 
-  // Keep agentVersion column in sync with live pushes (no REST round-trip needed)
+  // Live updates via Socket.io
   useEffect(() => {
     const socket = getSocket();
     if (!socket) return;
-    const handler = (data: { deviceId: number; agentVersion?: string }) => {
+
+    const onPush = (data: { deviceId: number; agentVersion?: string }) => {
       if (!data.agentVersion) return;
       setDevices(prev => prev.map(d =>
         d.id === data.deviceId && d.agentVersion !== data.agentVersion
@@ -318,8 +539,29 @@ export function AdminAgentPage() {
           : d,
       ));
     };
-    socket.on('agentPush', handler);
-    return () => { socket.off('agentPush', handler); };
+
+    const onDeviceUpdated = (data: AgentDevice) => {
+      setDevices(prev => prev.map(d => d.id === data.id ? data : d));
+    };
+
+    // Auto-delete after uninstall: remove device from list & selection
+    const onDeviceDeleted = (data: { deviceId: number }) => {
+      setDevices(prev => prev.filter(d => d.id !== data.deviceId));
+      setSelectedIds(prev => {
+        const next = new Set(prev);
+        next.delete(data.deviceId);
+        return next;
+      });
+    };
+
+    socket.on('agentPush', onPush);
+    socket.on(SOCKET_EVENTS.AGENT_DEVICE_UPDATED, onDeviceUpdated);
+    socket.on(SOCKET_EVENTS.AGENT_DEVICE_DELETED, onDeviceDeleted);
+    return () => {
+      socket.off('agentPush', onPush);
+      socket.off(SOCKET_EVENTS.AGENT_DEVICE_UPDATED, onDeviceUpdated);
+      socket.off(SOCKET_EVENTS.AGENT_DEVICE_DELETED, onDeviceDeleted);
+    };
   }, []);
 
   const filteredDevices = deviceFilter === 'all'
@@ -328,7 +570,39 @@ export function AdminAgentPage() {
 
   const pendingCount = devices.filter(d => d.status === 'pending').length;
 
-  // ── Key actions ────────────────────────────────────────────
+  // ── Select-all checkbox indeterminate state ──────────────────────────────────
+  const allSelected = filteredDevices.length > 0 && filteredDevices.every(d => selectedIds.has(d.id));
+  const someSelected = !allSelected && filteredDevices.some(d => selectedIds.has(d.id));
+
+  useEffect(() => {
+    if (selectAllRef.current) {
+      selectAllRef.current.indeterminate = someSelected;
+    }
+  }, [someSelected]);
+
+  const toggleSelectAll = () => {
+    if (allSelected) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(filteredDevices.map(d => d.id)));
+    }
+  };
+
+  const toggleSelect = (id: number) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const handleFilterChange = (f: DeviceStatusFilter) => {
+    setDeviceFilter(f);
+    setSelectedIds(new Set());
+  };
+
+  // ── Key actions ──────────────────────────────────────────────────────────────
 
   const handleCreateKey = async () => {
     if (!newKeyName.trim()) return;
@@ -357,7 +631,7 @@ export function AdminAgentPage() {
     }
   };
 
-  // ── Device actions ─────────────────────────────────────────
+  // ── Device actions ───────────────────────────────────────────────────────────
 
   const handleApprove = async (groupId: number | null) => {
     if (!approvingDevice) return;
@@ -397,13 +671,35 @@ export function AdminAgentPage() {
     try {
       await agentApi.deleteDevice(device.id);
       toast.success('Device deleted');
+      setSelectedIds(prev => { const next = new Set(prev); next.delete(device.id); return next; });
       loadAll();
     } catch {
       toast.error('Failed to delete device');
     }
   };
 
-  const handleEditSave = async (data: { name: string | null; heartbeatMonitoring: boolean; suspended: boolean }) => {
+  /** Send an uninstall command to a single device. */
+  const handleUninstallDevice = async (device: AgentDevice) => {
+    if (!confirm(
+      `Uninstall agent on "${device.name ?? device.hostname}"?\n\n` +
+      `The command will be sent on the agent's next push. The service will be removed from the machine. ` +
+      `The device entry will be automatically deleted a few minutes after uninstall.`,
+    )) return;
+    try {
+      await agentApi.sendCommand(device.id, 'uninstall');
+      toast.success(`Uninstall command queued for ${device.name ?? device.hostname}`);
+    } catch {
+      toast.error('Failed to queue uninstall command');
+    }
+  };
+
+  const handleEditSave = async (data: {
+    name: string | null;
+    groupId?: number | null;
+    heartbeatMonitoring: boolean;
+    overrideGroupSettings: boolean;
+    suspended: boolean;
+  }) => {
     if (!editingDevice) return;
     try {
       const newStatus = data.suspended ? 'suspended'
@@ -411,7 +707,9 @@ export function AdminAgentPage() {
         : undefined;
       await agentApi.updateDevice(editingDevice.id, {
         name: data.name,
+        ...(data.groupId !== undefined ? { groupId: data.groupId } : {}),
         heartbeatMonitoring: data.heartbeatMonitoring,
+        overrideGroupSettings: data.overrideGroupSettings,
         ...(newStatus ? { status: newStatus } : {}),
       });
       toast.success('Agent updated');
@@ -419,6 +717,57 @@ export function AdminAgentPage() {
       loadAll();
     } catch {
       toast.error('Failed to update agent');
+    }
+  };
+
+  // ── Bulk actions ─────────────────────────────────────────────────────────────
+
+  const selectedDevices = devices.filter(d => selectedIds.has(d.id));
+
+  const handleBulkDelete = async () => {
+    const count = selectedIds.size;
+    if (!confirm(`Delete ${count} device${count !== 1 ? 's' : ''} and all their monitors? This cannot be undone.`)) return;
+    try {
+      await agentApi.bulkDeleteDevices([...selectedIds]);
+      toast.success(`${count} device${count !== 1 ? 's' : ''} deleted`);
+      setSelectedIds(new Set());
+      loadAll();
+    } catch {
+      toast.error('Failed to delete devices');
+    }
+  };
+
+  const handleBulkUninstall = async () => {
+    const count = selectedIds.size;
+    if (!confirm(
+      `Send uninstall command to ${count} agent${count !== 1 ? 's' : ''}?\n\n` +
+      `Each agent will uninstall itself on its next push. ` +
+      `Device entries will be automatically deleted a few minutes after uninstall.`,
+    )) return;
+    try {
+      await agentApi.bulkSendCommand([...selectedIds], 'uninstall');
+      toast.success(`Uninstall command queued for ${count} agent${count !== 1 ? 's' : ''}`);
+      setSelectedIds(new Set());
+    } catch {
+      toast.error('Failed to queue bulk uninstall command');
+    }
+  };
+
+  const handleBulkEditSave = async (data: {
+    groupId?: number | null;
+    heartbeatMonitoring?: boolean;
+    overrideGroupSettings?: boolean;
+    status?: 'approved' | 'suspended';
+  }) => {
+    const count = selectedIds.size;
+    try {
+      await agentApi.bulkUpdateDevices([...selectedIds], data);
+      toast.success(`${count} agent${count !== 1 ? 's' : ''} updated`);
+      setShowBulkEditModal(false);
+      setSelectedIds(new Set());
+      loadAll();
+    } catch {
+      toast.error('Failed to update agents');
     }
   };
 
@@ -484,7 +833,7 @@ export function AdminAgentPage() {
             {(['all', 'approved', 'refused', 'suspended', 'pending'] as DeviceStatusFilter[]).map(f => (
               <button
                 key={f}
-                onClick={() => setDeviceFilter(f)}
+                onClick={() => handleFilterChange(f)}
                 className={`px-3 py-1.5 text-sm rounded-md transition-colors capitalize ${
                   deviceFilter === f
                     ? 'bg-bg-tertiary text-text-primary font-medium'
@@ -500,6 +849,33 @@ export function AdminAgentPage() {
               </button>
             ))}
           </div>
+
+          {/* Bulk action bar */}
+          {selectedIds.size > 0 && (
+            <div className="flex items-center gap-3 mb-3 px-4 py-2.5 rounded-lg bg-accent/10 border border-accent/20">
+              <span className="text-sm font-medium text-accent">
+                {selectedIds.size} selected
+              </span>
+              <div className="flex items-center gap-2 ml-auto">
+                <Button size="sm" variant="secondary" onClick={() => setShowBulkEditModal(true)}>
+                  <Settings2 size={12} className="mr-1.5" />Edit
+                </Button>
+                <Button size="sm" variant="secondary" onClick={handleBulkUninstall}>
+                  <PowerOff size={12} className="mr-1.5" />Uninstall
+                </Button>
+                <Button size="sm" variant="danger" onClick={handleBulkDelete}>
+                  <Trash2 size={12} className="mr-1.5" />Delete
+                </Button>
+                <button
+                  onClick={() => setSelectedIds(new Set())}
+                  className="p-1.5 rounded text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors"
+                  title="Clear selection"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Devices table */}
           <div className="rounded-lg border border-border bg-bg-secondary overflow-hidden">
@@ -519,6 +895,16 @@ export function AdminAgentPage() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-border bg-bg-tertiary">
+                    <th className="px-3 py-2.5 w-8">
+                      <input
+                        ref={selectAllRef}
+                        type="checkbox"
+                        checked={allSelected}
+                        onChange={toggleSelectAll}
+                        className="accent-accent w-4 h-4 cursor-pointer"
+                        title={allSelected ? 'Deselect all' : 'Select all'}
+                      />
+                    </th>
                     <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">Hostname</th>
                     <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">IP</th>
                     <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">OS</th>
@@ -530,7 +916,19 @@ export function AdminAgentPage() {
                 </thead>
                 <tbody className="divide-y divide-border">
                   {filteredDevices.map(device => (
-                    <tr key={device.id} className="hover:bg-bg-hover transition-colors">
+                    <tr
+                      key={device.id}
+                      className={`hover:bg-bg-hover transition-colors ${selectedIds.has(device.id) ? 'bg-accent/5' : ''}`}
+                    >
+                      {/* Checkbox */}
+                      <td className="px-3 py-3">
+                        <input
+                          type="checkbox"
+                          checked={selectedIds.has(device.id)}
+                          onChange={() => toggleSelect(device.id)}
+                          className="accent-accent w-4 h-4 cursor-pointer"
+                        />
+                      </td>
                       <td className="px-4 py-3">
                         {device.status === 'approved' ? (
                           <Link
@@ -595,6 +993,16 @@ export function AdminAgentPage() {
                               title="Edit"
                             >
                               <Pencil size={13} />
+                            </button>
+                          )}
+                          {/* Uninstall — approved devices only */}
+                          {device.status === 'approved' && (
+                            <button
+                              onClick={() => handleUninstallDevice(device)}
+                              className="p-1.5 rounded text-text-muted hover:text-orange-400 hover:bg-orange-400/10 transition-colors"
+                              title="Uninstall agent"
+                            >
+                              <PowerOff size={13} />
                             </button>
                           )}
                           <button
@@ -699,8 +1107,18 @@ export function AdminAgentPage() {
       {editingDevice && (
         <EditAgentModal
           device={editingDevice}
+          groups={groups}
           onSave={handleEditSave}
           onCancel={() => setEditingDevice(null)}
+        />
+      )}
+
+      {showBulkEditModal && selectedDevices.length > 0 && (
+        <BulkEditAgentModal
+          devices={selectedDevices}
+          groups={groups}
+          onSave={handleBulkEditSave}
+          onCancel={() => setShowBulkEditModal(false)}
         />
       )}
     </div>

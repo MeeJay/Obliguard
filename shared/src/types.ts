@@ -564,10 +564,29 @@ export interface AgentDevice {
     heartbeatMonitoring: boolean;
     maxMissedPushes: number;
   };
+  /**
+   * Raw agent_group_config from the parent group (null if device has no group or
+   * the group has no config set).  Unlike resolvedSettings this is never affected
+   * by overrideGroupSettings — it always reflects what the group itself defines.
+   * The UI uses this to display "inherited from group" values and to write the
+   * correct value to the device column when a per-field override is disabled.
+   */
+  groupSettings: AgentGroupConfig | null;
   /** Parent group's agent_thresholds — used as the "inherited" baseline in the threshold editor */
   groupThresholds?: AgentThresholds | null;
   /** Per-device UI display preferences (hidden cores, renamed drives, combined charts, etc.) */
   displayConfig: AgentDisplayConfig | null;
+  /**
+   * Command queued by an admin, delivered to the agent on its next push.
+   * Cleared once the command has been sent to the agent.
+   * Example values: 'uninstall'
+   */
+  pendingCommand?: string | null;
+  /**
+   * Timestamp at which the 'uninstall' command was delivered to the agent.
+   * Used by the cleanup job to auto-delete the device ~10 minutes after delivery.
+   */
+  uninstallCommandedAt?: string | null;
 }
 
 // ============================================

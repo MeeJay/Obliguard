@@ -108,7 +108,14 @@ export function GlobalAddAgentModal() {
                         </div>
                       </div>
                       <div>
-                        <p className="text-xs font-medium text-text-muted uppercase tracking-wide mb-1.5">macOS (Terminal, admin)</p>
+                        <p className="text-xs font-medium text-text-muted uppercase tracking-wide mb-1.5">macOS — Apple Silicon (M1 / M2 / M3 / M4)</p>
+                        <div className="flex items-start gap-2 rounded-md bg-bg-tertiary p-3">
+                          <code className="flex-1 text-xs font-mono text-text-primary break-all leading-relaxed">{macosOneliner}</code>
+                          <CopyButton text={macosOneliner} />
+                        </div>
+                      </div>
+                      <div>
+                        <p className="text-xs font-medium text-text-muted uppercase tracking-wide mb-1.5">macOS — Intel (x86_64)</p>
                         <div className="flex items-start gap-2 rounded-md bg-bg-tertiary p-3">
                           <code className="flex-1 text-xs font-mono text-text-primary break-all leading-relaxed">{macosOneliner}</code>
                           <CopyButton text={macosOneliner} />

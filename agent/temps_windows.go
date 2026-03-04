@@ -298,18 +298,26 @@ func parseLHMOutputAll(raw string) ([]TempSensor, []float64) {
 		}
 	}
 
-	// Build a dense slice indexed by core number.
+	// Build a dense slice indexed by core number, normalised to start at 0.
+	// LHM numbers cores starting from #1 on many AMD/Intel CPUs, which would
+	// leave clockSlice[0] = 0 and cause C0 to never display a clock in the UI.
+	// We find the minimum index actually present and shift every entry so that
+	// the first physical core always maps to slot 0 of the returned slice.
 	var clockSlice []float64
 	if len(coreClocks) > 0 {
+		minIdx := int(^uint(0) >> 1) // max int
 		maxIdx := -1
 		for idx := range coreClocks {
+			if idx < minIdx {
+				minIdx = idx
+			}
 			if idx > maxIdx {
 				maxIdx = idx
 			}
 		}
-		clockSlice = make([]float64, maxIdx+1)
+		clockSlice = make([]float64, maxIdx-minIdx+1)
 		for idx, mhz := range coreClocks {
-			clockSlice[idx] = mhz
+			clockSlice[idx-minIdx] = mhz
 		}
 	}
 	return sensors, clockSlice

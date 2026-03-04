@@ -6,17 +6,17 @@
 # (Mach API) which requires CGO. Cross-compiled binaries skip this and fall
 # back to `top`, which only gives overall CPU % — no per-core bars in the UI.
 #
-# This script must be run ON a Mac (Apple Silicon or Intel). The resulting
-# binary is placed in dist/ and will override the cross-compiled darwin binary
-# when the Docker image is built (server/Dockerfile's last COPY agent/dist/).
+# This script must be run ON a Mac (Apple Silicon or Intel). It builds BOTH
+# architectures: the native arch via CGO, and the other arch via clang -arch.
 #
 # Usage (run from the agent/ directory, or anywhere — it self-locates):
 #   bash agent/build-mac.sh
 #   # or from inside agent/:
 #   bash build-mac.sh
 #
-# After running, copy the binary to the Windows/Unraid build host at:
-#   agent/dist/obliview-agent-darwin-<arch>
+# After running, copy both binaries to the Windows/Unraid build host at:
+#   agent/dist/obliview-agent-darwin-arm64
+#   agent/dist/obliview-agent-darwin-amd64
 # Then run 000-RegularUpdate.bat (or 00-A2-docker-agent-push.bat) to rebuild.
 # =============================================================================
 
@@ -27,11 +27,12 @@ cd "$SCRIPT_DIR"
 
 # ── Architecture detection ────────────────────────────────────────────────────
 
-GOARCH="$(go env GOARCH 2>/dev/null || uname -m | sed 's/x86_64/amd64/')"
-case "$GOARCH" in
-  arm64|amd64) ;;
+NATIVE_GOARCH="$(go env GOARCH 2>/dev/null || uname -m | sed 's/x86_64/amd64/')"
+case "$NATIVE_GOARCH" in
+  arm64) CROSS_GOARCH="amd64"; CROSS_CLANG_ARCH="x86_64" ;;
+  amd64) CROSS_GOARCH="arm64"; CROSS_CLANG_ARCH="arm64"  ;;
   *)
-    echo "ERROR: Unsupported Go architecture: $GOARCH" >&2
+    echo "ERROR: Unsupported Go architecture: $NATIVE_GOARCH" >&2
     echo "       Run this script on an Apple Silicon (arm64) or Intel (amd64) Mac." >&2
     exit 1
     ;;
@@ -49,30 +50,44 @@ if [ -z "$VERSION" ] || [ "$VERSION" = "dev" ]; then
   VERSION="dev"
 fi
 
-# ── Build ─────────────────────────────────────────────────────────────────────
-
 OUT_DIR="dist"
 mkdir -p "$OUT_DIR"
-OUT_FILE="$OUT_DIR/obliview-agent-darwin-$GOARCH"
 
-echo "Building Obliview Agent $VERSION for darwin/$GOARCH (CGO_ENABLED=1)..."
-echo ""
+# ── Build native arch (full CGO) ──────────────────────────────────────────────
 
-CGO_ENABLED=1 GOOS=darwin GOARCH="$GOARCH" \
+echo "Building Obliview Agent $VERSION for darwin/$NATIVE_GOARCH (native, CGO_ENABLED=1)..."
+CGO_ENABLED=1 GOOS=darwin GOARCH="$NATIVE_GOARCH" \
   go build \
     -ldflags="-s -w -X main.agentVersion=$VERSION" \
-    -o "$OUT_FILE" \
+    -o "$OUT_DIR/obliview-agent-darwin-$NATIVE_GOARCH" \
     .
+echo "  → $OUT_DIR/obliview-agent-darwin-$NATIVE_GOARCH"
 
-echo "Done: $SCRIPT_DIR/$OUT_FILE"
+# ── Build cross arch (clang -arch) ────────────────────────────────────────────
+
 echo ""
-echo "This binary enables:"
-echo "  - Per-core CPU bars (via Mach host_processor_info, requires CGO)"
-echo "  - All existing metrics unchanged"
+echo "Building Obliview Agent $VERSION for darwin/$CROSS_GOARCH (cross, clang -arch $CROSS_CLANG_ARCH)..."
+if CGO_ENABLED=1 GOOS=darwin GOARCH="$CROSS_GOARCH" \
+     CGO_CFLAGS="-arch $CROSS_CLANG_ARCH" \
+     CGO_LDFLAGS="-arch $CROSS_CLANG_ARCH" \
+     go build \
+       -ldflags="-s -w -X main.agentVersion=$VERSION" \
+       -o "$OUT_DIR/obliview-agent-darwin-$CROSS_GOARCH" \
+       . 2>&1; then
+  echo "  → $OUT_DIR/obliview-agent-darwin-$CROSS_GOARCH"
+else
+  echo "  WARNING: Cross-compilation to darwin/$CROSS_GOARCH failed — skipping."
+  echo "           (The native $NATIVE_GOARCH binary was built successfully.)"
+fi
+
+# ── Summary ───────────────────────────────────────────────────────────────────
+
+echo ""
+echo "Built binaries:"
+ls -lh "$OUT_DIR"/obliview-agent-darwin-* 2>/dev/null || true
 echo ""
 echo "Next steps:"
-echo "  1. If building on a remote Mac: scp $OUT_FILE to the Unraid build host"
-echo "     at the same relative path (agent/dist/obliview-agent-darwin-$GOARCH)"
+echo "  1. The .bat script (00-A3-build-mac-agent.bat) retrieves both binaries automatically."
 echo "  2. Run 000-RegularUpdate.bat (or 00-A2-docker-agent-push.bat) to rebuild"
 echo "     the Docker image — the Dockerfile's last 'COPY agent/dist/' picks up"
-echo "     this binary and overrides the cross-compiled darwin/$GOARCH binary."
+echo "     both darwin binaries."

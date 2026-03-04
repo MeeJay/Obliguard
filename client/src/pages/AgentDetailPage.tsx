@@ -17,6 +17,7 @@ import { getSocket } from '../socket/socketClient';
 import { LoadingSpinner } from '../components/common/LoadingSpinner';
 import { NotificationBindingsPanel } from '../components/notifications/NotificationBindingsPanel';
 import { cn } from '../utils/cn';
+import { prettifySensorLabel } from '../utils/sensorLabels';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types / constants
@@ -917,7 +918,7 @@ function TempsSection({
       <div className="flex-1 overflow-y-auto divide-y divide-border min-h-0">
         {visibleTemps.map((t) => {
           const key = `temp:${t.label}`;
-          const displayName = sensorDisplayNames?.[key] ?? t.label;
+          const displayName = sensorDisplayNames?.[key] ?? prettifySensorLabel(t.label);
           const pct = (t.celsius / max) * 100;
           const color = t.celsius >= 90 ? 'bg-red-500' : t.celsius >= 75 ? 'bg-yellow-500' : 'bg-rose-400';
           const isEditing = editingSensor === key;
@@ -1651,7 +1652,7 @@ function TempsView({
     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
       {sensorLabels.map(label => {
         const key = `temp:${label}`;
-        const displayName = sensorDisplayNames?.[key] ?? label;
+        const displayName = sensorDisplayNames?.[key] ?? prettifySensorLabel(label);
         const data = history.map(h => (h.metrics.temps ?? []).find(t => t.label === label)?.celsius ?? 0);
         if (data.length < 2) return null;
         const maxTemp = Math.max(...data, 80);
@@ -2064,24 +2065,52 @@ function AgentSettingsSection({
   onDeviceUpdate: (d: AgentDevice) => void;
   onThresholdsUpdate: (t: AgentThresholds) => void;
 }) {
-  const resolved = device.resolvedSettings;
+  // groupSettings = raw group config unaffected by the override flag.
+  // This is the source of truth for "what the group actually says".
+  // resolvedSettings conflates group + device values depending on override,
+  // so we can't use it alone to determine the true inherited value.
+  const groupCfg = device.groupSettings;
+  const inheritedInterval  = groupCfg?.pushIntervalSeconds  ?? device.checkIntervalSeconds ?? 60;
+  const inheritedHeartbeat = groupCfg?.heartbeatMonitoring  ?? device.heartbeatMonitoring  ?? true;
 
-  // Track per-field override state
+  // Per-field override:  a field is "overriding" when the global override flag
+  // is ON *and* the device's raw value differs from what the group prescribes.
+  // If the values happen to be equal we still honour the override flag for
+  // checkInterval (user explicitly chose to pin it) but not for heartbeat
+  // (a heartbeat value equal to the group's is indistinguishable from inherited).
   const [fields, setFields] = useState({
     checkInterval: {
       overriding: device.overrideGroupSettings && device.checkIntervalSeconds != null,
-      value: device.checkIntervalSeconds ?? resolved?.checkIntervalSeconds ?? 60,
+      value: device.checkIntervalSeconds ?? inheritedInterval,
     },
     heartbeat: {
-      overriding: device.overrideGroupSettings && device.heartbeatMonitoring !== (resolved?.heartbeatMonitoring),
-      value: device.heartbeatMonitoring ?? resolved?.heartbeatMonitoring ?? true,
+      overriding: device.overrideGroupSettings && device.heartbeatMonitoring !== inheritedHeartbeat,
+      value: device.heartbeatMonitoring ?? inheritedHeartbeat,
     },
   });
   const [saving, setSaving] = useState(false);
   const [showThresholdModal, setShowThresholdModal] = useState(false);
 
-  const inheritedInterval = resolved?.checkIntervalSeconds ?? 60;
-  const inheritedHeartbeat = resolved?.heartbeatMonitoring ?? true;
+  // Re-sync fields state when device props change (e.g. after a save or
+  // when the parent refreshes the device from the server).  Without this,
+  // useState keeps the stale initial values and the "overriding" badges and
+  // displayed values would be wrong after an update.
+  useEffect(() => {
+    const gc = device.groupSettings;
+    const iInterval  = gc?.pushIntervalSeconds  ?? device.checkIntervalSeconds ?? 60;
+    const iHeartbeat = gc?.heartbeatMonitoring  ?? device.heartbeatMonitoring  ?? true;
+    setFields({
+      checkInterval: {
+        overriding: device.overrideGroupSettings && device.checkIntervalSeconds != null,
+        value: device.checkIntervalSeconds ?? iInterval,
+      },
+      heartbeat: {
+        overriding: device.overrideGroupSettings && device.heartbeatMonitoring !== iHeartbeat,
+        value: device.heartbeatMonitoring ?? iHeartbeat,
+      },
+    });
+  }, [device.id, device.overrideGroupSettings, device.heartbeatMonitoring, device.checkIntervalSeconds,
+      device.groupSettings?.heartbeatMonitoring, device.groupSettings?.pushIntervalSeconds]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const save = async (newFields: typeof fields) => {
     setSaving(true);
@@ -2089,8 +2118,12 @@ function AgentSettingsSection({
     try {
       const updated = await agentApi.updateDevice(device.id, {
         overrideGroupSettings: anyOverride,
-        checkIntervalSeconds: newFields.checkInterval.overriding ? newFields.checkInterval.value : (resolved?.checkIntervalSeconds ?? 60),
-        heartbeatMonitoring: newFields.heartbeat.overriding ? newFields.heartbeat.value : (resolved?.heartbeatMonitoring ?? true),
+        // When a field is NOT overriding, write the group's own value into the
+        // device column.  This ensures the correct value is stored even when
+        // overrideGroupSettings stays true (because the other field is still
+        // overriding) — the worker reads the column directly in that case.
+        checkIntervalSeconds: newFields.checkInterval.overriding ? newFields.checkInterval.value : inheritedInterval,
+        heartbeatMonitoring:  newFields.heartbeat.overriding  ? newFields.heartbeat.value  : inheritedHeartbeat,
       });
       onDeviceUpdate(updated);
     } finally {
@@ -2135,7 +2168,7 @@ function AgentSettingsSection({
           )}
           <input
             type="number"
-            min={5}
+            min={1}
             value={fields.checkInterval.overriding ? fields.checkInterval.value : inheritedInterval}
             disabled={!fields.checkInterval.overriding}
             onChange={e => updateValue('checkInterval', Number(e.target.value))}
@@ -2432,16 +2465,15 @@ export function AgentDetailPage() {
   const displayData: AgentPushSnapshot[] = period === 'realtime' ? history : (historicalData ?? history);
 
   // Known temperature sensors (for ThresholdEditor sensor overrides)
-  // Labels use sensorDisplayNames when available, falling back to raw label
   const knownSensors: Array<{ key: string; label: string }> = [
     ...(m?.temps ?? []).map(s => {
       const key = `temp:${s.label}`;
-      return { key, label: device.sensorDisplayNames?.[key] ?? s.label };
+      return { key, label: device.sensorDisplayNames?.[key] ?? prettifySensorLabel(s.label) };
     }),
     ...(m?.gpus ?? []).flatMap((gpu, i) => {
       if (gpu.tempCelsius === undefined) return [];
       const key = `gpu:${i}:${gpu.model}`;
-      return [{ key, label: device.sensorDisplayNames?.[key] ?? `GPU ${i} – ${gpu.model}` }];
+      return [{ key, label: device.sensorDisplayNames?.[key] ?? prettifySensorLabel(`gpu_${gpu.model}`) }];
     }),
   ];
 
@@ -2544,13 +2576,55 @@ export function AgentDetailPage() {
           </div>
         </div>
 
-        {/* Violations banner */}
-        {violations.length > 0 && (
-          <div className="flex items-start gap-2.5 rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-400">
-            <AlertTriangle size={15} className="mt-0.5 shrink-0" />
-            <span>{violations.join(' · ')}</span>
-          </div>
-        )}
+        {/* Violations banners — one banner per alert type */}
+        {violations.length > 0 && (() => {
+          const sdn = device.sensorDisplayNames ?? {};
+          const driveRenames = displayConfig.drives.renames ?? {};
+
+          type ViolGroup = { key: string; label: string; items: string[] };
+          const groups: ViolGroup[] = [];
+          const byKey: Record<string, ViolGroup> = {};
+
+          const addTo = (key: string, label: string, text: string) => {
+            if (!byKey[key]) { byKey[key] = { key, label, items: [] }; groups.push(byKey[key]); }
+            byKey[key].items.push(text);
+          };
+
+          for (const v of violations) {
+            if (v.startsWith('CPU:')) {
+              addTo('cpu', 'CPU', v);
+            } else if (v.startsWith('RAM:')) {
+              addTo('ram', 'RAM', v);
+            } else if (v.startsWith('Net ')) {
+              addTo('net', 'Network', v);
+            } else if (v.startsWith('Disk ')) {
+              // "Disk <mount>: 92.2% > 90%"
+              const match = v.match(/^Disk (.+): (\d.+)$/);
+              const displayMount = match ? (driveRenames[match[1]] ?? match[1]) : v.slice(5);
+              const text = match ? `${displayMount}: ${match[2]}` : v;
+              addTo('disk', 'Disk', text);
+            } else if (v.startsWith('Temp ')) {
+              // "Temp <raw_label>: 92.1°C > 85°C"
+              const match = v.match(/^Temp (.+): (.+)$/);
+              const displayLabel = match ? (sdn[`temp:${match[1]}`] ?? prettifySensorLabel(match[1])) : v.slice(5);
+              const text = match ? `${displayLabel}: ${match[2]}` : v;
+              addTo('temp', 'Temperature', text);
+            } else {
+              addTo('other', 'Alert', v);
+            }
+          }
+
+          return (
+            <div className="space-y-2">
+              {groups.map(g => (
+                <div key={g.key} className="flex items-start gap-2.5 rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-400">
+                  <AlertTriangle size={15} className="mt-0.5 shrink-0" />
+                  <span><span className="font-semibold mr-1.5">{g.label}:</span>{g.items.join(' · ')}</span>
+                </div>
+              ))}
+            </div>
+          );
+        })()}
 
         {/* No data yet */}
         {!snapshot && (

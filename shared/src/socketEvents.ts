@@ -31,6 +31,8 @@ export const SOCKET_EVENTS = {
   AGENT_DEVICE_UPDATED: 'agent:deviceUpdated',
   /** Real-time UP/ALERT/DOWN/INACTIVE status from agent push or offline watchdog */
   AGENT_STATUS_CHANGED: 'agent:statusChanged',
+  /** Emitted when a device is auto-deleted (e.g. after successful uninstall command) */
+  AGENT_DEVICE_DELETED: 'agent:deviceDeleted',
 } as const;
 
 // Client → Server events

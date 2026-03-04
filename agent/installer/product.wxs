@@ -38,7 +38,15 @@
           agent writes config.json and from then on reads that file directly.
         -->
         <Component Id="AgentExe" Guid="A1B2C3D4-E5F6-7890-ABCD-EF1234560001">
-          <File Id="AgentExeFile" Source="dist\obliview-agent.exe" Name="obliview-agent.exe" />
+          <!--
+            DefaultVersion forces MSI to always overwrite the exe even when the binary on disk
+            has no Win32 version resource (Go binaries are unversioned by default).
+            Without this, MSI may skip the copy if it finds an "unversioned but modified" file
+            on disk (e.g. leftover from a failed previous install), leaving the wrong binary in place.
+            65535.0.0.0 is always greater than any real version, so the source file always wins.
+          -->
+          <File Id="AgentExeFile" Source="dist\obliview-agent.exe" Name="obliview-agent.exe"
+                DefaultVersion="65535.0.0.0" />
           <ServiceInstall Id="AgentSvc"
                           Name="ObliviewAgent"
                           DisplayName="Obliview Monitoring Agent"
@@ -49,7 +57,7 @@
                           ErrorControl="normal"
                           Arguments='--url "[SERVERURL]" --key "[APIKEY]"' />
           <ServiceControl Id="AgentSvcStart" Name="ObliviewAgent" Start="install" />
-          <ServiceControl Id="AgentSvcStop"  Name="ObliviewAgent" Stop="both" Remove="uninstall" Wait="no" />
+          <ServiceControl Id="AgentSvcStop"  Name="ObliviewAgent" Stop="both" Remove="uninstall" Wait="yes" />
         </Component>
 
         <!--
@@ -69,8 +77,9 @@
 
           The CA.InstallPawnIO custom action also passes "-install -silent" to
           suppress the UI (confirmed working in PawnIO >= 2.x by community reports,
-          even though the flag is not in the official README).  Return="ignore"
-          ensures the MSI does not fail if the flag is unsupported on a given build.
+          even though the flag is not in the official README).  Return="asyncNoWait"
+          launches PawnIO_setup.exe asynchronously so MSI continues immediately to
+          StartServices without waiting for the driver installation to complete.
 
           Additionally, <ServiceControl Stop/Remove="uninstall"> is registered on
           the PawnIOSetup component as a belt-and-suspenders fallback: WiX's native
@@ -88,7 +97,15 @@
             This runs at MSI sequence ~1900-2000, before RemoveFiles (3500),
             ensuring clean service removal even if the uninstall CA is skipped.
           -->
-          <ServiceControl Id="PawnIOSvcStop" Name="PawnIO" Stop="uninstall" Remove="uninstall" Wait="yes" />
+          <!--
+            Stop PawnIO during BOTH install and uninstall:
+            - "both" ensures WiX's StopServices action (seq ~1900, before InstallFiles ~3650)
+              stops PawnIO before CA.InstallPawnIO tries to reinstall the driver.
+              Without this, if PawnIO is already running (e.g. after a failed upgrade),
+              PawnIO_setup.exe -install hangs trying to replace the in-use kernel driver.
+            - Wait="no" avoids MSI blocking on kernel-driver unload (can be slow/unpredictable).
+          -->
+          <ServiceControl Id="PawnIOSvcStop" Name="PawnIO" Stop="both" Remove="uninstall" Wait="no" />
         </Component>
 
         <!-- Same binary installed as "uninstall.exe" — PawnIO_setup.exe checks its own
@@ -118,8 +135,9 @@
 
       CA.InstallPawnIO   — deferred, elevated (Impersonate="no"), After InstallFiles.
                            Runs PawnIO_setup.exe -install -silent to install and start
-                           the PawnIO kernel driver.  Return="ignore" so the MSI does not
-                           fail if the -silent flag is unsupported on this PawnIO build.
+                           the PawnIO kernel driver.  Return="asyncNoWait" so the driver
+                           installs in the background and MSI immediately continues to
+                           StartServices (starts ObliviewAgent) without waiting.
                            Condition: only on fresh install or reinstall.
 
       CA.UninstallPawnIO — deferred, elevated, Before RemoveFiles.
@@ -130,11 +148,21 @@
                            removed by the ServiceControl fallback.
                            Condition: only on genuine uninstall (not upgrade).
     -->
+    <!--
+      Return="asyncNoWait" is critical here.
+      Return="ignore" only ignores the exit code but STILL WAITS for the process to finish.
+      If PawnIO_setup.exe -install hangs (e.g. when the driver is already loaded), MSI would
+      freeze indefinitely at this step and StartServices (which starts ObliviewAgent) would
+      never fire — the service appears in SCM but never starts.
+      asyncNoWait launches PawnIO_setup.exe detached; MSI continues immediately to StartServices.
+      PawnIO finishes installing in the background; by the time the agent first calls
+      "Start-Service PawnIO" it will already be available.
+    -->
     <CustomAction Id="CA.InstallPawnIO"
                   FileRef="PawnIOSetupExe"
                   ExeCommand="-install -silent"
                   Execute="deferred"
-                  Return="ignore"
+                  Return="asyncNoWait"
                   Impersonate="no" />
 
     <CustomAction Id="CA.UninstallPawnIO"
