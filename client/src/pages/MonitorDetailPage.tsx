@@ -323,21 +323,21 @@ export function MonitorDetailPage() {
 
       {/* Period selector */}
       <div className="flex items-center justify-between mb-4">
-        <h3 className="text-sm font-medium text-text-secondary">
-          History{zoomRange && <span className="ml-2 text-xs text-cyan-400 font-normal">— zoomed</span>}
+        <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wide">
+          History{zoomRange && <span className="ml-2 text-xs text-cyan-400 font-normal normal-case tracking-normal">— zoomed</span>}
         </h3>
         <PeriodSelector value={period} onChange={setPeriod} />
       </div>
 
       {/* Heartbeat Bar */}
       <div className="mb-6 rounded-lg border border-border bg-bg-secondary p-4">
-        <h3 className="text-sm font-medium text-text-secondary mb-3">Heartbeat History</h3>
+        <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wide mb-3">Heartbeat History</h3>
         <HeartbeatBar heartbeats={periodHeartbeats.length > 0 ? periodHeartbeats : heartbeats} />
       </div>
 
       {/* Response Time / Value Chart */}
       <div className="rounded-lg border border-border bg-bg-secondary p-4">
-        <h3 className="text-sm font-medium text-text-secondary mb-3">
+        <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wide mb-3">
           {monitor.type === 'value_watcher' ? 'Value History' : 'Response Time'}
         </h3>
         <HeartbeatChart
@@ -361,7 +361,7 @@ export function MonitorDetailPage() {
       {/* Monitor Info */}
       {monitor.description && (
         <div className="mt-6 rounded-lg border border-border bg-bg-secondary p-4">
-          <h3 className="text-sm font-medium text-text-secondary mb-2">Description</h3>
+          <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wide mb-2">Description</h3>
           <p className="text-sm text-text-primary">{monitor.description}</p>
         </div>
       )}

@@ -75,7 +75,7 @@ export function SettingsPanel({ scope, scopeId, title }: SettingsPanelProps) {
   return (
     <div className="rounded-lg border border-border bg-bg-secondary p-5">
       {title && (
-        <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide mb-4">
+        <h2 className="text-xs font-semibold text-text-muted uppercase tracking-wide mb-4">
           {title}
         </h2>
       )}

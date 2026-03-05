@@ -122,8 +122,8 @@ export function NotificationBindingsPanel({ scope, scopeId, title }: Notificatio
   return (
     <div className="rounded-lg border border-border bg-bg-secondary p-5">
       <div className="flex items-center justify-between mb-4">
-        <h3 className="text-sm font-medium text-text-primary flex items-center gap-2">
-          <Bell size={16} />
+        <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wide flex items-center gap-1.5">
+          <Bell size={12} />
           {title || 'Notification Channels'}
         </h3>
 

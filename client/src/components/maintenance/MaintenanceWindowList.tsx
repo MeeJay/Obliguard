@@ -5,6 +5,7 @@ import { maintenanceApi } from '@/api/maintenance.api';
 import { MaintenanceWindowModal } from './MaintenanceWindowModal';
 import { cn } from '@/utils/cn';
 
+// ScopeOption kept only for the optional backward-compat prop
 interface ScopeOption {
   id: number;
   name: string;
@@ -18,8 +19,11 @@ interface Props {
    */
   scopeType?: 'monitor' | 'agent' | 'group';
   scopeId?: number;
-  /** All scope options for the create/edit modal */
-  scopeOptions: ScopeOption[];
+  /**
+   * scopeOptions is no longer used — the modal fetches its own data.
+   * Kept optional for backward-compat with existing callers.
+   */
+  scopeOptions?: ScopeOption[];
   channels: NotificationChannel[];
   title?: string;
   /** Pre-fill modal when opening "Add window" (for embedded usage on detail pages) */
@@ -178,11 +182,10 @@ function WindowRow({
 function EffectiveList({
   scopeType,
   scopeId,
-  scopeOptions,
   channels,
   defaultScopeType,
   defaultScopeId,
-}: Required<Pick<Props, 'scopeType' | 'scopeId'>> & Omit<Props, 'scopeType' | 'scopeId' | 'title'>) {
+}: Required<Pick<Props, 'scopeType' | 'scopeId'>> & Omit<Props, 'scopeType' | 'scopeId' | 'title' | 'scopeOptions'>) {
   const [windows, setWindows] = useState<MaintenanceWindow[]>([]);
   const [loading, setLoading] = useState(true);
   const [modalOpen, setModalOpen] = useState(false);
@@ -202,14 +205,17 @@ function EffectiveList({
 
   useEffect(() => { load(); }, [load]);
 
+  /** Edit mode: update existing window */
   async function handleSave(data: Parameters<typeof maintenanceApi.create>[0]) {
-    if (editing) {
-      await maintenanceApi.update(editing.id, data);
-    } else {
-      await maintenanceApi.create(data);
-    }
+    if (!editing) return;
+    await maintenanceApi.update(editing.id, data);
     await load();
     setEditing(null);
+  }
+
+  /** Create mode: modal handled all API calls, just reload */
+  function handleSaved() {
+    load();
   }
 
   async function handleDelete(id: number) {
@@ -319,8 +325,8 @@ function EffectiveList({
         open={modalOpen}
         onClose={() => { setModalOpen(false); setEditing(null); }}
         onSave={handleSave}
+        onSaved={handleSaved}
         initial={editing}
-        scopeOptions={scopeOptions}
         channelOptions={channelOptions}
         defaultScopeType={defaultScopeType ?? scopeType}
         defaultScopeId={defaultScopeId ?? scopeId}
@@ -331,11 +337,10 @@ function EffectiveList({
 
 /** ─── Flat list view (for admin page) ──────────────────────────────────────── */
 function FlatList({
-  scopeOptions,
   channels,
   defaultScopeType,
   defaultScopeId,
-}: Omit<Props, 'scopeType' | 'scopeId' | 'title'>) {
+}: Omit<Props, 'scopeType' | 'scopeId' | 'title' | 'scopeOptions'>) {
   const [windows, setWindows] = useState<MaintenanceWindow[]>([]);
   const [loading, setLoading] = useState(true);
   const [modalOpen, setModalOpen] = useState(false);
@@ -356,14 +361,17 @@ function FlatList({
 
   useEffect(() => { load(); }, [load]);
 
+  /** Edit mode */
   async function handleSave(data: Parameters<typeof maintenanceApi.create>[0]) {
-    if (editing) {
-      await maintenanceApi.update(editing.id, data);
-    } else {
-      await maintenanceApi.create(data);
-    }
+    if (!editing) return;
+    await maintenanceApi.update(editing.id, data);
     await load();
     setEditing(null);
+  }
+
+  /** Create mode: modal handled API calls */
+  function handleSaved() {
+    load();
   }
 
   async function handleDelete(id: number) {
@@ -470,8 +478,8 @@ function FlatList({
         open={modalOpen}
         onClose={() => { setModalOpen(false); setEditing(null); }}
         onSave={handleSave}
+        onSaved={handleSaved}
         initial={editing}
-        scopeOptions={scopeOptions}
         channelOptions={channelOptions}
         defaultScopeType={defaultScopeType}
         defaultScopeId={defaultScopeId}
@@ -482,12 +490,12 @@ function FlatList({
 
 // ── Public component ─────────────────────────────────────────────────────────
 
-export function MaintenanceWindowList({ scopeType, scopeId, scopeOptions, channels, title, defaultScopeType, defaultScopeId }: Props) {
+export function MaintenanceWindowList({ scopeType, scopeId, channels, title, defaultScopeType, defaultScopeId }: Props) {
   return (
     <div>
       <div className="flex items-center gap-1.5 mb-3">
-        <CalendarClock size={15} className="text-text-muted" />
-        <h3 className="text-sm font-semibold text-text-primary">
+        <CalendarClock size={12} className="text-text-muted" />
+        <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wide">
           {title ?? 'Maintenance Windows'}
         </h3>
       </div>
@@ -496,14 +504,12 @@ export function MaintenanceWindowList({ scopeType, scopeId, scopeOptions, channe
         <EffectiveList
           scopeType={scopeType}
           scopeId={scopeId}
-          scopeOptions={scopeOptions}
           channels={channels}
           defaultScopeType={defaultScopeType}
           defaultScopeId={defaultScopeId}
         />
       ) : (
         <FlatList
-          scopeOptions={scopeOptions}
           channels={channels}
           defaultScopeType={defaultScopeType}
           defaultScopeId={defaultScopeId}

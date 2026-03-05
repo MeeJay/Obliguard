@@ -8,6 +8,9 @@ import type {
   MaintenanceRecurrenceType,
 } from '@obliview/shared';
 import { cn } from '@/utils/cn';
+import { maintenanceApi } from '@/api/maintenance.api';
+import { ScopeSelector } from './ScopeSelector';
+import type { ScopeTarget } from './ScopeSelector';
 
 const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
@@ -29,12 +32,6 @@ const TIMEZONES = [
   'Australia/Sydney',
 ];
 
-interface ScopeOption {
-  id: number;
-  name: string;
-  type: MaintenanceScopeType;
-}
-
 interface ChannelOption {
   id: number;
   name: string;
@@ -44,17 +41,25 @@ interface ChannelOption {
 interface Props {
   open: boolean;
   onClose: () => void;
+  /** Called for EDIT mode only — update the existing window */
   onSave: (data: CreateMaintenanceWindowRequest) => Promise<void>;
+  /** Called after multi-create completes (CREATE mode) — parent should reload */
+  onSaved?: () => void;
   initial?: MaintenanceWindow | null;
-  scopeOptions: ScopeOption[];
+  /** scopeOptions is no longer used — kept for backward-compat callers */
+  scopeOptions?: unknown[];
   channelOptions: ChannelOption[];
-  /** Pre-fill when embedding in a detail page */
+  /** Pre-select this scope when opening in CREATE mode */
   defaultScopeType?: MaintenanceScopeType;
   defaultScopeId?: number;
 }
 
 function Label({ children }: { children: React.ReactNode }) {
-  return <label className="block text-xs font-semibold text-text-muted uppercase tracking-wider mb-1">{children}</label>;
+  return (
+    <label className="block text-xs font-semibold text-text-muted uppercase tracking-wider mb-1">
+      {children}
+    </label>
+  );
 }
 
 function Input(props: React.InputHTMLAttributes<HTMLInputElement>) {
@@ -83,15 +88,23 @@ function Select(props: React.SelectHTMLAttributes<HTMLSelectElement> & { childre
   );
 }
 
-export function MaintenanceWindowModal({ open, onClose, onSave, initial, scopeOptions, channelOptions, defaultScopeType, defaultScopeId }: Props) {
+export function MaintenanceWindowModal({
+  open,
+  onClose,
+  onSave,
+  onSaved,
+  initial,
+  channelOptions,
+  defaultScopeType,
+  defaultScopeId,
+}: Props) {
+  const isEdit = !!initial;
+
+  // ── Schedule fields ───────────────────────────────────────────────────────
   const [name, setName] = useState('');
-  const [scopeType, setScopeType] = useState<MaintenanceScopeType>('monitor');
-  const [scopeId, setScopeId] = useState<number | ''>('');
   const [scheduleType, setScheduleType] = useState<MaintenanceScheduleType>('one_time');
-  // one_time
   const [startAt, setStartAt] = useState('');
   const [endAt, setEndAt] = useState('');
-  // recurring
   const [startTime, setStartTime] = useState('02:00');
   const [endTime, setEndTime] = useState('04:00');
   const [recurrenceType, setRecurrenceType] = useState<MaintenanceRecurrenceType>('weekly');
@@ -99,16 +112,22 @@ export function MaintenanceWindowModal({ open, onClose, onSave, initial, scopeOp
   const [timezone, setTimezone] = useState('UTC');
   const [notifyChannelIds, setNotifyChannelIds] = useState<number[]>([]);
   const [active, setActive] = useState(true);
+
+  // ── Edit-mode scope fields (single scope, from the existing window) ───────
+  const [editScopeType, setEditScopeType] = useState<MaintenanceScopeType>('monitor');
+  const [editScopeId, setEditScopeId] = useState<number | ''>('');
+
+  // ── Create-mode scope selection (multi-scope via ScopeSelector) ───────────
+  const [scopeTargets, setScopeTargets] = useState<ScopeTarget[]>([]);
+
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
-  // Reset form when opening
+  // ── Reset form when opening ───────────────────────────────────────────────
   useEffect(() => {
     if (!open) return;
     if (initial) {
       setName(initial.name);
-      setScopeType(initial.scopeType);
-      setScopeId(initial.scopeId ?? '');
       setScheduleType(initial.scheduleType);
       setStartAt(initial.startAt ? initial.startAt.slice(0, 16) : '');
       setEndAt(initial.endAt ? initial.endAt.slice(0, 16) : '');
@@ -119,10 +138,10 @@ export function MaintenanceWindowModal({ open, onClose, onSave, initial, scopeOp
       setTimezone(initial.timezone ?? 'UTC');
       setNotifyChannelIds(initial.notifyChannelIds ?? []);
       setActive(initial.active);
+      setEditScopeType(initial.scopeType);
+      setEditScopeId(initial.scopeId ?? '');
     } else {
       setName('');
-      setScopeType(defaultScopeType ?? 'monitor');
-      setScopeId(defaultScopeId ?? '');
       setScheduleType('one_time');
       setStartAt('');
       setEndAt('');
@@ -133,45 +152,89 @@ export function MaintenanceWindowModal({ open, onClose, onSave, initial, scopeOp
       setTimezone('UTC');
       setNotifyChannelIds([]);
       setActive(true);
+      setScopeTargets([]);
     }
     setError('');
   }, [open, initial]);
 
-  const filteredScopes = scopeOptions.filter((s) => s.type === scopeType);
-
   const toggleDay = (d: number) =>
-    setDaysOfWeek((prev) => prev.includes(d) ? prev.filter((x) => x !== d) : [...prev, d]);
+    setDaysOfWeek((prev) => (prev.includes(d) ? prev.filter((x) => x !== d) : [...prev, d]));
 
   const toggleChannel = (id: number) =>
-    setNotifyChannelIds((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]);
+    setNotifyChannelIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
 
+  // ── Build base window data (schedule fields) ──────────────────────────────
+  function buildBaseData(): Omit<CreateMaintenanceWindowRequest, 'scopeType' | 'scopeId'> {
+    return {
+      name: name.trim(),
+      scheduleType,
+      startAt: scheduleType === 'one_time' ? new Date(startAt).toISOString() : null,
+      endAt: scheduleType === 'one_time' ? new Date(endAt).toISOString() : null,
+      startTime: scheduleType === 'recurring' ? startTime : null,
+      endTime: scheduleType === 'recurring' ? endTime : null,
+      recurrenceType: scheduleType === 'recurring' ? recurrenceType : null,
+      daysOfWeek: scheduleType === 'recurring' && recurrenceType === 'weekly' ? daysOfWeek : null,
+      timezone,
+      notifyChannelIds,
+      active,
+    };
+  }
+
+  // ── Validate shared fields ────────────────────────────────────────────────
+  function validateBase(): string | null {
+    if (!name.trim()) return 'Name is required.';
+    if (scheduleType === 'one_time') {
+      if (!startAt || !endAt) return 'Start and end date/time are required.';
+      if (new Date(startAt) >= new Date(endAt)) return 'End must be after start.';
+    }
+    if (scheduleType === 'recurring' && recurrenceType === 'weekly' && daysOfWeek.length === 0) {
+      return 'Select at least one day.';
+    }
+    return null;
+  }
+
+  // ── Submit ────────────────────────────────────────────────────────────────
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!name.trim()) return setError('Name is required.');
-    if (scopeType !== 'global' && scopeId === '') return setError('Please select a scope target.');
-    if (scheduleType === 'one_time' && (!startAt || !endAt)) return setError('Start and end date/time are required.');
-    if (scheduleType === 'one_time' && new Date(startAt) >= new Date(endAt)) return setError('End must be after start.');
-    if (scheduleType === 'recurring' && recurrenceType === 'weekly' && daysOfWeek.length === 0) return setError('Select at least one day.');
+    const baseErr = validateBase();
+    if (baseErr) return setError(baseErr);
 
     setSaving(true);
     setError('');
+
     try {
-      await onSave({
-        name: name.trim(),
-        scopeType,
-        scopeId: scopeType === 'global' ? null : Number(scopeId),
-        scheduleType,
-        startAt: scheduleType === 'one_time' ? new Date(startAt).toISOString() : null,
-        endAt: scheduleType === 'one_time' ? new Date(endAt).toISOString() : null,
-        startTime: scheduleType === 'recurring' ? startTime : null,
-        endTime: scheduleType === 'recurring' ? endTime : null,
-        recurrenceType: scheduleType === 'recurring' ? recurrenceType : null,
-        daysOfWeek: scheduleType === 'recurring' && recurrenceType === 'weekly' ? daysOfWeek : null,
-        timezone,
-        notifyChannelIds,
-        active,
-      });
-      onClose();
+      if (isEdit) {
+        // ── EDIT mode: single scope, delegate to parent ──────────────────
+        await onSave({
+          ...buildBaseData(),
+          scopeType: editScopeType,
+          scopeId: editScopeType === 'global' ? null : Number(editScopeId),
+        });
+        onClose();
+      } else {
+        // ── CREATE mode: one window per selected scope target ────────────
+        if (scopeTargets.length === 0) {
+          setSaving(false);
+          return setError('Please select at least one scope target.');
+        }
+
+        const base = buildBaseData();
+        for (const target of scopeTargets) {
+          const created = await maintenanceApi.create({
+            ...base,
+            scopeType: target.scopeType,
+            scopeId: target.scopeId,
+          });
+          // Disable for excluded children (e.g. agent deselected within a group)
+          if (target.disables) {
+            for (const d of target.disables) {
+              await maintenanceApi.disableForScope(created.id, d.scopeType, d.scopeId);
+            }
+          }
+        }
+        onSaved?.();
+        onClose();
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save');
     } finally {
@@ -183,13 +246,14 @@ export function MaintenanceWindowModal({ open, onClose, onSave, initial, scopeOp
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-      <div className="w-full max-w-lg rounded-xl border border-border bg-bg-secondary shadow-2xl flex flex-col max-h-[90vh]">
+      <div className="w-full max-w-2xl rounded-xl border border-border bg-bg-secondary shadow-2xl flex flex-col max-h-[90vh]">
+
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-border shrink-0">
           <div className="flex items-center gap-2">
             <CalendarClock size={18} className="text-accent" />
             <h2 className="text-base font-semibold text-text-primary">
-              {initial ? 'Edit Maintenance Window' : 'New Maintenance Window'}
+              {isEdit ? 'Edit Maintenance Window' : 'New Maintenance Window'}
             </h2>
           </div>
           <button onClick={onClose} className="text-text-muted hover:text-text-primary transition-colors">
@@ -197,45 +261,53 @@ export function MaintenanceWindowModal({ open, onClose, onSave, initial, scopeOp
           </button>
         </div>
 
-        {/* Body */}
+        {/* Body — scrollable */}
         <form onSubmit={handleSubmit} className="overflow-y-auto flex-1 px-5 py-4 space-y-4">
+
           {/* Name */}
           <div>
             <Label>Name</Label>
             <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Weekly DB backup" />
           </div>
 
-          {/* Scope */}
-          <div className={cn('gap-3', scopeType === 'global' ? 'flex' : 'grid grid-cols-2')}>
-            <div className={scopeType === 'global' ? 'w-1/2' : undefined}>
-              <Label>Scope type</Label>
-              <Select value={scopeType} onChange={(e) => { setScopeType(e.target.value as MaintenanceScopeType); setScopeId(''); }}>
-                <option value="monitor">Monitor</option>
-                <option value="agent">Agent</option>
-                <option value="group">Group</option>
-                <option value="global">Global — applies to everything</option>
-              </Select>
-            </div>
-            {scopeType !== 'global' && (
-              <div>
-                <Label>Target</Label>
-                <Select value={scopeId} onChange={(e) => setScopeId(Number(e.target.value))}>
-                  <option value="">— select —</option>
-                  {filteredScopes.map((s) => (
-                    <option key={s.id} value={s.id}>{s.name}</option>
-                  ))}
-                </Select>
+          {/* ── Scope ────────────────────────────────────────────────────── */}
+          <div>
+            <Label>Scope</Label>
+
+            {isEdit ? (
+              /* Edit mode: simple dropdowns (scope already set, allow changing) */
+              <div className={cn('gap-3', editScopeType === 'global' ? 'flex' : 'grid grid-cols-2')}>
+                <div className={editScopeType === 'global' ? 'w-1/2' : undefined}>
+                  <Select
+                    value={editScopeType}
+                    onChange={(e) => { setEditScopeType(e.target.value as MaintenanceScopeType); setEditScopeId(''); }}
+                  >
+                    <option value="monitor">Monitor</option>
+                    <option value="agent">Agent</option>
+                    <option value="group">Group</option>
+                    <option value="global">Global — applies to everything</option>
+                  </Select>
+                </div>
+                {editScopeType !== 'global' && (
+                  <div>
+                    <Input
+                      type="number"
+                      value={editScopeId}
+                      onChange={(e) => setEditScopeId(Number(e.target.value))}
+                      placeholder="Scope ID"
+                    />
+                  </div>
+                )}
               </div>
+            ) : (
+              /* Create mode: visual two-column selector */
+              <ScopeSelector
+                defaultScopeType={defaultScopeType}
+                defaultScopeId={defaultScopeId}
+                onChange={setScopeTargets}
+              />
             )}
           </div>
-
-          {/* Global scope info */}
-          {scopeType === 'global' && (
-            <p className="text-xs text-text-muted bg-bg-tertiary border border-border rounded-md px-3 py-2">
-              This window will apply to <strong className="text-text-primary">all groups, monitors and agents</strong>.
-              Individual scopes can disable it if needed.
-            </p>
-          )}
 
           {/* Schedule type tabs */}
           <div>
@@ -279,7 +351,10 @@ export function MaintenanceWindowModal({ open, onClose, onSave, initial, scopeOp
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <Label>Recurrence</Label>
-                  <Select value={recurrenceType} onChange={(e) => setRecurrenceType(e.target.value as MaintenanceRecurrenceType)}>
+                  <Select
+                    value={recurrenceType}
+                    onChange={(e) => setRecurrenceType(e.target.value as MaintenanceRecurrenceType)}
+                  >
                     <option value="daily">Daily</option>
                     <option value="weekly">Weekly (select days)</option>
                   </Select>
@@ -328,11 +403,13 @@ export function MaintenanceWindowModal({ open, onClose, onSave, initial, scopeOp
             </>
           )}
 
-          {/* Notification channels (optional) */}
+          {/* Notification channels */}
           {channelOptions.length > 0 && (
             <div>
               <Label>Notify channels (optional)</Label>
-              <p className="text-xs text-text-muted mb-2">Selected channels receive a message when maintenance starts and ends.</p>
+              <p className="text-xs text-text-muted mb-2">
+                Selected channels receive a message when maintenance starts and ends.
+              </p>
               <div className="space-y-1.5 max-h-32 overflow-y-auto">
                 {channelOptions.map((ch) => (
                   <label key={ch.id} className="flex items-center gap-2 cursor-pointer">
@@ -365,21 +442,40 @@ export function MaintenanceWindowModal({ open, onClose, onSave, initial, scopeOp
         </form>
 
         {/* Footer */}
-        <div className="flex justify-end gap-2 px-5 py-4 border-t border-border shrink-0">
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-md px-4 py-2 text-sm font-medium text-text-secondary bg-bg-tertiary hover:bg-bg-hover border border-border transition-colors"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={handleSubmit as unknown as React.MouseEventHandler<HTMLButtonElement>}
-            disabled={saving}
-            className="rounded-md px-4 py-2 text-sm font-medium text-white bg-accent hover:bg-accent-hover disabled:opacity-50 transition-colors"
-          >
-            {saving ? 'Saving…' : initial ? 'Save changes' : 'Create window'}
-          </button>
+        <div className="flex items-center justify-between gap-2 px-5 py-4 border-t border-border shrink-0">
+          {/* Selection summary (create mode only) */}
+          {!isEdit && scopeTargets.length > 0 && (
+            <p className="text-xs text-text-muted">
+              {scopeTargets.length === 1
+                ? '1 window will be created'
+                : `${scopeTargets.length} windows will be created`}
+              {scopeTargets.some((t) => t.disables?.length) && (
+                <span className="text-text-muted/70">
+                  {' '}(with {scopeTargets.reduce((n, t) => n + (t.disables?.length ?? 0), 0)} exclusion(s))
+                </span>
+              )}
+            </p>
+          )}
+          {(!(!isEdit && scopeTargets.length > 0)) && <div />}
+
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-md px-4 py-2 text-sm font-medium text-text-secondary bg-bg-tertiary hover:bg-bg-hover border border-border transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleSubmit as unknown as React.MouseEventHandler<HTMLButtonElement>}
+              disabled={saving}
+              className="rounded-md px-4 py-2 text-sm font-medium text-white bg-accent hover:bg-accent-hover disabled:opacity-50 transition-colors"
+            >
+              {saving
+                ? (isEdit ? 'Saving…' : `Creating…`)
+                : (isEdit ? 'Save changes' : 'Create')}
+            </button>
+          </div>
         </div>
       </div>
     </div>

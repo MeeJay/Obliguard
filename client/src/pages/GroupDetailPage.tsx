@@ -24,6 +24,7 @@ import { PeriodSelector } from '@/components/common/PeriodSelector';
 import { SettingsPanel } from '@/components/settings/SettingsPanel';
 import { NotificationBindingsPanel } from '@/components/notifications/NotificationBindingsPanel';
 import { RemediationBindingsPanel } from '@/components/remediation/RemediationBindingsPanel';
+import { MaintenanceWindowList } from '@/components/maintenance/MaintenanceWindowList';
 import toast from 'react-hot-toast';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -603,15 +604,15 @@ export function GroupDetailPage() {
       {!isAgentGroup && (
         <>
           <div className="flex items-center justify-between mb-4">
-            <h3 className="text-sm font-medium text-text-secondary">History</h3>
+            <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wide">History</h3>
             <PeriodSelector value={period} onChange={setPeriod} />
           </div>
           <div className="mb-6 rounded-lg border border-border bg-bg-secondary p-4">
-            <h3 className="text-sm font-medium text-text-secondary mb-3">Heartbeat History</h3>
+            <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wide mb-3">Heartbeat History</h3>
             <HeartbeatBar heartbeats={periodHeartbeats} />
           </div>
           <div className="mb-6 rounded-lg border border-border bg-bg-secondary p-4">
-            <h3 className="text-sm font-medium text-text-secondary mb-3">Response Time</h3>
+            <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wide mb-3">Response Time</h3>
             <HeartbeatChart heartbeats={periodHeartbeats} height={250} period={period} />
           </div>
         </>
@@ -621,7 +622,7 @@ export function GroupDetailPage() {
       {isAgentGroup && monitors.length > 0 && (
         <div className="mb-6 rounded-lg border border-border bg-bg-secondary">
           <div className="px-4 py-3 border-b border-border">
-            <h3 className="text-sm font-medium text-text-secondary">Agents ({monitors.filter(m => m.type === 'agent').length})</h3>
+            <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wide">Agents ({monitors.filter(m => m.type === 'agent').length})</h3>
           </div>
           <div className="divide-y divide-border">
             {monitors.filter(m => m.type === 'agent').map(m => (
@@ -643,7 +644,7 @@ export function GroupDetailPage() {
       {!isAgentGroup && monitors.length > 0 && (
         <div className="mb-6 rounded-lg border border-border bg-bg-secondary">
           <div className="flex items-center justify-between px-4 py-3 border-b border-border">
-            <h3 className="text-sm font-medium text-text-secondary">
+            <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wide">
               Monitors ({monitors.length})
             </h3>
           </div>
@@ -681,6 +682,19 @@ export function GroupDetailPage() {
             scope="group"
             scopeId={groupId}
             title="Remediations"
+          />
+        </div>
+      )}
+
+      {/* Maintenance Windows (admin only) */}
+      {isAdmin() && (
+        <div className="mt-4 rounded-lg border border-border bg-bg-secondary p-4">
+          <MaintenanceWindowList
+            scopeType="group"
+            scopeId={groupId}
+            channels={[]}
+            defaultScopeType="group"
+            defaultScopeId={groupId}
           />
         </div>
       )}

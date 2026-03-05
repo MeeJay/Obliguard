@@ -697,7 +697,8 @@ export const agentService = {
     if (thresholds.disk.enabled && m.disks) {
       for (const disk of m.disks) {
         if (this._isThresholdExceeded(disk.percent, thresholds.disk)) {
-          violations.push(`Disk ${disk.mount}: ${disk.percent.toFixed(1)}% ${thresholds.disk.op} ${thresholds.disk.threshold}%`);
+          const diskName = device.displayConfig?.drives?.renames?.[disk.mount] ?? disk.mount;
+          violations.push(`Disk ${diskName}: ${disk.percent.toFixed(1)}% ${thresholds.disk.op} ${thresholds.disk.threshold}%`);
         }
       }
     }
@@ -747,8 +748,9 @@ export const agentService = {
           ? { op: override.op, threshold: override.threshold }
           : { op: tempT.op, threshold: tempT.threshold };
         if (this._isThresholdExceeded(sensor.celsius, active)) {
+          const displayLabel = device.sensorDisplayNames?.[sensor.key] ?? sensor.label;
           violations.push(
-            `Temp ${sensor.label}: ${sensor.celsius.toFixed(1)}°C ${active.op} ${active.threshold}°C`,
+            `Temp ${displayLabel}: ${sensor.celsius.toFixed(1)}°C ${active.op} ${active.threshold}°C`,
           );
         }
       }
