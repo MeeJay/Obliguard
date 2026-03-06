@@ -1,5 +1,6 @@
 import { LogOut, Menu, Download, Bell } from 'lucide-react';
 import { Link } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { useAuthStore } from '@/store/authStore';
 import { useUiStore } from '@/store/uiStore';
 import { useLiveAlertsStore } from '@/store/liveAlertsStore';
@@ -10,6 +11,7 @@ const isNativeApp = typeof window !== 'undefined' &&
   !!(window as Window & { __obliview_is_native_app?: boolean }).__obliview_is_native_app;
 
 export function Header() {
+  const { t } = useTranslation();
   const { user, logout } = useAuthStore();
   const { toggleSidebar } = useUiStore();
   const { enabled } = useLiveAlertsStore();
@@ -33,14 +35,14 @@ export function Header() {
             className="flex items-center gap-1.5 text-sm text-text-secondary hover:text-text-primary transition-colors"
           >
             <Download size={14} />
-            Download App
+            {t('nav.downloadApp')}
           </Link>
         )}
 
         {/* Live alerts toggle */}
         <button
           onClick={() => useLiveAlertsStore.getState().setEnabled(!enabled)}
-          title={enabled ? 'Disable live alerts' : 'Enable live alerts'}
+          title={enabled ? t('header.disableAlerts') : t('header.enableAlerts')}
           className="flex items-center gap-1.5 text-sm text-text-secondary hover:text-text-primary transition-colors"
         >
           <Bell size={14} className={enabled ? 'text-accent' : 'text-text-muted'} />
@@ -49,7 +51,7 @@ export function Header() {
         {user && (
           <>
             <div className="text-sm">
-              <span className="text-text-secondary">Signed in as </span>
+              <span className="text-text-secondary">{t('header.signedInAs')} </span>
               <span className="font-medium text-text-primary">{user.username}</span>
               <span className="ml-2 rounded-full bg-bg-tertiary px-2 py-0.5 text-xs text-text-muted">
                 {user.role}
@@ -59,7 +61,7 @@ export function Header() {
               variant="ghost"
               size="sm"
               onClick={logout}
-              title="Sign out"
+              title={t('nav.signOut')}
             >
               <LogOut size={16} />
             </Button>

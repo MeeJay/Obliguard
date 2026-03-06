@@ -5,6 +5,9 @@ import { useAuthStore } from '@/store/authStore';
 import { ProtectedRoute } from '@/components/layout/ProtectedRoute';
 import { AppLayout } from '@/components/layout/AppLayout';
 import { LoginPage } from '@/pages/LoginPage';
+import { EnrollmentPage } from '@/pages/EnrollmentPage';
+import { ForgotPasswordPage } from '@/pages/ForgotPasswordPage';
+import { ResetPasswordPage } from '@/pages/ResetPasswordPage';
 import { DashboardPage } from '@/pages/DashboardPage';
 import { MonitorDetailPage } from '@/pages/MonitorDetailPage';
 import { MonitorEditPage } from '@/pages/MonitorEditPage';
@@ -22,6 +25,7 @@ import { ImportExportPage } from '@/pages/ImportExportPage';
 import { AdminRemediationsPage } from '@/pages/AdminRemediationsPage';
 import { AdminMaintenancePage } from '@/pages/AdminMaintenancePage';
 import { NotFoundPage } from '@/pages/NotFoundPage';
+import '@/i18n';
 
 export default function App() {
   const { checkSession } = useAuthStore();
@@ -35,9 +39,13 @@ export default function App() {
       <Routes>
         {/* Public routes */}
         <Route path="/login" element={<LoginPage />} />
+        <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+        <Route path="/reset-password" element={<ResetPasswordPage />} />
 
         {/* Protected routes */}
         <Route element={<ProtectedRoute />}>
+          {/* Enrollment — full-screen, outside AppLayout */}
+          <Route path="/enroll" element={<EnrollmentPage />} />
           <Route element={<AppLayout />}>
             <Route path="/" element={<DashboardPage />} />
             <Route path="/download" element={<DownloadPage />} />

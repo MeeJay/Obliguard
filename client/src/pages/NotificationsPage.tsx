@@ -11,8 +11,10 @@ import { smtpServerApi } from '@/api/smtpServer.api';
 import { Button } from '@/components/common/Button';
 import { Input } from '@/components/common/Input';
 import toast from 'react-hot-toast';
+import { useTranslation } from 'react-i18next';
 
 export function NotificationsPage() {
+  const { t } = useTranslation();
   const [channels, setChannels] = useState<NotificationChannel[]>([]);
   const [plugins, setPlugins] = useState<NotificationPluginMeta[]>([]);
   const [globalBindings, setGlobalBindings] = useState<NotificationBinding[]>([]);
@@ -72,32 +74,32 @@ export function NotificationsPage() {
           name: formName,
           config: formConfig,
         });
-        toast.success('Channel updated');
+        toast.success(t('notifications.updated'));
       } else {
         await notificationsApi.createChannel({
           name: formName,
           type: selectedType,
           config: formConfig,
         });
-        toast.success('Channel created');
+        toast.success(t('notifications.created'));
       }
       setShowForm(false);
       load();
     } catch {
-      toast.error('Failed to save channel');
+      toast.error(t('notifications.failedSave'));
     } finally {
       setSaving(false);
     }
   };
 
   const handleDelete = async (id: number, name: string) => {
-    if (!confirm(`Delete notification channel "${name}"?`)) return;
+    if (!confirm(t('notifications.confirmDelete', { name }))) return;
     try {
       await notificationsApi.deleteChannel(id);
-      toast.success('Channel deleted');
+      toast.success(t('notifications.deleted'));
       load();
     } catch {
-      toast.error('Failed to delete channel');
+      toast.error(t('notifications.failedDelete'));
     }
   };
 
@@ -105,9 +107,9 @@ export function NotificationsPage() {
     setTesting(id);
     try {
       await notificationsApi.testChannel(id);
-      toast.success('Test notification sent!');
+      toast.success(t('notifications.testSent'));
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Test failed';
+      const msg = err instanceof Error ? err.message : t('notifications.testFailed');
       toast.error(msg);
     } finally {
       setTesting(null);
@@ -119,14 +121,14 @@ export function NotificationsPage() {
     try {
       if (existing) {
         await notificationsApi.removeBinding(channelId, 'global', null);
-        toast.success('Removed from global');
+        toast.success(t('notifications.removedFromGlobal'));
       } else {
         await notificationsApi.addBinding(channelId, 'global', null);
-        toast.success('Added to global');
+        toast.success(t('notifications.addedToGlobal'));
       }
       load();
     } catch {
-      toast.error('Failed to update binding');
+      toast.error(t('notifications.failedBinding'));
     }
   };
 
@@ -136,10 +138,10 @@ export function NotificationsPage() {
   return (
     <div className="p-6 max-w-5xl min-w-0 mx-auto">
       <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-semibold text-text-primary">Notifications</h1>
+        <h1 className="text-2xl font-semibold text-text-primary">{t('notifications.title')}</h1>
         <Button size="sm" onClick={openCreate}>
           <Plus size={16} className="mr-1.5" />
-          New Channel
+          {t('notifications.newChannel')}
         </Button>
       </div>
 
@@ -147,20 +149,20 @@ export function NotificationsPage() {
       {showForm && (
         <div className="mb-6 rounded-lg border border-border bg-bg-secondary p-5">
           <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide mb-4">
-            {editingId ? 'Edit Channel' : 'New Channel'}
+            {editingId ? t('notifications.editChannel') : t('notifications.newChannel')}
           </h2>
           <form onSubmit={handleSubmit} className="space-y-4">
             <Input
-              label="Channel Name"
+              label={t('notifications.channelName')}
               value={formName}
               onChange={(e) => setFormName(e.target.value)}
-              placeholder="e.g. Ops Discord"
+              placeholder={t('notifications.channelNamePlaceholder')}
               required
             />
 
             {!editingId && (
               <div className="space-y-1">
-                <label className="block text-sm font-medium text-text-secondary">Type</label>
+                <label className="block text-sm font-medium text-text-secondary">{t('common.type')}</label>
                 <select
                   value={selectedType}
                   onChange={(e) => {
@@ -213,13 +215,13 @@ export function NotificationsPage() {
                       required={field.required}
                       className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
                     >
-                      <option value="">— Select SMTP Server —</option>
+                      <option value="">{t('notifications.selectSmtp')}</option>
                       {smtpServers.map((s) => (
                         <option key={s.id} value={s.id}>{s.name} ({s.host}:{s.port})</option>
                       ))}
                     </select>
                     {smtpServers.length === 0 && (
-                      <p className="text-xs text-amber-400">No SMTP servers configured. Add one in Settings → SMTP Servers.</p>
+                      <p className="text-xs text-amber-400">{t('notifications.noSmtp')}</p>
                     )}
                   </div>
                 );
@@ -244,7 +246,7 @@ export function NotificationsPage() {
 
             <div className="flex items-center gap-3">
               <Button type="submit" loading={saving}>
-                {editingId ? 'Save' : 'Create'}
+                {editingId ? t('common.save') : t('common.create')}
               </Button>
               <Button
                 type="button"
@@ -254,7 +256,7 @@ export function NotificationsPage() {
                   setEditingId(null);
                 }}
               >
-                Cancel
+                {t('common.cancel')}
               </Button>
             </div>
           </form>
@@ -266,9 +268,9 @@ export function NotificationsPage() {
         {channels.length === 0 ? (
           <div className="py-12 text-center">
             <Bell size={32} className="mx-auto mb-3 text-text-muted" />
-            <p className="text-text-muted">No notification channels</p>
+            <p className="text-text-muted">{t('notifications.noChannels')}</p>
             <p className="text-sm text-text-muted mt-1">
-              Create channels to receive alerts when monitors go down
+              {t('notifications.noChannelsDesc')}
             </p>
           </div>
         ) : (
@@ -285,7 +287,7 @@ export function NotificationsPage() {
                       </span>
                       {!ch.isEnabled && (
                         <span className="rounded-full bg-status-down/10 px-2 py-0.5 text-[10px] font-medium text-status-down">
-                          Disabled
+                          {t('status.disabled')}
                         </span>
                       )}
                     </div>
@@ -302,7 +304,7 @@ export function NotificationsPage() {
                     title={isGloballyBound(ch.id) ? 'Remove from global' : 'Add to global notifications'}
                   >
                     <Zap size={12} className="inline mr-1" />
-                    {isGloballyBound(ch.id) ? 'Global' : 'Enable'}
+                    {isGloballyBound(ch.id) ? t('remediations.globalActive') : t('common.enable')}
                   </button>
 
                   {/* Test */}
@@ -310,21 +312,21 @@ export function NotificationsPage() {
                     onClick={() => handleTest(ch.id)}
                     disabled={testing === ch.id}
                     className="shrink-0 p-1.5 text-text-muted hover:text-accent opacity-0 group-hover:opacity-100 transition-opacity"
-                    title="Send test"
+                    title={t('notifications.sendTest')}
                   >
                     {testing === ch.id ? <Loader2 size={14} className="animate-spin" /> : <TestTube2 size={14} />}
                   </button>
                   <button
                     onClick={() => openEdit(ch)}
                     className="shrink-0 p-1.5 text-text-muted hover:text-text-primary opacity-0 group-hover:opacity-100 transition-opacity"
-                    title="Edit"
+                    title={t('common.edit')}
                   >
                     <Pencil size={14} />
                   </button>
                   <button
                     onClick={() => handleDelete(ch.id, ch.name)}
                     className="shrink-0 p-1.5 text-text-muted hover:text-status-down opacity-0 group-hover:opacity-100 transition-opacity"
-                    title="Delete"
+                    title={t('common.delete')}
                   >
                     <Trash2 size={14} />
                   </button>

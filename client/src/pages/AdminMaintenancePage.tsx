@@ -3,6 +3,7 @@ import { CalendarClock, Loader2 } from 'lucide-react';
 import type { MaintenanceScopeType, NotificationChannel } from '@obliview/shared';
 import { MaintenanceWindowList } from '@/components/maintenance/MaintenanceWindowList';
 import toast from 'react-hot-toast';
+import { useTranslation } from 'react-i18next';
 
 interface ScopeOption {
   id: number;
@@ -11,6 +12,7 @@ interface ScopeOption {
 }
 
 export function AdminMaintenancePage() {
+  const { t } = useTranslation();
   const [scopeOptions, setScopeOptions] = useState<ScopeOption[]>([]);
   const [channels, setChannels] = useState<NotificationChannel[]>([]);
   const [loading, setLoading] = useState(true);
@@ -45,7 +47,7 @@ export function AdminMaintenancePage() {
 
         if (channelsRes.success) setChannels(channelsRes.data);
       } catch {
-        toast.error('Failed to load maintenance data');
+        toast.error(t('maintenance.failedLoad'));
       } finally {
         setLoading(false);
       }
@@ -67,16 +69,16 @@ export function AdminMaintenancePage() {
       <div className="flex items-center gap-3">
         <CalendarClock size={22} className="text-accent" />
         <div>
-          <h1 className="text-xl font-bold text-text-primary">Maintenance Windows</h1>
+          <h1 className="text-xl font-bold text-text-primary">{t('maintenance.title')}</h1>
           <p className="text-sm text-text-muted mt-0.5">
-            Define scheduled maintenance periods. During maintenance, alerts are suppressed and heartbeats are shown in blue.
+            {t('maintenance.description')}
           </p>
         </div>
       </div>
 
       {/* Legend */}
       <div className="rounded-lg border border-border bg-bg-secondary p-4 space-y-2">
-        <h2 className="text-xs font-semibold text-text-muted uppercase tracking-wider">How it works</h2>
+        <h2 className="text-xs font-semibold text-text-muted uppercase tracking-wider">{t('maintenance.howItWorks')}</h2>
         <ul className="text-sm text-text-secondary space-y-1">
           <li>• <strong className="text-text-primary">Global windows</strong> apply to all groups, monitors and agents system-wide.</li>
           <li>• <strong className="text-text-primary">Group windows</strong> apply to all monitors and agents in the group and its subgroups.</li>
@@ -84,8 +86,8 @@ export function AdminMaintenancePage() {
           <li>• Windows are <strong className="text-text-primary">additive</strong> — all applicable windows (global + group + local) are active simultaneously.</li>
           <li>• Any scope can <strong className="text-text-primary">disable</strong> a specific inherited window without affecting other scopes.</li>
           <li>• During maintenance, <strong className="text-status-maintenance">down/pending heartbeats appear in blue</strong> and are excluded from uptime % and average response time.</li>
-          <li>• Notifications and remediations are suppressed during maintenance.</li>
-          <li>• One-time windows are automatically deleted after their end date.</li>
+          <li>• {t('maintenance.rule7')}</li>
+          <li>• {t('maintenance.rule8')}</li>
         </ul>
       </div>
 
@@ -94,7 +96,7 @@ export function AdminMaintenancePage() {
         <MaintenanceWindowList
           scopeOptions={scopeOptions}
           channels={channels}
-          title="All Maintenance Windows"
+          title={t('maintenance.allWindows')}
         />
       </div>
     </div>

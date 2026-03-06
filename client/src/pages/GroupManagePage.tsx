@@ -1,5 +1,6 @@
 import { useState, useEffect, type FormEvent } from 'react';
 import { Plus, Pencil, Trash2, FolderTree, GripVertical, RotateCcw, Bell, Server } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import {
   DndContext,
   DragOverlay,
@@ -88,6 +89,7 @@ function findNodeById(nodes: GroupTreeNode[], id: number): GroupTreeNode | null 
 
 export function GroupManagePage() {
   const { fetchGroups, fetchTree, tree } = useGroupStore();
+  const { t } = useTranslation();
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [form, setForm] = useState<GroupFormData>(emptyForm);
@@ -135,7 +137,7 @@ export function GroupManagePage() {
           isGeneral: form.isGeneral,
           groupNotifications: form.groupNotifications,
         });
-        toast.success('Group updated');
+        toast.success(t('groups.updated'));
       } else {
         await groupsApi.create({
           name: form.name,
@@ -145,7 +147,7 @@ export function GroupManagePage() {
           groupNotifications: form.groupNotifications,
           kind: form.kind,
         });
-        toast.success('Group created');
+        toast.success(t('groups.created'));
       }
       setShowForm(false);
       setForm(emptyForm);
@@ -153,35 +155,35 @@ export function GroupManagePage() {
       fetchGroups();
       fetchTree();
     } catch {
-      toast.error(editingId ? 'Failed to update group' : 'Failed to create group');
+      toast.error(editingId ? t('groups.failedUpdate') : t('groups.failedCreate'));
     } finally {
       setSaving(false);
     }
   };
 
   const handleClearHeartbeats = async (id: number, name: string) => {
-    if (!confirm(`Clear all heartbeat/uptime data for group "${name}" and all its sub-groups? This cannot be undone.`)) {
+    if (!confirm(t('groups.confirmClear', { name }))) {
       return;
     }
     try {
       const result = await groupsApi.clearHeartbeats(id);
-      toast.success(`Cleared ${result.deleted} heartbeats from ${result.monitorCount} monitors`);
+      toast.success(t('groups.cleared', { heartbeats: result.deleted, monitors: result.monitorCount }));
     } catch {
-      toast.error('Failed to clear heartbeats');
+      toast.error(t('groups.failedClear'));
     }
   };
 
   const handleDelete = async (id: number, name: string) => {
-    if (!confirm(`Delete group "${name}" and all its sub-groups? Monitors in the group will become ungrouped.`)) {
+    if (!confirm(t('groups.confirmDelete', { name }))) {
       return;
     }
     try {
       await groupsApi.delete(id);
-      toast.success('Group deleted');
+      toast.success(t('groups.deleted'));
       fetchGroups();
       fetchTree();
     } catch {
-      toast.error('Failed to delete group');
+      toast.error(t('groups.failedDelete'));
     }
   };
 
@@ -214,11 +216,11 @@ export function GroupManagePage() {
 
       try {
         await groupsApi.move(draggedId, targetGroupId);
-        toast.success('Group moved');
+        toast.success(t('groups.moved'));
         fetchGroups();
         fetchTree();
       } catch {
-        toast.error('Failed to move group');
+        toast.error(t('groups.failedMove'));
       }
       return;
     }
@@ -236,7 +238,7 @@ export function GroupManagePage() {
         try {
           await groupsApi.move(draggedId, targetParentId);
         } catch {
-          toast.error('Failed to move group');
+          toast.error(t('groups.failedMove'));
           return;
         }
       }
@@ -261,12 +263,12 @@ export function GroupManagePage() {
       try {
         await groupsApi.reorder(reorderItems);
         if (draggedNodeCopy.parentId === targetParentId) {
-          toast.success('Groups reordered');
+          toast.success(t('groups.reordered'));
         }
         fetchGroups();
         fetchTree();
       } catch {
-        toast.error('Failed to reorder groups');
+        toast.error(t('groups.failedReorder'));
       }
     }
   };
@@ -274,10 +276,10 @@ export function GroupManagePage() {
   return (
     <div className="p-6 max-w-5xl min-w-0 mx-auto">
       <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-semibold text-text-primary">Groups</h1>
+        <h1 className="text-2xl font-semibold text-text-primary">{t('nav.groups')}</h1>
         <Button size="sm" onClick={() => openCreate()}>
           <Plus size={16} className="mr-1.5" />
-          New Group
+          {t('groups.new')}
         </Button>
       </div>
 
@@ -285,26 +287,26 @@ export function GroupManagePage() {
       {showForm && (
         <div className="mb-6 rounded-lg border border-border bg-bg-secondary p-5">
           <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide mb-4">
-            {editingId ? 'Edit Group' : 'New Group'}
+            {editingId ? t('groups.edit') : t('groups.new')}
           </h2>
           <form onSubmit={handleSubmit} className="space-y-4">
             <Input
-              label="Name"
+              label={t('groups.form.name')}
               value={form.name}
               onChange={(e) => setForm({ ...form, name: e.target.value })}
-              placeholder="Group name"
+              placeholder={t('groups.form.namePlaceholder')}
               required
             />
             <Input
-              label="Description (optional)"
+              label={t('groups.form.description')}
               value={form.description}
               onChange={(e) => setForm({ ...form, description: e.target.value })}
-              placeholder="Optional description"
+              placeholder={t('groups.form.descriptionPlaceholder')}
             />
             {/* Group type — only on create */}
             {!editingId && (
               <div className="space-y-1">
-                <label className="block text-sm font-medium text-text-secondary">Group Type</label>
+                <label className="block text-sm font-medium text-text-secondary">{t('groups.form.groupType')}</label>
                 <div className="flex gap-2">
                   <button
                     type="button"
@@ -316,7 +318,7 @@ export function GroupManagePage() {
                     }`}
                   >
                     <FolderTree size={14} />
-                    Monitor Group
+                    {t('groups.monitorGroup')}
                   </button>
                   <button
                     type="button"
@@ -328,26 +330,26 @@ export function GroupManagePage() {
                     }`}
                   >
                     <Server size={14} />
-                    Agent Group
+                    {t('groups.agentGroup')}
                   </button>
                 </div>
                 <p className="text-xs text-text-muted">
                   {form.kind === 'agent'
-                    ? 'Agent groups organise servers/machines. Default thresholds apply on device approval.'
-                    : 'Monitor groups organise HTTP, ping, and other monitors.'}
+                    ? t('groups.form.agentGroupDesc')
+                    : t('groups.form.monitorGroupDesc')}
                 </p>
               </div>
             )}
             {!editingId && (
               <div className="space-y-1">
                 <label className="block text-sm font-medium text-text-secondary">
-                  Parent Group
+                  {t('groups.form.parent')}
                 </label>
                 <GroupPicker
                   value={form.parentId}
                   onChange={(parentId) => setForm({ ...form, parentId })}
                   tree={tree}
-                  placeholder="None (root level)"
+                  placeholder={t('groups.form.parentNone')}
                   excludeId={editingId ?? undefined}
                 />
               </div>
@@ -363,7 +365,7 @@ export function GroupManagePage() {
                     className="h-4 w-4 rounded border-border bg-bg-tertiary text-accent focus:ring-accent"
                   />
                   <label htmlFor="is-general" className="text-sm text-text-secondary">
-                    General group (visible to all users)
+                    {t('groups.form.isGeneral')}
                   </label>
                 </div>
                 <div className="space-y-1">
@@ -376,18 +378,18 @@ export function GroupManagePage() {
                       className="h-4 w-4 rounded border-border bg-bg-tertiary text-accent focus:ring-accent"
                     />
                     <label htmlFor="group-notifications" className="text-sm text-text-secondary">
-                      Group notifications
+                      {t('groups.form.groupNotifications')}
                     </label>
                   </div>
                   <p className="text-xs text-text-muted ml-6">
-                    Send a single notification when the first monitor goes down, and one recovery when all are back up.
+                    {t('groups.form.groupNotificationsDesc')}
                   </p>
                 </div>
               </>
             )}
             <div className="flex items-center gap-3">
               <Button type="submit" loading={saving}>
-                {editingId ? 'Save' : 'Create'}
+                {editingId ? t('groups.save') : t('common.create')}
               </Button>
               <Button
                 type="button"
@@ -398,7 +400,7 @@ export function GroupManagePage() {
                   setForm(emptyForm);
                 }}
               >
-                Cancel
+                {t('common.cancel')}
               </Button>
             </div>
           </form>
@@ -447,9 +449,9 @@ export function GroupManagePage() {
         {tree.length === 0 ? (
           <div className="py-12 text-center">
             <FolderTree size={32} className="mx-auto mb-3 text-text-muted" />
-            <p className="text-text-muted">No groups yet</p>
+            <p className="text-text-muted">{t('groups.noGroups')}</p>
             <p className="text-sm text-text-muted mt-1">
-              Create groups to organize your monitors
+              {t('groups.noGroupsDesc')}
             </p>
           </div>
         ) : (
@@ -574,6 +576,7 @@ function DraggableGroupRow({
   handleDelete: (id: number, name: string) => void;
   draggedId: number | null;
 }) {
+  const { t } = useTranslation();
   const { attributes, listeners, setNodeRef: setDragRef, isDragging } = useDraggable({
     id: `group-drag-${node.id}`,
     data: { node },
@@ -613,18 +616,18 @@ function DraggableGroupRow({
       {node.kind === 'agent' && (
         <span className="inline-flex items-center gap-0.5 rounded-full bg-bg-tertiary px-2 py-0.5 text-[10px] font-medium text-text-muted">
           <Server size={9} />
-          Agents
+          {t('nav.agents')}
         </span>
       )}
       {node.isGeneral && (
         <span className="rounded-full bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-accent">
-          General
+          {t('groups.generalBadge')}
         </span>
       )}
       {node.groupNotifications && (
         <span className="inline-flex items-center gap-0.5 rounded-full bg-yellow-500/10 px-2 py-0.5 text-[10px] font-medium text-yellow-500">
           <Bell size={10} />
-          Grouped
+          {t('groups.groupedBadge')}
         </span>
       )}
       <button
@@ -637,7 +640,7 @@ function DraggableGroupRow({
       <button
         onClick={() => openEdit(node)}
         className="p-1 text-text-muted hover:text-text-primary opacity-0 group-hover:opacity-100"
-        title="Edit"
+        title={t('common.edit')}
       >
         <Pencil size={14} />
       </button>
@@ -651,7 +654,7 @@ function DraggableGroupRow({
       <button
         onClick={() => handleDelete(node.id, node.name)}
         className="p-1 text-text-muted hover:text-status-down opacity-0 group-hover:opacity-100"
-        title="Delete"
+        title={t('common.delete')}
       >
         <Trash2 size={14} />
       </button>

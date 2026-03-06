@@ -19,6 +19,8 @@ export interface User {
   updatedAt: string;
   preferences?: UserPreferences | null;
   email?: string | null;
+  preferredLanguage: string;
+  enrollmentVersion: number;
   totpEnabled?: boolean;
   emailOtpEnabled?: boolean;
 }

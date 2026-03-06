@@ -3,12 +3,16 @@ import type { User, UserPermissions, PermissionLevel } from '@obliview/shared';
 import { authApi, type LoginResult } from '../api/auth.api';
 import { connectSocket, disconnectSocket } from '../socket/socketClient';
 import { useLiveAlertsStore } from './liveAlertsStore';
+import { setLanguage } from '../i18n';
 
 function syncPreferencesToStore(user: User) {
   const prefs = user.preferences;
   if (prefs) {
     useLiveAlertsStore.getState().setEnabled(prefs.toastEnabled ?? true);
     useLiveAlertsStore.getState().setPosition(prefs.toastPosition ?? 'bottom-right');
+  }
+  if (user.preferredLanguage) {
+    setLanguage(user.preferredLanguage);
   }
 }
 

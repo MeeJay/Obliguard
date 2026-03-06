@@ -26,6 +26,7 @@ import {
   ChevronDown,
   CalendarClock,
 } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import { cn } from '@/utils/cn';
 import { useAuthStore } from '@/store/authStore';
 import { useMonitorStore } from '@/store/monitorStore';
@@ -165,26 +166,27 @@ interface NavItem {
   adminOnly?: boolean;
 }
 
-const topNavItems: NavItem[] = [
-  { label: 'Dashboard', path: '/', icon: <LayoutDashboard size={18} /> },
-];
-
-const adminNavItems: NavItem[] = [
-  { label: 'Groups',          path: '/groups',               icon: <FolderTree size={18} />,  adminOnly: true },
-  { label: 'Notifications',   path: '/notifications',        icon: <Bell size={18} />,        adminOnly: true },
-  { label: 'Users',           path: '/admin/users',          icon: <Users size={18} />,       adminOnly: true },
-  { label: 'Agents',          path: '/admin/agents',         icon: <Cpu size={18} />,         adminOnly: true },
-  { label: 'Remediations',    path: '/admin/remediations',   icon: <ShieldCheck size={18} />,  adminOnly: true },
-  { label: 'Maintenance',     path: '/admin/maintenance',    icon: <CalendarClock size={18} />, adminOnly: true },
-  { label: 'Import / Export', path: '/admin/import-export',  icon: <PackageOpen size={18} />,  adminOnly: true },
-  { label: 'Settings',        path: '/settings',             icon: <Settings size={18} />,    adminOnly: true },
-];
-
 // ── Main Sidebar ──────────────────────────────────────────────────────────────
 
 export function Sidebar() {
+  const { t } = useTranslation();
   const location = useLocation();
   const { user, isAdmin, canCreate } = useAuthStore();
+
+  const topNavItems: NavItem[] = [
+    { label: t('nav.dashboard'), path: '/', icon: <LayoutDashboard size={18} /> },
+  ];
+
+  const adminNavItems: NavItem[] = [
+    { label: t('nav.groups'),        path: '/groups',               icon: <FolderTree size={18} />,    adminOnly: true },
+    { label: t('nav.notifications'), path: '/notifications',        icon: <Bell size={18} />,          adminOnly: true },
+    { label: t('nav.users'),         path: '/admin/users',          icon: <Users size={18} />,         adminOnly: true },
+    { label: t('nav.agents'),        path: '/admin/agents',         icon: <Cpu size={18} />,           adminOnly: true },
+    { label: t('nav.remediations'),  path: '/admin/remediations',   icon: <ShieldCheck size={18} />,   adminOnly: true },
+    { label: t('nav.maintenance'),   path: '/admin/maintenance',    icon: <CalendarClock size={18} />, adminOnly: true },
+    { label: t('nav.importExport'),  path: '/admin/import-export',  icon: <PackageOpen size={18} />,   adminOnly: true },
+    { label: t('nav.settings'),      path: '/settings',             icon: <Settings size={18} />,      adminOnly: true },
+  ];
   const { openAddAgentModal } = useUiStore();
   const { fetchMonitors, monitors } = useMonitorStore();
   const { tree } = useGroupStore();
@@ -352,7 +354,7 @@ export function Sidebar() {
         {!hideHeader && (
         <div className="px-2 py-1 flex items-center gap-1.5 text-xs font-medium text-text-muted uppercase tracking-wider">
           <Server size={12} />
-          Agent Groups
+          {t('groups.agentGroup')}
         </div>)}
 
         {/* Grouped devices */}
@@ -422,14 +424,14 @@ export function Sidebar() {
             className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm font-medium text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary"
           >
             <Plus size={14} />
-            Monitor
+            {t('common.monitor')}
           </Link>
           <button
             onClick={openAddAgentModal}
             className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm font-medium text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary"
           >
             <Plus size={14} />
-            Agent
+            {t('common.agent')}
           </button>
         </div>
       )}
@@ -438,7 +440,7 @@ export function Sidebar() {
       <div className="px-3 py-3">
         <input
           type="text"
-          placeholder="Search monitors..."
+          placeholder={t('common.search')}
           value={search}
           onChange={e => setSearch(e.target.value)}
           className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-1.5 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:ring-1 focus:ring-accent"
@@ -458,7 +460,7 @@ export function Sidebar() {
                   : 'border-border text-text-muted hover:text-text-secondary',
               )}
             >
-              Monitors
+              {t('importExport.monitors')}
             </button>
             <button
               onClick={() => setShowAgents(v => !v)}
@@ -469,7 +471,7 @@ export function Sidebar() {
                   : 'border-border text-text-muted hover:text-text-secondary',
               )}
             >
-              Agents
+              {t('nav.agents')}
             </button>
           </div>
           <button
@@ -490,7 +492,7 @@ export function Sidebar() {
           <div className="flex flex-col overflow-hidden min-w-0" style={{ width: `${splitPercent}%` }}>
             {/* Column header */}
             <div className="flex items-center gap-1.5 px-3 py-1.5 border-b border-border shrink-0">
-              <span className="text-[10px] font-bold uppercase tracking-widest text-text-muted">Monitors</span>
+              <span className="text-[10px] font-bold uppercase tracking-widest text-text-muted">{t('importExport.monitors')}</span>
             </div>
             <div className="flex-1 overflow-y-auto px-2 min-h-0">
               <GroupTree searchQuery={search} />
@@ -507,7 +509,7 @@ export function Sidebar() {
           <div className="flex flex-col flex-1 overflow-hidden min-w-0">
             {/* Column header */}
             <div className="flex items-center justify-between px-3 py-1.5 border-b border-border shrink-0">
-              <span className="text-[10px] font-bold uppercase tracking-widest text-text-muted">Agents</span>
+              <span className="text-[10px] font-bold uppercase tracking-widest text-text-muted">{t('nav.agents')}</span>
               <button
                 onClick={() => setSidebarLayout('stacked')}
                 title="Switch to stacked"
@@ -611,7 +613,7 @@ export function Sidebar() {
           className="flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary"
         >
           <LogOut size={18} />
-          Logout
+          {t('nav.signOut')}
         </button>
       </div>
     </aside>

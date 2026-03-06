@@ -14,6 +14,8 @@ interface UserRow {
   updated_at: Date;
   preferences?: UserPreferences | null;
   email?: string | null;
+  preferred_language?: string;
+  enrollment_version?: number;
   totp_enabled?: boolean;
   email_otp_enabled?: boolean;
 }
@@ -29,6 +31,8 @@ function rowToUser(row: UserRow): User {
     updatedAt: row.updated_at.toISOString(),
     preferences: row.preferences ?? null,
     email: row.email ?? null,
+    preferredLanguage: row.preferred_language ?? 'en',
+    enrollmentVersion: row.enrollment_version ?? 0,
     totpEnabled: row.totp_enabled ?? false,
     emailOtpEnabled: row.email_otp_enabled ?? false,
   };

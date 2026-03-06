@@ -4,6 +4,7 @@ import {
   Pencil, Pause, Play, Trash2, ArrowLeft, FolderOpen, RotateCcw, Bell, Globe,
   Server, Settings2, Thermometer, X,
 } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import { cn } from '@/utils/cn';
 import { useGroupStore } from '@/store/groupStore';
 import { useAuthStore } from '@/store/authStore';
@@ -89,6 +90,7 @@ function AgentGroupThresholdEditor({
   thresholds: AgentThresholds;
   onSave: (t: AgentThresholds) => Promise<void>;
 }) {
+  const { t } = useTranslation();
   const [values, setValues] = useState<AgentThresholds>({ ...thresholds });
   const [tempValues, setTempValues] = useState<AgentTempThreshold>(() => ({
     globalEnabled: false, op: '>', threshold: 85, overrides: {},
@@ -109,17 +111,17 @@ function AgentGroupThresholdEditor({
 
   const handleSave = async () => {
     setSaving(true);
-    try { await onSave({ ...values, temp: tempValues }); toast.success('Thresholds saved'); }
-    catch { toast.error('Failed to save thresholds'); }
+    try { await onSave({ ...values, temp: tempValues }); toast.success(t('groups.detail.thresholdsSaved')); }
+    catch { toast.error(t('groups.detail.failedThresholds')); }
     finally { setSaving(false); }
   };
 
-  const metricRows: Array<{ key: keyof Omit<AgentThresholds, 'temp'>; label: string; unit: string; scale?: number }> = [
-    { key: 'cpu',    label: 'CPU',        unit: '%' },
-    { key: 'memory', label: 'Memory',     unit: '%' },
-    { key: 'disk',   label: 'Disk (any)', unit: '%' },
-    { key: 'netIn',  label: 'Net In',     unit: 'Mbps', scale: BYTES_PER_MBIT },
-    { key: 'netOut', label: 'Net Out',    unit: 'Mbps', scale: BYTES_PER_MBIT },
+  const metricRows: Array<{ key: keyof Omit<AgentThresholds, 'temp'>; labelKey: string; unit: string; scale?: number }> = [
+    { key: 'cpu',    labelKey: 'groups.detail.cpu',    unit: '%' },
+    { key: 'memory', labelKey: 'groups.detail.memory', unit: '%' },
+    { key: 'disk',   labelKey: 'groups.detail.disk',   unit: '%' },
+    { key: 'netIn',  labelKey: 'groups.detail.netIn',  unit: 'Mbps', scale: BYTES_PER_MBIT },
+    { key: 'netOut', labelKey: 'groups.detail.netOut', unit: 'Mbps', scale: BYTES_PER_MBIT },
   ];
 
   return (
@@ -127,16 +129,16 @@ function AgentGroupThresholdEditor({
       <table className="w-full text-sm">
         <thead>
           <tr className="text-xs uppercase text-text-muted border-b border-border">
-            <th className="text-left pb-2 font-medium">Metric</th>
-            <th className="text-center pb-2 font-medium w-12">On</th>
-            <th className="text-center pb-2 font-medium w-16">Op</th>
-            <th className="text-left pb-2 font-medium">Value</th>
+            <th className="text-left pb-2 font-medium">{t('groups.detail.metricCol')}</th>
+            <th className="text-center pb-2 font-medium w-12">{t('groups.detail.onCol')}</th>
+            <th className="text-center pb-2 font-medium w-16">{t('groups.detail.opCol')}</th>
+            <th className="text-left pb-2 font-medium">{t('groups.detail.valueCol')}</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-border">
-          {metricRows.map(({ key, label, unit, scale }) => (
+          {metricRows.map(({ key, labelKey, unit, scale }) => (
             <tr key={key} className={values[key].enabled ? '' : 'opacity-50'}>
-              <td className="py-2.5 font-medium text-text-secondary">{label}</td>
+              <td className="py-2.5 font-medium text-text-secondary">{t(labelKey)}</td>
               <td className="py-2.5 text-center">
                 <Switch on={values[key].enabled} onChange={v => upd(key, 'enabled', v)} />
               </td>
@@ -165,20 +167,20 @@ function AgentGroupThresholdEditor({
       {/* Temperature global threshold */}
       <div>
         <div className="text-xs font-medium text-text-muted uppercase tracking-wide mb-2 flex items-center gap-1.5">
-          <Thermometer size={11} /> Temperatures
+          <Thermometer size={11} /> {t('groups.detail.temperatures')}
         </div>
         <table className="w-full text-sm">
           <thead>
             <tr className="text-xs uppercase text-text-muted border-b border-border">
-              <th className="text-left pb-2 font-medium">Metric</th>
-              <th className="text-center pb-2 font-medium w-12">On</th>
-              <th className="text-center pb-2 font-medium w-16">Op</th>
-              <th className="text-left pb-2 font-medium">Value</th>
+              <th className="text-left pb-2 font-medium">{t('groups.detail.metricCol')}</th>
+              <th className="text-center pb-2 font-medium w-12">{t('groups.detail.onCol')}</th>
+              <th className="text-center pb-2 font-medium w-16">{t('groups.detail.opCol')}</th>
+              <th className="text-left pb-2 font-medium">{t('groups.detail.valueCol')}</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-border">
             <tr className={tempValues.globalEnabled ? '' : 'opacity-50'}>
-              <td className="py-2.5 font-medium text-text-secondary">Temperature (global)</td>
+              <td className="py-2.5 font-medium text-text-secondary">{t('groups.detail.tempGlobal')}</td>
               <td className="py-2.5 text-center">
                 <Switch on={tempValues.globalEnabled} onChange={v => updTemp('globalEnabled', v)} />
               </td>
@@ -206,7 +208,7 @@ function AgentGroupThresholdEditor({
       <div className="flex justify-end">
         <button onClick={handleSave} disabled={saving}
           className="px-4 py-2 text-sm rounded-lg bg-accent text-white hover:bg-accent/90 disabled:opacity-60 transition-colors">
-          {saving ? 'Saving…' : 'Save Thresholds'}
+          {saving ? t('common.saving') : t('groups.detail.saveSettings')}
         </button>
       </div>
     </div>
@@ -218,6 +220,7 @@ function AgentGroupThresholdEditor({
 // ─────────────────────────────────────────────────────────────────────────────
 
 function AgentGroupSettingsPanel({ group, onUpdate }: { group: MonitorGroup; onUpdate: (g: MonitorGroup) => void }) {
+  const { t } = useTranslation();
   const cfg = group.agentGroupConfig ?? { pushIntervalSeconds: null, heartbeatMonitoring: null, maxMissedPushes: null };
   const thr = group.agentThresholds ?? DEFAULT_AGENT_THRESHOLDS;
 
@@ -237,48 +240,48 @@ function AgentGroupSettingsPanel({ group, onUpdate }: { group: MonitorGroup; onU
         },
       });
       onUpdate(updated);
-      toast.success('Agent group settings saved');
-    } catch { toast.error('Failed to save settings'); }
+      toast.success(t('groups.detail.saveSettings'));
+    } catch { toast.error(t('groups.failedUpdate')); }
     finally { setSaving(false); }
   };
 
-  const handleSaveThresholds = async (t: AgentThresholds) => {
-    const updated = await groupsApi.updateAgentGroupConfig(group.id, { agentThresholds: t });
+  const handleSaveThresholds = async (thresholds: AgentThresholds) => {
+    const updated = await groupsApi.updateAgentGroupConfig(group.id, { agentThresholds: thresholds });
     onUpdate(updated);
   };
 
   return (
     <div className="rounded-lg border border-border bg-bg-secondary p-5 space-y-6">
       <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide">
-        Agent Group Settings
+        {t('groups.detail.agentSettings')}
       </h2>
 
       {/* Push Interval */}
       <div className="flex items-center justify-between gap-4">
         <div>
-          <div className="text-sm font-medium text-text-primary">Default Push Interval</div>
-          <div className="text-xs text-text-muted">Applied to new agents in this group (empty = device default)</div>
+          <div className="text-sm font-medium text-text-primary">{t('groups.detail.pushInterval')}</div>
+          <div className="text-xs text-text-muted">{t('groups.detail.pushIntervalDesc')}</div>
         </div>
         <div className="flex items-center gap-2">
           <input type="number" value={interval} min={1} max={86400}
             onChange={e => setInterval(e.target.value)}
             placeholder="60"
             className="w-24 rounded-lg border border-border bg-bg-tertiary px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:ring-1 focus:ring-accent text-right placeholder:text-text-muted" />
-          <span className="text-xs text-text-muted">s</span>
+          <span className="text-xs text-text-muted">{t('groups.detail.seconds')}</span>
         </div>
       </div>
 
       {/* Heartbeat Monitoring */}
       <div className="flex items-center justify-between">
         <div>
-          <div className="text-sm font-medium text-text-primary">Default Heartbeat Monitoring</div>
-          <div className="text-xs text-text-muted">Alert when agents go offline (null = device default)</div>
+          <div className="text-sm font-medium text-text-primary">{t('groups.detail.heartbeatMonitoring')}</div>
+          <div className="text-xs text-text-muted">{t('groups.detail.heartbeatMonitoringDesc')}</div>
         </div>
         <div className="flex items-center gap-2">
-          <span className="text-xs text-text-muted">{heartbeat === null ? 'Inherit' : heartbeat ? 'On' : 'Off'}</span>
+          <span className="text-xs text-text-muted">{heartbeat === null ? t('common.inherit') : heartbeat ? t('common.on') : t('common.off')}</span>
           <Switch on={heartbeat ?? false} onChange={v => setHeartbeat(v)} />
           {heartbeat !== null && (
-            <button onClick={() => setHeartbeat(null)} className="text-xs text-text-muted hover:text-text-primary" title="Reset to inherit">
+            <button onClick={() => setHeartbeat(null)} className="text-xs text-text-muted hover:text-text-primary" title={t('common.reset')}>
               <X size={12} />
             </button>
           )}
@@ -288,8 +291,8 @@ function AgentGroupSettingsPanel({ group, onUpdate }: { group: MonitorGroup; onU
       {/* Max Missed Pushes */}
       <div className="flex items-center justify-between gap-4">
         <div>
-          <div className="text-sm font-medium text-text-primary">Max Missed Pushes</div>
-          <div className="text-xs text-text-muted">Consecutive missed pushes before marking offline (empty = 2)</div>
+          <div className="text-sm font-medium text-text-primary">{t('groups.detail.maxMissedPushes')}</div>
+          <div className="text-xs text-text-muted">{t('groups.detail.maxMissedPushesDesc')}</div>
         </div>
         <div className="flex items-center gap-2">
           <input type="number" value={maxMissed} min={1} max={20}
@@ -302,15 +305,15 @@ function AgentGroupSettingsPanel({ group, onUpdate }: { group: MonitorGroup; onU
       <div className="flex justify-end">
         <button onClick={handleSaveConfig} disabled={saving}
           className="px-4 py-2 text-sm rounded-lg bg-accent text-white hover:bg-accent/90 disabled:opacity-60 transition-colors">
-          {saving ? 'Saving…' : 'Save Settings'}
+          {saving ? t('common.saving') : t('groups.detail.saveSettings')}
         </button>
       </div>
 
       {/* Divider */}
       <div className="border-t border-border pt-4">
         <div className="text-xs font-medium text-text-muted uppercase tracking-wide mb-4 flex items-center gap-1.5">
-          <Settings2 size={11} /> Default Alert Thresholds
-          <span className="ml-1 text-text-muted font-normal normal-case">Inherited by agents in this group (overridable per agent)</span>
+          <Settings2 size={11} /> {t('groups.detail.thresholds')}
+          <span className="ml-1 text-text-muted font-normal normal-case">{t('groups.detail.thresholdsDesc')}</span>
         </div>
         <AgentGroupThresholdEditor thresholds={thr} onSave={handleSaveThresholds} />
       </div>
@@ -335,6 +338,7 @@ interface GroupStats {
 export function GroupDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const { t } = useTranslation();
   const { isAdmin, canWriteGroup } = useAuthStore();
   const { getGroup, removeGroup, fetchGroups, fetchTree } = useGroupStore();
 
@@ -395,57 +399,57 @@ export function GroupDetailPage() {
   if (!group) {
     return (
       <div className="flex h-full flex-col items-center justify-center">
-        <p className="text-text-muted">Group not found</p>
+        <p className="text-text-muted">{t('monitors.notFound')}</p>
         <Link to="/" className="mt-4">
-          <Button variant="secondary">Back to Dashboard</Button>
+          <Button variant="secondary">{t('monitors.backToDashboard')}</Button>
         </Link>
       </div>
     );
   }
 
   const handleDelete = async () => {
-    if (!confirm(`Delete group "${group.name}" and all its sub-groups? Monitors will become ungrouped.`)) return;
+    if (!confirm(t('groups.confirmDelete', { name: group.name }))) return;
     try {
       await groupsApi.delete(groupId);
       removeGroup(groupId);
       fetchGroups();
       fetchTree();
-      toast.success('Group deleted');
+      toast.success(t('groups.deleted'));
       navigate('/');
     } catch {
-      toast.error('Failed to delete group');
+      toast.error(t('groups.failedDelete'));
     }
   };
 
   const handlePauseAll = async () => {
     const active = monitors.filter((m) => m.status !== 'paused');
-    if (active.length === 0) { toast('No active monitors to pause'); return; }
+    if (active.length === 0) { toast(t('groups.noActive')); return; }
     try {
       await Promise.all(active.map((m) => monitorsApi.pause(m.id)));
-      toast.success(`Paused ${active.length} monitors`);
+      toast.success(t('groups.pausedAll', { count: active.length }));
       const m = await groupsApi.getMonitors(groupId, true);
       setMonitors(m);
-    } catch { toast.error('Failed to pause monitors'); }
+    } catch { toast.error(t('groups.failedPause')); }
   };
 
   const handleResumeAll = async () => {
     const paused = monitors.filter((m) => m.status === 'paused');
-    if (paused.length === 0) { toast('No paused monitors to resume'); return; }
+    if (paused.length === 0) { toast(t('groups.noPaused')); return; }
     try {
       await Promise.all(paused.map((m) => monitorsApi.pause(m.id)));
-      toast.success(`Resumed ${paused.length} monitors`);
+      toast.success(t('groups.resumedAll', { count: paused.length }));
       const m = await groupsApi.getMonitors(groupId, true);
       setMonitors(m);
-    } catch { toast.error('Failed to resume monitors'); }
+    } catch { toast.error(t('groups.failedResume')); }
   };
 
   const handleClearHeartbeats = async () => {
-    if (!confirm(`Clear all heartbeat/uptime data for group "${group.name}" and all its sub-groups? This cannot be undone.`)) return;
+    if (!confirm(t('groups.confirmClear', { name: group.name }))) return;
     try {
       const result = await groupsApi.clearHeartbeats(groupId);
-      toast.success(`Cleared ${result.deleted} heartbeats from ${result.monitorCount} monitors`);
+      toast.success(t('groups.cleared', { heartbeats: result.deleted, monitors: result.monitorCount }));
       setPeriodHeartbeats([]);
-    } catch { toast.error('Failed to clear heartbeats'); }
+    } catch { toast.error(t('groups.failedClear')); }
   };
 
   const pausedCount = monitors.filter((m) => m.status === 'paused').length;
@@ -457,7 +461,7 @@ export function GroupDetailPage() {
       {/* Back button */}
       <Link to="/" className="inline-flex items-center gap-1 text-sm text-text-secondary hover:text-text-primary mb-4">
         <ArrowLeft size={14} />
-        Back to Dashboard
+        {t('monitors.backToDashboard')}
       </Link>
 
       {/* Header */}
@@ -475,19 +479,19 @@ export function GroupDetailPage() {
               {isAgentGroup && (
                 <span className="inline-flex items-center gap-1 rounded-full bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-accent">
                   <Server size={10} />
-                  Agent Group
+                  {t('groups.agentGroup')}
                 </span>
               )}
               {group.isGeneral && (
                 <span className="inline-flex items-center gap-1 rounded-full bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-accent">
                   <Globe size={10} />
-                  General
+                  {t('groups.generalBadge')}
                 </span>
               )}
               {group.groupNotifications && (
                 <span className="inline-flex items-center gap-1 rounded-full bg-yellow-500/10 px-2 py-0.5 text-[10px] font-medium text-yellow-500">
                   <Bell size={10} />
-                  Grouped Notifications
+                  {t('groups.groupedBadge')}
                 </span>
               )}
               {group.description && (
@@ -502,27 +506,27 @@ export function GroupDetailPage() {
             <Link to={`/group/${groupId}/edit`}>
               <Button variant="secondary" size="sm">
                 <Pencil size={14} className="mr-1.5" />
-                Edit
+                {t('common.edit')}
               </Button>
             </Link>
             {!isAgentGroup && (hasPaused ? (
               <Button variant="secondary" size="sm" onClick={handleResumeAll}>
                 <Play size={14} className="mr-1.5" />
-                Resume All
+                {t('groups.detail.resumeAll')}
               </Button>
             ) : (
               <Button variant="secondary" size="sm" onClick={handlePauseAll}>
                 <Pause size={14} className="mr-1.5" />
-                Pause All
+                {t('groups.detail.pauseAll')}
               </Button>
             ))}
             <Button variant="secondary" size="sm" onClick={handleClearHeartbeats}>
               <RotateCcw size={14} className="mr-1.5" />
-              Clear Data
+              {t('groups.detail.clearData')}
             </Button>
             <Button variant="danger" size="sm" onClick={handleDelete}>
               <Trash2 size={14} className="mr-1.5" />
-              Delete
+              {t('common.delete')}
             </Button>
           </div>
         )}
@@ -532,30 +536,30 @@ export function GroupDetailPage() {
       {isAgentGroup && agentStats && (
         <div className="grid gap-4 mb-6" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))' }}>
           <div className="rounded-lg border border-border bg-bg-secondary p-4">
-            <div className="text-sm text-text-secondary mb-1">Total Agents</div>
+            <div className="text-sm text-text-secondary mb-1">{t('groups.detail.totalAgents')}</div>
             <div className="text-xl font-mono font-semibold text-text-primary">{agentStats.total}</div>
           </div>
           <div className="rounded-lg border border-status-up/30 bg-bg-secondary p-4">
-            <div className="text-sm text-text-secondary mb-1">Online</div>
+            <div className="text-sm text-text-secondary mb-1">{t('groups.detail.online')}</div>
             <div className="text-xl font-mono font-semibold text-status-up">{agentStats.online}</div>
           </div>
           {agentStats.alert > 0 && (
             <div className="rounded-lg border border-orange-500/30 bg-bg-secondary p-4">
-              <div className="text-sm text-text-secondary mb-1">Alert</div>
+              <div className="text-sm text-text-secondary mb-1">{t('groups.detail.alert')}</div>
               <div className="text-xl font-mono font-semibold text-orange-400">{agentStats.alert}</div>
               <div className="text-xs text-text-muted mt-0.5 truncate">{agentStats.alertAgentNames.join(', ')}</div>
             </div>
           )}
           {agentStats.offline > 0 && (
             <div className="rounded-lg border border-status-down/30 bg-bg-secondary p-4">
-              <div className="text-sm text-text-secondary mb-1">Offline</div>
+              <div className="text-sm text-text-secondary mb-1">{t('groups.detail.offline')}</div>
               <div className="text-xl font-mono font-semibold text-status-down">{agentStats.offline}</div>
               <div className="text-xs text-text-muted mt-0.5 truncate">{agentStats.offlineAgentNames.join(', ')}</div>
             </div>
           )}
           {agentStats.pending > 0 && (
             <div className="rounded-lg border border-yellow-500/30 bg-bg-secondary p-4">
-              <div className="text-sm text-text-secondary mb-1">Pending</div>
+              <div className="text-sm text-text-secondary mb-1">{t('groups.detail.pending')}</div>
               <div className="text-xl font-mono font-semibold text-yellow-400">{agentStats.pending}</div>
             </div>
           )}
@@ -566,7 +570,7 @@ export function GroupDetailPage() {
       {!isAgentGroup && stats && (
         <div className="grid gap-4 mb-6" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' }}>
           <div className="rounded-lg border border-border bg-bg-secondary p-4">
-            <div className="text-sm text-text-secondary mb-1">Uptime</div>
+            <div className="text-sm text-text-secondary mb-1">{t('groups.detail.uptime')}</div>
             <div className={cn('text-xl font-mono font-semibold',
               stats.uptimePct >= 99 ? 'text-status-up' : stats.uptimePct >= 95 ? 'text-yellow-500' : 'text-status-down'
             )}>
@@ -574,7 +578,7 @@ export function GroupDetailPage() {
             </div>
           </div>
           <div className="rounded-lg border border-border bg-bg-secondary p-4">
-            <div className="text-sm text-text-secondary mb-1">Monitors</div>
+            <div className="text-sm text-text-secondary mb-1">{t('groups.detail.monitors')}</div>
             <div className="text-xl font-mono font-semibold text-text-primary">{stats.monitorCount}</div>
             <div className="text-xs text-text-muted mt-0.5">
               {stats.monitorCount - stats.downMonitorNames.length} up / {stats.downMonitorNames.length} down
@@ -582,19 +586,19 @@ export function GroupDetailPage() {
           </div>
           {stats.downMonitorNames.length > 0 && (
             <div className="rounded-lg border border-status-down/30 bg-status-down-bg p-4">
-              <div className="text-sm text-text-secondary mb-1">Down Monitors</div>
+              <div className="text-sm text-text-secondary mb-1">{t('groups.detail.downMonitors')}</div>
               <div className="text-xl font-mono font-semibold text-status-down">{stats.downMonitorNames.length}</div>
               <div className="text-xs text-text-muted mt-0.5 truncate">{stats.downMonitorNames.join(', ')}</div>
             </div>
           )}
           <div className="rounded-lg border border-border bg-bg-secondary p-4">
-            <div className="text-sm text-text-secondary mb-1">Avg Response Time</div>
+            <div className="text-sm text-text-secondary mb-1">{t('groups.detail.avgResponse')}</div>
             <div className="text-xl font-mono font-semibold text-text-primary">
-              {stats.avgResponseTime ? `${stats.avgResponseTime}ms` : 'N/A'}
+              {stats.avgResponseTime ? `${stats.avgResponseTime}ms` : t('common.na')}
             </div>
           </div>
           <div className="rounded-lg border border-border bg-bg-secondary p-4">
-            <div className="text-sm text-text-secondary mb-1">Total Checks</div>
+            <div className="text-sm text-text-secondary mb-1">{t('groups.detail.totalChecks')}</div>
             <div className="text-xl font-mono font-semibold text-text-primary">{stats.total.toLocaleString()}</div>
           </div>
         </div>
@@ -604,15 +608,15 @@ export function GroupDetailPage() {
       {!isAgentGroup && (
         <>
           <div className="flex items-center justify-between mb-4">
-            <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wide">History</h3>
+            <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wide">{t('monitors.history')}</h3>
             <PeriodSelector value={period} onChange={setPeriod} />
           </div>
           <div className="mb-6 rounded-lg border border-border bg-bg-secondary p-4">
-            <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wide mb-3">Heartbeat History</h3>
+            <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wide mb-3">{t('monitors.heartbeatHistory')}</h3>
             <HeartbeatBar heartbeats={periodHeartbeats} />
           </div>
           <div className="mb-6 rounded-lg border border-border bg-bg-secondary p-4">
-            <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wide mb-3">Response Time</h3>
+            <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wide mb-3">{t('monitors.responseTime')}</h3>
             <HeartbeatChart heartbeats={periodHeartbeats} height={250} period={period} />
           </div>
         </>
@@ -622,7 +626,7 @@ export function GroupDetailPage() {
       {isAgentGroup && monitors.length > 0 && (
         <div className="mb-6 rounded-lg border border-border bg-bg-secondary">
           <div className="px-4 py-3 border-b border-border">
-            <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wide">Agents ({monitors.filter(m => m.type === 'agent').length})</h3>
+            <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wide">{t('groups.detail.agentList', { count: monitors.filter(m => m.type === 'agent').length })}</h3>
           </div>
           <div className="divide-y divide-border">
             {monitors.filter(m => m.type === 'agent').map(m => (
@@ -633,7 +637,7 @@ export function GroupDetailPage() {
               >
                 <MonitorStatusBadge status={m.status} size="sm" inMaintenance={m.inMaintenance} />
                 <span className="flex-1 text-sm text-text-primary truncate">{m.name}</span>
-                <span className="text-xs text-text-muted">Agent</span>
+                <span className="text-xs text-text-muted">{t('common.agent')}</span>
               </Link>
             ))}
           </div>
@@ -645,7 +649,7 @@ export function GroupDetailPage() {
         <div className="mb-6 rounded-lg border border-border bg-bg-secondary">
           <div className="flex items-center justify-between px-4 py-3 border-b border-border">
             <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wide">
-              Monitors ({monitors.length})
+              {t('groups.detail.monitorList', { count: monitors.length })}
             </h3>
           </div>
           <div className="divide-y divide-border">
@@ -670,7 +674,7 @@ export function GroupDetailPage() {
           <NotificationBindingsPanel
             scope="group"
             scopeId={groupId}
-            title="Notification Channels"
+            title={t('monitors.sectionNotifications')}
           />
         </div>
       )}
@@ -681,7 +685,7 @@ export function GroupDetailPage() {
           <RemediationBindingsPanel
             scope="group"
             scopeId={groupId}
-            title="Remediations"
+            title={t('monitors.sectionRemediations')}
           />
         </div>
       )}
@@ -712,7 +716,7 @@ export function GroupDetailPage() {
           <SettingsPanel
             scope="group"
             scopeId={groupId}
-            title="Group Settings"
+            title={t('monitors.sectionSettings')}
           />
         </div>
       )}

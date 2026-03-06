@@ -19,6 +19,7 @@ import {
   X,
   Settings2,
 } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import { SOCKET_EVENTS } from '@obliview/shared';
 import type { AgentApiKey, AgentDevice, MonitorGroup } from '@obliview/shared';
 import { agentApi } from '@/api/agent.api';
@@ -50,26 +51,27 @@ function formatDate(dateStr: string) {
   });
 }
 
-function statusBadge(status: AgentDevice['status']) {
+function StatusBadge({ status }: { status: AgentDevice['status'] }) {
+  const { t } = useTranslation();
   const styles: Record<AgentDevice['status'], { icon: React.ReactNode; label: string; cls: string }> = {
     pending: {
       icon: <Clock size={11} />,
-      label: 'Pending',
+      label: t('status.pending'),
       cls: 'bg-yellow-500/10 text-yellow-400',
     },
     approved: {
       icon: <CheckCircle size={11} />,
-      label: 'Approved',
+      label: t('status.approved'),
       cls: 'bg-status-up/10 text-status-up',
     },
     refused: {
       icon: <XCircle size={11} />,
-      label: 'Refused',
+      label: t('status.refused'),
       cls: 'bg-status-down/10 text-status-down',
     },
     suspended: {
       icon: <PauseCircle size={11} />,
-      label: 'Suspended',
+      label: t('status.suspended'),
       cls: 'bg-text-muted/15 text-text-muted',
     },
   };
@@ -158,6 +160,7 @@ function ApproveModal({
   onApprove: (groupId: number | null) => void;
   onCancel: () => void;
 }) {
+  const { t } = useTranslation();
   const [selectedGroupId, setSelectedGroupId] = useState<number | null>(null);
   const agentGroups = groups.filter(g => g.kind === 'agent');
   const selectedGroup = agentGroups.find(g => g.id === selectedGroupId);
@@ -166,36 +169,36 @@ function ApproveModal({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
       <div className="w-full max-w-sm rounded-xl border border-border bg-bg-primary shadow-2xl p-6">
-        <h2 className="text-base font-semibold text-text-primary mb-1">Approve Device</h2>
+        <h2 className="text-base font-semibold text-text-primary mb-1">{t('agents.approveTitle')}</h2>
         <p className="text-sm text-text-muted mb-4">
-          Approve <span className="font-medium text-text-primary">{device.hostname}</span> and create its monitor?
+          {t('agents.approveDesc', { hostname: device.hostname })}
         </p>
 
         <div className="space-y-1 mb-4">
-          <label className="block text-sm font-medium text-text-secondary">Assign to Agent Group (optional)</label>
+          <label className="block text-sm font-medium text-text-secondary">{t('agents.assignGroup')}</label>
           <select
             value={selectedGroupId ?? ''}
             onChange={e => setSelectedGroupId(e.target.value ? Number(e.target.value) : null)}
             className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
           >
-            <option value="">— No group —</option>
+            <option value="">{t('agents.noGroup')}</option>
             {agentGroups.map(g => (
               <option key={g.id} value={g.id}>{g.name}</option>
             ))}
           </select>
           {agentGroups.length === 0 && (
-            <p className="text-xs text-text-muted mt-1">No agent groups found. Create one in Groups settings.</p>
+            <p className="text-xs text-text-muted mt-1">{t('agents.noAgentGroups')}</p>
           )}
           {hasGroupThresholds && (
-            <p className="text-xs text-status-up mt-1">✓ Group default thresholds will be applied</p>
+            <p className="text-xs text-status-up mt-1">{t('agents.groupThresholdsNote')}</p>
           )}
         </div>
 
         <div className="flex gap-2">
           <Button onClick={() => onApprove(selectedGroupId)} className="flex-1">
-            <CheckCircle size={14} className="mr-1.5" />Approve
+            <CheckCircle size={14} className="mr-1.5" />{t('agents.approve')}
           </Button>
-          <Button variant="secondary" onClick={onCancel} className="flex-1">Cancel</Button>
+          <Button variant="secondary" onClick={onCancel} className="flex-1">{t('common.cancel')}</Button>
         </div>
       </div>
     </div>
@@ -228,6 +231,7 @@ function EditAgentModal({
   const [suspended, setSuspended] = useState(device.status === 'suspended');
   const [saving, setSaving] = useState(false);
 
+  const { t } = useTranslation();
   const agentGroups = groups.filter(g => g.kind === 'agent');
 
   const handleSave = async () => {
@@ -244,33 +248,33 @@ function EditAgentModal({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
       <div className="w-full max-w-sm rounded-xl border border-border bg-bg-primary shadow-2xl p-6">
-        <h2 className="text-base font-semibold text-text-primary mb-1">Edit Agent</h2>
+        <h2 className="text-base font-semibold text-text-primary mb-1">{t('agents.editAgent')}</h2>
         <p className="text-xs text-text-muted mb-5">
-          Hostname: <span className="font-mono text-text-secondary">{device.hostname}</span>
+          {t('agents.hostnameInfo', { hostname: device.hostname })}
         </p>
 
         <div className="space-y-4">
           {/* Display name */}
           <div>
-            <label className="block text-sm font-medium text-text-secondary mb-1">Display name</label>
+            <label className="block text-sm font-medium text-text-secondary mb-1">{t('agents.displayName')}</label>
             <Input
               placeholder={device.hostname}
               value={name}
               onChange={e => setName(e.target.value)}
               autoFocus
             />
-            <p className="text-xs text-text-muted mt-1">Leave empty to use hostname</p>
+            <p className="text-xs text-text-muted mt-1">{t('agents.displayNameDesc')}</p>
           </div>
 
           {/* Group */}
           <div>
-            <label className="block text-sm font-medium text-text-secondary mb-1">Agent Group</label>
+            <label className="block text-sm font-medium text-text-secondary mb-1">{t('agents.agentGroup')}</label>
             <select
               value={groupId ?? ''}
               onChange={e => setGroupId(e.target.value === '' ? null : Number(e.target.value))}
               className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
             >
-              <option value="">— No group —</option>
+              <option value="">{t('agents.noGroup')}</option>
               {agentGroups.map(g => (
                 <option key={g.id} value={g.id}>{g.name}</option>
               ))}
@@ -287,10 +291,10 @@ function EditAgentModal({
             />
             <div>
               <p className="text-sm font-medium text-text-primary group-hover:text-accent transition-colors">
-                Heartbeat monitoring
+                {t('agents.heartbeatMonitoring')}
               </p>
               <p className="text-xs text-text-muted leading-relaxed">
-                Alert if agent goes offline (DOWN). Disable for workstations.
+                {t('agents.heartbeatMonitoringDesc')}
               </p>
             </div>
           </label>
@@ -305,10 +309,10 @@ function EditAgentModal({
             />
             <div>
               <p className="text-sm font-medium text-text-primary group-hover:text-accent transition-colors">
-                Override group settings
+                {t('agents.overrideGroupSettings')}
               </p>
               <p className="text-xs text-text-muted leading-relaxed">
-                Use this device's own thresholds and push interval instead of the group's.
+                {t('agents.overrideGroupSettingsDesc')}
               </p>
             </div>
           </label>
@@ -323,18 +327,18 @@ function EditAgentModal({
             />
             <div>
               <p className="text-sm font-medium text-text-primary group-hover:text-accent transition-colors">
-                Suspended
+                {t('agents.suspended')}
               </p>
               <p className="text-xs text-text-muted leading-relaxed">
-                Block the agent without deleting it. The monitor is paused; the device cannot push data.
+                {t('agents.suspendedDesc')}
               </p>
             </div>
           </label>
         </div>
 
         <div className="flex gap-2 mt-6">
-          <Button onClick={handleSave} loading={saving} className="flex-1">Save</Button>
-          <Button variant="secondary" onClick={onCancel} className="flex-1">Cancel</Button>
+          <Button onClick={handleSave} loading={saving} className="flex-1">{t('common.save')}</Button>
+          <Button variant="secondary" onClick={onCancel} className="flex-1">{t('common.cancel')}</Button>
         </div>
       </div>
     </div>
@@ -359,6 +363,7 @@ function BulkEditAgentModal({
   }) => void;
   onCancel: () => void;
 }) {
+  const { t } = useTranslation();
   const agentGroups = groups.filter(g => g.kind === 'agent');
 
   // Compute initial tri-state values: single value if all same, null if mixed
@@ -396,16 +401,16 @@ function BulkEditAgentModal({
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
       <div className="w-full max-w-sm rounded-xl border border-border bg-bg-primary shadow-2xl p-6">
         <h2 className="text-base font-semibold text-text-primary mb-1">
-          Edit {devices.length} Agent{devices.length !== 1 ? 's' : ''}
+          {t('agents.bulkEditTitle', { count: devices.length })}
         </h2>
         <p className="text-xs text-text-muted mb-5">
-          Only changed fields will be applied. Mixed values show as indeterminate (—).
+          {t('agents.bulkEditDesc')}
         </p>
 
         <div className="space-y-4">
           {/* Group */}
           <div>
-            <label className="block text-sm font-medium text-text-secondary mb-1">Agent Group</label>
+            <label className="block text-sm font-medium text-text-secondary mb-1">{t('agents.agentGroup')}</label>
             <select
               value={
                 groupSelection === 'keep' ? '__keep__'
@@ -420,8 +425,8 @@ function BulkEditAgentModal({
               }}
               className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
             >
-              <option value="__keep__">— Keep current —</option>
-              <option value="">— No group —</option>
+              <option value="__keep__">{t('agents.keepCurrent')}</option>
+              <option value="">{t('agents.noGroup')}</option>
               {agentGroups.map(g => (
                 <option key={g.id} value={g.id}>{g.name}</option>
               ))}
@@ -432,36 +437,36 @@ function BulkEditAgentModal({
           <TriStateCheckbox
             value={heartbeatMonitoring}
             onChange={setHeartbeatMonitoring}
-            label="Heartbeat monitoring"
-            description="Alert if agent goes offline (DOWN). Disable for workstations."
+            label={t('agents.heartbeatMonitoring')}
+            description={t('agents.heartbeatMonitoringDesc')}
           />
 
           {/* Override group settings */}
           <TriStateCheckbox
             value={overrideGroupSettings}
             onChange={setOverrideGroupSettings}
-            label="Override group settings"
-            description="Use each device's own thresholds and push interval instead of the group's."
+            label={t('agents.overrideGroupSettings')}
+            description={t('agents.overrideGroupSettingsDesc')}
           />
 
           {/* Status */}
           <div>
-            <label className="block text-sm font-medium text-text-secondary mb-1">Status</label>
+            <label className="block text-sm font-medium text-text-secondary mb-1">{t('common.status')}</label>
             <select
               value={statusAction}
               onChange={e => setStatusAction(e.target.value as 'no-change' | 'approved' | 'suspended')}
               className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
             >
-              <option value="no-change">— No change —</option>
-              <option value="approved">Approve all</option>
-              <option value="suspended">Suspend all</option>
+              <option value="no-change">{t('agents.noChange')}</option>
+              <option value="approved">{t('agents.approveAll')}</option>
+              <option value="suspended">{t('agents.suspendAll')}</option>
             </select>
           </div>
         </div>
 
         <div className="flex gap-2 mt-6">
-          <Button onClick={handleSave} loading={saving} className="flex-1">Apply</Button>
-          <Button variant="secondary" onClick={onCancel} className="flex-1">Cancel</Button>
+          <Button onClick={handleSave} loading={saving} className="flex-1">{t('common.apply')}</Button>
+          <Button variant="secondary" onClick={onCancel} className="flex-1">{t('common.cancel')}</Button>
         </div>
       </div>
     </div>
@@ -471,6 +476,7 @@ function BulkEditAgentModal({
 // ── Main Page ─────────────────────────────────────────────────────────────────
 
 export function AdminAgentPage() {
+  const { t } = useTranslation();
   const [tab, setTab] = useState<Tab>('devices');
   const [deviceFilter, setDeviceFilter] = useState<DeviceStatusFilter>('all');
 
@@ -807,7 +813,7 @@ export function AdminAgentPage() {
           }`}
         >
           <Monitor size={13} className="inline mr-1.5" />
-          Devices
+          {t('agents.tabDevices')}
           {pendingCount > 0 && (
             <span className="ml-1.5 inline-flex items-center justify-center w-4 h-4 rounded-full bg-yellow-500 text-white text-[10px] font-bold">
               {pendingCount}
@@ -821,7 +827,7 @@ export function AdminAgentPage() {
           }`}
         >
           <Key size={13} className="inline mr-1.5" />
-          API Keys
+          {t('agents.tabKeys')}
         </button>
       </div>
 
@@ -858,13 +864,13 @@ export function AdminAgentPage() {
               </span>
               <div className="flex items-center gap-2 ml-auto">
                 <Button size="sm" variant="secondary" onClick={() => setShowBulkEditModal(true)}>
-                  <Settings2 size={12} className="mr-1.5" />Edit
+                  <Settings2 size={12} className="mr-1.5" />{t('common.edit')}
                 </Button>
                 <Button size="sm" variant="secondary" onClick={handleBulkUninstall}>
                   <PowerOff size={12} className="mr-1.5" />Uninstall
                 </Button>
                 <Button size="sm" variant="danger" onClick={handleBulkDelete}>
-                  <Trash2 size={12} className="mr-1.5" />Delete
+                  <Trash2 size={12} className="mr-1.5" />{t('common.delete')}
                 </Button>
                 <button
                   onClick={() => setSelectedIds(new Set())}
@@ -908,10 +914,10 @@ export function AdminAgentPage() {
                     <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">Hostname</th>
                     <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">IP</th>
                     <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">OS</th>
-                    <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">Agent</th>
-                    <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">Status</th>
+                    <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">{t('common.agent')}</th>
+                    <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">{t('common.status')}</th>
                     <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">Registered</th>
-                    <th className="px-4 py-2.5 text-right text-xs font-medium text-text-muted uppercase tracking-wide">Actions</th>
+                    <th className="px-4 py-2.5 text-right text-xs font-medium text-text-muted uppercase tracking-wide">{t('common.actions')}</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border">
@@ -952,14 +958,14 @@ export function AdminAgentPage() {
                           : '—'}
                       </td>
                       <td className="px-4 py-3 text-text-muted">{device.agentVersion ?? '—'}</td>
-                      <td className="px-4 py-3">{statusBadge(device.status)}</td>
+                      <td className="px-4 py-3"><StatusBadge status={device.status} /></td>
                       <td className="px-4 py-3 text-text-muted text-xs">{formatDate(device.createdAt)}</td>
                       <td className="px-4 py-3 text-right">
                         <div className="flex items-center justify-end gap-1">
                           {device.status === 'pending' && (
                             <>
                               <Button size="sm" onClick={() => setApprovingDevice(device)}>
-                                <CheckCircle size={12} className="mr-1" />Approve
+                                <CheckCircle size={12} className="mr-1" />{t('agents.approve')}
                               </Button>
                               <Button size="sm" variant="danger" onClick={() => handleRefuse(device)}>
                                 Refuse
@@ -1029,14 +1035,14 @@ export function AdminAgentPage() {
           <div className="flex items-center justify-between mb-4">
             <p className="text-sm text-text-muted">API Keys are used to authenticate agents during installation.</p>
             <Button size="sm" onClick={() => setShowCreateKey(true)}>
-              <Plus size={13} className="mr-1" />New Key
+              <Plus size={13} className="mr-1" />{t('common.new')} Key
             </Button>
           </div>
 
           {/* Create key form */}
           {showCreateKey && (
             <div className="mb-4 rounded-lg border border-border bg-bg-secondary p-4">
-              <h3 className="text-sm font-semibold text-text-secondary uppercase tracking-wide mb-3">New API Key</h3>
+              <h3 className="text-sm font-semibold text-text-secondary uppercase tracking-wide mb-3">{t('common.new')} API Key</h3>
               <div className="flex gap-2">
                 <Input
                   placeholder="Key name (e.g. Production Servers)"
@@ -1046,10 +1052,10 @@ export function AdminAgentPage() {
                   autoFocus
                 />
                 <Button onClick={handleCreateKey} loading={saving} disabled={!newKeyName.trim()}>
-                  Create
+                  {t('common.create')}
                 </Button>
                 <Button variant="secondary" onClick={() => { setShowCreateKey(false); setNewKeyName(''); }}>
-                  Cancel
+                  {t('common.cancel')}
                 </Button>
               </div>
             </div>

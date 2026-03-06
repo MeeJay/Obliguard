@@ -3,6 +3,7 @@ import { Download, Upload, FileJson, CheckCircle2, PackageOpen, ExternalLink } f
 import { Button } from '@/components/common/Button';
 import apiClient from '@/api/client';
 import toast from 'react-hot-toast';
+import { useTranslation } from 'react-i18next';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -27,40 +28,6 @@ const ALL_SECTIONS: Section[] = [
   'teams',
   'remediationActions',
   'remediationBindings',
-];
-
-const SECTION_LABELS: Record<Section, string> = {
-  monitorGroups:       'Monitor Groups',
-  monitors:            'Monitors',
-  settings:            'Settings',
-  notificationChannels:'Notification Channels',
-  agentGroups:         'Agent Groups',
-  teams:               'Teams',
-  remediationActions:  'Remediation Actions',
-  remediationBindings: 'Remediation Bindings',
-};
-
-const SECTION_DESCRIPTIONS: Partial<Record<Section, string>> = {
-  remediationActions:  'Global automation actions (webhooks, scripts, etc.)',
-  remediationBindings: 'Scope-based remediation bindings (global/group/monitor)',
-};
-
-const CONFLICT_OPTIONS: { value: ConflictStrategy; label: string; description: string }[] = [
-  {
-    value:       'update',
-    label:       'Update existing',
-    description: 'When a UUID matches an existing record, overwrite it with the imported data.',
-  },
-  {
-    value:       'generateNew',
-    label:       'Generate new copy',
-    description: 'When a UUID matches an existing record, create a brand-new duplicate with a fresh UUID.',
-  },
-  {
-    value:       'ignore',
-    label:       'Skip duplicates',
-    description: 'When a UUID matches an existing record, skip that item entirely.',
-  },
 ];
 
 // ── Sub-components ────────────────────────────────────────────────────────────
@@ -117,6 +84,19 @@ function SectionSelector({
   descriptions?: Partial<Record<Section, string>>;
   extra?:        ReactNode;
 }) {
+  const { t } = useTranslation();
+
+  const SECTION_LABELS: Record<Section, string> = {
+    monitorGroups:       t('importExport.monitorGroups'),
+    monitors:            t('importExport.monitors'),
+    settings:            t('importExport.settingsSection'),
+    notificationChannels:t('importExport.notificationChannels'),
+    agentGroups:         t('importExport.agentGroups'),
+    teams:               t('importExport.teams'),
+    remediationActions:  t('importExport.remediationActions'),
+    remediationBindings: t('importExport.remediationBindings'),
+  };
+
   const allOn  = sections.length > 0 && sections.every(s => enabled.has(s));
   const someOn = sections.some(s => enabled.has(s));
 
@@ -124,7 +104,7 @@ function SectionSelector({
     <div className="space-y-1">
       {/* All toggle */}
       <div className="flex items-center justify-between py-2 border-b border-border">
-        <span className="text-sm font-medium text-text-primary">All</span>
+        <span className="text-sm font-medium text-text-primary">{t('importExport.all')}</span>
         <Toggle
           checked={allOn}
           indeterminate={!allOn && someOn}
@@ -156,6 +136,41 @@ function SectionSelector({
 // ── Main Page ─────────────────────────────────────────────────────────────────
 
 export function ImportExportPage() {
+  const { t } = useTranslation();
+
+  const SECTION_LABELS: Record<Section, string> = {
+    monitorGroups:       t('importExport.monitorGroups'),
+    monitors:            t('importExport.monitors'),
+    settings:            t('importExport.settingsSection'),
+    notificationChannels:t('importExport.notificationChannels'),
+    agentGroups:         t('importExport.agentGroups'),
+    teams:               t('importExport.teams'),
+    remediationActions:  t('importExport.remediationActions'),
+    remediationBindings: t('importExport.remediationBindings'),
+  };
+
+  const SECTION_DESCRIPTIONS: Partial<Record<Section, string>> = {
+    remediationActions:  t('importExport.remediationActionsDesc'),
+    remediationBindings: t('importExport.remediationBindingsDesc'),
+  };
+
+  const CONFLICT_OPTIONS: { value: ConflictStrategy; label: string; description: string }[] = [
+    {
+      value:       'update',
+      label:       t('importExport.conflictUpdate'),
+      description: t('importExport.conflictUpdateDesc'),
+    },
+    {
+      value:       'generateNew',
+      label:       t('importExport.conflictCopy'),
+      description: t('importExport.conflictCopyDesc'),
+    },
+    {
+      value:       'ignore',
+      label:       t('importExport.conflictSkip'),
+      description: t('importExport.conflictSkipDesc'),
+    },
+  ];
 
   // ── Export state ──
   const [exportSections,       setExportSections]       = useState<Set<Section>>(new Set(ALL_SECTIONS));
@@ -192,7 +207,7 @@ export function ImportExportPage() {
 
   const handleExport = useCallback(async () => {
     if (exportSections.size === 0) {
-      toast.error('Select at least one section to export');
+      toast.error(t('importExport.selectSection'));
       return;
     }
     setExporting(true);
@@ -211,13 +226,13 @@ export function ImportExportPage() {
       a.download = `obliview-export-${new Date().toISOString().slice(0, 10)}.json`;
       a.click();
       URL.revokeObjectURL(url);
-      toast.success('Export downloaded');
+      toast.success(t('importExport.exported'));
     } catch {
-      toast.error('Export failed');
+      toast.error(t('importExport.failedExport'));
     } finally {
       setExporting(false);
     }
-  }, [exportSections, includeSSHCredentials]);
+  }, [exportSections, includeSSHCredentials, t]);
 
   // ── Import handlers ──────────────────────────────────────────────────────
 
@@ -294,11 +309,11 @@ export function ImportExportPage() {
 
   const handleImport = useCallback(async () => {
     if (!importData) {
-      toast.error('Please choose an export file first');
+      toast.error(t('importExport.noFile'));
       return;
     }
     if (importSections.size === 0) {
-      toast.error('Select at least one section to import');
+      toast.error(t('importExport.noSections'));
       return;
     }
     setImporting(true);
@@ -310,13 +325,13 @@ export function ImportExportPage() {
         conflictStrategy,
       });
       setImportResults(res.data.data);
-      toast.success('Import completed successfully');
+      toast.success(t('importExport.importOk'));
     } catch (err: any) {
-      toast.error(err?.response?.data?.error ?? 'Import failed');
+      toast.error(err?.response?.data?.error ?? t('importExport.failedImport'));
     } finally {
       setImporting(false);
     }
-  }, [importData, importSections, conflictStrategy]);
+  }, [importData, importSections, conflictStrategy, t]);
 
   // ── Render ───────────────────────────────────────────────────────────────
 
@@ -327,12 +342,10 @@ export function ImportExportPage() {
       <div className="mb-8">
         <div className="flex items-center gap-3 mb-2">
           <PackageOpen size={22} className="text-accent" />
-          <h1 className="text-2xl font-semibold text-text-primary">Import / Export</h1>
+          <h1 className="text-2xl font-semibold text-text-primary">{t('importExport.title')}</h1>
         </div>
         <p className="text-sm text-text-muted">
-          Export your configuration to a portable JSON file, or import a previously saved file.
-          UUIDs in the file enable idempotent re-imports — existing records are updated rather
-          than duplicated. UUIDs are optional when creating your own import files.
+          {t('importExport.description')}
         </p>
         <a
           href="/obliview-import-example.json"
@@ -340,7 +353,7 @@ export function ImportExportPage() {
           className="mt-2 inline-flex items-center gap-1.5 text-xs text-accent hover:underline"
         >
           <ExternalLink size={11} />
-          Download example / template JSON
+          {t('importExport.downloadTemplate')}
         </a>
       </div>
 
@@ -348,10 +361,10 @@ export function ImportExportPage() {
       <div className="mb-6 rounded-xl border border-border bg-bg-secondary p-6">
         <div className="flex items-center gap-2 mb-1">
           <Download size={15} className="text-accent" />
-          <h2 className="text-base font-semibold text-text-primary">Export</h2>
+          <h2 className="text-base font-semibold text-text-primary">{t('importExport.exportTitle')}</h2>
         </div>
         <p className="text-xs text-text-muted mb-5">
-          Choose what to include in the exported file, then download it.
+          {t('importExport.exportDesc')}
         </p>
 
         <SectionSelector
@@ -371,9 +384,9 @@ export function ImportExportPage() {
                   className="mt-0.5 accent-accent"
                 />
                 <label htmlFor="includeSSHCredentials" className="cursor-pointer">
-                  <span className="text-sm text-text-secondary">Include SSH credentials</span>
+                  <span className="text-sm text-text-secondary">{t('importExport.includeSsh')}</span>
                   <p className="text-[11px] text-text-muted mt-0.5">
-                    Export plaintext SSH passwords and private keys. Off by default for security.
+                    {t('importExport.includeSshDesc')}
                   </p>
                 </label>
               </div>
@@ -388,7 +401,7 @@ export function ImportExportPage() {
             disabled={exportSections.size === 0}
           >
             <Download size={14} className="mr-1.5" />
-            Download JSON
+            {t('importExport.downloadJson')}
           </Button>
         </div>
       </div>
@@ -397,11 +410,10 @@ export function ImportExportPage() {
       <div className="rounded-xl border border-border bg-bg-secondary p-6">
         <div className="flex items-center gap-2 mb-1">
           <Upload size={15} className="text-accent" />
-          <h2 className="text-base font-semibold text-text-primary">Import</h2>
+          <h2 className="text-base font-semibold text-text-primary">{t('importExport.importTitle')}</h2>
         </div>
         <p className="text-xs text-text-muted mb-5">
-          Upload an Obliview export file. Select which sections to import and how to handle
-          records whose UUID already exists in your database.
+          {t('importExport.importDesc')}
         </p>
 
         {/* File drop zone */}
@@ -423,16 +435,16 @@ export function ImportExportPage() {
           <FileJson size={28} className={importFile || isDragging ? 'text-accent' : 'text-text-muted'} />
           <span className="text-sm text-text-secondary text-center">
             {isDragging
-              ? 'Drop the file here'
+              ? t('importExport.dropzoneActive')
               : importFile
                 ? importFile.name
-                : 'Click or drag & drop an export file (.json)'}
+                : t('importExport.dropzone')}
           </span>
           {importFile && (
             <span className="text-xs text-text-muted">
               {(importFile.size / 1024).toFixed(1)} KB
               {availableSections.length > 0 && (
-                <> · {availableSections.length} section{availableSections.length !== 1 ? 's' : ''} found</>
+                <> · {t('importExport.sectionsFound', { count: availableSections.length })}</>
               )}
             </span>
           )}
@@ -451,7 +463,7 @@ export function ImportExportPage() {
             {/* Section selector */}
             <div className="mb-5">
               <p className="text-xs font-medium text-text-muted uppercase tracking-wider mb-3">
-                Sections to import
+                {t('importExport.sectionsToImport')}
               </p>
               <SectionSelector
                 sections={availableSections}
@@ -465,7 +477,7 @@ export function ImportExportPage() {
             {/* Conflict strategy */}
             <div className="mb-5">
               <p className="text-xs font-medium text-text-muted uppercase tracking-wider mb-3">
-                When a UUID already exists in the database
+                {t('importExport.conflictLabel')}
               </p>
               <div className="space-y-2">
                 {CONFLICT_OPTIONS.map(opt => (
@@ -502,7 +514,7 @@ export function ImportExportPage() {
                 disabled={importSections.size === 0}
               >
                 <Upload size={14} className="mr-1.5" />
-                Import
+                {t('importExport.importBtn')}
               </Button>
             </div>
           </>
@@ -511,7 +523,7 @@ export function ImportExportPage() {
         {/* No sections found */}
         {importData && availableSections.length === 0 && (
           <p className="text-sm text-text-muted text-center py-4">
-            No importable sections found in this file.
+            {t('importExport.noImportable')}
           </p>
         )}
 
@@ -520,7 +532,7 @@ export function ImportExportPage() {
           <div className="mt-5 rounded-lg border border-border bg-bg-tertiary p-4">
             <div className="flex items-center gap-2 mb-3 text-green-400">
               <CheckCircle2 size={15} />
-              <span className="text-sm font-medium">Import successful</span>
+              <span className="text-sm font-medium">{t('importExport.importOk')}</span>
             </div>
             <div className="space-y-1.5">
               {Object.entries(importResults).map(([section, r]) => (
@@ -529,11 +541,11 @@ export function ImportExportPage() {
                     {SECTION_LABELS[section as Section] ?? section}
                   </span>
                   <span className="text-text-muted tabular-nums">
-                    <span className="text-green-400">{r.created} created</span>
+                    <span className="text-green-400">{t('importExport.statCreated', { count: r.created })}</span>
                     {' · '}
-                    <span className="text-blue-400">{r.updated} updated</span>
+                    <span className="text-blue-400">{t('importExport.statUpdated', { count: r.updated })}</span>
                     {r.skipped > 0 && (
-                      <>{' · '}<span className="text-yellow-400">{r.skipped} skipped</span></>
+                      <>{' · '}<span className="text-yellow-400">{t('importExport.statSkipped', { count: r.skipped })}</span></>
                     )}
                   </span>
                 </div>

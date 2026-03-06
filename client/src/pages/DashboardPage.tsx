@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { Plus, CheckSquare, Activity, Clock, AlertTriangle, ShieldOff, Folder, Server, Bell } from 'lucide-react';
 import type { Monitor, GroupTreeNode } from '@obliview/shared';
 import { useMonitorStore } from '@/store/monitorStore';
@@ -62,6 +63,7 @@ function distributeColumns<T>(items: T[], getWeight: (item: T) => number): [T[],
 export function DashboardPage() {
   useSocket();
 
+  const { t } = useTranslation();
   const { canCreate } = useAuthStore();
   const { openAddAgentModal } = useUiStore();
   const { fetchMonitors, fetchAllHeartbeats, getMonitorList, getMonitorsByGroup, getRecentHeartbeats, isLoading } = useMonitorStore();
@@ -171,7 +173,7 @@ export function DashboardPage() {
       return (
         <DashboardSection
           key="ungrouped"
-          title="Ungrouped"
+          title={t('dashboard.sectionUngrouped')}
           borderColor="border-border"
         >
           {block.monitors.map((m) => (
@@ -216,7 +218,7 @@ export function DashboardPage() {
     <div className="p-6">
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-semibold text-text-primary">Dashboard</h1>
+        <h1 className="text-2xl font-semibold text-text-primary">{t('dashboard.title')}</h1>
         {showCreate && (
           <div className="flex items-center gap-2">
             <Button
@@ -229,16 +231,16 @@ export function DashboardPage() {
               }}
             >
               <CheckSquare size={16} className="mr-1.5" />
-              {selectionMode ? 'Cancel' : 'Select'}
+              {selectionMode ? t('dashboard.cancelSelection') : t('dashboard.select')}
             </Button>
             <Button variant="secondary" size="sm" onClick={openAddAgentModal}>
               <Plus size={16} className="mr-1.5" />
-              Add Agent
+              {t('dashboard.addAgent')}
             </Button>
             <Link to="/monitor/new">
               <Button variant="secondary" size="sm">
                 <Plus size={16} className="mr-1.5" />
-                Add Monitor
+                {t('dashboard.addMonitor')}
               </Button>
             </Link>
           </div>
@@ -249,36 +251,36 @@ export function DashboardPage() {
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-8 gap-4 mb-6">
         <div className="rounded-lg border border-border bg-bg-secondary p-4">
           <div className="text-2xl font-bold text-status-up">{upCount}</div>
-          <div className="text-sm text-text-secondary">Up</div>
+          <div className="text-sm text-text-secondary">{t('dashboard.statsUp')}</div>
         </div>
         <div className="rounded-lg border border-border bg-bg-secondary p-4">
           <div className="text-2xl font-bold text-status-down">{downCount}</div>
-          <div className="text-sm text-text-secondary">Down</div>
+          <div className="text-sm text-text-secondary">{t('dashboard.statsDown')}</div>
         </div>
         {alertCount > 0 && (
           <div className="rounded-lg border border-border bg-bg-secondary p-4">
             <div className="text-2xl font-bold text-orange-500">{alertCount}</div>
-            <div className="text-sm text-text-secondary">Alert</div>
+            <div className="text-sm text-text-secondary">{t('dashboard.statsAlert')}</div>
           </div>
         )}
         <div className="rounded-lg border border-border bg-bg-secondary p-4">
           <div className="text-2xl font-bold text-status-pending">{pendingCount}</div>
-          <div className="text-sm text-text-secondary">Pending</div>
+          <div className="text-sm text-text-secondary">{t('dashboard.statsPending')}</div>
         </div>
         <div className="rounded-lg border border-border bg-bg-secondary p-4">
           <div className="text-2xl font-bold text-status-paused">{pausedCount}</div>
-          <div className="text-sm text-text-secondary">Paused</div>
+          <div className="text-sm text-text-secondary">{t('dashboard.statsPaused')}</div>
         </div>
         {(sslWarnCount > 0 || sslExpiredCount > 0) && (
           <div className="rounded-lg border border-border bg-bg-secondary p-4">
             <div className="text-2xl font-bold text-status-ssl-warning">{sslWarnCount}</div>
-            <div className="text-sm text-text-secondary">SSL Warn</div>
+            <div className="text-sm text-text-secondary">{t('dashboard.statsSslWarn')}</div>
           </div>
         )}
         {sslExpiredCount > 0 && (
           <div className="rounded-lg border border-border bg-bg-secondary p-4">
             <div className="text-2xl font-bold text-status-ssl-expired">{sslExpiredCount}</div>
-            <div className="text-sm text-text-secondary">SSL Expired</div>
+            <div className="text-sm text-text-secondary">{t('dashboard.statsSslExpired')}</div>
           </div>
         )}
         <div className="rounded-lg border border-border bg-bg-secondary p-4">
@@ -286,14 +288,14 @@ export function DashboardPage() {
             <Activity size={20} />
             {overallUptime !== null ? `${overallUptime}%` : '-'}
           </div>
-          <div className="text-sm text-text-secondary">Uptime (24h)</div>
+          <div className="text-sm text-text-secondary">{t('dashboard.statsUptime')}</div>
         </div>
         <div className="rounded-lg border border-border bg-bg-secondary p-4">
           <div className="flex items-center gap-1.5 text-2xl font-bold text-text-primary">
             <Clock size={20} />
             {overallAvgRt !== null ? `${overallAvgRt}ms` : '-'}
           </div>
-          <div className="text-sm text-text-secondary">Avg Response</div>
+          <div className="text-sm text-text-secondary">{t('dashboard.statsAvgResponse')}</div>
         </div>
       </div>
 
@@ -301,16 +303,18 @@ export function DashboardPage() {
       {selectionMode && selectedIds.size > 0 && (
         <div className="mb-4 flex items-center gap-3 rounded-lg border border-accent/30 bg-bg-tertiary p-3">
           <span className="text-sm text-text-secondary">
-            {selectedIds.size} {selectionKind === 'agent' ? 'agent' : 'monitor'}{selectedIds.size > 1 ? 's' : ''} selected
+            {selectionKind === 'agent'
+              ? t(selectedIds.size === 1 ? 'dashboard.selectedCountAgent_one' : 'dashboard.selectedCountAgent_other', { count: selectedIds.size })
+              : t(selectedIds.size === 1 ? 'dashboard.selectedCount_one' : 'dashboard.selectedCount_other', { count: selectedIds.size })}
           </span>
           <Button variant="secondary" size="sm" onClick={() => setBulkEditOpen(true)}>
-            Edit Selected
+            {t('dashboard.editSelected')}
           </Button>
           <Button variant="secondary" size="sm">
-            Pause
+            {t('dashboard.pause')}
           </Button>
           <Button variant="danger" size="sm">
-            Delete
+            {t('dashboard.bulkDelete')}
           </Button>
         </div>
       )}
@@ -319,7 +323,7 @@ export function DashboardPage() {
       {downMonitors.length > 0 && (
         <DashboardSection
           icon={<AlertTriangle size={16} className="text-status-down" />}
-          title="Down"
+          title={t('dashboard.sectionDown')}
           badge={<span className="text-xs font-semibold text-status-down">{downMonitors.length}</span>}
           borderColor="border-status-down/30"
         >
@@ -343,7 +347,7 @@ export function DashboardPage() {
       {alertMonitors.length > 0 && (
         <DashboardSection
           icon={<Bell size={16} className="text-orange-500" />}
-          title="Alert"
+          title={t('dashboard.sectionAlert')}
           badge={<span className="text-xs font-semibold text-orange-500">{alertMonitors.length}</span>}
           borderColor="border-orange-500/30"
         >
@@ -367,7 +371,7 @@ export function DashboardPage() {
       {sslExpiredMonitors.length > 0 && (
         <DashboardSection
           icon={<ShieldOff size={16} className="text-status-ssl-expired" />}
-          title="SSL Expired"
+          title={t('dashboard.sectionSslExpired')}
           badge={<span className="text-xs font-semibold text-status-ssl-expired">{sslExpiredMonitors.length}</span>}
           borderColor="border-status-ssl-expired/30"
         >
@@ -400,7 +404,7 @@ export function DashboardPage() {
       {/* Empty state */}
       {monitors.length === 0 && (
         <div className="py-12 text-center">
-          <p className="text-text-muted">No monitors found</p>
+          <p className="text-text-muted">{t('dashboard.noMonitors')}</p>
         </div>
       )}
 

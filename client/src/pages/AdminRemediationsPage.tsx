@@ -16,6 +16,7 @@ import { remediationApi } from '../api/remediation.api';
 import { Button } from '../components/common/Button';
 import { Input } from '../components/common/Input';
 import toast from 'react-hot-toast';
+import { useTranslation } from 'react-i18next';
 
 // ─── Type metadata ─────────────────────────────────────────────────────────────
 
@@ -140,6 +141,7 @@ function SshForm({
   onChange: (c: Partial<SshRemediationConfig & { credential?: string }>) => void;
   isEdit?: boolean;
 }) {
+  const { t } = useTranslation();
   return (
     <div className="space-y-3">
       <div className="grid grid-cols-3 gap-3">
@@ -191,7 +193,7 @@ function SshForm({
       <Input label="Timeout (ms)" type="number" min={1000} max={60000}
         value={String(config.timeoutMs ?? 15000)}
         onChange={e => onChange({ ...config, timeoutMs: Number(e.target.value) })} />
-      <p className="text-xs text-text-muted">Credentials are stored encrypted (AES-256-GCM) on the server.</p>
+      <p className="text-xs text-text-muted">{t('remediations.credentialsNote')}</p>
     </div>
   );
 }
@@ -207,6 +209,7 @@ function ActionModal({
   onSave: (name: string, type: RemediationActionType, config: AnyConfig, enabled: boolean) => Promise<void>;
   onClose: () => void;
 }) {
+  const { t } = useTranslation();
   const [type, setType] = useState<RemediationActionType>(initial?.type ?? 'webhook');
   const [name, setName] = useState(initial?.name ?? '');
   const [enabled, setEnabled] = useState(initial?.enabled ?? true);
@@ -251,30 +254,30 @@ function ActionModal({
       <div className="w-full max-w-lg rounded-xl border border-border bg-bg-primary shadow-2xl max-h-[90vh] flex flex-col">
         <div className="flex items-center justify-between px-6 py-4 border-b border-border shrink-0">
           <h2 className="text-base font-semibold text-text-primary flex items-center gap-2">
-            <ShieldCheck size={16} /> {initial ? 'Edit Action' : 'New Remediation Action'}
+            <ShieldCheck size={16} /> {initial ? t('remediations.editAction') : t('remediations.newAction')}
           </h2>
           <button onClick={onClose} className="text-text-muted hover:text-text-primary text-xl leading-none">×</button>
         </div>
 
         <form onSubmit={handleSubmit} className="overflow-y-auto flex-1 p-5 space-y-4">
-          <Input label="Name" required value={name} onChange={e => setName(e.target.value)} placeholder="Restart Nginx" />
+          <Input label={t('remediations.nameLabel')} required value={name} onChange={e => setName(e.target.value)} placeholder={t('remediations.namePlaceholder')} />
 
           {/* Type selector — only for new actions */}
           {!initial && (
             <div>
-              <label className="block text-xs font-medium text-text-secondary mb-2">Action Type</label>
+              <label className="block text-xs font-medium text-text-secondary mb-2">{t('remediations.actionType')}</label>
               <div className="grid grid-cols-1 gap-2">
-                {ACTION_TYPES.map(t => (
-                  <label key={t} className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${
-                    type === t
+                {ACTION_TYPES.map(t_ => (
+                  <label key={t_} className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${
+                    type === t_
                       ? 'border-accent bg-accent/5'
                       : 'border-border hover:border-accent/50 hover:bg-bg-hover'
                   }`}>
-                    <input type="radio" name="actionType" value={t} checked={type === t}
-                      onChange={() => { setType(t); setConfig({}); }} className="mt-0.5 accent-accent" />
+                    <input type="radio" name="actionType" value={t_} checked={type === t_}
+                      onChange={() => { setType(t_); setConfig({}); }} className="mt-0.5 accent-accent" />
                     <div>
-                      <div className="text-sm font-medium text-text-primary">{ACTION_TYPE_LABELS[t]}</div>
-                      <div className="text-xs text-text-muted">{ACTION_TYPE_DESCRIPTIONS[t]}</div>
+                      <div className="text-sm font-medium text-text-primary">{ACTION_TYPE_LABELS[t_]}</div>
+                      <div className="text-xs text-text-muted">{ACTION_TYPE_DESCRIPTIONS[t_]}</div>
                     </div>
                   </label>
                 ))}
@@ -284,7 +287,7 @@ function ActionModal({
 
           {/* Enabled toggle */}
           <div className="flex items-center justify-between">
-            <span className="text-sm text-text-secondary">Enabled</span>
+            <span className="text-sm text-text-secondary">{t('remediations.enabledLabel')}</span>
             <button type="button" onClick={() => setEnabled(v => !v)}
               className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
                 enabled ? 'bg-accent' : 'bg-bg-tertiary border border-border'
@@ -297,20 +300,20 @@ function ActionModal({
 
           <div className="border-t border-border pt-4">
             <p className="text-xs font-medium text-text-muted uppercase tracking-wide mb-3">
-              {ACTION_TYPE_LABELS[type]} Configuration
+              {t('remediations.sectionConfig', { type: ACTION_TYPE_LABELS[type] })}
             </p>
             {renderConfigForm()}
           </div>
         </form>
 
         <div className="flex justify-end gap-2 px-6 py-4 border-t border-border shrink-0">
-          <Button variant="secondary" onClick={onClose} type="button">Cancel</Button>
+          <Button variant="secondary" onClick={onClose} type="button">{t('common.cancel')}</Button>
           <Button loading={saving} onClick={(e) => {
             // trigger form submit
             (e.currentTarget.closest('form') as HTMLFormElement | null)?.requestSubmit()
               ?? handleSubmit(e as unknown as React.FormEvent);
           }}>
-            {initial ? 'Save' : 'Create'}
+            {initial ? t('common.save') : t('common.create')}
           </Button>
         </div>
       </div>
@@ -321,6 +324,7 @@ function ActionModal({
 // ─── Global Bindings inline panel ─────────────────────────────────────────────
 
 function GlobalBindingsPanel({ actions }: { actions: RemediationAction[] }) {
+  const { t } = useTranslation();
   const [bindings, setBindings] = useState<RemediationBinding[]>([]);
   const [open, setOpen] = useState(false);
   const [addingId, setAddingId] = useState<number | null>(null);
@@ -360,7 +364,7 @@ function GlobalBindingsPanel({ actions }: { actions: RemediationAction[] }) {
         className="w-full flex items-center justify-between px-4 py-3 text-sm font-medium text-text-primary hover:bg-bg-hover transition-colors rounded-lg">
         <span className="flex items-center gap-2">
           <Globe size={14} className="text-text-muted" />
-          Global Bindings
+          {t('remediations.globalBindings')}
           {bindings.length > 0 && (
             <span className="rounded-full bg-accent/10 text-accent text-xs px-2 py-0.5 font-medium">
               {bindings.length}
@@ -372,10 +376,10 @@ function GlobalBindingsPanel({ actions }: { actions: RemediationAction[] }) {
       {open && (
         <div className="px-4 pb-4 border-t border-border space-y-1 pt-3">
           <p className="text-xs text-text-muted mb-2">
-            Globally bound actions fire for <em>every</em> monitor status change.
+            {t('remediations.globalBindingsDesc')}
           </p>
           {actions.length === 0 && (
-            <p className="text-xs text-text-muted">No actions created yet.</p>
+            <p className="text-xs text-text-muted">{t('remediations.noActions')}</p>
           )}
           {actions.map(a => (
             <div key={a.id} className="flex items-center justify-between gap-2 py-1">
@@ -393,7 +397,7 @@ function GlobalBindingsPanel({ actions }: { actions: RemediationAction[] }) {
                     ? 'bg-accent/10 text-accent hover:bg-accent/20'
                     : 'text-text-muted border border-border hover:bg-bg-hover'
                 }`}>
-                {addingId === a.id ? <Loader2 size={11} className="animate-spin" /> : isBound(a.id) ? 'Global ✓' : 'Add to global'}
+                {addingId === a.id ? <Loader2 size={11} className="animate-spin" /> : isBound(a.id) ? t('remediations.globalActive') : t('remediations.addToGlobal')}
               </button>
             </div>
           ))}
@@ -406,6 +410,7 @@ function GlobalBindingsPanel({ actions }: { actions: RemediationAction[] }) {
 // ─── Main Page ─────────────────────────────────────────────────────────────────
 
 export function AdminRemediationsPage() {
+  const { t } = useTranslation();
   const [actions, setActions]   = useState<RemediationAction[]>([]);
   const [loading, setLoading]   = useState(true);
   const [showModal, setShowModal] = useState(false);
@@ -466,14 +471,14 @@ export function AdminRemediationsPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-bold text-text-primary flex items-center gap-2">
-            <ShieldCheck size={20} /> Remediations
+            <ShieldCheck size={20} /> {t('remediations.title')}
           </h1>
           <p className="text-sm text-text-muted mt-0.5">
             Automated actions triggered when monitors change status
           </p>
         </div>
         <Button onClick={openCreate} className="flex items-center gap-1.5">
-          <Plus size={15} /> New Action
+          <Plus size={15} /> {t('remediations.newAction')}
         </Button>
       </div>
 
@@ -489,7 +494,7 @@ export function AdminRemediationsPage() {
         ) : actions.length === 0 ? (
           <div className="py-12 text-center">
             <ShieldCheck size={32} className="mx-auto mb-3 text-text-muted opacity-40" />
-            <p className="text-text-muted">No remediation actions yet</p>
+            <p className="text-text-muted">{t('remediations.noActions')}</p>
             <p className="text-sm text-text-muted mt-1">
               Create actions to automate responses to monitor failures
             </p>
@@ -508,7 +513,7 @@ export function AdminRemediationsPage() {
                       </span>
                       {!action.enabled && (
                         <span className="rounded-full bg-status-down/10 px-2 py-0.5 text-[10px] font-medium text-status-down">
-                          Disabled
+                          {t('status.disabled')}
                         </span>
                       )}
                     </div>
@@ -534,12 +539,12 @@ export function AdminRemediationsPage() {
                     </button>
                     <button onClick={() => openEdit(action)}
                       className="p-1.5 rounded text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors"
-                      title="Edit">
+                      title={t('common.edit')}>
                       <Pencil size={14} />
                     </button>
                     <button onClick={() => void handleDelete(action.id)} disabled={deleting === action.id}
                       className="p-1.5 rounded text-text-muted hover:text-status-down hover:bg-status-down/10 transition-colors disabled:opacity-40"
-                      title="Delete">
+                      title={t('common.delete')}>
                       {deleting === action.id
                         ? <Loader2 size={14} className="animate-spin" />
                         : <Trash2 size={14} />}

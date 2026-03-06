@@ -7,7 +7,7 @@ export const profileApi = {
     return res.data.data;
   },
 
-  async update(data: { displayName?: string | null; preferences?: UserPreferences | null }): Promise<User> {
+  async update(data: { displayName?: string | null; email?: string | null; preferredLanguage?: string; preferences?: UserPreferences | null }): Promise<User> {
     const res = await apiClient.put('/profile', data);
     return res.data.data;
   },

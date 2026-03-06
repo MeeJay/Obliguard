@@ -32,12 +32,14 @@ import { useAuthStore } from '@/store/authStore';
 import { Button } from '@/components/common/Button';
 import { Input } from '@/components/common/Input';
 import toast from 'react-hot-toast';
+import { useTranslation } from 'react-i18next';
 
 type Tab = 'users' | 'teams';
 type UserFormMode = 'create' | 'edit' | 'password' | null;
 type TeamFormMode = 'create' | 'edit' | null;
 
 export function AdminUsersPage() {
+  const { t } = useTranslation();
   const { user: currentUser } = useAuthStore();
   const [tab, setTab] = useState<Tab>('users');
 
@@ -94,7 +96,7 @@ export function AdminUsersPage() {
       setTeamMembers(detail.memberIds);
       setTeamPermissions(detail.permissions);
     } catch {
-      toast.error('Failed to load team details');
+      toast.error(t('users.teams.failedMembers'));
     }
   };
 
@@ -124,11 +126,11 @@ export function AdminUsersPage() {
         displayName: formDisplayName || undefined,
         role: formRole,
       });
-      toast.success('User created');
+      toast.success(t('users.created'));
       resetUserForm();
       load();
     } catch {
-      toast.error('Failed to create user');
+      toast.error(t('users.failedCreate'));
     } finally {
       setSaving(false);
     }
@@ -144,11 +146,11 @@ export function AdminUsersPage() {
         displayName: formDisplayName || null,
         role: formRole,
       });
-      toast.success('User updated');
+      toast.success(t('users.updated'));
       resetUserForm();
       load();
     } catch {
-      toast.error('Failed to update user');
+      toast.error(t('users.failedUpdate'));
     } finally {
       setSaving(false);
     }
@@ -170,23 +172,23 @@ export function AdminUsersPage() {
   };
 
   const handleDeleteUser = async (user: User) => {
-    if (!confirm(`Delete user "${user.username}"?`)) return;
+    if (!confirm(t('users.confirmDelete', { username: user.username }))) return;
     try {
       await usersApi.delete(user.id);
-      toast.success('User deleted');
+      toast.success(t('users.deleted'));
       load();
     } catch {
-      toast.error('Failed to delete user');
+      toast.error(t('users.failedDelete'));
     }
   };
 
   const handleToggleActive = async (user: User) => {
     try {
       await usersApi.update(user.id, { isActive: !user.isActive });
-      toast.success(user.isActive ? 'User disabled' : 'User enabled');
+      toast.success(user.isActive ? t('users.disabled') : t('users.enabled'));
       load();
     } catch {
-      toast.error('Failed to update user');
+      toast.error(t('users.failedUpdate'));
     }
   };
 
@@ -209,12 +211,12 @@ export function AdminUsersPage() {
         description: formTeamDesc || null,
         canCreate: formCanCreate,
       });
-      toast.success('Team created');
+      toast.success(t('users.teams.created'));
       resetTeamForm();
       load();
       selectTeam(team.id);
     } catch {
-      toast.error('Failed to create team');
+      toast.error(t('users.teams.failedCreate'));
     } finally {
       setSaving(false);
     }
@@ -230,25 +232,25 @@ export function AdminUsersPage() {
         description: formTeamDesc || null,
         canCreate: formCanCreate,
       });
-      toast.success('Team updated');
+      toast.success(t('users.teams.updated'));
       resetTeamForm();
       load();
     } catch {
-      toast.error('Failed to update team');
+      toast.error(t('users.teams.failedUpdate'));
     } finally {
       setSaving(false);
     }
   };
 
   const handleDeleteTeam = async (team: UserTeam) => {
-    if (!confirm(`Delete team "${team.name}"?`)) return;
+    if (!confirm(t('users.teams.confirmDelete', { name: team.name }))) return;
     try {
       await teamsApi.delete(team.id);
-      toast.success('Team deleted');
+      toast.success(t('users.teams.deleted'));
       if (selectedTeamId === team.id) setSelectedTeamId(null);
       load();
     } catch {
-      toast.error('Failed to delete team');
+      toast.error(t('users.teams.failedDelete'));
     }
   };
 
@@ -263,7 +265,7 @@ export function AdminUsersPage() {
       await teamsApi.setMembers(selectedTeamId, { userIds: newMembers });
       setTeamMembers(newMembers);
     } catch {
-      toast.error('Failed to update members');
+      toast.error(t('users.teams.failedUpdateMembers'));
     }
   };
 
@@ -283,7 +285,7 @@ export function AdminUsersPage() {
         });
         await loadTeamDetails(selectedTeamId);
       } catch {
-        toast.error('Failed to update permission');
+        toast.error(t('users.teams.failedUpdatePermission'));
       }
     } else {
       // Add new
@@ -295,7 +297,7 @@ export function AdminUsersPage() {
         await teamsApi.setPermissions(selectedTeamId, { permissions: newPerms });
         await loadTeamDetails(selectedTeamId);
       } catch {
-        toast.error('Failed to add permission');
+        toast.error(t('users.teams.failedAddPermission'));
       }
     }
   };
@@ -306,7 +308,7 @@ export function AdminUsersPage() {
       await teamsApi.removePermission(selectedTeamId, permId);
       setTeamPermissions((prev) => prev.filter((p) => p.id !== permId));
     } catch {
-      toast.error('Failed to remove permission');
+      toast.error(t('users.teams.failedRemovePermission'));
     }
   };
 
@@ -376,7 +378,7 @@ export function AdminUsersPage() {
             }`}
           >
             <UserIcon size={14} className="inline mr-1.5" />
-            Users
+            {t('users.tabUsers')}
           </button>
           <button
             onClick={() => setTab('teams')}
@@ -387,7 +389,7 @@ export function AdminUsersPage() {
             }`}
           >
             <Users size={14} className="inline mr-1.5" />
-            Teams
+            {t('users.tabTeams')}
           </button>
         </div>
 
@@ -395,9 +397,9 @@ export function AdminUsersPage() {
         {tab === 'users' && (
           <>
             <div className="flex items-center justify-between mb-4">
-              <h2 className="text-lg font-semibold text-text-primary">Users</h2>
+              <h2 className="text-lg font-semibold text-text-primary">{t('users.tabUsers')}</h2>
               <Button size="sm" onClick={() => { resetUserForm(); setUserFormMode('create'); }}>
-                <Plus size={14} className="mr-1" />New
+                <Plus size={14} className="mr-1" />{t('common.new')}
               </Button>
             </div>
 
@@ -405,25 +407,25 @@ export function AdminUsersPage() {
             {(userFormMode === 'create' || userFormMode === 'edit') && (
               <div className="mb-4 rounded-lg border border-border bg-bg-secondary p-4">
                 <h3 className="text-sm font-semibold text-text-secondary uppercase tracking-wide mb-3">
-                  {userFormMode === 'create' ? 'New User' : `Edit: ${editingUser?.username}`}
+                  {userFormMode === 'create' ? t('users.newUser') : t('users.editUser', { username: editingUser?.username })}
                 </h3>
                 <form onSubmit={userFormMode === 'create' ? handleCreateUser : handleEditUser} className="space-y-3">
-                  <Input label="Username" value={formUsername} onChange={(e) => setFormUsername(e.target.value)} required pattern="[a-zA-Z0-9_.\-]+" />
-                  <Input label="Display Name" value={formDisplayName} onChange={(e) => setFormDisplayName(e.target.value)} />
+                  <Input label={t('users.usernameLabel')} value={formUsername} onChange={(e) => setFormUsername(e.target.value)} required pattern="[a-zA-Z0-9_.\-]+" />
+                  <Input label={t('users.displayNameLabel')} value={formDisplayName} onChange={(e) => setFormDisplayName(e.target.value)} />
                   {userFormMode === 'create' && (
-                    <Input label="Password" type="password" value={formPassword} onChange={(e) => setFormPassword(e.target.value)} required minLength={6} />
+                    <Input label={t('users.passwordLabel')} type="password" value={formPassword} onChange={(e) => setFormPassword(e.target.value)} required minLength={6} />
                   )}
                   <div className="space-y-1">
-                    <label className="block text-sm font-medium text-text-secondary">Role</label>
+                    <label className="block text-sm font-medium text-text-secondary">{t('users.roleLabel')}</label>
                     <select value={formRole} onChange={(e) => setFormRole(e.target.value as 'admin' | 'user')}
                       className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent">
-                      <option value="user">User</option>
-                      <option value="admin">Admin</option>
+                      <option value="user">{t('users.roleUser')}</option>
+                      <option value="admin">{t('users.roleAdmin')}</option>
                     </select>
                   </div>
                   <div className="flex gap-2">
-                    <Button type="submit" size="sm" loading={saving}>{userFormMode === 'create' ? 'Create' : 'Save'}</Button>
-                    <Button type="button" size="sm" variant="secondary" onClick={resetUserForm}>Cancel</Button>
+                    <Button type="submit" size="sm" loading={saving}>{userFormMode === 'create' ? t('common.create') : t('common.save')}</Button>
+                    <Button type="button" size="sm" variant="secondary" onClick={resetUserForm}>{t('common.cancel')}</Button>
                   </div>
                 </form>
               </div>
@@ -432,13 +434,13 @@ export function AdminUsersPage() {
             {userFormMode === 'password' && editingUser && (
               <div className="mb-4 rounded-lg border border-border bg-bg-secondary p-4">
                 <h3 className="text-sm font-semibold text-text-secondary uppercase tracking-wide mb-3">
-                  Password: {editingUser.username}
+                  {t('users.changePasswordTitle', { username: editingUser.username })}
                 </h3>
                 <form onSubmit={handlePasswordChange} className="space-y-3">
-                  <Input label="New Password" type="password" value={formPassword} onChange={(e) => setFormPassword(e.target.value)} required minLength={6} />
+                  <Input label={t('users.newPassword')} type="password" value={formPassword} onChange={(e) => setFormPassword(e.target.value)} required minLength={6} />
                   <div className="flex gap-2">
-                    <Button type="submit" size="sm" loading={saving}>Change</Button>
-                    <Button type="button" size="sm" variant="secondary" onClick={resetUserForm}>Cancel</Button>
+                    <Button type="submit" size="sm" loading={saving}>{t('users.changePassword')}</Button>
+                    <Button type="button" size="sm" variant="secondary" onClick={resetUserForm}>{t('common.cancel')}</Button>
                   </div>
                 </form>
               </div>
@@ -455,7 +457,7 @@ export function AdminUsersPage() {
                       <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
                         user.role === 'admin' ? 'bg-accent/10 text-accent' : 'bg-bg-tertiary text-text-muted'
                       }`}>
-                        {user.role === 'admin' ? <><Shield size={10} className="inline mr-0.5" />Admin</> : 'User'}
+                        {user.role === 'admin' ? <><Shield size={10} className="inline mr-0.5" />{t('users.roleAdmin')}</> : t('users.roleUser')}
                       </span>
                       {!user.isActive && (
                         <span className="rounded-full bg-status-down/10 px-1.5 py-0.5 text-[10px] font-medium text-status-down">Off</span>
@@ -469,18 +471,18 @@ export function AdminUsersPage() {
                         <Key size={13} />
                       </button>
                       <button onClick={() => handleToggleActive(user)}
-                        className="shrink-0 p-1 text-text-muted hover:text-text-primary opacity-0 group-hover:opacity-100" title={user.isActive ? 'Disable' : 'Enable'}>
+                        className="shrink-0 p-1 text-text-muted hover:text-text-primary opacity-0 group-hover:opacity-100" title={user.isActive ? t('common.disable') : t('common.enable')}>
                         {user.isActive ? <UserX size={13} /> : <UserIcon size={13} />}
                       </button>
                     </>
                   )}
                   <button onClick={() => { setEditingUser(user); setFormUsername(user.username); setFormDisplayName(user.displayName || ''); setFormRole(user.role); setUserFormMode('edit'); }}
-                    className="shrink-0 p-1 text-text-muted hover:text-text-primary opacity-0 group-hover:opacity-100" title="Edit">
+                    className="shrink-0 p-1 text-text-muted hover:text-text-primary opacity-0 group-hover:opacity-100" title={t('common.edit')}>
                     <Pencil size={13} />
                   </button>
                   {user.id !== currentUser?.id && (
                     <button onClick={() => handleDeleteUser(user)}
-                      className="shrink-0 p-1 text-text-muted hover:text-status-down opacity-0 group-hover:opacity-100" title="Delete">
+                      className="shrink-0 p-1 text-text-muted hover:text-status-down opacity-0 group-hover:opacity-100" title={t('common.delete')}>
                       <Trash2 size={13} />
                     </button>
                   )}
@@ -494,9 +496,9 @@ export function AdminUsersPage() {
         {tab === 'teams' && (
           <>
             <div className="flex items-center justify-between mb-4">
-              <h2 className="text-lg font-semibold text-text-primary">Teams</h2>
+              <h2 className="text-lg font-semibold text-text-primary">{t('users.tabTeams')}</h2>
               <Button size="sm" onClick={() => { resetTeamForm(); setTeamFormMode('create'); }}>
-                <Plus size={14} className="mr-1" />New
+                <Plus size={14} className="mr-1" />{t('common.new')}
               </Button>
             </div>
 
@@ -504,19 +506,19 @@ export function AdminUsersPage() {
             {(teamFormMode === 'create' || teamFormMode === 'edit') && (
               <div className="mb-4 rounded-lg border border-border bg-bg-secondary p-4">
                 <h3 className="text-sm font-semibold text-text-secondary uppercase tracking-wide mb-3">
-                  {teamFormMode === 'create' ? 'New Team' : `Edit: ${editingTeam?.name}`}
+                  {teamFormMode === 'create' ? t('users.teams.newTeam') : t('users.teams.editTeam', { name: editingTeam?.name })}
                 </h3>
                 <form onSubmit={teamFormMode === 'create' ? handleCreateTeam : handleEditTeam} className="space-y-3">
-                  <Input label="Name" value={formTeamName} onChange={(e) => setFormTeamName(e.target.value)} required />
-                  <Input label="Description" value={formTeamDesc} onChange={(e) => setFormTeamDesc(e.target.value)} />
+                  <Input label={t('users.teams.nameLabel')} value={formTeamName} onChange={(e) => setFormTeamName(e.target.value)} required />
+                  <Input label={t('users.teams.descLabel')} value={formTeamDesc} onChange={(e) => setFormTeamDesc(e.target.value)} />
                   <label className="flex items-center gap-2 text-sm text-text-primary cursor-pointer">
                     <input type="checkbox" checked={formCanCreate} onChange={(e) => setFormCanCreate(e.target.checked)}
                       className="rounded border-border text-accent focus:ring-accent" />
-                    Can create monitors & groups
+                    {t('users.teams.canCreate')}
                   </label>
                   <div className="flex gap-2">
-                    <Button type="submit" size="sm" loading={saving}>{teamFormMode === 'create' ? 'Create' : 'Save'}</Button>
-                    <Button type="button" size="sm" variant="secondary" onClick={resetTeamForm}>Cancel</Button>
+                    <Button type="submit" size="sm" loading={saving}>{teamFormMode === 'create' ? t('common.create') : t('common.save')}</Button>
+                    <Button type="button" size="sm" variant="secondary" onClick={resetTeamForm}>{t('common.cancel')}</Button>
                   </div>
                 </form>
               </div>
@@ -527,7 +529,7 @@ export function AdminUsersPage() {
               {teams.length === 0 ? (
                 <div className="py-8 text-center">
                   <Users size={28} className="mx-auto mb-2 text-text-muted" />
-                  <p className="text-sm text-text-muted">No teams created yet</p>
+                  <p className="text-sm text-text-muted">{t('users.teams.noTeams')}</p>
                 </div>
               ) : (
                 teams.map((team) => (
@@ -543,7 +545,7 @@ export function AdminUsersPage() {
                       <span className="text-sm font-medium text-text-primary">{team.name}</span>
                       {team.canCreate && (
                         <span className="ml-2 rounded-full bg-accent/10 px-1.5 py-0.5 text-[10px] font-medium text-accent">
-                          Create
+                          {t('users.teams.createBadge')}
                         </span>
                       )}
                       {team.description && (
@@ -586,7 +588,7 @@ export function AdminUsersPage() {
                   rightTab === 'members' ? 'bg-accent text-white' : 'text-text-muted hover:text-text-primary'
                 }`}
               >
-                Members
+                {t('users.teams.tabMembers')}
               </button>
               <button
                 onClick={() => setRightTab('permissions')}
@@ -594,7 +596,7 @@ export function AdminUsersPage() {
                   rightTab === 'permissions' ? 'bg-accent text-white' : 'text-text-muted hover:text-text-primary'
                 }`}
               >
-                Permissions
+                {t('users.teams.tabPermissions')}
               </button>
             </div>
 
@@ -602,7 +604,7 @@ export function AdminUsersPage() {
             {rightTab === 'members' && (
               <div className="rounded-lg border border-border bg-bg-secondary divide-y divide-border max-h-[60vh] overflow-y-auto">
                 {users.filter((u) => u.role !== 'admin').length === 0 ? (
-                  <p className="p-4 text-sm text-text-muted text-center">No non-admin users</p>
+                  <p className="p-4 text-sm text-text-muted text-center">{t('users.teams.noUsers')}</p>
                 ) : (
                   users.filter((u) => u.role !== 'admin').map((user) => {
                     const isMember = teamMembers.includes(user.id);
@@ -618,7 +620,7 @@ export function AdminUsersPage() {
                         </div>
                         <span className="text-sm text-text-primary">{user.username}</span>
                         {user.displayName && <span className="text-xs text-text-muted">({user.displayName})</span>}
-                        {!user.isActive && <span className="text-[10px] text-status-down">Disabled</span>}
+                        {!user.isActive && <span className="text-[10px] text-status-down">{t('users.disabled')}</span>}
                       </label>
                     );
                   })
@@ -630,7 +632,7 @@ export function AdminUsersPage() {
             {rightTab === 'permissions' && (
               <div className="rounded-lg border border-border bg-bg-secondary max-h-[70vh] overflow-y-auto">
                 {tree.length === 0 && ungroupedMonitors.length === 0 ? (
-                  <p className="p-4 text-sm text-text-muted text-center">No groups or monitors</p>
+                  <p className="p-4 text-sm text-text-muted text-center">{t('users.teams.noResources')}</p>
                 ) : (
                   <div className="py-1">
                     {tree.map((node) => (
@@ -705,6 +707,7 @@ function PermTreeNode({
   removePermission,
   togglePermissionLevel,
 }: PermTreeNodeProps) {
+  const { t } = useTranslation();
   const [expanded, setExpanded] = useState(true);
   const perm = getGroupPerm(node.id);
   const isCovered = coveredGroupIds.has(node.id);
@@ -733,7 +736,7 @@ function PermTreeNode({
         </span>
 
         {node.isGeneral && (
-          <span className="text-[10px] text-accent bg-accent/10 px-1 rounded shrink-0">General</span>
+          <span className="text-[10px] text-accent bg-accent/10 px-1 rounded shrink-0">{t('users.teams.generalBadge')}</span>
         )}
 
         {/* Permission controls */}
@@ -748,23 +751,23 @@ function PermTreeNode({
               }`}
               title="Click to toggle RO/RW"
             >
-              {perm.level === 'rw' ? <><Pencil size={10} className="inline mr-0.5" />RW</> : <><Eye size={10} className="inline mr-0.5" />RO</>}
+              {perm.level === 'rw' ? <><Pencil size={10} className="inline mr-0.5" />{t('users.teams.rwLabel')}</> : <><Eye size={10} className="inline mr-0.5" />{t('users.teams.roLabel')}</>}
             </button>
             <button onClick={() => removePermission(perm.id)} className="p-0.5 text-text-muted hover:text-status-down shrink-0">
               <Trash2 size={11} />
             </button>
           </>
         ) : isCovered ? (
-          <span className="text-[10px] text-text-muted italic shrink-0">inherited</span>
+          <span className="text-[10px] text-text-muted italic shrink-0">{t('users.teams.inherited')}</span>
         ) : (
           <>
             <button onClick={() => addPermission('group', node.id, 'ro')}
               className="px-1.5 py-0.5 text-[10px] rounded bg-bg-tertiary text-text-muted hover:bg-bg-hover shrink-0" title="Read Only">
-              RO
+              {t('users.teams.roLabel')}
             </button>
             <button onClick={() => addPermission('group', node.id, 'rw')}
               className="px-1.5 py-0.5 text-[10px] rounded bg-accent/10 text-accent hover:bg-accent/20 shrink-0" title="Read/Write">
-              RW
+              {t('users.teams.rwLabel')}
             </button>
           </>
         )}
@@ -830,6 +833,7 @@ function PermMonitorRow({
   removePermission,
   togglePermissionLevel,
 }: PermMonitorRowProps) {
+  const { t } = useTranslation();
   return (
     <div
       className={`flex items-center gap-1.5 px-2 py-1.5 hover:bg-bg-hover transition-colors ${
@@ -853,23 +857,23 @@ function PermMonitorRow({
             }`}
             title="Click to toggle RO/RW"
           >
-            {perm.level === 'rw' ? <><Pencil size={10} className="inline mr-0.5" />RW</> : <><Eye size={10} className="inline mr-0.5" />RO</>}
+            {perm.level === 'rw' ? <><Pencil size={10} className="inline mr-0.5" />{t('users.teams.rwLabel')}</> : <><Eye size={10} className="inline mr-0.5" />{t('users.teams.roLabel')}</>}
           </button>
           <button onClick={() => removePermission(perm.id)} className="p-0.5 text-text-muted hover:text-status-down shrink-0">
             <Trash2 size={11} />
           </button>
         </>
       ) : isCovered ? (
-        <span className="text-[10px] text-text-muted italic shrink-0">inherited</span>
+        <span className="text-[10px] text-text-muted italic shrink-0">{t('users.teams.inherited')}</span>
       ) : (
         <>
           <button onClick={() => addPermission('monitor', monitor.id, 'ro')}
             className="px-1.5 py-0.5 text-[10px] rounded bg-bg-tertiary text-text-muted hover:bg-bg-hover shrink-0" title="Read Only">
-            RO
+            {t('users.teams.roLabel')}
           </button>
           <button onClick={() => addPermission('monitor', monitor.id, 'rw')}
             className="px-1.5 py-0.5 text-[10px] rounded bg-accent/10 text-accent hover:bg-accent/20 shrink-0" title="Read/Write">
-            RW
+            {t('users.teams.rwLabel')}
           </button>
         </>
       )}

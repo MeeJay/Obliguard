@@ -25,4 +25,7 @@ export const config = {
 
   // 2FA bypass — set DISABLE_2FA_FORCE=true to skip forced 2FA requirement
   disable2faForce: process.env.DISABLE_2FA_FORCE === 'true',
+
+  // App URL — used in password reset emails
+  appUrl: process.env.APP_URL || 'http://localhost:5173',
 };

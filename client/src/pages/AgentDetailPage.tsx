@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import {
   ArrowLeft, RefreshCw, Settings2, Cpu, HardDrive,
   Network, Activity, Server, AlertTriangle, Wind, Thermometer,
@@ -1728,6 +1729,7 @@ function ThresholdEditor({
   onClose: () => void;
   knownSensors?: Array<{ key: string; label: string }>;
 }) {
+  const { t } = useTranslation();
   const [saving, setSaving] = useState(false);
 
   type MetricKey = 'cpu' | 'memory' | 'disk' | 'netIn' | 'netOut';
@@ -1824,11 +1826,11 @@ function ThresholdEditor({
 
   const BYTES_PER_MBIT = 125_000;
   const rows: Array<{ key: MetricKey; label: string; unit: string; scale?: number }> = [
-    { key: 'cpu',    label: 'CPU',        unit: '%' },
-    { key: 'memory', label: 'Memory',     unit: '%' },
-    { key: 'disk',   label: 'Disk (any)', unit: '%' },
-    { key: 'netIn',  label: 'Net In',     unit: 'Mbps', scale: BYTES_PER_MBIT },
-    { key: 'netOut', label: 'Net Out',    unit: 'Mbps', scale: BYTES_PER_MBIT },
+    { key: 'cpu',    label: t('groups.detail.cpu'),    unit: '%' },
+    { key: 'memory', label: t('groups.detail.memory'), unit: '%' },
+    { key: 'disk',   label: t('groups.detail.disk'),   unit: '%' },
+    { key: 'netIn',  label: t('groups.detail.netIn'),  unit: 'Mbps', scale: BYTES_PER_MBIT },
+    { key: 'netOut', label: t('groups.detail.netOut'), unit: 'Mbps', scale: BYTES_PER_MBIT },
   ];
   const OPS = ['>', '>=', '<', '<='] as const;
 
@@ -1851,7 +1853,7 @@ function ThresholdEditor({
       <div className="w-full max-w-lg rounded-xl border border-border bg-bg-primary shadow-2xl max-h-[90vh] flex flex-col">
         <div className="flex items-center justify-between px-6 py-4 border-b border-border shrink-0">
           <h2 className="text-base font-semibold text-text-primary flex items-center gap-2">
-            <Settings2 size={16} /> Alert Thresholds
+            <Settings2 size={16} /> {t('groups.detail.thresholds')}
           </h2>
           <button onClick={onClose} className="text-text-muted hover:text-text-primary text-xl leading-none">×</button>
         </div>
@@ -1861,10 +1863,10 @@ function ThresholdEditor({
           <table className="w-full text-sm">
             <thead>
               <tr className="text-xs uppercase text-text-muted border-b border-border">
-                <th className="text-left pb-2 font-medium">Metric</th>
-                <th className="text-center pb-2 font-medium w-12">On</th>
-                <th className="text-center pb-2 font-medium w-16">Op</th>
-                <th className="text-left pb-2 font-medium">Value</th>
+                <th className="text-left pb-2 font-medium">{t('groups.detail.metricCol')}</th>
+                <th className="text-center pb-2 font-medium w-12">{t('groups.detail.onCol')}</th>
+                <th className="text-center pb-2 font-medium w-16">{t('groups.detail.opCol')}</th>
+                <th className="text-left pb-2 font-medium">{t('groups.detail.valueCol')}</th>
                 <th className="pb-2 w-20" />
               </tr>
             </thead>
@@ -1921,7 +1923,7 @@ function ThresholdEditor({
           {/* ── Temperature thresholds ── */}
           <div>
             <div className="text-xs font-medium text-text-muted uppercase tracking-wide mb-2 flex items-center gap-1.5">
-              <Thermometer size={11} /> Temperatures
+              <Thermometer size={11} /> {t('groups.detail.temperatures')}
             </div>
 
             {/* Global Sensor card */}
@@ -1937,7 +1939,7 @@ function ThresholdEditor({
                     onChange={v => tempGlobalOverriding && setTempValues(prev => ({ ...prev, globalEnabled: v }))}
                   />
                   <div className="min-w-0">
-                    <div className="text-sm font-medium text-text-primary">Global Sensor</div>
+                    <div className="text-sm font-medium text-text-primary">{t('groups.detail.tempGlobal')}</div>
                     <div className="text-xs text-text-muted mt-0.5">
                       {tempGlobalOverriding ? 'Custom threshold for this agent' : 'Using group default'}
                     </div>
@@ -1973,7 +1975,7 @@ function ThresholdEditor({
                 <thead>
                   <tr className="text-xs uppercase text-text-muted border-b border-border">
                     <th className="text-left pb-2 font-medium">Sensor</th>
-                    <th className="text-center pb-2 font-medium w-12">On</th>
+                    <th className="text-center pb-2 font-medium w-12">{t('groups.detail.onCol')}</th>
                     <th className="text-left pb-2 font-medium">Threshold</th>
                     <th className="pb-2 w-20" />
                   </tr>
@@ -2040,11 +2042,11 @@ function ThresholdEditor({
         <div className="flex justify-end gap-2 px-6 py-4 border-t border-border shrink-0">
           <button onClick={onClose}
             className="px-4 py-2 text-sm rounded-lg border border-border text-text-secondary hover:bg-bg-hover transition-colors">
-            Cancel
+            {t('common.cancel')}
           </button>
           <button onClick={handleSave} disabled={saving}
             className="px-4 py-2 text-sm rounded-lg bg-accent text-white hover:bg-accent/90 disabled:opacity-60 transition-colors">
-            {saving ? 'Saving…' : 'Save'}
+            {saving ? t('common.saving') : t('common.save')}
           </button>
         </div>
       </div>
@@ -2066,6 +2068,7 @@ function AgentSettingsSection({
   onDeviceUpdate: (d: AgentDevice) => void;
   onThresholdsUpdate: (t: AgentThresholds) => void;
 }) {
+  const { t } = useTranslation();
   // groupSettings = raw group config unaffected by the override flag.
   // This is the source of truth for "what the group actually says".
   // resolvedSettings conflates group + device values depending on override,
@@ -2154,7 +2157,7 @@ function AgentSettingsSection({
       {/* Header */}
       <div className="flex items-center justify-between mb-4">
         <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wide flex items-center gap-1.5">
-          <Settings2 size={12} /> Agent Settings
+          <Settings2 size={12} /> {t('agents.editAgent')}
         </h3>
       </div>
 
@@ -2165,7 +2168,7 @@ function AgentSettingsSection({
           {fields.checkInterval.overriding ? (
             <span className="text-xs px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-500 font-medium">Override</span>
           ) : (
-            <span className="text-xs px-1.5 py-0.5 rounded bg-bg-tertiary text-text-muted">Inherited</span>
+            <span className="text-xs px-1.5 py-0.5 rounded bg-bg-tertiary text-text-muted">{t('common.inherit')}</span>
           )}
           <input
             type="number"
@@ -2176,7 +2179,7 @@ function AgentSettingsSection({
             onBlur={() => { if (fields.checkInterval.overriding) save(fields); }}
             className="w-24 rounded border border-border bg-bg-secondary px-2 py-1 text-sm disabled:opacity-50"
           />
-          <span className="text-xs text-text-muted">seconds</span>
+          <span className="text-xs text-text-muted">{t('groups.detail.seconds')}</span>
           {inGroup && (
             <button
               onClick={() => toggleField('checkInterval', !fields.checkInterval.overriding)}
@@ -2198,11 +2201,11 @@ function AgentSettingsSection({
 
         {/* Heartbeat Monitoring field */}
         <div className="flex items-center gap-3 py-3 border-b border-border">
-          <span className="text-sm font-medium text-text-primary w-40">Heartbeat Monitoring</span>
+          <span className="text-sm font-medium text-text-primary w-40">{t('agents.heartbeatMonitoring')}</span>
           {fields.heartbeat.overriding ? (
             <span className="text-xs px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-500 font-medium">Override</span>
           ) : (
-            <span className="text-xs px-1.5 py-0.5 rounded bg-bg-tertiary text-text-muted">Inherited</span>
+            <span className="text-xs px-1.5 py-0.5 rounded bg-bg-tertiary text-text-muted">{t('common.inherit')}</span>
           )}
           <Switch
             on={fields.heartbeat.overriding ? fields.heartbeat.value : inheritedHeartbeat}
@@ -2235,8 +2238,8 @@ function AgentSettingsSection({
 
         {/* Alert Thresholds */}
         <div className="flex items-center gap-3 py-3">
-          <span className="text-sm font-medium text-text-primary w-40">Alert Thresholds</span>
-          <span className="text-xs text-text-muted">CPU, RAM, disk, network, temperature limits</span>
+          <span className="text-sm font-medium text-text-primary w-40">{t('groups.detail.thresholds')}</span>
+          <span className="text-xs text-text-muted">{t('groups.detail.thresholdsDesc')}</span>
           <button onClick={() => setShowThresholdModal(true)}
             className="ml-auto flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-border text-xs text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors">
             <Settings2 size={12} /> Configure
@@ -2269,8 +2272,11 @@ const NAV_ITEMS: Array<{ id: View; icon: React.ReactNode; label: string }> = [
   { id: 'others',   icon: <HardDrive size={18} />,       label: 'Disk / Net' },
   { id: 'temps',    icon: <Thermometer size={18} />,     label: 'Temperatures' },
 ];
+// Note: NAV_ITEMS labels are used as tooltip titles (title={item.label}), so they stay as English constants.
+// Translation is applied at the usage point inside the component where t() is available.
 
 export function AgentDetailPage() {
+  const { t } = useTranslation();
   const { deviceId } = useParams<{ deviceId: string }>();
   const navigate = useNavigate();
   const id = Number(deviceId);
@@ -2450,8 +2456,8 @@ export function AgentDetailPage() {
   if (!device) return (
     <div className="p-6 text-center">
       <Server size={48} className="mx-auto mb-3 text-text-muted opacity-40" />
-      <p className="text-text-muted">Device not found</p>
-      <button onClick={() => navigate(-1)} className="mt-3 text-accent hover:underline text-sm">Go back</button>
+      <p className="text-text-muted">{t('monitors.notFound')}</p>
+      <button onClick={() => navigate(-1)} className="mt-3 text-accent hover:underline text-sm">{t('common.back')}</button>
     </div>
   );
 
@@ -2462,10 +2468,10 @@ export function AgentDetailPage() {
   const overallStatus = !isOnline ? 'offline' : (snapshot?.overallStatus ?? 'pending');
   const violations = snapshot?.violations ?? [];
   const sc = {
-    up:      { dot: 'bg-status-up',   text: 'text-status-up',   label: 'Online',  glow: 'shadow-[0_0_8px_2px] shadow-status-up/50' },
-    alert:   { dot: 'bg-orange-500',  text: 'text-orange-400',  label: 'Alert',   glow: 'shadow-[0_0_8px_2px] shadow-orange-500/50' },
-    offline: { dot: 'bg-text-muted',  text: 'text-text-muted',  label: 'Offline', glow: '' },
-    pending: { dot: 'bg-yellow-500',  text: 'text-yellow-400',  label: 'Pending', glow: '' },
+    up:      { dot: 'bg-status-up',   text: 'text-status-up',   label: t('groups.detail.online'),  glow: 'shadow-[0_0_8px_2px] shadow-status-up/50' },
+    alert:   { dot: 'bg-orange-500',  text: 'text-orange-400',  label: t('groups.detail.alert'),   glow: 'shadow-[0_0_8px_2px] shadow-orange-500/50' },
+    offline: { dot: 'bg-text-muted',  text: 'text-text-muted',  label: t('groups.detail.offline'), glow: '' },
+    pending: { dot: 'bg-yellow-500',  text: 'text-yellow-400',  label: t('groups.detail.pending'), glow: '' },
   }[overallStatus] ?? { dot: 'bg-text-muted', text: 'text-text-muted', label: overallStatus, glow: '' };
   const osLabel = device.osInfo
     ? `${device.osInfo.distro ?? device.osInfo.platform ?? ''} ${device.osInfo.release ?? ''}`.trim()
@@ -2550,7 +2556,7 @@ export function AgentDetailPage() {
                 {device.osInfo?.arch && <span>{device.osInfo.arch}</span>}
                 {device.agentVersion && <span>Agent v{device.agentVersion}</span>}
                 {lastPush            && <span>Last push: {fmtRelTime(lastPush)}</span>}
-                {!snapshot           && <span className="text-yellow-400">Waiting for first push…</span>}
+                {!snapshot           && <span className="text-yellow-400">{t('status.pending')}…</span>}
               </div>
             </div>
           </div>
@@ -2570,7 +2576,7 @@ export function AgentDetailPage() {
             )}
             {/* Loading indicator for historical data */}
             {loadingHistory && (
-              <span className="text-xs text-text-muted animate-pulse">Loading…</span>
+              <span className="text-xs text-text-muted animate-pulse">{t('common.loading')}</span>
             )}
             {/* Display config button — for non-overview detail views */}
             {view !== 'overview' && (
@@ -2645,7 +2651,7 @@ export function AgentDetailPage() {
         {!snapshot && (
           <div className="rounded-xl border border-dashed border-border p-10 text-center">
             <Activity size={36} className="mx-auto mb-3 text-text-muted opacity-40" />
-            <p className="text-text-muted text-sm">No metrics yet — agent pushes every {device.checkIntervalSeconds ?? 60}s</p>
+            <p className="text-text-muted text-sm">{t('common.loading')} — agent pushes every {device.checkIntervalSeconds ?? 60}s</p>
           </div>
         )}
 

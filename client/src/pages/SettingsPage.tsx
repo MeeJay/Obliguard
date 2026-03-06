@@ -9,6 +9,7 @@ import { Input } from '@/components/common/Input';
 import type { SmtpServer, AppConfig } from '@obliview/shared';
 import toast from 'react-hot-toast';
 import { cn } from '@/utils/cn';
+import { useTranslation } from 'react-i18next';
 
 type SmtpFormMode = 'create' | 'edit' | null;
 
@@ -33,6 +34,7 @@ const emptySmtpForm = (): SmtpForm => ({
 });
 
 export function SettingsPage() {
+  const { t } = useTranslation();
   const { isAdmin } = useAuthStore();
   const admin = isAdmin();
 
@@ -98,16 +100,16 @@ export function SettingsPage() {
       if (smtpMode === 'create') {
         const created = await smtpServerApi.create(data);
         setServers((prev) => [...prev, created]);
-        toast.success('SMTP server created');
+        toast.success(t('settings.smtp.created'));
       } else if (editingServer) {
         const payload = smtpForm.password ? data : { ...data, password: undefined };
         const updated = await smtpServerApi.update(editingServer.id, payload);
         setServers((prev) => prev.map((s) => (s.id === updated.id ? updated : s)));
-        toast.success('SMTP server updated');
+        toast.success(t('settings.smtp.updated'));
       }
       closeSmtpModal();
     } catch {
-      toast.error('Failed to save SMTP server');
+      toast.error(t('settings.smtp.failedSave'));
     } finally {
       setSmtpSaving(false);
     }
@@ -118,9 +120,9 @@ export function SettingsPage() {
     try {
       await smtpServerApi.delete(server.id);
       setServers((prev) => prev.filter((s) => s.id !== server.id));
-      toast.success('Server deleted');
+      toast.success(t('settings.smtp.deleted'));
     } catch {
-      toast.error('Failed to delete server');
+      toast.error(t('settings.smtp.failedDelete'));
     }
   }
 
@@ -128,9 +130,9 @@ export function SettingsPage() {
     setTestingId(server.id);
     try {
       await smtpServerApi.test(server.id);
-      toast.success(`Connection to "${server.name}" successful`);
+      toast.success(t('settings.smtp.testOk', { name: server.name }));
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Connection failed';
+      const msg = err instanceof Error ? err.message : t('settings.smtp.testFailed');
       toast.error(msg);
     } finally {
       setTestingId(null);
@@ -144,7 +146,7 @@ export function SettingsPage() {
       await appConfigApi.setConfig(key, value);
       setAppConfig((prev) => prev ? { ...prev, [key]: value } : prev);
     } catch {
-      toast.error('Failed to update setting');
+      toast.error(t('settings.failedUpdate'));
     } finally {
       setConfigSaving(false);
     }
@@ -153,38 +155,38 @@ export function SettingsPage() {
   return (
     <div className="p-6 max-w-5xl min-w-0 mx-auto space-y-8">
       <div>
-        <h1 className="text-2xl font-semibold text-text-primary mb-2">Global Settings</h1>
+        <h1 className="text-2xl font-semibold text-text-primary mb-2">{t('settings.title')}</h1>
         <p className="text-sm text-text-muted">
-          These defaults apply to all groups and monitors unless overridden at a lower level.
+          {t('settings.globalDesc')}
         </p>
       </div>
 
-      <SettingsPanel scope="global" scopeId={null} title="Default Settings" />
+      <SettingsPanel scope="global" scopeId={null} title={t('settings.defaultSettings')} />
 
       {admin && (
         <>
           {/* ── SMTP Servers ── */}
           <div>
             <div className="flex items-center justify-between mb-4">
-              <h2 className="text-lg font-semibold text-text-primary">SMTP Servers</h2>
+              <h2 className="text-lg font-semibold text-text-primary">{t('settings.smtp.title')}</h2>
               <Button size="sm" onClick={openCreate}>
-                <Plus size={14} className="mr-1" /> Add Server
+                <Plus size={14} className="mr-1" /> {t('settings.smtp.addServer')}
               </Button>
             </div>
             {servers.length === 0 ? (
               <div className="rounded-lg border border-border bg-bg-secondary p-5 text-sm text-text-muted flex items-center gap-3">
                 <Server size={16} className="shrink-0" />
-                No SMTP servers configured. Add one to use Email notifications.
+                {t('settings.smtp.noServers')}
               </div>
             ) : (
               <div className="rounded-lg border border-border bg-bg-secondary overflow-hidden">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b border-border text-left">
-                      <th className="px-4 py-2.5 font-medium text-text-secondary">Name</th>
-                      <th className="px-4 py-2.5 font-medium text-text-secondary">Host</th>
-                      <th className="px-4 py-2.5 font-medium text-text-secondary">From</th>
-                      <th className="px-4 py-2.5 font-medium text-text-secondary text-right">Actions</th>
+                      <th className="px-4 py-2.5 font-medium text-text-secondary">{t('settings.smtp.colName')}</th>
+                      <th className="px-4 py-2.5 font-medium text-text-secondary">{t('settings.smtp.colHost')}</th>
+                      <th className="px-4 py-2.5 font-medium text-text-secondary">{t('settings.smtp.colFrom')}</th>
+                      <th className="px-4 py-2.5 font-medium text-text-secondary text-right">{t('settings.smtp.colActions')}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -193,7 +195,7 @@ export function SettingsPage() {
                         <td className="px-4 py-3 text-text-primary font-medium">{server.name}</td>
                         <td className="px-4 py-3 text-text-secondary">
                           {server.host}:{server.port}
-                          {server.secure && <span className="ml-1.5 text-xs bg-green-500/10 text-green-400 rounded px-1">TLS</span>}
+                          {server.secure && <span className="ml-1.5 text-xs bg-green-500/10 text-green-400 rounded px-1">{t('settings.smtp.tlsBadge')}</span>}
                         </td>
                         <td className="px-4 py-3 text-text-muted">{server.fromAddress}</td>
                         <td className="px-4 py-3">
@@ -202,21 +204,21 @@ export function SettingsPage() {
                               onClick={() => handleTest(server)}
                               disabled={testingId === server.id}
                               className="p-1.5 rounded text-text-muted hover:text-blue-400 hover:bg-blue-400/10 transition-colors disabled:opacity-50"
-                              title="Test connection"
+                              title={t('settings.smtp.testConnection')}
                             >
                               <Wifi size={14} />
                             </button>
                             <button
                               onClick={() => openEdit(server)}
                               className="p-1.5 rounded text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors"
-                              title="Edit"
+                              title={t('common.edit')}
                             >
                               <Pencil size={14} />
                             </button>
                             <button
                               onClick={() => handleDelete(server)}
                               className="p-1.5 rounded text-text-muted hover:text-red-400 hover:bg-red-400/10 transition-colors"
-                              title="Delete"
+                              title={t('common.delete')}
                             >
                               <Trash2 size={14} />
                             </button>
@@ -232,14 +234,14 @@ export function SettingsPage() {
 
           {/* ── Security / 2FA ── */}
           <div>
-            <h2 className="text-lg font-semibold text-text-primary mb-4">Security</h2>
+            <h2 className="text-lg font-semibold text-text-primary mb-4">{t('settings.security.title')}</h2>
             <div className="rounded-lg border border-border bg-bg-secondary divide-y divide-border">
               <div className="flex items-start justify-between gap-4 p-4">
                 <div className="flex items-start gap-3">
                   <Shield size={16} className="text-text-muted mt-0.5 shrink-0" />
                   <div>
-                    <p className="text-sm font-medium text-text-primary">Allow users to configure 2FA</p>
-                    <p className="text-xs text-text-muted mt-0.5">Users can enable TOTP or Email OTP from their profile.</p>
+                    <p className="text-sm font-medium text-text-primary">{t('settings.security.allow2fa')}</p>
+                    <p className="text-xs text-text-muted mt-0.5">{t('settings.security.allow2faDesc')}</p>
                   </div>
                 </div>
                 <button
@@ -260,9 +262,10 @@ export function SettingsPage() {
                 <div className="flex items-start gap-3">
                   <Shield size={16} className="text-text-muted mt-0.5 shrink-0" />
                   <div>
-                    <p className="text-sm font-medium text-text-primary">Force 2FA for all users</p>
+                    <p className="text-sm font-medium text-text-primary">{t('settings.security.force2fa')}</p>
                     <p className="text-xs text-text-muted mt-0.5">
-                      Users without a 2FA method will be warned to set one up.
+                      {t('settings.security.force2faDesc').split('\n')[0]}
+                      {' '}
                       Bypass via <code className="text-xs font-mono">DISABLE_2FA_FORCE=true</code> in .env.
                     </p>
                   </div>
@@ -284,15 +287,15 @@ export function SettingsPage() {
               <div className={cn('flex items-start gap-4 p-4', !appConfig?.allow_2fa && 'opacity-50 pointer-events-none')}>
                 <Server size={16} className="text-text-muted mt-0.5 shrink-0" />
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-text-primary">SMTP Server for Email OTP</p>
-                  <p className="text-xs text-text-muted mt-0.5">Used to send one-time codes when Email OTP is enabled.</p>
+                  <p className="text-sm font-medium text-text-primary">{t('settings.security.otpSmtp')}</p>
+                  <p className="text-xs text-text-muted mt-0.5">{t('settings.security.otpSmtpDesc')}</p>
                   <select
                     className="mt-2 w-full max-w-xs rounded-md border border-border bg-bg-primary px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-50"
                     value={appConfig?.otp_smtp_server_id ?? ''}
                     disabled={configSaving || !appConfig || !appConfig.allow_2fa}
                     onChange={(e) => setConfigKey('otp_smtp_server_id', e.target.value ? parseInt(e.target.value, 10) : null)}
                   >
-                    <option value="">— None —</option>
+                    <option value="">{t('settings.security.noneOption')}</option>
                     {servers.map((s) => (
                       <option key={s.id} value={s.id}>{s.name}</option>
                     ))}
@@ -309,33 +312,33 @@ export function SettingsPage() {
           <div className="bg-bg-secondary rounded-xl shadow-2xl border border-border w-full max-w-md">
             <div className="px-5 py-4 border-b border-border">
               <h3 className="text-base font-semibold text-text-primary">
-                {smtpMode === 'create' ? 'Add SMTP Server' : 'Edit SMTP Server'}
+                {smtpMode === 'create' ? t('settings.smtp.addTitle') : t('settings.smtp.editTitle')}
               </h3>
             </div>
             <form onSubmit={handleSmtpSubmit} className="p-5 space-y-3">
               <Input
-                label="Name"
+                label={t('settings.smtp.nameLabel')}
                 value={smtpForm.name}
                 onChange={(e) => setSmtpForm((f) => ({ ...f, name: e.target.value }))}
-                placeholder="Main SMTP"
+                placeholder={t('settings.smtp.namePlaceholder')}
                 required
               />
               <div className="grid grid-cols-3 gap-3">
                 <div className="col-span-2">
                   <Input
-                    label="Host"
+                    label={t('settings.smtp.hostLabel')}
                     value={smtpForm.host}
                     onChange={(e) => setSmtpForm((f) => ({ ...f, host: e.target.value }))}
-                    placeholder="smtp.example.com"
+                    placeholder={t('settings.smtp.hostPlaceholder')}
                     required
                   />
                 </div>
                 <Input
-                  label="Port"
+                  label={t('settings.smtp.portLabel')}
                   type="number"
                   value={smtpForm.port}
                   onChange={(e) => setSmtpForm((f) => ({ ...f, port: e.target.value }))}
-                  placeholder="587"
+                  placeholder={t('settings.smtp.portPlaceholder')}
                   required
                 />
               </div>
@@ -346,17 +349,17 @@ export function SettingsPage() {
                   onChange={(e) => setSmtpForm((f) => ({ ...f, secure: e.target.checked }))}
                   className="rounded border-border"
                 />
-                Use TLS (port 465)
+                {t('settings.smtp.tlsLabel')}
               </label>
               <Input
-                label="Username"
+                label={t('settings.smtp.usernameLabel')}
                 value={smtpForm.username}
                 onChange={(e) => setSmtpForm((f) => ({ ...f, username: e.target.value }))}
                 required
               />
               <div className="relative">
                 <Input
-                  label={smtpMode === 'edit' ? 'Password (leave blank to keep current)' : 'Password'}
+                  label={smtpMode === 'edit' ? t('settings.smtp.passwordEditLabel') : t('settings.smtp.passwordLabel')}
                   type={showPassword ? 'text' : 'password'}
                   value={smtpForm.password}
                   onChange={(e) => setSmtpForm((f) => ({ ...f, password: e.target.value }))}
@@ -371,17 +374,17 @@ export function SettingsPage() {
                 </button>
               </div>
               <Input
-                label="From Address"
+                label={t('settings.smtp.fromLabel')}
                 type="email"
                 value={smtpForm.fromAddress}
                 onChange={(e) => setSmtpForm((f) => ({ ...f, fromAddress: e.target.value }))}
-                placeholder="alerts@example.com"
+                placeholder={t('settings.smtp.fromPlaceholder')}
                 required
               />
               <div className="flex justify-end gap-2 pt-2">
-                <Button type="button" variant="ghost" onClick={closeSmtpModal}>Cancel</Button>
+                <Button type="button" variant="ghost" onClick={closeSmtpModal}>{t('common.cancel')}</Button>
                 <Button type="submit" disabled={smtpSaving}>
-                  {smtpSaving ? 'Saving...' : smtpMode === 'create' ? 'Create' : 'Save'}
+                  {smtpSaving ? t('common.saving') : smtpMode === 'create' ? t('common.create') : t('common.save')}
                 </Button>
               </div>
             </form>

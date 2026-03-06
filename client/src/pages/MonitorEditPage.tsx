@@ -1,6 +1,7 @@
 import { useState, useEffect, type FormEvent } from 'react';
 import { useParams, useNavigate, Link, useLocation } from 'react-router-dom';
 import { ArrowLeft, Save } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import type { Monitor, MonitorType } from '@obliview/shared';
 import { MONITOR_TYPES, MONITOR_TYPE_LABELS } from '@obliview/shared';
 import { monitorsApi } from '@/api/monitors.api';
@@ -15,6 +16,7 @@ export function MonitorEditPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const location = useLocation();
+  const { t } = useTranslation();
   const { addMonitor, updateMonitor: updateStoreMonitor } = useMonitorStore();
   const { fetchGroups, fetchTree, tree } = useGroupStore();
   const isNew = !id || id === 'new';
@@ -49,11 +51,11 @@ export function MonitorEditPage() {
       monitorsApi.getById(parseInt(id!, 10)).then((monitor) => {
         setForm(monitor);
       }).catch(() => {
-        toast.error('Monitor not found');
+        toast.error(t('monitors.notFound'));
         navigate('/');
       });
     }
-  }, [id, isNew, navigate]);
+  }, [id, isNew, navigate, t]);
 
   const updateField = <K extends keyof Monitor>(key: K, value: Monitor[K]) => {
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -162,16 +164,16 @@ export function MonitorEditPage() {
       if (isNew) {
         const monitor = await monitorsApi.create(payload);
         addMonitor(monitor);
-        toast.success('Monitor created');
+        toast.success(t('monitors.created'));
         navigate(`/monitor/${monitor.id}`);
       } else {
         const monitor = await monitorsApi.update(parseInt(id!, 10), payload);
         updateStoreMonitor(monitor.id, monitor);
-        toast.success('Monitor updated');
+        toast.success(t('monitors.updated'));
         navigate(`/monitor/${monitor.id}`);
       }
     } catch (err) {
-      toast.error(isNew ? 'Failed to create monitor' : 'Failed to update monitor');
+      toast.error(isNew ? t('monitors.failedCreate') : t('monitors.failedUpdate'));
     } finally {
       setSaving(false);
     }
@@ -184,31 +186,31 @@ export function MonitorEditPage() {
         className="inline-flex items-center gap-1 text-sm text-text-secondary hover:text-text-primary mb-4"
       >
         <ArrowLeft size={14} />
-        {isNew ? 'Back to Dashboard' : 'Back to Monitor'}
+        {isNew ? t('monitors.backToDashboard') : t('monitors.backToMonitor')}
       </Link>
 
       <h1 className="text-2xl font-semibold text-text-primary mb-6">
-        {isNew ? 'Add Monitor' : 'Edit Monitor'}
+        {isNew ? t('monitors.new') : t('monitors.edit')}
       </h1>
 
       <form onSubmit={handleSubmit} className="space-y-6">
         {/* Basic Info */}
         <div className="rounded-lg border border-border bg-bg-secondary p-5 space-y-4">
           <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide">
-            General
+            {t('monitors.form.sectionGeneral')}
           </h2>
 
           <Input
-            label="Name"
+            label={t('monitors.form.name')}
             value={form.name || ''}
             onChange={(e) => updateField('name', e.target.value)}
-            placeholder="My Website"
+            placeholder={t('monitors.form.namePlaceholder')}
             required
           />
 
           <div className="space-y-1">
             <label className="block text-sm font-medium text-text-secondary">
-              Monitor Type
+              {t('monitors.form.monitorType')}
             </label>
             <select
               value={form.type || 'http'}
@@ -224,21 +226,21 @@ export function MonitorEditPage() {
           </div>
 
           <Input
-            label="Description (optional)"
+            label={t('monitors.form.descriptionOptional')}
             value={form.description || ''}
             onChange={(e) => updateField('description', e.target.value || null)}
-            placeholder="Optional description"
+            placeholder={t('monitors.form.descriptionPlaceholder')}
           />
 
           <div className="space-y-1">
             <label className="block text-sm font-medium text-text-secondary">
-              Group
+              {t('monitors.form.group')}
             </label>
             <GroupPicker
               value={form.groupId ?? null}
               onChange={(groupId) => updateField('groupId', groupId)}
               tree={tree}
-              placeholder="No group"
+              placeholder={t('monitors.form.noGroup')}
             />
           </div>
         </div>
@@ -247,19 +249,19 @@ export function MonitorEditPage() {
         {(form.type === 'http' || form.type === 'json_api') && (
           <div className="rounded-lg border border-border bg-bg-secondary p-5 space-y-4">
             <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide">
-              HTTP Settings
+              {t('monitors.form.sectionHttp')}
             </h2>
 
             <Input
-              label="URL"
+              label={t('monitors.form.url')}
               value={form.url || ''}
               onChange={(e) => updateField('url', e.target.value)}
-              placeholder="https://example.com"
+              placeholder={t('monitors.form.urlPlaceholder')}
               required
             />
 
             <div className="space-y-1">
-              <label className="block text-sm font-medium text-text-secondary">Method</label>
+              <label className="block text-sm font-medium text-text-secondary">{t('monitors.form.method')}</label>
               <select
                 value={form.method || 'GET'}
                 onChange={(e) => updateField('method', e.target.value)}
@@ -272,10 +274,10 @@ export function MonitorEditPage() {
             </div>
 
             <Input
-              label="Keyword (optional)"
+              label={t('monitors.form.keyword')}
               value={form.keyword || ''}
               onChange={(e) => updateField('keyword', e.target.value || null)}
-              placeholder="Keyword to find in response body"
+              placeholder={t('monitors.form.keywordPlaceholder')}
             />
 
             {(form.url || '').startsWith('https') && (
@@ -289,12 +291,12 @@ export function MonitorEditPage() {
                     className="h-4 w-4 rounded border-border bg-bg-tertiary text-accent focus:ring-accent"
                   />
                   <label htmlFor="ignore-ssl" className="text-sm text-text-secondary">
-                    Ignore SSL certificate errors (for self-signed certificates)
+                    {t('monitors.form.ignoreSsl')}
                   </label>
                 </div>
                 {!form.ignoreSsl && (
                   <Input
-                    label="SSL warning threshold (days before expiry)"
+                    label={t('monitors.form.sslWarnDays')}
                     type="number"
                     value={form.sslWarnDays ?? 30}
                     onChange={(e) => updateField('sslWarnDays', parseInt(e.target.value, 10) || 30)}
@@ -307,16 +309,16 @@ export function MonitorEditPage() {
             {form.type === 'json_api' && (
               <>
                 <Input
-                  label="JSON Path"
+                  label={t('monitors.form.jsonPath')}
                   value={form.jsonPath || ''}
                   onChange={(e) => updateField('jsonPath', e.target.value || null)}
-                  placeholder="$.status or data.health"
+                  placeholder={t('monitors.form.jsonPathPlaceholder')}
                 />
                 <Input
-                  label="Expected Value"
+                  label={t('monitors.form.expectedValue')}
                   value={form.jsonExpectedValue || ''}
                   onChange={(e) => updateField('jsonExpectedValue', e.target.value || null)}
-                  placeholder="ok"
+                  placeholder={t('monitors.form.expectedValuePlaceholder')}
                 />
               </>
             )}
@@ -326,20 +328,20 @@ export function MonitorEditPage() {
         {(form.type === 'ping' || form.type === 'tcp' || form.type === 'dns' || form.type === 'ssl' || form.type === 'smtp') && (
           <div className="rounded-lg border border-border bg-bg-secondary p-5 space-y-4">
             <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide">
-              Host Settings
+              {t('monitors.form.sectionHost')}
             </h2>
 
             <Input
-              label="Hostname"
+              label={t('monitors.form.hostname')}
               value={form.hostname || ''}
               onChange={(e) => updateField('hostname', e.target.value)}
-              placeholder="example.com"
+              placeholder={t('monitors.form.hostnamePlaceholder')}
               required
             />
 
             {(form.type === 'tcp' || form.type === 'smtp') && (
               <Input
-                label="Port"
+                label={t('monitors.form.port')}
                 type="number"
                 value={form.port ?? (form.type === 'smtp' ? 25 : '')}
                 onChange={(e) => updateField('port', parseInt(e.target.value, 10) || null)}
@@ -350,7 +352,7 @@ export function MonitorEditPage() {
             {form.type === 'dns' && (
               <>
                 <div className="space-y-1">
-                  <label className="block text-sm font-medium text-text-secondary">Record Type</label>
+                  <label className="block text-sm font-medium text-text-secondary">{t('monitors.form.dnsRecordType')}</label>
                   <select
                     value={form.dnsRecordType || 'A'}
                     onChange={(e) => updateField('dnsRecordType', e.target.value)}
@@ -362,23 +364,23 @@ export function MonitorEditPage() {
                   </select>
                 </div>
                 <Input
-                  label="DNS Resolver (optional)"
+                  label={t('monitors.form.dnsResolver')}
                   value={form.dnsResolver || ''}
                   onChange={(e) => updateField('dnsResolver', e.target.value || null)}
-                  placeholder="8.8.8.8"
+                  placeholder={t('monitors.form.dnsResolverPlaceholder')}
                 />
                 <Input
-                  label="Expected Value (optional)"
+                  label={t('monitors.form.dnsExpected')}
                   value={form.dnsExpectedValue || ''}
                   onChange={(e) => updateField('dnsExpectedValue', e.target.value || null)}
-                  placeholder="Expected record value"
+                  placeholder={t('monitors.form.dnsExpectedPlaceholder')}
                 />
               </>
             )}
 
             {form.type === 'ssl' && (
               <Input
-                label="Warn Days Before Expiry"
+                label={t('monitors.form.warnDays')}
                 type="number"
                 value={form.sslWarnDays ?? 30}
                 onChange={(e) => updateField('sslWarnDays', parseInt(e.target.value, 10) || 30)}
@@ -391,20 +393,20 @@ export function MonitorEditPage() {
         {form.type === 'docker' && (
           <div className="rounded-lg border border-border bg-bg-secondary p-5 space-y-4">
             <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide">
-              Docker Settings
+              {t('monitors.form.sectionDocker')}
             </h2>
             <Input
-              label="Docker Host"
+              label={t('monitors.form.dockerHost')}
               value={form.dockerHost || ''}
               onChange={(e) => updateField('dockerHost', e.target.value)}
-              placeholder="/var/run/docker.sock or tcp://host:2375"
+              placeholder={t('monitors.form.dockerHostPlaceholder')}
               required
             />
             <Input
-              label="Container Name"
+              label={t('monitors.form.containerName')}
               value={form.dockerContainerName || ''}
               onChange={(e) => updateField('dockerContainerName', e.target.value)}
-              placeholder="my-container"
+              placeholder={t('monitors.form.containerNamePlaceholder')}
               required
             />
           </div>
@@ -413,28 +415,28 @@ export function MonitorEditPage() {
         {form.type === 'game_server' && (
           <div className="rounded-lg border border-border bg-bg-secondary p-5 space-y-4">
             <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide">
-              Game Server Settings
+              {t('monitors.form.sectionGame')}
             </h2>
             <Input
-              label="Game Type"
+              label={t('monitors.form.gameType')}
               value={form.gameType || ''}
               onChange={(e) => updateField('gameType', e.target.value)}
-              placeholder="minecraft, csgo, valheim..."
+              placeholder={t('monitors.form.gameTypePlaceholder')}
               required
             />
             <Input
-              label="Host"
+              label={t('monitors.form.gameHost')}
               value={form.gameHost || ''}
               onChange={(e) => updateField('gameHost', e.target.value)}
-              placeholder="play.example.com"
+              placeholder={t('monitors.form.gameHostPlaceholder')}
               required
             />
             <Input
-              label="Port"
+              label={t('monitors.form.gamePort')}
               type="number"
               value={form.gamePort ?? ''}
               onChange={(e) => updateField('gamePort', parseInt(e.target.value, 10) || null)}
-              placeholder="25565"
+              placeholder={t('monitors.form.gamePortPlaceholder')}
             />
           </div>
         )}
@@ -442,18 +444,18 @@ export function MonitorEditPage() {
         {form.type === 'push' && (
           <div className="rounded-lg border border-border bg-bg-secondary p-5 space-y-4">
             <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide">
-              Push Monitor Settings
+              {t('monitors.form.sectionPush')}
             </h2>
             <Input
-              label="Max Interval (seconds)"
+              label={t('monitors.form.pushMaxInterval')}
               type="number"
               value={form.pushMaxIntervalSec ?? 300}
               onChange={(e) => updateField('pushMaxIntervalSec', parseInt(e.target.value, 10) || 300)}
-              placeholder="300"
+              placeholder={t('monitors.form.pushMaxIntervalPlaceholder')}
             />
             {!isNew && form.pushToken && (
               <div className="space-y-1">
-                <label className="block text-sm font-medium text-text-secondary">Push URL</label>
+                <label className="block text-sm font-medium text-text-secondary">{t('monitors.form.pushUrl')}</label>
                 <code className="block rounded-md bg-bg-tertiary p-2 text-xs text-accent break-all">
                   {window.location.origin}/api/heartbeat/{form.pushToken}
                 </code>
@@ -465,21 +467,21 @@ export function MonitorEditPage() {
         {form.type === 'script' && (
           <div className="rounded-lg border border-border bg-bg-secondary p-5 space-y-4">
             <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide">
-              Script Settings
+              {t('monitors.form.sectionScript')}
             </h2>
             <Input
-              label="Command"
+              label={t('monitors.form.scriptCommand')}
               value={form.scriptCommand || ''}
               onChange={(e) => updateField('scriptCommand', e.target.value)}
-              placeholder="/path/to/script.sh"
+              placeholder={t('monitors.form.scriptCommandPlaceholder')}
               required
             />
             <Input
-              label="Expected Exit Code"
+              label={t('monitors.form.scriptExpectedExit')}
               type="number"
               value={form.scriptExpectedExit ?? 0}
               onChange={(e) => updateField('scriptExpectedExit', parseInt(e.target.value, 10) || 0)}
-              placeholder="0"
+              placeholder={t('monitors.form.scriptExpectedExitPlaceholder')}
             />
           </div>
         )}
@@ -487,29 +489,29 @@ export function MonitorEditPage() {
         {form.type === 'browser' && (
           <div className="rounded-lg border border-border bg-bg-secondary p-5 space-y-4">
             <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide">
-              Browser Settings
+              {t('monitors.form.sectionBrowser')}
             </h2>
             <p className="text-xs text-text-secondary">
-              Uses a headless Chromium browser (Playwright) to load the page with full JavaScript rendering.
+              {t('monitors.form.browserDesc')}
             </p>
             <Input
-              label="URL"
+              label={t('monitors.form.browserUrl')}
               value={form.browserUrl || ''}
               onChange={(e) => updateField('browserUrl', e.target.value)}
-              placeholder="https://example.com/spa-page"
+              placeholder={t('monitors.form.browserUrlPlaceholder')}
               required
             />
             <Input
-              label="Wait for Selector (optional)"
+              label={t('monitors.form.browserWaitSelector')}
               value={form.browserWaitForSelector || ''}
               onChange={(e) => updateField('browserWaitForSelector', e.target.value || null)}
-              placeholder="#app-loaded, .content-ready"
+              placeholder={t('monitors.form.browserWaitSelectorPlaceholder')}
             />
             <Input
-              label="Keyword (optional)"
+              label={t('monitors.form.browserKeyword')}
               value={form.browserKeyword || ''}
               onChange={(e) => updateField('browserKeyword', e.target.value || null)}
-              placeholder="Keyword to find in rendered page"
+              placeholder={t('monitors.form.browserKeywordPlaceholder')}
             />
             {form.browserKeyword && (
               <div className="flex items-center gap-2">
@@ -521,7 +523,7 @@ export function MonitorEditPage() {
                   className="h-4 w-4 rounded border-border bg-bg-tertiary text-accent focus:ring-accent"
                 />
                 <label htmlFor="browser-keyword-absent" className="text-sm text-text-secondary">
-                  Alert if keyword IS present (inverted)
+                  {t('monitors.form.browserKeywordInverted')}
                 </label>
               </div>
             )}
@@ -531,45 +533,45 @@ export function MonitorEditPage() {
         {form.type === 'value_watcher' && (
           <div className="rounded-lg border border-border bg-bg-secondary p-5 space-y-4">
             <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide">
-              Value Watcher Settings
+              {t('monitors.form.sectionValueWatcher')}
             </h2>
             <p className="text-xs text-text-secondary">
-              Fetches a JSON API and monitors a numeric value extracted via JSON path.
+              {t('monitors.form.valueWatcherDesc')}
             </p>
             <Input
-              label="API URL"
+              label={t('monitors.form.valueWatcherUrl')}
               value={form.valueWatcherUrl || ''}
               onChange={(e) => updateField('valueWatcherUrl', e.target.value)}
-              placeholder="https://api.example.com/metrics"
+              placeholder={t('monitors.form.valueWatcherUrlPlaceholder')}
               required
             />
             <Input
-              label="JSON Path"
+              label={t('monitors.form.valueWatcherJsonPath')}
               value={form.valueWatcherJsonPath || ''}
               onChange={(e) => updateField('valueWatcherJsonPath', e.target.value)}
-              placeholder="$.data.temperature or metrics.cpu_usage"
+              placeholder={t('monitors.form.valueWatcherJsonPathPlaceholder')}
               required
             />
             <div className="space-y-1">
-              <label className="block text-sm font-medium text-text-secondary">Operator</label>
+              <label className="block text-sm font-medium text-text-secondary">{t('monitors.form.valueWatcherOperator')}</label>
               <select
                 value={form.valueWatcherOperator || '>'}
                 onChange={(e) => updateField('valueWatcherOperator', e.target.value)}
                 className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
               >
-                <option value=">">{'> Greater than'}</option>
-                <option value="<">{'< Less than'}</option>
-                <option value=">=">{'>= Greater or equal'}</option>
-                <option value="<=">{'<= Less or equal'}</option>
-                <option value="==">{'== Equal to'}</option>
-                <option value="!=">{'!= Not equal to'}</option>
-                <option value="between">Between (range)</option>
-                <option value="changed">Changed (any change = down)</option>
+                <option value=">">{t('monitors.form.opGt')}</option>
+                <option value="<">{t('monitors.form.opLt')}</option>
+                <option value=">=">{t('monitors.form.opGte')}</option>
+                <option value="<=">{t('monitors.form.opLte')}</option>
+                <option value="==">{t('monitors.form.opEq')}</option>
+                <option value="!=">{t('monitors.form.opNeq')}</option>
+                <option value="between">{t('monitors.form.opBetween')}</option>
+                <option value="changed">{t('monitors.form.opChanged')}</option>
               </select>
             </div>
             {form.valueWatcherOperator !== 'changed' && (
               <Input
-                label={form.valueWatcherOperator === 'between' ? 'Min Threshold' : 'Threshold'}
+                label={form.valueWatcherOperator === 'between' ? t('monitors.form.minThreshold') : t('monitors.form.threshold')}
                 type="number"
                 value={form.valueWatcherThreshold ?? ''}
                 onChange={(e) => updateField('valueWatcherThreshold', e.target.value ? parseFloat(e.target.value) : null)}
@@ -579,7 +581,7 @@ export function MonitorEditPage() {
             )}
             {form.valueWatcherOperator === 'between' && (
               <Input
-                label="Max Threshold"
+                label={t('monitors.form.maxThreshold')}
                 type="number"
                 value={form.valueWatcherThresholdMax ?? ''}
                 onChange={(e) => updateField('valueWatcherThresholdMax', e.target.value ? parseFloat(e.target.value) : null)}
@@ -593,43 +595,43 @@ export function MonitorEditPage() {
         {/* Timing Settings */}
         <div className="rounded-lg border border-border bg-bg-secondary p-5 space-y-4">
           <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide">
-            Timing
+            {t('monitors.form.sectionTiming')}
           </h2>
 
           <div className="grid grid-cols-2 gap-4">
             <Input
-              label="Check Interval (seconds)"
+              label={t('monitors.form.checkInterval')}
               type="number"
               min={1}
               max={86400}
               value={form.intervalSeconds ?? ''}
               onChange={(e) => updateField('intervalSeconds', parseInt(e.target.value, 10) || null)}
-              placeholder="inherited (60)"
+              placeholder={t('monitors.form.checkIntervalPlaceholder')}
             />
             <Input
-              label="Timeout (ms)"
+              label={t('monitors.form.timeout')}
               type="number"
               min={1000}
               max={60000}
               value={form.timeoutMs ?? ''}
               onChange={(e) => updateField('timeoutMs', parseInt(e.target.value, 10) || null)}
-              placeholder="inherited (5000)"
+              placeholder={t('monitors.form.timeoutPlaceholder')}
             />
             <Input
-              label="Retry Interval (seconds)"
+              label={t('monitors.form.retryInterval')}
               type="number"
               min={1}
               max={3600}
               value={form.retryIntervalSeconds ?? ''}
               onChange={(e) => updateField('retryIntervalSeconds', parseInt(e.target.value, 10) || null)}
-              placeholder="inherited (20)"
+              placeholder={t('monitors.form.retryIntervalPlaceholder')}
             />
             <Input
-              label="Max Retries"
+              label={t('monitors.form.maxRetries')}
               type="number"
               value={form.maxRetries ?? ''}
               onChange={(e) => updateField('maxRetries', parseInt(e.target.value, 10) || null)}
-              placeholder="inherited (3)"
+              placeholder={t('monitors.form.maxRetriesPlaceholder')}
             />
           </div>
 
@@ -642,7 +644,7 @@ export function MonitorEditPage() {
               className="h-4 w-4 rounded border-border bg-bg-tertiary text-accent focus:ring-accent"
             />
             <label htmlFor="upside-down" className="text-sm text-text-secondary">
-              Upside Down Mode (invert UP/DOWN logic)
+              {t('monitors.form.upsideDown')}
             </label>
           </div>
         </div>
@@ -651,11 +653,11 @@ export function MonitorEditPage() {
         <div className="flex items-center gap-3">
           <Button type="submit" loading={saving}>
             <Save size={16} className="mr-1.5" />
-            {isNew ? 'Create Monitor' : 'Save Changes'}
+            {isNew ? t('monitors.create') : t('monitors.saveChanges')}
           </Button>
           <Link to={isNew ? '/' : `/monitor/${id}`}>
             <Button type="button" variant="secondary">
-              Cancel
+              {t('common.cancel')}
             </Button>
           </Link>
         </div>

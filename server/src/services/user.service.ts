@@ -22,6 +22,8 @@ function rowToUser(row: UserRow): User {
     isActive: row.is_active,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
+    preferredLanguage: 'en',
+    enrollmentVersion: 0,
   };
 }
 

@@ -1,4 +1,5 @@
 import { useState, useEffect, type FormEvent } from 'react';
+import { useTranslation } from 'react-i18next';
 import { User, Save, KeyRound, Bell, CheckCircle2, AlertTriangle, QrCode, Mail } from 'lucide-react';
 import { profileApi } from '@/api/profile.api';
 import { appConfigApi } from '@/api/appConfig.api';
@@ -7,13 +8,17 @@ import { useAuthStore } from '@/store/authStore';
 import { useLiveAlertsStore } from '@/store/liveAlertsStore';
 import { Button } from '@/components/common/Button';
 import { Input } from '@/components/common/Input';
+import { SUPPORTED_LANGUAGES, setLanguage } from '@/i18n';
 import toast from 'react-hot-toast';
 
 export function ProfilePage() {
+  const { t } = useTranslation();
   const { user: sessionUser, requires2faSetup } = useAuthStore();
   const { enabled: alertEnabled, position: alertPosition, setEnabled, setPosition } = useLiveAlertsStore();
 
   const [displayName, setDisplayName] = useState('');
+  const [email, setEmail] = useState('');
+  const [preferredLanguage, setPreferredLanguage] = useState('');
   const [savingProfile, setSavingProfile] = useState(false);
 
   const [currentPassword, setCurrentPassword] = useState('');
@@ -41,6 +46,8 @@ export function ProfilePage() {
   useEffect(() => {
     profileApi.get().then((profile) => {
       setDisplayName(profile.displayName || '');
+      setEmail((profile as any).email || '');
+      setPreferredLanguage((profile as any).preferredLanguage || '');
     });
     appConfigApi.getConfig().then((cfg) => {
       setAllow2fa(cfg.allow_2fa);
@@ -52,10 +59,10 @@ export function ProfilePage() {
     e.preventDefault();
     setSavingProfile(true);
     try {
-      await profileApi.update({ displayName: displayName || null });
-      toast.success('Profile updated');
+      await profileApi.update({ displayName: displayName || null, email: email || null, preferredLanguage: preferredLanguage || undefined });
+      toast.success(t('profile.profileUpdated'));
     } catch {
-      toast.error('Failed to update profile');
+      toast.error(t('profile.failedProfile'));
     } finally {
       setSavingProfile(false);
     }
@@ -65,24 +72,24 @@ export function ProfilePage() {
     e.preventDefault();
 
     if (newPassword !== confirmPassword) {
-      toast.error('New passwords do not match');
+      toast.error(t('profile.password.mismatch'));
       return;
     }
 
     if (newPassword.length < 6) {
-      toast.error('Password must be at least 6 characters');
+      toast.error(t('profile.password.tooShort'));
       return;
     }
 
     setSavingPassword(true);
     try {
       await profileApi.changePassword(currentPassword, newPassword);
-      toast.success('Password changed successfully');
+      toast.success(t('profile.password.changed'));
       setCurrentPassword('');
       setNewPassword('');
       setConfirmPassword('');
     } catch (err: any) {
-      const msg = err?.response?.data?.error || 'Failed to change password';
+      const msg = err?.response?.data?.error || t('profile.password.failed');
       toast.error(msg);
     } finally {
       setSavingPassword(false);
@@ -98,17 +105,27 @@ export function ProfilePage() {
           toastPosition: alertPosition,
         },
       });
-      toast.success('Preferences saved');
+      toast.success(t('profile.alerts.preferencesSaved'));
     } catch {
-      toast.error('Failed to save preferences');
+      toast.error(t('profile.alerts.failedPreferences'));
     } finally {
       setSavingPrefs(false);
     }
   };
 
+  const handleLanguageChange = async (code: string) => {
+    setPreferredLanguage(code);
+    setLanguage(code);
+    try {
+      await profileApi.update({ preferredLanguage: code });
+    } catch {
+      // non-critical, ignore
+    }
+  };
+
   return (
     <div className="p-6 max-w-2xl min-w-0 mx-auto">
-      <h1 className="text-2xl font-semibold text-text-primary mb-6">My Profile</h1>
+      <h1 className="text-2xl font-semibold text-text-primary mb-6">{t('profile.title')}</h1>
 
       {/* Profile section */}
       <form onSubmit={handleProfileSubmit} className="mb-8">
@@ -116,27 +133,53 @@ export function ProfilePage() {
           <div className="flex items-center gap-2 mb-2">
             <User size={18} className="text-accent" />
             <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide">
-              Display Name
+              {t('profile.sectionProfile')}
             </h2>
           </div>
 
           <div className="space-y-1">
-            <label className="block text-sm font-medium text-text-secondary">Username</label>
+            <label className="block text-sm font-medium text-text-secondary">{t('profile.usernameLabel')}</label>
             <p className="text-sm text-text-primary font-mono bg-bg-tertiary rounded-md px-3 py-2">
               {sessionUser?.username}
             </p>
           </div>
 
           <Input
-            label="Display Name"
+            label={t('profile.displayNameLabel')}
             value={displayName}
             onChange={(e) => setDisplayName(e.target.value)}
-            placeholder="Your display name"
+            placeholder={t('profile.displayNamePlaceholder')}
           />
+
+          <div>
+            <Input
+              label={t('profile.emailLabel')}
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder={t('profile.emailPlaceholder')}
+            />
+            <p className="mt-1 text-xs text-text-muted">{t('profile.emailHint')}</p>
+          </div>
+
+          <div className="space-y-1">
+            <label className="block text-sm font-medium text-text-secondary">{t('profile.preferredLanguage')}</label>
+            <select
+              value={preferredLanguage}
+              onChange={(e) => handleLanguageChange(e.target.value)}
+              className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-1 focus:ring-accent"
+            >
+              {SUPPORTED_LANGUAGES.map((lang) => (
+                <option key={lang.code} value={lang.code}>
+                  {lang.nativeName} ({lang.name})
+                </option>
+              ))}
+            </select>
+          </div>
 
           <Button type="submit" loading={savingProfile}>
             <Save size={16} className="mr-1.5" />
-            Save Profile
+            {t('profile.saveProfile')}
           </Button>
         </div>
       </form>
@@ -147,40 +190,40 @@ export function ProfilePage() {
           <div className="flex items-center gap-2 mb-2">
             <KeyRound size={18} className="text-accent" />
             <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide">
-              Change Password
+              {t('profile.password.title')}
             </h2>
           </div>
 
           <Input
-            label="Current Password"
+            label={t('profile.password.current')}
             type="password"
             value={currentPassword}
             onChange={(e) => setCurrentPassword(e.target.value)}
-            placeholder="Enter current password"
+            placeholder={t('profile.password.currentPlaceholder')}
             required
           />
 
           <Input
-            label="New Password"
+            label={t('profile.password.new')}
             type="password"
             value={newPassword}
             onChange={(e) => setNewPassword(e.target.value)}
-            placeholder="Enter new password (min 6 characters)"
+            placeholder={t('profile.password.newPlaceholder')}
             required
           />
 
           <Input
-            label="Confirm New Password"
+            label={t('profile.password.confirm')}
             type="password"
             value={confirmPassword}
             onChange={(e) => setConfirmPassword(e.target.value)}
-            placeholder="Confirm new password"
+            placeholder={t('profile.password.confirmPlaceholder')}
             required
           />
 
           <Button type="submit" loading={savingPassword}>
             <KeyRound size={16} className="mr-1.5" />
-            Change Password
+            {t('profile.password.change')}
           </Button>
         </div>
       </form>
@@ -191,16 +234,16 @@ export function ProfilePage() {
           <div className="flex items-center gap-2 mb-2">
             <Bell size={18} className="text-accent" />
             <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide">
-              Live Alert Notifications
+              {t('profile.alerts.title')}
             </h2>
           </div>
 
           {/* Enabled toggle */}
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm font-medium text-text-primary">Enable live alerts</p>
+              <p className="text-sm font-medium text-text-primary">{t('profile.alerts.enableLabel')}</p>
               <p className="text-xs text-text-muted mt-0.5">
-                Show floating toast notifications when monitors change status
+                {t('profile.alerts.enableDesc')}
               </p>
             </div>
             <button
@@ -221,7 +264,7 @@ export function ProfilePage() {
 
           {/* Position selector */}
           <div>
-            <p className="text-sm font-medium text-text-primary mb-2">Notification position</p>
+            <p className="text-sm font-medium text-text-primary mb-2">{t('profile.alerts.positionLabel')}</p>
             <div className="flex flex-col gap-3">
               <label className="flex items-start gap-3 cursor-pointer">
                 <input
@@ -233,9 +276,9 @@ export function ProfilePage() {
                   className="accent-accent mt-0.5"
                 />
                 <div>
-                  <span className="text-sm text-text-primary">Bottom right — stack, auto-dismiss after 1 min</span>
+                  <span className="text-sm text-text-primary">{t('profile.alerts.bottomRight')}</span>
                   <p className="text-xs text-text-muted">
-                    Up to 5 alerts stacked in the bottom-right corner. Older alerts fade out gradually.
+                    {t('profile.alerts.bottomRightDesc')}
                   </p>
                 </div>
               </label>
@@ -249,9 +292,9 @@ export function ProfilePage() {
                   className="accent-accent mt-0.5"
                 />
                 <div>
-                  <span className="text-sm text-text-primary">Top center — latest only, auto-dismiss after 10 sec</span>
+                  <span className="text-sm text-text-primary">{t('profile.alerts.topCenter')}</span>
                   <p className="text-xs text-text-muted">
-                    Only the most recent alert is shown, centered at the top of the page.
+                    {t('profile.alerts.topCenterDesc')}
                   </p>
                 </div>
               </label>
@@ -260,7 +303,7 @@ export function ProfilePage() {
 
           <Button type="button" onClick={handleSavePreferences} loading={savingPrefs}>
             <Save size={16} className="mr-1.5" />
-            Save Preferences
+            {t('profile.alerts.savePreferences')}
           </Button>
         </div>
       </div>
@@ -268,13 +311,13 @@ export function ProfilePage() {
       {/* Security / 2FA section */}
       {(allow2fa || requires2faSetup) && (
         <div>
-          <h2 className="text-lg font-semibold text-text-primary mb-4">Security</h2>
+          <h2 className="text-lg font-semibold text-text-primary mb-4">{t('profile.security.title')}</h2>
 
           {requires2faSetup && (
             <div className="mb-4 flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-4">
               <AlertTriangle size={16} className="text-amber-400 mt-0.5 shrink-0" />
               <p className="text-sm text-amber-300">
-                Your administrator requires Two-Factor Authentication. Please enable a method below.
+                {t('profile.security.force2faWarning')}
               </p>
             </div>
           )}
@@ -285,7 +328,7 @@ export function ProfilePage() {
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <QrCode size={16} className="text-text-muted" />
-                  <p className="text-sm font-medium text-text-primary">Authenticator App (TOTP)</p>
+                  <p className="text-sm font-medium text-text-primary">{t('profile.security.totp')}</p>
                   {tfaStatus?.totpEnabled && <CheckCircle2 size={14} className="text-green-400" />}
                 </div>
                 {tfaStatus?.totpEnabled ? (
@@ -296,11 +339,11 @@ export function ProfilePage() {
                       try {
                         await twoFactorApi.totpDisable();
                         setTfaStatus((s) => s ? { ...s, totpEnabled: false } : s);
-                        toast.success('TOTP disabled');
-                      } catch { toast.error('Failed to disable TOTP'); }
+                        toast.success(t('profile.security.totpDisabled'));
+                      } catch { toast.error(t('profile.security.failedDisableTotp')); }
                     }}
                   >
-                    Disable
+                    {t('common.disable')}
                   </Button>
                 ) : !totpSetupData ? (
                   <Button
@@ -310,23 +353,23 @@ export function ProfilePage() {
                         const data = await twoFactorApi.totpSetup();
                         setTotpSetupData(data);
                         setTotpCode('');
-                      } catch { toast.error('Failed to start TOTP setup'); }
+                      } catch { toast.error(t('profile.security.failedStartTotp')); }
                     }}
                   >
-                    Enable
+                    {t('common.enable')}
                   </Button>
                 ) : null}
               </div>
 
               {!tfaStatus?.totpEnabled && totpSetupData && (
                 <div className="space-y-3">
-                  <p className="text-xs text-text-muted">Scan this QR code with your authenticator app, then enter the 6-digit code to confirm.</p>
+                  <p className="text-xs text-text-muted">{t('profile.security.totpScanDesc')}</p>
                   <img src={totpSetupData.qrDataUrl} alt="TOTP QR Code" className="w-40 h-40 rounded-lg border border-border" />
-                  <p className="text-xs text-text-muted font-mono break-all">Secret: {totpSetupData.secret}</p>
+                  <p className="text-xs text-text-muted font-mono break-all">{t('profile.security.totpSecret', { secret: totpSetupData.secret })}</p>
                   <div className="flex items-end gap-2">
                     <div className="flex-1">
                       <Input
-                        label="Verification code"
+                        label={t('profile.security.verificationCode')}
                         type="text"
                         inputMode="numeric"
                         value={totpCode}
@@ -344,14 +387,14 @@ export function ProfilePage() {
                           setTfaStatus((s) => s ? { ...s, totpEnabled: true } : s);
                           setTotpSetupData(null);
                           setTotpCode('');
-                          toast.success('TOTP enabled');
-                        } catch { toast.error('Invalid code'); }
+                          toast.success(t('profile.security.totpEnabled'));
+                        } catch { toast.error(t('profile.security.invalidCode')); }
                         finally { setTotpSaving(false); }
                       }}
                     >
-                      Confirm
+                      {t('common.confirm')}
                     </Button>
-                    <Button variant="ghost" onClick={() => { setTotpSetupData(null); setTotpCode(''); }}>Cancel</Button>
+                    <Button variant="ghost" onClick={() => { setTotpSetupData(null); setTotpCode(''); }}>{t('common.cancel')}</Button>
                   </div>
                 </div>
               )}
@@ -362,7 +405,7 @@ export function ProfilePage() {
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <Mail size={16} className="text-text-muted" />
-                  <p className="text-sm font-medium text-text-primary">Email OTP</p>
+                  <p className="text-sm font-medium text-text-primary">{t('profile.security.emailOtp')}</p>
                   {tfaStatus?.emailOtpEnabled && (
                     <>
                       <CheckCircle2 size={14} className="text-green-400" />
@@ -378,14 +421,14 @@ export function ProfilePage() {
                       try {
                         await twoFactorApi.emailDisable();
                         setTfaStatus((s) => s ? { ...s, emailOtpEnabled: false, email: null } : s);
-                        toast.success('Email OTP disabled');
-                      } catch { toast.error('Failed to disable Email OTP'); }
+                        toast.success(t('profile.security.emailOtpDisabled'));
+                      } catch { toast.error(t('profile.security.failedDisableEmailOtp')); }
                     }}
                   >
-                    Disable
+                    {t('common.disable')}
                   </Button>
                 ) : emailSetupStep === 'idle' ? (
-                  <Button size="sm" onClick={() => setEmailSetupStep('sent')}>Enable</Button>
+                  <Button size="sm" onClick={() => setEmailSetupStep('sent')}>{t('common.enable')}</Button>
                 ) : null}
               </div>
 
@@ -394,11 +437,11 @@ export function ProfilePage() {
                   {emailSetupStep === 'sent' && !emailInput && (
                     <>
                       <Input
-                        label="Your email address"
+                        label={t('profile.security.yourEmail')}
                         type="email"
                         value={emailInput}
                         onChange={(e) => setEmailInput(e.target.value)}
-                        placeholder="you@example.com"
+                        placeholder={t('profile.security.emailPlaceholder')}
                       />
                       <div className="flex gap-2">
                         <Button
@@ -408,24 +451,24 @@ export function ProfilePage() {
                             setEmailSaving(true);
                             try {
                               await twoFactorApi.emailSetup(emailInput);
-                              toast.success('Code sent to your email');
-                            } catch { toast.error('Failed to send code'); setEmailInput(''); }
+                              toast.success(t('profile.security.codeSent'));
+                            } catch { toast.error(t('profile.security.failedSendCode')); setEmailInput(''); }
                             finally { setEmailSaving(false); }
                           }}
                         >
-                          Send code
+                          {t('profile.security.sendCode')}
                         </Button>
-                        <Button variant="ghost" onClick={() => { setEmailSetupStep('idle'); setEmailInput(''); setEmailCode(''); }}>Cancel</Button>
+                        <Button variant="ghost" onClick={() => { setEmailSetupStep('idle'); setEmailInput(''); setEmailCode(''); }}>{t('common.cancel')}</Button>
                       </div>
                     </>
                   )}
                   {emailInput && (
                     <>
-                      <p className="text-xs text-text-muted">Enter the code sent to <strong>{emailInput}</strong></p>
+                      <p className="text-xs text-text-muted">{t('profile.security.enterCode', { email: emailInput })}</p>
                       <div className="flex items-end gap-2">
                         <div className="flex-1">
                           <Input
-                            label="Verification code"
+                            label={t('profile.security.verificationCode')}
                             type="text"
                             inputMode="numeric"
                             value={emailCode}
@@ -445,14 +488,14 @@ export function ProfilePage() {
                               setEmailSetupStep('idle');
                               setEmailInput('');
                               setEmailCode('');
-                              toast.success('Email OTP enabled');
-                            } catch { toast.error('Invalid code'); }
+                              toast.success(t('profile.security.emailOtpEnabled'));
+                            } catch { toast.error(t('profile.security.invalidCode')); }
                             finally { setEmailSaving(false); }
                           }}
                         >
-                          Confirm
+                          {t('common.confirm')}
                         </Button>
-                        <Button variant="ghost" onClick={() => { setEmailSetupStep('idle'); setEmailInput(''); setEmailCode(''); }}>Cancel</Button>
+                        <Button variant="ghost" onClick={() => { setEmailSetupStep('idle'); setEmailInput(''); setEmailCode(''); }}>{t('common.cancel')}</Button>
                       </div>
                     </>
                   )}

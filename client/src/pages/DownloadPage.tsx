@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Monitor, Apple, Download, ExternalLink, FolderOpen, Loader2, CheckCircle, AlertCircle } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 // ── Native desktop-app Go bindings ───────────────────────────────────────────
 // These are injected by the Go overlay into window when running inside Obliview.
@@ -32,57 +33,60 @@ interface Platform {
   downloads: DownloadEntry[];
 }
 
-const PLATFORMS: Platform[] = [
-  {
-    name: 'Windows',
-    icon: <Monitor size={24} />,
-    downloads: [
-      {
-        label: 'Installer (.msi)',
-        sublabel: 'Windows 10/11 · x64',
-        filename: 'ObliviewSetup.msi',
-        primary: true,
-      },
-      {
-        label: 'Portable (.exe)',
-        sublabel: 'Windows 10 1803+ · x64',
-        filename: 'Obliview.exe',
-      },
-    ],
-  },
-  {
-    name: 'macOS',
-    icon: <Apple size={24} />,
-    downloads: [
-      {
-        label: 'Disk Image (.dmg)',
-        sublabel: 'Apple Silicon (M1–M4)',
-        filename: 'Obliview-arm64.dmg',
-        primary: true,
-      },
-      {
-        label: 'Disk Image (.dmg)',
-        sublabel: 'Intel (x86_64)',
-        filename: 'Obliview-amd64.dmg',
-        primary: true,
-      },
-      {
-        label: 'Zip Archive (.zip)',
-        sublabel: 'Apple Silicon (M1–M4)',
-        filename: 'Obliview-arm64.zip',
-      },
-      {
-        label: 'Zip Archive (.zip)',
-        sublabel: 'Intel (x86_64)',
-        filename: 'Obliview-amd64.zip',
-      },
-    ],
-  },
-];
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export function DownloadPage() {
+  const { t } = useTranslation();
+
+  const PLATFORMS: Platform[] = [
+    {
+      name: t('download.windows'),
+      icon: <Monitor size={24} />,
+      downloads: [
+        {
+          label: t('download.installer'),
+          sublabel: t('download.installerSub'),
+          filename: 'ObliviewSetup.msi',
+          primary: true,
+        },
+        {
+          label: t('download.portable'),
+          sublabel: t('download.portableSub'),
+          filename: 'Obliview.exe',
+        },
+      ],
+    },
+    {
+      name: t('download.macos'),
+      icon: <Apple size={24} />,
+      downloads: [
+        {
+          label: t('download.dmg'),
+          sublabel: t('download.dmgSubArm'),
+          filename: 'Obliview-arm64.dmg',
+          primary: true,
+        },
+        {
+          label: t('download.dmg'),
+          sublabel: t('download.dmgSubIntel'),
+          filename: 'Obliview-amd64.dmg',
+          primary: true,
+        },
+        {
+          label: t('download.zip'),
+          sublabel: t('download.dmgSubArm'),
+          filename: 'Obliview-arm64.zip',
+        },
+        {
+          label: t('download.zip'),
+          sublabel: t('download.dmgSubIntel'),
+          filename: 'Obliview-amd64.zip',
+        },
+      ],
+    },
+  ];
+
   // Native-app download folder state
   const [downloadDir, setDownloadDir] = useState<string>('');
 
@@ -148,10 +152,9 @@ export function DownloadPage() {
             <Download size={32} />
           </div>
         </div>
-        <h1 className="mb-2 text-3xl font-bold text-text-primary">Obliview Desktop</h1>
+        <h1 className="mb-2 text-3xl font-bold text-text-primary">{t('download.title')}</h1>
         <p className="text-text-secondary">
-          A lightweight native wrapper for your Obliview instance.
-          Get system-level sound notifications and a distraction-free monitoring experience.
+          {t('download.description')}
         </p>
       </div>
 
@@ -160,17 +163,17 @@ export function DownloadPage() {
         <div className="mb-6 flex items-center gap-3 rounded-lg border border-border bg-bg-secondary px-4 py-3 text-sm">
           <FolderOpen size={15} className="text-text-muted shrink-0" />
           <div className="flex-1 min-w-0">
-            <span className="text-text-secondary">Download folder: </span>
+            <span className="text-text-secondary">{t('download.downloadFolder')}</span>
             {downloadDir
               ? <span className="font-mono text-text-primary break-all">{downloadDir}</span>
-              : <span className="text-text-muted italic">Will ask on first download</span>
+              : <span className="text-text-muted italic">{t('download.downloadFolderPlaceholder')}</span>
             }
           </div>
           <button
             onClick={handleChangeDir}
             className="shrink-0 rounded-md border border-border px-3 py-1 text-xs text-text-secondary hover:bg-bg-hover transition-colors"
           >
-            Change
+            {t('download.changeFolder')}
           </button>
         </div>
       )}
@@ -178,11 +181,11 @@ export function DownloadPage() {
       {/* Feature pills */}
       <div className="mb-10 flex flex-wrap justify-center gap-2">
         {[
-          'Sound alerts for probe down / recovery',
-          'Agent threshold notifications',
-          'No browser overhead',
-          'Remembers your server URL',
-          'Always up-to-date — no rebuilds needed',
+          t('download.features.soundAlerts'),
+          t('download.features.agentAlerts'),
+          t('download.features.noBrowserOverhead'),
+          t('download.features.remembersUrl'),
+          t('download.features.alwaysUpToDate'),
         ].map((f) => (
           <span
             key={f}
@@ -220,12 +223,12 @@ export function DownloadPage() {
                 const inner = isLoading ? (
                   <>
                     <Loader2 size={15} className="animate-spin" />
-                    <span className="text-xs mt-0.5">Downloading…</span>
+                    <span className="text-xs mt-0.5">{t('common.downloading')}</span>
                   </>
                 ) : isSaved ? (
                   <>
                     <CheckCircle size={15} className={d.primary ? 'text-white/80' : 'text-green-400'} />
-                    <span className="text-xs mt-0.5">Saved</span>
+                    <span className="text-xs mt-0.5">{t('common.saved')}</span>
                   </>
                 ) : (
                   <>
@@ -272,12 +275,12 @@ export function DownloadPage() {
       <div className="mt-8 rounded-xl border border-border bg-bg-secondary p-5">
         <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-text-primary">
           <ExternalLink size={14} />
-          Build from source
+          {t('download.buildFromSource')}
         </div>
         <p className="text-sm text-text-secondary leading-relaxed">
-          The desktop app lives in the{' '}
+          {t('download.buildFromSourceDesc')}
+          {' '}
           <code className="rounded bg-bg-tertiary px-1.5 py-0.5 text-xs font-mono text-text-primary">desktop-app/</code>{' '}
-          directory of the Obliview repository.
           It is a Go application using the native OS webview (WebView2 on Windows, WKWebView on macOS).{' '}
           On Windows run{' '}
           <code className="rounded bg-bg-tertiary px-1.5 py-0.5 text-xs font-mono text-text-primary">.\build-windows.ps1</code>{' '}
@@ -289,27 +292,27 @@ export function DownloadPage() {
 
       {/* How it works */}
       <div className="mt-6 rounded-xl border border-border bg-bg-secondary p-5">
-        <div className="mb-3 text-sm font-semibold text-text-primary">How it works</div>
+        <div className="mb-3 text-sm font-semibold text-text-primary">{t('download.howItWorks')}</div>
         <ul className="space-y-2 text-sm text-text-secondary">
           <li className="flex gap-2">
             <span className="mt-0.5 shrink-0 text-primary">1.</span>
-            On first launch, enter your Obliview server URL. It is saved locally.
+            {t('download.step1')}
           </li>
           <li className="flex gap-2">
             <span className="mt-0.5 shrink-0 text-primary">2.</span>
-            The app opens your Obliview in a native window — no browser tabs, no address bar.
+            {t('download.step2')}
           </li>
           <li className="flex gap-2">
             <span className="mt-0.5 shrink-0 text-primary">3.</span>
-            Sound notifications play when a probe goes down/up or an agent threshold is breached/cleared.
+            {t('download.step3')}
           </li>
           <li className="flex gap-2">
             <span className="mt-0.5 shrink-0 text-primary">4.</span>
-            Click the ⚙ gear icon (bottom-right corner) to change the server URL at any time.
+            {t('download.step4')}
           </li>
           <li className="flex gap-2">
             <span className="mt-0.5 shrink-0 text-primary">5.</span>
-            No rebuild is needed after Obliview updates — the app always loads the latest web UI.
+            {t('download.step5')}
           </li>
         </ul>
       </div>

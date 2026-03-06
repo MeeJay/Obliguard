@@ -1,5 +1,6 @@
 import { useState, useEffect, type FormEvent } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { useAuthStore } from '@/store/authStore';
 import { twoFactorApi } from '@/api/twoFactor.api';
 import { Button } from '@/components/common/Button';
@@ -8,6 +9,7 @@ import { Input } from '@/components/common/Input';
 type Step = 'credentials' | '2fa';
 
 export function LoginPage() {
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const { login, isLoading, checkSession } = useAuthStore();
 
@@ -43,7 +45,7 @@ export function LoginPage() {
         navigate('/', { replace: true });
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Login failed');
+      setError(err instanceof Error ? err.message : t('login.loginFailed'));
     }
   };
 
@@ -56,7 +58,7 @@ export function LoginPage() {
       await checkSession();
       navigate('/', { replace: true });
     } catch {
-      setError('Invalid code. Please try again.');
+      setError(t('login.twoFactor.invalidCode'));
     } finally {
       setMfaLoading(false);
     }
@@ -66,7 +68,7 @@ export function LoginPage() {
     try {
       await twoFactorApi.resendEmail();
     } catch {
-      setError('Failed to resend code');
+      setError(t('login.twoFactor.resendFailed'));
     }
   };
 
@@ -76,27 +78,27 @@ export function LoginPage() {
         <div className="text-center">
           <img src="/logo.webp" alt="Obliview" className="mx-auto h-16 w-16 mb-3" />
           <h1 className="text-3xl font-bold text-text-primary">Obliview</h1>
-          <p className="mt-2 text-sm text-text-secondary">Monitoring Dashboard</p>
+          <p className="mt-2 text-sm text-text-secondary">{t('login.title')}</p>
         </div>
 
         {step === 'credentials' ? (
           <form onSubmit={handleSubmit} className="space-y-6 rounded-lg border border-border bg-bg-secondary p-6">
             <Input
-              label="Username"
+              label={t('login.username')}
               type="text"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
-              placeholder="admin"
+              placeholder={t('login.usernamePlaceholder')}
               autoComplete="username"
               autoFocus
               required
             />
             <Input
-              label="Password"
+              label={t('login.password')}
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              placeholder="Enter your password"
+              placeholder={t('login.passwordPlaceholder')}
               autoComplete="current-password"
               required
             />
@@ -106,14 +108,19 @@ export function LoginPage() {
               </div>
             )}
             <Button type="submit" className="w-full" loading={isLoading}>
-              Sign in
+              {t('login.signIn')}
             </Button>
+            <div className="text-center">
+              <Link to="/forgot-password" className="text-xs text-text-muted hover:text-text-primary transition-colors">
+                {t('login.forgotPassword')}
+              </Link>
+            </div>
           </form>
         ) : (
           <form onSubmit={handleMfaSubmit} className="space-y-5 rounded-lg border border-border bg-bg-secondary p-6">
             <div>
-              <p className="text-sm font-medium text-text-primary mb-1">Two-Factor Authentication</p>
-              <p className="text-xs text-text-muted">Enter the verification code to continue.</p>
+              <p className="text-sm font-medium text-text-primary mb-1">{t('login.twoFactor.title')}</p>
+              <p className="text-xs text-text-muted">{t('login.twoFactor.description')}</p>
             </div>
 
             {mfaMethods.totp && mfaMethods.email && (
@@ -123,29 +130,29 @@ export function LoginPage() {
                   onClick={() => setMfaTab('totp')}
                   className={`flex-1 py-1.5 transition-colors ${mfaTab === 'totp' ? 'bg-primary text-white' : 'text-text-secondary hover:bg-bg-hover'}`}
                 >
-                  Authenticator App
+                  {t('login.twoFactor.tabTotp')}
                 </button>
                 <button
                   type="button"
                   onClick={() => setMfaTab('email')}
                   className={`flex-1 py-1.5 transition-colors ${mfaTab === 'email' ? 'bg-primary text-white' : 'text-text-secondary hover:bg-bg-hover'}`}
                 >
-                  Email Code
+                  {t('login.twoFactor.tabEmail')}
                 </button>
               </div>
             )}
 
             {mfaTab === 'email' && (
-              <p className="text-xs text-text-muted">A code was sent to your email address.</p>
+              <p className="text-xs text-text-muted">{t('login.twoFactor.emailSent')}</p>
             )}
 
             <Input
-              label={mfaTab === 'totp' ? 'Authenticator code' : 'Email code'}
+              label={mfaTab === 'totp' ? t('login.twoFactor.totpLabel') : t('login.twoFactor.emailLabel')}
               type="text"
               inputMode="numeric"
               value={mfaCode}
               onChange={(e) => setMfaCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-              placeholder="000000"
+              placeholder={t('login.twoFactor.codePlaceholder')}
               autoFocus
               required
             />
@@ -157,14 +164,14 @@ export function LoginPage() {
             )}
 
             <div className="flex flex-col gap-2">
-              <Button type="submit" className="w-full" loading={mfaLoading}>Verify</Button>
+              <Button type="submit" className="w-full" loading={mfaLoading}>{t('login.twoFactor.verify')}</Button>
               {mfaTab === 'email' && (
                 <button type="button" onClick={handleResendEmail} className="text-xs text-text-muted hover:text-text-primary text-center">
-                  Resend code
+                  {t('login.twoFactor.resend')}
                 </button>
               )}
               <button type="button" onClick={() => { setStep('credentials'); setError(''); }} className="text-xs text-text-muted hover:text-text-primary text-center">
-                ← Back to login
+                {t('login.twoFactor.backToLogin')}
               </button>
             </div>
           </form>
@@ -172,8 +179,8 @@ export function LoginPage() {
       </div>
 
       <p className="fixed bottom-3 left-0 right-0 text-center text-xs text-text-secondary/50 select-none">
-        client v{__APP_VERSION__}
-        {serverVersion && ` · server v${serverVersion}`}
+        {t('login.clientVersion', { version: __APP_VERSION__ })}
+        {serverVersion && ` · ${t('login.serverVersion', { version: serverVersion })}`}
       </p>
     </div>
   );

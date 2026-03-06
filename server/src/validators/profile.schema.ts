@@ -8,6 +8,8 @@ const userPreferencesSchema = z.object({
 export const updateProfileSchema = z.object({
   displayName: z.string().max(100).nullable().optional(),
   preferences: userPreferencesSchema,
+  email: z.string().email().max(255).nullable().optional(),
+  preferredLanguage: z.string().max(10).optional(),
 });
 
 export const changePasswordSchema = z.object({

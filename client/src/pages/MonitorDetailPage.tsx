@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { Pencil, Pause, Play, Trash2, ArrowLeft, Copy, ShieldAlert, ShieldX, ShieldCheck } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import { cn } from '@/utils/cn';
 import { useMonitorStore } from '@/store/monitorStore';
 import { useAuthStore } from '@/store/authStore';
@@ -23,6 +24,7 @@ import toast from 'react-hot-toast';
 export function MonitorDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const { t } = useTranslation();
   const { isAdmin, canWriteMonitor } = useAuthStore();
   const { getMonitor, getRecentHeartbeats, setHeartbeats, updateMonitor, removeMonitor } =
     useMonitorStore();
@@ -97,9 +99,9 @@ export function MonitorDetailPage() {
   if (!monitor) {
     return (
       <div className="flex h-full flex-col items-center justify-center">
-        <p className="text-text-muted">Monitor not found</p>
+        <p className="text-text-muted">{t('monitors.notFound')}</p>
         <Link to="/" className="mt-4">
-          <Button variant="secondary">Back to Dashboard</Button>
+          <Button variant="secondary">{t('monitors.backToDashboard')}</Button>
         </Link>
       </div>
     );
@@ -109,9 +111,9 @@ export function MonitorDetailPage() {
     try {
       const result = await monitorsApi.pause(monitorId);
       updateMonitor(monitorId, { status: result.status as any });
-      toast.success(result.status === 'paused' ? 'Monitor paused' : 'Monitor resumed');
+      toast.success(result.status === 'paused' ? t('monitors.paused') : t('monitors.resumed'));
     } catch {
-      toast.error('Failed to pause monitor');
+      toast.error(t('monitors.failedPause'));
     }
   };
 
@@ -119,19 +121,19 @@ export function MonitorDetailPage() {
     // Copy monitor data, strip unique fields, add "(Copy)" to name
     const { id: _id, createdAt: _ca, updatedAt: _ua, pushToken: _pt, status: _st, createdBy: _cb, ...cloneData } = monitor;
     navigate('/monitor/new', {
-      state: { cloneData: { ...cloneData, name: `${monitor.name} (Copy)` } },
+      state: { cloneData: { ...cloneData, name: `${monitor.name}${t('monitors.cloneSuffix')}` } },
     });
   };
 
   const handleDelete = async () => {
-    if (!confirm(`Delete monitor "${monitor.name}"? This cannot be undone.`)) return;
+    if (!confirm(t('monitors.confirmDelete', { name: monitor.name }))) return;
     try {
       await monitorsApi.delete(monitorId);
       removeMonitor(monitorId);
-      toast.success('Monitor deleted');
+      toast.success(t('monitors.deleted'));
       navigate('/');
     } catch {
-      toast.error('Failed to delete monitor');
+      toast.error(t('monitors.failedDelete'));
     }
   };
 
@@ -167,7 +169,7 @@ export function MonitorDetailPage() {
       {/* Back button */}
       <Link to="/" className="inline-flex items-center gap-1 text-sm text-text-secondary hover:text-text-primary mb-4">
         <ArrowLeft size={14} />
-        Back to Dashboard
+        {t('monitors.backToDashboard')}
       </Link>
 
       {/* Header */}
@@ -195,23 +197,23 @@ export function MonitorDetailPage() {
             <Link to={`/monitor/${monitorId}/edit`}>
               <Button variant="secondary" size="sm">
                 <Pencil size={14} className="mr-1.5" />
-                Edit
+                {t('monitors.edit')}
               </Button>
             </Link>
             <Button variant="secondary" size="sm" onClick={handleClone}>
               <Copy size={14} className="mr-1.5" />
-              Clone
+              {t('monitors.clone')}
             </Button>
             <Button variant="secondary" size="sm" onClick={handlePause}>
               {monitor.status === 'paused' ? (
-                <><Play size={14} className="mr-1.5" />Resume</>
+                <><Play size={14} className="mr-1.5" />{t('monitors.resumeMonitor')}</>
               ) : (
-                <><Pause size={14} className="mr-1.5" />Pause</>
+                <><Pause size={14} className="mr-1.5" />{t('monitors.pauseMonitor')}</>
               )}
             </Button>
             <Button variant="danger" size="sm" onClick={handleDelete}>
               <Trash2 size={14} className="mr-1.5" />
-              Delete
+              {t('monitors.deleteMonitor')}
             </Button>
           </div>
         )}
@@ -222,7 +224,7 @@ export function MonitorDetailPage() {
         <div className="mb-4 flex items-center gap-3 rounded-lg border border-status-ssl-warning/30 bg-status-ssl-warning-bg px-4 py-3">
           <ShieldAlert size={20} className="shrink-0 text-status-ssl-warning" />
           <div>
-            <p className="text-sm font-semibold text-status-ssl-warning">SSL Certificate Warning</p>
+            <p className="text-sm font-semibold text-status-ssl-warning">{t('monitors.stats.sslWarn')}</p>
             <p className="text-sm text-text-secondary">{lastHeartbeat.message}</p>
           </div>
         </div>
@@ -231,7 +233,7 @@ export function MonitorDetailPage() {
         <div className="mb-4 flex items-center gap-3 rounded-lg border border-status-ssl-expired/30 bg-status-ssl-expired-bg px-4 py-3">
           <ShieldX size={20} className="shrink-0 text-status-ssl-expired" />
           <div>
-            <p className="text-sm font-semibold text-status-ssl-expired">SSL Certificate Expired</p>
+            <p className="text-sm font-semibold text-status-ssl-expired">{t('monitors.stats.sslExpired')}</p>
             <p className="text-sm text-text-secondary">{lastHeartbeat.message}</p>
           </div>
         </div>
@@ -244,11 +246,11 @@ export function MonitorDetailPage() {
       >
         {monitor.type === 'value_watcher' ? (
           <div className="rounded-lg border border-accent/30 bg-bg-secondary p-4">
-            <div className="text-sm text-text-secondary mb-1">Current Value</div>
+            <div className="text-sm text-text-secondary mb-1">{t('monitors.stats.currentValue')}</div>
             <div className="text-xl font-mono font-semibold text-accent">
               {lastHeartbeat?.value != null
                 ? (() => { const n = Number(lastHeartbeat.value); return isNaN(n) ? lastHeartbeat.value : n.toLocaleString(); })()
-                : 'N/A'}
+                : t('common.na')}
             </div>
             {monitor.valueWatcherJsonPath && (
               <div className="text-xs text-text-muted mt-0.5">{monitor.valueWatcherJsonPath}</div>
@@ -256,25 +258,25 @@ export function MonitorDetailPage() {
           </div>
         ) : (
           <div className="rounded-lg border border-border bg-bg-secondary p-4">
-            <div className="text-sm text-text-secondary mb-1">Response Time</div>
+            <div className="text-sm text-text-secondary mb-1">{t('monitors.stats.responseTime')}</div>
             <div className="text-xl font-mono font-semibold text-text-primary">
-              {lastHeartbeat?.responseTime ? `${lastHeartbeat.responseTime}ms` : 'N/A'}
+              {lastHeartbeat?.responseTime ? `${lastHeartbeat.responseTime}ms` : t('common.na')}
             </div>
           </div>
         )}
         <div className="rounded-lg border border-border bg-bg-secondary p-4">
-          <UptimePercentage heartbeats={heartbeats} label="Uptime" />
+          <UptimePercentage heartbeats={heartbeats} label={t('monitors.stats.uptime')} />
         </div>
         <div className="rounded-lg border border-border bg-bg-secondary p-4">
-          <div className="text-sm text-text-secondary mb-1">Total Checks</div>
+          <div className="text-sm text-text-secondary mb-1">{t('monitors.stats.totalChecks')}</div>
           <div className="text-xl font-mono font-semibold text-text-primary">
             {heartbeats.length}
           </div>
         </div>
         <div className="rounded-lg border border-border bg-bg-secondary p-4">
-          <div className="text-sm text-text-secondary mb-1">Last Check</div>
+          <div className="text-sm text-text-secondary mb-1">{t('monitors.stats.lastCheck')}</div>
           <div className="text-sm font-mono text-text-primary">
-            {lastHeartbeat ? new Date(lastHeartbeat.createdAt).toLocaleString() : 'Never'}
+            {lastHeartbeat ? new Date(lastHeartbeat.createdAt).toLocaleString() : t('common.never')}
           </div>
         </div>
         {isHttps && (
@@ -296,7 +298,7 @@ export function MonitorDetailPage() {
               ) : (
                 <ShieldCheck size={14} className="text-status-up" />
               )}
-              SSL Certificate
+              {t('monitors.stats.sslCert')}
             </div>
             <div
               className={cn(
@@ -312,7 +314,7 @@ export function MonitorDetailPage() {
                 ? sslDaysRemaining < 0
                   ? `Expired ${Math.abs(sslDaysRemaining)}d ago`
                   : `${sslDaysRemaining}d left`
-                : 'N/A'}
+                : t('common.na')}
             </div>
             {sslExpiryDate && (
               <div className="text-xs text-text-muted mt-0.5">{sslExpiryDate}</div>
@@ -324,21 +326,21 @@ export function MonitorDetailPage() {
       {/* Period selector */}
       <div className="flex items-center justify-between mb-4">
         <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wide">
-          History{zoomRange && <span className="ml-2 text-xs text-cyan-400 font-normal normal-case tracking-normal">— zoomed</span>}
+          {t('monitors.history')}{zoomRange && <span className="ml-2 text-xs text-cyan-400 font-normal normal-case tracking-normal">— {t('monitors.zoomed')}</span>}
         </h3>
         <PeriodSelector value={period} onChange={setPeriod} />
       </div>
 
       {/* Heartbeat Bar */}
       <div className="mb-6 rounded-lg border border-border bg-bg-secondary p-4">
-        <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wide mb-3">Heartbeat History</h3>
+        <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wide mb-3">{t('monitors.heartbeatHistory')}</h3>
         <HeartbeatBar heartbeats={periodHeartbeats.length > 0 ? periodHeartbeats : heartbeats} />
       </div>
 
       {/* Response Time / Value Chart */}
       <div className="rounded-lg border border-border bg-bg-secondary p-4">
         <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wide mb-3">
-          {monitor.type === 'value_watcher' ? 'Value History' : 'Response Time'}
+          {monitor.type === 'value_watcher' ? t('monitors.valueHistory') : t('monitors.responseTime')}
         </h3>
         <HeartbeatChart
           heartbeats={
@@ -361,7 +363,7 @@ export function MonitorDetailPage() {
       {/* Monitor Info */}
       {monitor.description && (
         <div className="mt-6 rounded-lg border border-border bg-bg-secondary p-4">
-          <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wide mb-2">Description</h3>
+          <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wide mb-2">{t('monitors.sectionDescription')}</h3>
           <p className="text-sm text-text-primary">{monitor.description}</p>
         </div>
       )}
@@ -372,7 +374,7 @@ export function MonitorDetailPage() {
           <NotificationBindingsPanel
             scope="monitor"
             scopeId={monitorId}
-            title="Notification Channels"
+            title={t('monitors.sectionNotifications')}
           />
         </div>
       )}
@@ -408,7 +410,7 @@ export function MonitorDetailPage() {
           <SettingsPanel
             scope="monitor"
             scopeId={monitorId}
-            title="Monitor Settings"
+            title={t('monitors.sectionSettings')}
           />
         </div>
       )}
