@@ -37,10 +37,35 @@ export const twoFactorService = {
         period: 30,
         secret: OTPAuth.Secret.fromBase32(secret.trim()),
       });
-      // window: 2 = ±60 seconds clock drift tolerance (was 1 = ±30s)
-      const delta = totp.validate({ token: code.trim(), window: 2 });
-      return delta !== null;
-    } catch {
+      // Use a wide window (10 = ±5 minutes) purely for diagnostics —
+      // we still only ACCEPT within ±2 windows (±60 s) for security.
+      const serverCounter = Math.floor(Date.now() / 1000 / 30);
+      const delta = totp.validate({ token: code.trim(), window: 10 });
+
+      if (delta === null) {
+        // Code doesn't match ANY window in ±5 min — completely wrong code or corrupted secret
+        logger.warn(
+          { serverCounter, serverTime: new Date().toISOString() },
+          '[2FA] TOTP completely invalid — no match in ±10 windows (±5 min). Wrong code or bad secret.',
+        );
+        return false;
+      }
+
+      // Code IS correct for some time window — log how many steps off we are
+      const driftSeconds = delta * 30;
+      if (Math.abs(delta) <= 2) {
+        logger.info({ delta, driftSeconds, serverCounter }, '[2FA] TOTP valid (within ±60 s tolerance)');
+        return true;
+      } else {
+        // Valid code but clock is too far off — log it so we can fix the root cause
+        logger.warn(
+          { delta, driftSeconds, serverCounter, serverTime: new Date().toISOString() },
+          `[2FA] TOTP clock drift too large: ${driftSeconds}s off. Increase NTP sync on server or phone.`,
+        );
+        return false;
+      }
+    } catch (err) {
+      logger.warn({ err }, '[2FA] TOTP verification threw an exception (secret may be malformed)');
       return false;
     }
   },

@@ -127,13 +127,14 @@ export const twoFactorController = {
 
       if (method === 'totp' && row.totp_enabled && row.totp_secret) {
         valid = twoFactorService.verifyTotp(row.totp_secret, String(code));
-        logger.debug({
+        logger.warn({
           userId,
           method: 'totp',
           codeLength: String(code).length,
           secretLength: (row.totp_secret as string).length,
           secretPrefix: (row.totp_secret as string).substring(0, 4),
           serverTime: new Date().toISOString(),
+          serverTimestamp: Date.now(),
           valid,
         }, '[2FA] TOTP verification attempt');
       } else if (method === 'totp') {
