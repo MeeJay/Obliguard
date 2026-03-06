@@ -4,6 +4,7 @@ import { twoFactorService } from '../services/twoFactor.service';
 import { appConfigService } from '../services/appConfig.service';
 import { authService } from '../services/auth.service';
 import { AppError } from '../middleware/errorHandler';
+import { logger } from '../utils/logger';
 
 // Extend session type for 2FA state
 declare module 'express-session' {
@@ -126,6 +127,18 @@ export const twoFactorController = {
 
       if (method === 'totp' && row.totp_enabled && row.totp_secret) {
         valid = twoFactorService.verifyTotp(row.totp_secret, String(code));
+        logger.debug({
+          userId,
+          method: 'totp',
+          codeLength: String(code).length,
+          secretLength: (row.totp_secret as string).length,
+          secretPrefix: (row.totp_secret as string).substring(0, 4),
+          serverTime: new Date().toISOString(),
+          valid,
+        }, '[2FA] TOTP verification attempt');
+      } else if (method === 'totp') {
+        logger.warn({ userId, totpEnabled: row.totp_enabled, hasSecret: !!row.totp_secret },
+          '[2FA] TOTP verify failed: totp_enabled or totp_secret missing in DB');
       } else if (method === 'email' && row.email_otp_enabled) {
         const pending = req.session.pendingEmailOtp;
         if (pending && Date.now() <= pending.expires && pending.code === String(code)) {

@@ -110,7 +110,8 @@
       "resend": "Resend code",
       "backToLogin": "← Back to login",
       "invalidCode": "Invalid code. Please try again.",
-      "resendFailed": "Failed to resend code"
+      "resendFailed": "Failed to resend code",
+      "sessionExpired": "Session expired. Please log in again."
     },
     "loginFailed": "Login failed",
     "clientVersion": "client v{{version}}",

@@ -57,8 +57,17 @@ export function LoginPage() {
       await twoFactorApi.verify(mfaCode, mfaTab);
       await checkSession();
       navigate('/', { replace: true });
-    } catch {
-      setError(t('login.twoFactor.invalidCode'));
+    } catch (err: unknown) {
+      const axiosErr = err as { response?: { status?: number; data?: { error?: string } } };
+      const status = axiosErr?.response?.status;
+      const serverMsg = axiosErr?.response?.data?.error ?? '';
+      if (status === 400 && serverMsg.toLowerCase().includes('pending')) {
+        // Session was lost between login and 2FA verify (e.g. server restart)
+        setError(t('login.twoFactor.sessionExpired'));
+        setStep('credentials');
+      } else {
+        setError(t('login.twoFactor.invalidCode'));
+      }
     } finally {
       setMfaLoading(false);
     }

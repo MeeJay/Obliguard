@@ -107,7 +107,8 @@
       "resend": "Renvoyer le code",
       "backToLogin": "← Retour à la connexion",
       "invalidCode": "Code invalide. Veuillez réessayer.",
-      "resendFailed": "Échec du renvoi du code"
+      "resendFailed": "Échec du renvoi du code",
+      "sessionExpired": "Session expirée. Veuillez vous reconnecter."
     },
     "loginFailed": "Échec de la connexion",
     "clientVersion": "client v{{version}}",

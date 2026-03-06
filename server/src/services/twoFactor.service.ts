@@ -35,9 +35,10 @@ export const twoFactorService = {
         algorithm: 'SHA1',
         digits: 6,
         period: 30,
-        secret: OTPAuth.Secret.fromBase32(secret),
+        secret: OTPAuth.Secret.fromBase32(secret.trim()),
       });
-      const delta = totp.validate({ token: code, window: 1 });
+      // window: 2 = ±60 seconds clock drift tolerance (was 1 = ±30s)
+      const delta = totp.validate({ token: code.trim(), window: 2 });
       return delta !== null;
     } catch {
       return false;
