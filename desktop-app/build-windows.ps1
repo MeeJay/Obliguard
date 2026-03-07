@@ -26,12 +26,12 @@ $ExeName     = 'Obliview.exe'
 $MsiName     = 'ObliviewSetup.msi'
 $WxsFile     = 'installer.wxs'
 $DistDir     = 'dist'
-# NOTE: Go automatically links every *.syso in the package directory.
-# resource_windows.syso is the single icon-resource file used by this package.
-# We regenerate it here so the icon is always up-to-date AND so there is
-# never more than one .syso in the directory (double .syso = corrupted binary).
+# NOTE: resource_windows.syso is committed to the repo and auto-linked by Go.
+# Do NOT regenerate it via rsrc here — rsrc can produce an incompatible syso
+# that causes the resulting exe to refuse to launch on Windows.
+# If you need to update the icon, run tools\convert_icon manually and commit
+# the new resource_windows.syso.
 $sysoFile    = 'resource_windows.syso'
-$sysoCreated = $false
 
 # --- Read version (single source of truth) ---
 # Edit the VERSION file to bump; this script injects it into the binary and MSI.
@@ -66,20 +66,17 @@ if (-not (Test-Path 'logo.ico')) {
 }
 Write-Host "  logo.ico: OK"
 
-# --- Step 2: Embed the app icon into the exe via a Windows resource file ---
-Write-Host "`n=== Step 2: Embedding icon resource ===" -ForegroundColor Cyan
-# rsrc generates resource_windows.syso from logo.ico.
-# Go automatically picks up *.syso files in the package directory.
-# Writing to resource_windows.syso (the canonical name) ensures there is
-# never more than one .syso - a second .syso causes duplicate resource IDs
-# and produces a binary that refuses to run on Windows.
-# Quote the module path so PowerShell does not misparse '@' as a splatting operator.
-go run "github.com/akavel/rsrc@v0.10.2" -ico logo.ico -arch amd64 -o $sysoFile
-if ($LASTEXITCODE -ne 0) {
-    Write-Warning "rsrc failed (exit $LASTEXITCODE) - binary will be built without a custom icon."
+# --- Step 2: Verify committed icon resource is present ---
+Write-Host "`n=== Step 2: Icon resource ===" -ForegroundColor Cyan
+# resource_windows.syso is committed to the repo; Go links it automatically.
+# We do NOT regenerate it here — rsrc can produce an incompatible syso that
+# causes the exe to refuse to launch. Use tools\convert_icon + commit if the
+# icon changes.
+if (Test-Path $sysoFile) {
+    $sysoSize = (Get-Item $sysoFile).Length
+    Write-Host "  $sysoFile OK ($sysoSize bytes, committed)"
 } else {
-    $sysoCreated = $true
-    Write-Host "  Icon resource: $sysoFile (regenerated)"
+    Write-Warning "$sysoFile not found — exe will launch without a custom icon."
 }
 
 # --- Step 3: Build the Go binary ---
@@ -102,21 +99,19 @@ $env:CGO_CXXFLAGS = '-IC:/obliview-winrt'
 Write-Host "  EventToken.h stub: $stubDir"
 
 $env:CGO_ENABLED = '1'
-# -H windowsgui   suppresses the console window that would otherwise flash on launch.
+# -H windowsgui  suppresses the console window that would otherwise flash on launch.
+# -s -w          strip debug symbols + DWARF info (halves binary size, required for
+#                a working GUI exe — matches the flags used in 00-D1-build-msi.bat).
 # -X main.appVersion injects the version string so React can detect outdated clients.
-go build -ldflags "-H windowsgui -X main.appVersion=$Version" -o $ExeName .
+if (-not (Test-Path $DistDir)) { New-Item -ItemType Directory -Path $DistDir | Out-Null }
+$distExe = Join-Path $DistDir $ExeName
+go build -ldflags "-H windowsgui -s -w -X main.appVersion=$Version" -o $distExe .
 if ($LASTEXITCODE -ne 0) {
     Write-Error "go build failed."
 }
-# resource_windows.syso is intentionally kept - it is the committed icon resource
-# for Windows builds and will be reused / overwritten on the next run.
 
-# Move to dist/
-if (-not (Test-Path $DistDir)) { New-Item -ItemType Directory -Path $DistDir | Out-Null }
-Copy-Item $ExeName (Join-Path $DistDir $ExeName) -Force
-
-$exeSize = (Get-Item $ExeName).Length / 1MB
-Write-Host ("  Built: {0} ({1:F1} MB)" -f $ExeName, $exeSize)
+$exeSize = (Get-Item $distExe).Length / 1MB
+Write-Host ("  Built: dist\{0} ({1:F1} MB)" -f $ExeName, $exeSize)
 
 # --- Step 4: Build the MSI with WiX ---
 Write-Host "`n=== Step 4: Building $MsiName ===" -ForegroundColor Cyan
@@ -141,7 +136,7 @@ Write-Host ("  Built: {0} ({1:F1} MB)" -f $msiPath, $msiSize)
 
 # --- Done ---
 Write-Host "`n=== Done! (v$Version) ===" -ForegroundColor Green
-Write-Host "  Executable : $(Join-Path $DistDir $ExeName)"
+Write-Host "  Executable : $distExe"
 Write-Host "  Installer  : $msiPath"
 Write-Host ""
 Write-Host "To install: double-click $msiPath  (or: msiexec /i $msiPath)"
