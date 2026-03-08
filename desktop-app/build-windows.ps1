@@ -1,4 +1,4 @@
-# build-windows.ps1 - Build Obliview.exe and ObliviewSetup.msi for Windows
+# build-windows.ps1 - Build Obliguard.exe and ObliguardSetup.msi for Windows
 # Run from the desktop-app/ directory:
 #   .\build-windows.ps1
 #
@@ -11,8 +11,8 @@
 #   2. Run this script - the version is injected everywhere automatically.
 #
 # Outputs:
-#   dist\Obliview.exe        - portable executable
-#   dist\ObliviewSetup.msi   - Windows installer with Start Menu + optional Desktop shortcut
+#   dist\Obliguard.exe        - portable executable
+#   dist\ObliguardSetup.msi   - Windows installer with Start Menu + optional Desktop shortcut
 
 # NOTE: Set-StrictMode is intentionally NOT used here.
 # On certain PowerShell + Go version combinations, Set-StrictMode -Version Latest causes
@@ -21,9 +21,9 @@
 $ErrorActionPreference = 'Stop'
 
 # All script-level variables declared up-front so they are always in scope.
-$AppName     = 'Obliview'
-$ExeName     = 'Obliview.exe'
-$MsiName     = 'ObliviewSetup.msi'
+$AppName     = 'Obliguard'
+$ExeName     = 'Obliguard.exe'
+$MsiName     = 'ObliguardSetup.msi'
 $WxsFile     = 'installer.wxs'
 $DistDir     = 'dist'
 # NOTE: resource_windows.syso is committed to the repo and auto-linked by Go.
@@ -89,13 +89,13 @@ Write-Host "`n=== Step 3: Building $ExeName ===" -ForegroundColor Cyan
 # flag parsing even when quoted).  CGO_CXXFLAGS is used because webview.cc is C++;
 # CGO_CFLAGS only covers plain C compilation units.
 # This is the same approach used in 00-D1-build-msi.bat.
-$stubDir = 'C:\obliview-winrt'
+$stubDir = 'C:\obliguard-winrt'
 if (-not (Test-Path $stubDir)) { New-Item -ItemType Directory -Path $stubDir | Out-Null }
 Set-Content "$stubDir\EventToken.h" @'
 #pragma once
 typedef struct EventRegistrationToken { __int64 value; } EventRegistrationToken;
 '@ -Encoding ASCII
-$env:CGO_CXXFLAGS = '-IC:/obliview-winrt'
+$env:CGO_CXXFLAGS = '-IC:/obliguard-winrt'
 Write-Host "  EventToken.h stub: $stubDir"
 
 $env:CGO_ENABLED = '1'
