@@ -1,4 +1,4 @@
-import type { Heartbeat } from '@obliview/shared';
+import type { Heartbeat } from '@/store/monitorStore';
 import { cn } from '@/utils/cn';
 
 interface UptimePercentageProps {

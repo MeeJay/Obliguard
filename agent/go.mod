@@ -1,8 +1,9 @@
-module github.com/obliview/agent
+module github.com/obliguard/agent
 
 go 1.22
 
 require (
+	github.com/google/uuid v1.6.0
 	github.com/shirou/gopsutil/v3 v3.24.5
 	golang.org/x/sys v0.20.0
 )

@@ -1,5 +1,5 @@
 #!/bin/bash
-# build-mac.sh — Build Obliview.app for macOS (arm64 + amd64)
+# build-mac.sh — Build Obliguard.app for macOS (arm64 + amd64)
 # Run from the desktop-app/ directory: ./build-mac.sh
 #
 # To release a new version:
@@ -7,8 +7,8 @@
 #   2. Run this script — the version is injected everywhere automatically.
 set -e
 
-BINARY_NAME="obliview"
-APPNAME="Obliview"
+BINARY_NAME="obliguard"
+APPNAME="Obliguard"
 BUNDLE="$APPNAME.app"
 PNG="logo.png"
 
@@ -104,13 +104,13 @@ package_arch() {
 <plist version="1.0">
 <dict>
   <key>CFBundleIdentifier</key>
-  <string>me.binaryhearts.obliview</string>
+  <string>me.binaryhearts.obliguard</string>
   <key>CFBundleName</key>
-  <string>Obliview</string>
+  <string>Obliguard</string>
   <key>CFBundleDisplayName</key>
-  <string>Obliview</string>
+  <string>Obliguard</string>
   <key>CFBundleExecutable</key>
-  <string>obliview</string>
+  <string>obliguard</string>
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
   <key>CFBundleVersion</key>
@@ -171,7 +171,7 @@ EOF
 
   local MOUNT_POINT
   # hdiutil output is tab-delimited; use -F'\t' so volume names containing
-  # spaces (e.g. "Obliview 1" when a previous mount was not ejected) are
+  # spaces (e.g. "Obliguard 1" when a previous mount was not ejected) are
   # captured correctly as a single field instead of being split by awk.
   MOUNT_POINT=$(hdiutil attach -readwrite -noverify -noautoopen "$DMG_TMP" \
     | awk -F'\t' '/\/Volumes\//{print $NF}')
@@ -255,8 +255,8 @@ rm -f "${BINARY_NAME}-${NATIVE_GOARCH}" 2>/dev/null || true
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 echo "=== Done! ==="
-ls -lh dist/Obliview-*.{zip,dmg} 2>/dev/null || true
+ls -lh dist/Obliguard-*.{zip,dmg} 2>/dev/null || true
 echo ""
 echo "NOTE: If macOS blocks the app (Gatekeeper) because it is unsigned:"
 echo "  Right-click → Open  (first time only)"
-echo "  or: xattr -dr com.apple.quarantine Obliview.app"
+echo "  or: xattr -dr com.apple.quarantine Obliguard.app"

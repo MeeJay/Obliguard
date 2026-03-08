@@ -22,11 +22,11 @@ import type {
   UserTeam,
   TeamPermission,
   GroupTreeNode,
-  Monitor as MonitorType,
   PermissionLevel,
   PermissionScope,
   UserTenantAssignment,
 } from '@obliview/shared';
+import type { Monitor as MonitorType } from '@/store/monitorStore';
 import { usersApi } from '@/api/users.api';
 import { teamsApi } from '@/api/teams.api';
 import { groupsApi } from '@/api/groups.api';
@@ -413,7 +413,7 @@ export function AdminUsersPage() {
 
   // Build sets for quick lookup
   const assignedGroupIds = new Set(teamPermissions.filter((p) => p.scope === 'group').map((p) => p.scopeId));
-  const assignedMonitorIds = new Set(teamPermissions.filter((p) => p.scope === 'monitor').map((p) => p.scopeId));
+  const assignedMonitorIds = new Set<number>(); // monitors removed from Obliguard
 
   // Collect all descendant group IDs covered by a group permission (implicit coverage)
   const coveredGroupIds = new Set<number>();
@@ -452,7 +452,7 @@ export function AdminUsersPage() {
 
   // Get permission for a group/monitor
   const getGroupPerm = (groupId: number) => teamPermissions.find((p) => p.scope === 'group' && p.scopeId === groupId);
-  const getMonitorPerm = (monitorId: number) => teamPermissions.find((p) => p.scope === 'monitor' && p.scopeId === monitorId);
+  const getMonitorPerm = (_monitorId: number): TeamPermission | undefined => undefined; // monitors removed from Obliguard
 
   return (
     <>
@@ -1123,7 +1123,7 @@ function PermMonitorRow({
   depth,
   perm,
   isCovered,
-  addPermission,
+  addPermission: _addPermission,
   removePermission,
   togglePermissionLevel,
 }: PermMonitorRowProps) {
@@ -1161,14 +1161,7 @@ function PermMonitorRow({
         <span className="text-[10px] text-text-muted italic shrink-0">{t('users.teams.inherited')}</span>
       ) : (
         <>
-          <button onClick={() => addPermission('monitor', monitor.id, 'ro')}
-            className="px-1.5 py-0.5 text-[10px] rounded bg-bg-tertiary text-text-muted hover:bg-bg-hover shrink-0" title="Read Only">
-            {t('users.teams.roLabel')}
-          </button>
-          <button onClick={() => addPermission('monitor', monitor.id, 'rw')}
-            className="px-1.5 py-0.5 text-[10px] rounded bg-accent/10 text-accent hover:bg-accent/20 shrink-0" title="Read/Write">
-            {t('users.teams.rwLabel')}
-          </button>
+          {/* Monitor-level permissions removed from Obliguard */}
         </>
       )}
     </div>

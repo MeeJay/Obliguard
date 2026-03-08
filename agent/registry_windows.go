@@ -3,34 +3,30 @@
 package main
 
 import (
-	"fmt"
-
 	"golang.org/x/sys/windows/registry"
 )
 
-// loadConfigFromRegistry reads ServerUrl and ApiKey from
-// HKLM\SOFTWARE\ObliviewAgent (written by the MSI installer at install time).
-// Used as fallback when config.json doesn't exist yet.
+const regPath = `SOFTWARE\ObliguardAgent`
+
 func loadConfigFromRegistry() (*Config, error) {
-	k, err := registry.OpenKey(registry.LOCAL_MACHINE, `SOFTWARE\ObliviewAgent`, registry.QUERY_VALUE)
+	k, err := registry.OpenKey(registry.LOCAL_MACHINE, regPath, registry.QUERY_VALUE)
 	if err != nil {
-		return nil, fmt.Errorf("registry key not found: %w", err)
+		return nil, err
 	}
 	defer k.Close()
 
-	serverURL, _, err := k.GetStringValue("ServerUrl")
-	if err != nil || serverURL == "" {
-		return nil, fmt.Errorf("ServerUrl not in registry")
+	serverURL, _, err := k.GetStringValue("ServerURL")
+	if err != nil {
+		return nil, err
 	}
-	apiKey, _, err := k.GetStringValue("ApiKey")
-	if err != nil || apiKey == "" {
-		return nil, fmt.Errorf("ApiKey not in registry")
+	apiKey, _, err := k.GetStringValue("APIKey")
+	if err != nil {
+		return nil, err
 	}
 
 	return &Config{
-		ServerURL:            serverURL,
-		APIKey:               apiKey,
-		CheckIntervalSeconds: 60,
-		AgentVersion:         agentVersion,
+		ServerURL:    serverURL,
+		APIKey:       apiKey,
+		AgentVersion: agentVersion,
 	}, nil
 }

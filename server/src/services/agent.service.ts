@@ -2,12 +2,24 @@ import type { Server as SocketIOServer } from 'socket.io';
 import * as fs from 'fs';
 import * as path from 'path';
 import { db } from '../db';
-import type { AgentApiKey, AgentDevice, AgentDisplayConfig, AgentGroupConfig, AgentThresholds, NotificationTypeConfig } from '@obliview/shared';
-import { DEFAULT_AGENT_THRESHOLDS, SOCKET_EVENTS, prettifySensorLabel } from '@obliview/shared';
-import { heartbeatService } from './heartbeat.service';
+import type {
+  AgentApiKey,
+  AgentDevice,
+  AgentDisplayConfig,
+  AgentGroupConfig,
+  AgentThresholds,
+  NotificationTypeConfig,
+  ObliguardPushBody,
+  ObliguardPushResponse,
+  AgentServiceConfig,
+  AgentIpEvent,
+} from '@obliview/shared';
+import { DEFAULT_AGENT_THRESHOLDS, SOCKET_EVENTS } from '@obliview/shared';
 import { notificationService } from './notification.service';
-import { liveAlertService } from './liveAlert.service';
 import { logger } from '../utils/logger';
+import { whitelistService } from './whitelist.service';
+import { banService } from './ban.service';
+import { ipReputationService } from './ipReputation.service';
 
 // ── Socket.io instance (set from index.ts) ──────────────────
 let _io: SocketIOServer | null = null;
@@ -151,89 +163,6 @@ async function getGroupAgentThresholds(groupId: number): Promise<AgentThresholds
     ? JSON.parse(g.agent_thresholds)
     : g.agent_thresholds) as AgentThresholds;
 }
-
-// ============================================================
-// Push payload types
-// ============================================================
-
-export interface AgentMetrics {
-  cpu?: {
-    percent: number;
-    cores?: number[];
-    model?: string;
-    freqMhz?: number;
-  };
-  memory?: {
-    totalMb: number;
-    usedMb: number;
-    percent: number;
-    cachedMb?: number;
-    buffersMb?: number;
-    swapTotalMb?: number;
-    swapUsedMb?: number;
-  };
-  disks?: Array<{
-    mount: string;
-    totalGb: number;
-    usedGb: number;
-    percent: number;
-    readBytesPerSec?: number;
-    writeBytesPerSec?: number;
-  }>;
-  network?: {
-    inBytesPerSec: number;
-    outBytesPerSec: number;
-    interfaces?: Array<{ name: string; inBytesPerSec: number; outBytesPerSec: number }>;
-  };
-  loadAvg?: number;
-  temps?: Array<{ label: string; celsius: number }>;
-  gpus?: Array<{
-    model: string;
-    utilizationPct: number;
-    vramUsedMb: number;
-    vramTotalMb: number;
-    tempCelsius?: number;
-    engines?: Array<{ label: string; pct: number }>;
-  }>;
-  fans?: Array<{ label: string; rpm: number; maxRpm?: number }>;
-}
-
-export interface AgentPushPayload {
-  hostname: string;
-  agentVersion: string;
-  osInfo?: {
-    platform: string;
-    distro?: string | null;
-    release?: string | null;
-    arch: string;
-  };
-  metrics: AgentMetrics;
-}
-
-export interface AgentPushResponse {
-  status: 'ok' | 'pending' | 'unauthorized';
-  config?: { checkIntervalSeconds: number };
-  /** Piggybacked on every ok/pending response so agents update without an extra round-trip. */
-  latestVersion?: string;
-  /**
-   * One-shot command for the agent to execute (e.g. 'uninstall').
-   * Cleared from DB as soon as it is included in a push response.
-   */
-  command?: string;
-}
-
-// ── In-memory snapshot: indexed by deviceId ─────────────────
-export interface AgentPushSnapshot {
-  monitorId: number;
-  receivedAt: Date;
-  metrics: AgentMetrics;
-  violations: string[];
-  /** Stable per-metric keys (same index as violations), used by the client for dedup */
-  violationKeys: string[];
-  overallStatus: 'up' | 'alert';
-}
-
-export const agentPushData = new Map<number, AgentPushSnapshot>();
 
 // ============================================================
 // Agent Service
@@ -543,69 +472,16 @@ export const agentService = {
     return count > 0;
   },
 
-  // ── Latest metrics ───────────────────────────────────────
-
-  getLatestMetrics(deviceId: number): AgentPushSnapshot | null {
-    return agentPushData.get(deviceId) ?? null;
-  },
-
-  /**
-   * Reconstruct the latest AgentPushSnapshot from the most recent heartbeat in DB.
-   * Used as fallback when in-memory Map is empty (e.g. after server restart).
-   */
-  async getMetricsFromDB(deviceId: number): Promise<AgentPushSnapshot | null> {
-    // Find the agent monitor for this device
-    const monitor = await db('monitors')
-      .where({ agent_device_id: deviceId, type: 'agent' })
-      .select('id')
-      .first() as { id: number } | undefined;
-
-    if (!monitor) return null;
-
-    // Get the most recent heartbeat
-    const hb = await db('heartbeats')
-      .where({ monitor_id: monitor.id })
-      .orderBy('created_at', 'desc')
-      .select('status', 'message', 'value', 'created_at')
-      .first() as { status: string; message: string; value: string | null; created_at: Date } | undefined;
-
-    if (!hb || !hb.value) return null;
-
-    let parsed: Record<string, unknown>;
-    try {
-      parsed = JSON.parse(hb.value);
-    } catch {
-      return null;
-    }
-
-    const fullMetrics = parsed._full as AgentMetrics | undefined;
-    const violations = (parsed._violations as string[] | undefined) ?? [];
-
-    if (!fullMetrics) return null;
-
-    const snapshot: AgentPushSnapshot = {
-      monitorId: monitor.id,
-      receivedAt: hb.created_at,
-      metrics: fullMetrics,
-      violations,
-      violationKeys: [], // keys not persisted in DB; recomputed on next live push
-      overallStatus: (hb.status === 'alert' ? 'alert' : 'up') as 'up' | 'alert',
-    };
-
-    // Cache it so next call is instant
-    agentPushData.set(deviceId, snapshot);
-    return snapshot;
-  },
-
   // ── Push endpoint logic ───────────────────────────────────
 
   async handlePush(
-    apiKeyId: number,
-    tenantId: number,
+    agentApiKeyId: number,
+    agentTenantId: number,
     deviceUuid: string,
     clientIp: string,
-    payload: AgentPushPayload,
-  ): Promise<AgentPushResponse> {
+    body: ObliguardPushBody,
+  ): Promise<ObliguardPushResponse> {
+    // ── a. Find or register device ────────────────────────
     let device = await this.getDeviceByUuid(deviceUuid);
 
     if (!device) {
@@ -613,24 +489,25 @@ export const agentService = {
       const [row] = await db('agent_devices')
         .insert({
           uuid: deviceUuid,
-          hostname: payload.hostname,
+          hostname: body.hostname,
           ip: clientIp,
-          os_info: payload.osInfo ? JSON.stringify(payload.osInfo) : null,
-          agent_version: payload.agentVersion,
-          api_key_id: apiKeyId,
-          tenant_id: tenantId,
+          os_info: body.osInfo ? JSON.stringify(body.osInfo) : null,
+          agent_version: body.agentVersion,
+          api_key_id: agentApiKeyId,
+          tenant_id: agentTenantId,
           status: 'pending',
-          check_interval_seconds: 300, // pending: check every 5min
+          check_interval_seconds: 300, // pending: check every 5 min
         })
         .returning('*') as AgentDeviceRow[];
       device = rowToDevice(row);
     } else {
-      // Update device metadata — clear updating_since if set (agent came back after update)
+      // ── b. Update device metadata ─────────────────────
+      // Clear updating_since if set (agent came back after update)
       const metadataUpdate: Record<string, unknown> = {
-        hostname: payload.hostname,
+        hostname: body.hostname,
         ip: clientIp,
-        agent_version: payload.agentVersion,
-        os_info: payload.osInfo ? JSON.stringify(payload.osInfo) : null,
+        agent_version: body.agentVersion,
+        os_info: body.osInfo ? JSON.stringify(body.osInfo) : null,
         updated_at: new Date(),
       };
       if (device.updatingSince) {
@@ -641,18 +518,157 @@ export const agentService = {
         .where({ id: device.id })
         .update(metadataUpdate);
 
-      // Refresh
+      // Refresh device from DB
       device = (await this.getDeviceByUuid(deviceUuid))!;
     }
 
-    // Handle refused/suspended devices
-    if (device.status === 'refused' || device.status === 'suspended') {
-      return { status: 'unauthorized' };
+    // ── c. Pending status ─────────────────────────────────
+    if (device.status === 'pending') {
+      return { status: 'pending' };
     }
 
-    // Consume any pending command: clear from DB and include in response once.
-    // For 'uninstall', also record the delivery timestamp so the cleanup job can
-    // auto-delete the device after ~10 minutes of silence.
+    // ── d. Refused status ─────────────────────────────────
+    if (device.status === 'refused') {
+      return { status: 'refused' };
+    }
+
+    // Also treat suspended as refused — agent should stop pushing
+    if (device.status === 'suspended') {
+      return { status: 'refused' };
+    }
+
+    const deviceId = device.id;
+
+    // ── e. Process services ───────────────────────────────
+    if (body.services && body.services.length > 0) {
+      try {
+        const serviceTypes = body.services.map(s => s.type);
+        // Delete existing entries for only the reported service types, then insert fresh
+        await db('agent_services')
+          .where({ device_id: deviceId })
+          .whereIn('service_type', serviceTypes)
+          .del();
+        await db('agent_services').insert(
+          body.services.map(s => ({
+            device_id: deviceId,
+            service_type: s.type,
+            port: s.port,
+            active: s.active,
+            last_seen_at: new Date(),
+          })),
+        );
+      } catch (err) {
+        logger.warn({ err, deviceId }, 'handlePush: failed to upsert agent_services (table may not exist yet)');
+      }
+    }
+
+    // ── f. Process events ─────────────────────────────────
+    if (body.events && body.events.length > 0) {
+      try {
+        await db('ip_events').insert(
+          body.events.map((ev: AgentIpEvent) => ({
+            device_id: deviceId,
+            ip: ev.ip,
+            username: ev.username ?? null,
+            service: ev.service,
+            event_type: ev.eventType,
+            timestamp: new Date(ev.timestamp),
+            raw_log: ev.rawLog ?? null,
+            tenant_id: agentTenantId,
+          })),
+        );
+
+        // Update IP reputation from the new events
+        await ipReputationService.upsertFromEvents(
+          body.events.map((ev: AgentIpEvent) => ({
+            ip: ev.ip,
+            service: ev.service,
+            username: ev.username ?? null,
+            deviceId,
+            eventType: ev.eventType,
+          })),
+        );
+      } catch (err) {
+        logger.warn({ err, deviceId }, 'handlePush: failed to insert ip_events');
+      }
+
+      // Handle log samples: clear sample_requested flag for each reported log path
+      if (body.logSamples && Object.keys(body.logSamples).length > 0) {
+        try {
+          const logPaths = Object.keys(body.logSamples);
+          await db('service_template_assignments')
+            .where({ scope: 'agent', scope_id: deviceId })
+            .whereIn('log_path_override', logPaths)
+            .update({ sample_requested: false });
+        } catch (err) {
+          logger.warn({ err, deviceId }, 'handlePush: failed to clear sample_requested flags');
+        }
+      }
+    }
+
+    // ── g. Compute ban delta ──────────────────────────────
+    // Walk group_closure to get ancestor group IDs (closest first)
+    let groupIds: number[] = [];
+    if (device.groupId) {
+      try {
+        const groupRows = await db('group_closure')
+          .where('descendant_id', device.groupId)
+          .select('ancestor_id')
+          .orderBy('depth', 'asc') as { ancestor_id: number }[];
+        groupIds = groupRows.map(r => r.ancestor_id);
+      } catch (err) {
+        logger.warn({ err, deviceId }, 'handlePush: failed to resolve group ancestry');
+      }
+    }
+
+    let resolvedWhitelist: string[] = [];
+    let banDelta: { add: string[]; remove: string[] } = { add: [], remove: [] };
+
+    try {
+      resolvedWhitelist = await whitelistService.resolveWhitelistForAgent(
+        deviceId,
+        groupIds,
+        agentTenantId,
+      );
+    } catch (err) {
+      logger.warn({ err, deviceId }, 'handlePush: whitelistService.resolveWhitelistForAgent failed');
+    }
+
+    try {
+      banDelta = await banService.computeBanDelta(
+        deviceId,
+        groupIds,
+        agentTenantId,
+        body.firewallBanned ?? [],
+        resolvedWhitelist,
+      );
+    } catch (err) {
+      logger.warn({ err, deviceId }, 'handlePush: banService.computeBanDelta failed');
+    }
+
+    // ── h. Compute service configs ────────────────────────
+    let serviceConfigsMap: Record<string, AgentServiceConfig> = {};
+    try {
+      const { serviceTemplateService } = await import('./serviceTemplate.service');
+      const resolvedConfigs = await serviceTemplateService.resolveForAgent(deviceId, groupIds);
+      for (const cfg of resolvedConfigs) {
+        const key = cfg.serviceType === 'custom'
+          ? `custom:${cfg.logPath ?? cfg.templateId}`
+          : cfg.serviceType;
+        serviceConfigsMap[key] = {
+          enabled: cfg.enabled,
+          threshold: cfg.threshold,
+          windowSeconds: cfg.windowSeconds,
+          customRegex: cfg.customRegex ?? undefined,
+          sampleRequested: cfg.sampleRequested,
+        };
+      }
+    } catch {
+      // serviceTemplateService may not exist yet; return empty configs
+      serviceConfigsMap = {};
+    }
+
+    // ── i. Handle pending command ─────────────────────────
     let pendingCommand: string | undefined;
     if (device.pendingCommand) {
       pendingCommand = device.pendingCommand;
@@ -660,262 +676,24 @@ export const agentService = {
       if (pendingCommand === 'uninstall') {
         commandUpdate.uninstall_commanded_at = new Date();
       }
-      await db('agent_devices').where({ id: device.id }).update(commandUpdate);
+      await db('agent_devices').where({ id: deviceId }).update(commandUpdate);
     }
 
-    // Handle pending devices
-    if (device.status === 'pending') {
-      return {
-        status: 'pending',
-        // Use resolvedSettings so group-inherited intervals are honoured.
-        config: { checkIntervalSeconds: device.resolvedSettings.checkIntervalSeconds },
-        latestVersion: this.getAgentVersion().version,
-        ...(pendingCommand ? { command: pendingCommand } : {}),
-      };
-    }
+    // ── j. Update device last push time ──────────────────
+    await db('agent_devices')
+      .where({ id: deviceId })
+      .update({ updated_at: new Date() });
 
-    // Device is approved → store single heartbeat
-    if (device.status === 'approved') {
-      await this._storeMetricsAsHeartbeat(device, payload);
-
-      return {
-        status: 'ok',
-        // Use resolvedSettings so group-inherited intervals are honoured.
-        config: { checkIntervalSeconds: device.resolvedSettings.checkIntervalSeconds },
-        latestVersion: this.getAgentVersion().version,
-        ...(pendingCommand ? { command: pendingCommand } : {}),
-      };
-    }
-
-    return { status: 'unauthorized' };
-  },
-
-  /**
-   * Evaluate all metric thresholds and store ONE heartbeat for the device's monitor.
-   */
-  async _storeMetricsAsHeartbeat(
-    device: AgentDevice,
-    payload: AgentPushPayload,
-  ): Promise<void> {
-    // Find the single agent monitor for this device
-    const monitor = await db('monitors')
-      .where({ agent_device_id: device.id, type: 'agent', is_active: true })
-      .select('id', 'agent_thresholds')
-      .first() as { id: number; agent_thresholds: AgentThresholds | null } | undefined;
-
-    if (!monitor) {
-      logger.warn(`No active agent monitor found for device ${device.id} (${device.hostname})`);
-      return;
-    }
-
-    // Threshold hierarchy: agent's explicitly saved thresholds always win;
-    // group thresholds are the default when the agent has none;
-    // system defaults are the last resort.
-    // Note: overrideGroupSettings controls checkInterval/heartbeat/maxMissedPushes only.
-    const thresholds: AgentThresholds =
-      monitor.agent_thresholds ?? device.groupThresholds ?? DEFAULT_AGENT_THRESHOLDS;
-    const m = payload.metrics;
-
-    // Evaluate each threshold and build violation list.
-    // violations[i] = human-readable message, violationKeys[i] = stable metric key for client dedup.
-    const violations: string[] = [];
-    const violationKeys: string[] = [];
-
-    if (thresholds.cpu.enabled && m.cpu !== undefined) {
-      if (this._isThresholdExceeded(m.cpu.percent, thresholds.cpu)) {
-        violations.push(`CPU: ${m.cpu.percent.toFixed(1)}% ${thresholds.cpu.op} ${thresholds.cpu.threshold}%`);
-        violationKeys.push('cpu');
-      }
-    }
-
-    if (thresholds.memory.enabled && m.memory !== undefined) {
-      if (this._isThresholdExceeded(m.memory.percent, thresholds.memory)) {
-        violations.push(`RAM: ${m.memory.percent.toFixed(1)}% ${thresholds.memory.op} ${thresholds.memory.threshold}%`);
-        violationKeys.push('ram');
-      }
-    }
-
-    if (thresholds.disk.enabled && m.disks) {
-      for (const disk of m.disks) {
-        if (this._isThresholdExceeded(disk.percent, thresholds.disk)) {
-          const diskName = device.displayConfig?.drives?.renames?.[disk.mount] ?? disk.mount;
-          violations.push(`Disk ${diskName}: ${disk.percent.toFixed(1)}% ${thresholds.disk.op} ${thresholds.disk.threshold}%`);
-          violationKeys.push(`disk:${disk.mount}`); // raw mount (stable, not affected by rename)
-        }
-      }
-    }
-
-    if (thresholds.netIn.enabled && m.network !== undefined) {
-      if (this._isThresholdExceeded(m.network.inBytesPerSec, thresholds.netIn)) {
-        // Convert bytes/sec → Mbps (1 Mbps = 125 000 bytes/sec)
-        const current = (m.network.inBytesPerSec / 125_000).toFixed(1);
-        const limit   = (thresholds.netIn.threshold  / 125_000).toFixed(0);
-        violations.push(`Net In: ${current} Mbps ${thresholds.netIn.op} ${limit} Mbps`);
-        violationKeys.push('net_in');
-      }
-    }
-
-    if (thresholds.netOut.enabled && m.network !== undefined) {
-      if (this._isThresholdExceeded(m.network.outBytesPerSec, thresholds.netOut)) {
-        const current = (m.network.outBytesPerSec / 125_000).toFixed(1);
-        const limit   = (thresholds.netOut.threshold / 125_000).toFixed(0);
-        violations.push(`Net Out: ${current} Mbps ${thresholds.netOut.op} ${limit} Mbps`);
-        violationKeys.push('net_out');
-      }
-    }
-
-    // Temperature thresholds: global + per-sensor overrides
-    if (thresholds.temp?.globalEnabled) {
-      const tempT = thresholds.temp;
-      // Gather all sensors: regular temps + GPU temps
-      const sensors: Array<{ key: string; label: string; celsius: number }> = [];
-      if (m.temps) {
-        for (const s of m.temps) {
-          sensors.push({ key: `temp:${s.label}`, label: s.label, celsius: s.celsius });
-        }
-      }
-      if (m.gpus) {
-        m.gpus.forEach((gpu, i) => {
-          if (gpu.tempCelsius !== undefined) {
-            sensors.push({
-              key: `gpu:${i}:${gpu.model}`,
-              label: `GPU ${i} – ${gpu.model}`,
-              celsius: gpu.tempCelsius,
-            });
-          }
-        });
-      }
-      for (const sensor of sensors) {
-        const override = tempT.overrides[sensor.key];
-        // Per-sensor override active → use its settings; otherwise fall back to global
-        const active = override?.enabled
-          ? { op: override.op, threshold: override.threshold }
-          : { op: tempT.op, threshold: tempT.threshold };
-        if (this._isThresholdExceeded(sensor.celsius, active)) {
-          const displayLabel = device.sensorDisplayNames?.[sensor.key] ?? prettifySensorLabel(sensor.label);
-          violations.push(
-            `Temp ${displayLabel}: ${sensor.celsius.toFixed(1)}°C ${active.op} ${active.threshold}°C`,
-          );
-          violationKeys.push(sensor.key); // already stable: "temp:CPU Package", "gpu:0:RTX 4090", etc.
-        }
-      }
-    }
-
-    const overallStatus: 'up' | 'alert' = violations.length > 0 ? 'alert' : 'up';
-    const message = violations.length > 0 ? violations.join('; ') : 'All metrics OK';
-
-    // Capture previous status before overwriting snapshot (for transition detection)
-    const previousSnapshot = agentPushData.get(device.id);
-    const previousStatus = previousSnapshot?.overallStatus ?? 'up';
-
-    // Update in-memory snapshot
-    const snapshot: AgentPushSnapshot = {
-      monitorId: monitor.id,
-      receivedAt: new Date(),
-      metrics: m,
-      violations,
-      violationKeys,
-      overallStatus,
+    // ── k. Return ObliguardPushResponse ──────────────────
+    return {
+      status: 'ok',
+      latestVersion: this.getAgentVersion().version,
+      config: { pushIntervalSeconds: device.resolvedSettings.checkIntervalSeconds },
+      banList: { add: banDelta.add, remove: banDelta.remove },
+      whitelist: resolvedWhitelist,
+      services: serviceConfigsMap,
+      command: pendingCommand ?? '',
     };
-    agentPushData.set(device.id, snapshot);
-
-    // Emit real-time update for AgentDetailPage
-    if (_io) {
-      _io.to('role:admin').emit('agentPush', {
-        deviceId: device.id,
-        monitorId: monitor.id,
-        agentVersion: payload.agentVersion,   // lets the UI refresh without a REST round-trip
-        metrics: m,
-        violations,
-        overallStatus,
-        receivedAt: snapshot.receivedAt.toISOString(),
-      });
-    }
-
-    // Store heartbeat — include full metrics for DB reconstruction on server restart
-    await heartbeatService.create({
-      monitorId: monitor.id,
-      status: overallStatus,
-      message,
-      value: JSON.stringify({
-        // Summary fields (quick access)
-        cpu: m.cpu?.percent,
-        memory: m.memory?.percent,
-        disks: m.disks?.map(d => ({ mount: d.mount, percent: d.percent })),
-        netIn: m.network?.inBytesPerSec,
-        netOut: m.network?.outBytesPerSec,
-        loadAvg: m.loadAvg,
-        // Full metrics for reconstruction
-        _full: m,
-        _violations: violations,
-      }),
-    });
-
-    // Update monitor status
-    await db('monitors')
-      .where({ id: monitor.id })
-      .update({ status: overallStatus, updated_at: new Date() });
-
-    // Notify the frontend monitor store so the sidebar badge updates in real-time
-    if (_io) {
-      _io.to('role:admin').emit(SOCKET_EVENTS.MONITOR_STATUS_CHANGE, {
-        monitorId: monitor.id,
-        newStatus: overallStatus,
-      });
-      // Dedicated agent status event — includes deviceId so the sidebar can
-      // update the badge without a monitorStore lookup by agentDeviceId.
-      _io.to('role:admin').emit(SOCKET_EVENTS.AGENT_STATUS_CHANGED, {
-        deviceId: device.id,
-        status: overallStatus,
-        violations,
-        violationKeys,
-      });
-    }
-
-    // Send notifications + persist live alerts on status transitions (up ↔ alert)
-    if (overallStatus !== previousStatus) {
-      const deviceName = device.name ?? device.hostname;
-      notificationService.sendForAgent(device.id, deviceName, overallStatus, previousStatus, violations).catch(
-        (err) => logger.error(err, `Failed to send agent notification for device ${device.id}`),
-      );
-
-      // Persist live alerts in DB so offline users see them when they reconnect
-      const deviceTenantId = device.tenantId;
-      if (overallStatus === 'alert') {
-        // One alert per violation, deduplicated by stable key (skipped if unread alert already exists)
-        for (const [i, violation] of violations.entries()) {
-          const metricKey = violationKeys[i] ?? `unknown_${i}`;
-          liveAlertService.add(deviceTenantId, {
-            severity: 'warning',
-            title: deviceName,
-            message: violation,
-            navigateTo: `/agents/${device.id}`,
-            stableKey: `agent-${device.id}-${metricKey}`,
-          }).catch(err => logger.error(err, `Failed to persist live alert for device ${device.id}`));
-        }
-      } else if (previousStatus === 'alert') {
-        // Recovery from alert state
-        liveAlertService.add(deviceTenantId, {
-          severity: 'up',
-          title: deviceName,
-          message: 'All metrics back to normal',
-          navigateTo: `/agents/${device.id}`,
-        }).catch(err => logger.error(err, `Failed to persist recovery alert for device ${device.id}`));
-      }
-    }
-  },
-
-  /**
-   * Returns true if the threshold condition is triggered (i.e. metric is in violation).
-   */
-  _isThresholdExceeded(value: number, t: { threshold: number; op: string }): boolean {
-    switch (t.op) {
-      case '>':  return value > t.threshold;
-      case '<':  return value < t.threshold;
-      case '>=': return value >= t.threshold;
-      case '<=': return value <= t.threshold;
-      default:   return false;
-    }
   },
 
   // ── Version / download endpoints ─────────────────────────
@@ -1016,3 +794,4 @@ export const agentService = {
     return { version: '0.0.0' };
   },
 };
+

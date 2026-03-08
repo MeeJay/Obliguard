@@ -9,8 +9,10 @@ import { EnrollmentPage } from '@/pages/EnrollmentPage';
 import { ForgotPasswordPage } from '@/pages/ForgotPasswordPage';
 import { ResetPasswordPage } from '@/pages/ResetPasswordPage';
 import { DashboardPage } from '@/pages/DashboardPage';
-import { MonitorDetailPage } from '@/pages/MonitorDetailPage';
-import { MonitorEditPage } from '@/pages/MonitorEditPage';
+import { NetMapPage } from '@/pages/NetMapPage';
+import { IPReputationPage } from '@/pages/IPReputationPage';
+import { BansPage } from '@/pages/BansPage';
+import { WhitelistPage } from '@/pages/WhitelistPage';
 import { GroupManagePage } from '@/pages/GroupManagePage';
 import { SettingsPage } from '@/pages/SettingsPage';
 import { NotificationsPage } from '@/pages/NotificationsPage';
@@ -22,9 +24,8 @@ import { GroupDetailPage } from '@/pages/GroupDetailPage';
 import { GroupEditPage } from '@/pages/GroupEditPage';
 import { DownloadPage } from '@/pages/DownloadPage';
 import { ImportExportPage } from '@/pages/ImportExportPage';
-import { AdminRemediationsPage } from '@/pages/AdminRemediationsPage';
-import { AdminMaintenancePage } from '@/pages/AdminMaintenancePage';
 import { AdminTenantsPage } from '@/pages/AdminTenantsPage';
+import { ServiceTemplatesPage } from '@/pages/ServiceTemplatesPage';
 import { NotFoundPage } from '@/pages/NotFoundPage';
 import '@/i18n';
 
@@ -49,24 +50,24 @@ export default function App() {
           <Route path="/enroll" element={<EnrollmentPage />} />
           <Route element={<AppLayout />}>
             <Route path="/" element={<DashboardPage />} />
+            <Route path="/netmap" element={<NetMapPage />} />
+            <Route path="/ip-reputation" element={<IPReputationPage />} />
             <Route path="/download" element={<DownloadPage />} />
             <Route path="/profile" element={<ProfilePage />} />
-            <Route path="/monitor/:id" element={<MonitorDetailPage />} />
-            <Route path="/monitor/new" element={<MonitorEditPage />} />
-            <Route path="/monitor/:id/edit" element={<MonitorEditPage />} />
             <Route path="/group/:id" element={<GroupDetailPage />} />
             <Route path="/group/:id/edit" element={<GroupEditPage />} />
 
             {/* Admin-only routes */}
             <Route element={<ProtectedRoute requiredRole="admin" />}>
+              <Route path="/bans" element={<BansPage />} />
+              <Route path="/whitelist" element={<WhitelistPage />} />
               <Route path="/groups" element={<GroupManagePage />} />
               <Route path="/notifications" element={<NotificationsPage />} />
               <Route path="/admin/users" element={<AdminUsersPage />} />
               <Route path="/admin/agents" element={<AdminAgentPage />} />
               <Route path="/admin/import-export" element={<ImportExportPage />} />
-              <Route path="/admin/remediations" element={<AdminRemediationsPage />} />
-              <Route path="/admin/maintenance" element={<AdminMaintenancePage />} />
               <Route path="/admin/tenants" element={<AdminTenantsPage />} />
+              <Route path="/admin/service-templates" element={<ServiceTemplatesPage />} />
               <Route path="/agents/:deviceId" element={<AgentDetailPage />} />
               <Route path="/settings" element={<SettingsPage />} />
             </Route>

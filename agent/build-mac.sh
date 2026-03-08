@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Obliview Agent — Native macOS build (CGO_ENABLED=1)
+# Obliguard Agent — Native macOS build (CGO_ENABLED=1)
 #
 # Why native? gopsutil's cpu.Percent(percpu=true) calls host_processor_info
 # (Mach API) which requires CGO. Cross-compiled binaries skip this and fall
@@ -15,8 +15,8 @@
 #   bash build-mac.sh
 #
 # After running, copy both binaries to the Windows/Unraid build host at:
-#   agent/dist/obliview-agent-darwin-arm64
-#   agent/dist/obliview-agent-darwin-amd64
+#   agent/dist/obliguard-agent-darwin-arm64
+#   agent/dist/obliguard-agent-darwin-amd64
 # Then run 000-RegularUpdate.bat (or 00-A2-docker-agent-push.bat) to rebuild.
 # =============================================================================
 
@@ -55,26 +55,26 @@ mkdir -p "$OUT_DIR"
 
 # ── Build native arch (full CGO) ──────────────────────────────────────────────
 
-echo "Building Obliview Agent $VERSION for darwin/$NATIVE_GOARCH (native, CGO_ENABLED=1)..."
+echo "Building Obliguard Agent $VERSION for darwin/$NATIVE_GOARCH (native, CGO_ENABLED=1)..."
 CGO_ENABLED=1 GOOS=darwin GOARCH="$NATIVE_GOARCH" \
   go build \
     -ldflags="-s -w -X main.agentVersion=$VERSION" \
-    -o "$OUT_DIR/obliview-agent-darwin-$NATIVE_GOARCH" \
+    -o "$OUT_DIR/obliguard-agent-darwin-$NATIVE_GOARCH" \
     .
-echo "  → $OUT_DIR/obliview-agent-darwin-$NATIVE_GOARCH"
+echo "  → $OUT_DIR/obliguard-agent-darwin-$NATIVE_GOARCH"
 
 # ── Build cross arch (clang -arch) ────────────────────────────────────────────
 
 echo ""
-echo "Building Obliview Agent $VERSION for darwin/$CROSS_GOARCH (cross, clang -arch $CROSS_CLANG_ARCH)..."
+echo "Building Obliguard Agent $VERSION for darwin/$CROSS_GOARCH (cross, clang -arch $CROSS_CLANG_ARCH)..."
 if CGO_ENABLED=1 GOOS=darwin GOARCH="$CROSS_GOARCH" \
      CGO_CFLAGS="-arch $CROSS_CLANG_ARCH" \
      CGO_LDFLAGS="-arch $CROSS_CLANG_ARCH" \
      go build \
        -ldflags="-s -w -X main.agentVersion=$VERSION" \
-       -o "$OUT_DIR/obliview-agent-darwin-$CROSS_GOARCH" \
+       -o "$OUT_DIR/obliguard-agent-darwin-$CROSS_GOARCH" \
        . 2>&1; then
-  echo "  → $OUT_DIR/obliview-agent-darwin-$CROSS_GOARCH"
+  echo "  → $OUT_DIR/obliguard-agent-darwin-$CROSS_GOARCH"
 else
   echo "  WARNING: Cross-compilation to darwin/$CROSS_GOARCH failed — skipping."
   echo "           (The native $NATIVE_GOARCH binary was built successfully.)"
@@ -84,7 +84,7 @@ fi
 
 echo ""
 echo "Built binaries:"
-ls -lh "$OUT_DIR"/obliview-agent-darwin-* 2>/dev/null || true
+ls -lh "$OUT_DIR"/obliguard-agent-darwin-* 2>/dev/null || true
 echo ""
 echo "Next steps:"
 echo "  1. The .bat script (00-A3-build-mac-agent.bat) retrieves both binaries automatically."

@@ -14,6 +14,7 @@ import { AgentDisplayConfigModal } from '../components/agent/AgentDisplayConfigM
 import { NotificationTypesPanel } from '../components/agent/NotificationTypesPanel';
 import { agentApi } from '../api/agent.api';
 import { monitorsApi } from '../api/monitors.api';
+import type { Heartbeat } from '../store/monitorStore';
 import type { AgentMetrics, AgentPushSnapshot } from '../types/agent';
 import { getSocket } from '../socket/socketClient';
 import { LoadingSpinner } from '../components/common/LoadingSpinner';
@@ -2342,7 +2343,7 @@ export function AgentDetailPage() {
         setHistory(prev => prev.length === 0 ? [snap] : prev);
         try {
           const monitor = await monitorsApi.getById(snap.monitorId);
-          if (monitor.agentThresholds) setThresholds(monitor.agentThresholds);
+          if (monitor.agentThresholds) setThresholds(monitor.agentThresholds as import('@obliview/shared').AgentThresholds);
         } catch { /* defaults */ }
       }
     } catch { /* ignore */ }
@@ -2424,10 +2425,10 @@ export function AgentDetailPage() {
     }
     setLoadingHistory(true);
     monitorsApi.getHeartbeatsByPeriod(monitorId, period as '1h' | '24h')
-      .then(heartbeats => {
+      .then((heartbeats: Heartbeat[]) => {
         const snapshots = heartbeats
-          .filter(hb => hb.value)
-          .map(hb => {
+          .filter((hb: Heartbeat) => hb.value)
+          .map((hb: Heartbeat) => {
             try {
               const v = JSON.parse(hb.value!);
               if (!v._full) return null;
@@ -2441,7 +2442,7 @@ export function AgentDetailPage() {
             } catch { return null; }
           })
           .filter((s): s is AgentPushSnapshot => s !== null)
-          .sort((a, b) => new Date(a.receivedAt).getTime() - new Date(b.receivedAt).getTime());
+          .sort((a: AgentPushSnapshot, b: AgentPushSnapshot) => new Date(a.receivedAt).getTime() - new Date(b.receivedAt).getTime());
         setHistoricalData(snapshots.length > 30 ? downsample(snapshots, 30) : snapshots);
       })
       .catch(() => {})

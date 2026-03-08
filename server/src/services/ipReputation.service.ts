@@ -1,0 +1,351 @@
+import { db } from '../db';
+import type { IpReputation, IpEvent, IpStatus } from '@obliview/shared';
+
+// ── Row interfaces ───────────────────────────────────────────────────────────
+
+interface IpReputationRow {
+  ip: string;
+  total_failures: number | string;
+  total_successes: number | string;
+  affected_agents_count: number | string;
+  affected_services: string[] | string | null;
+  attempted_usernames: string[] | string | null;
+  first_seen: Date | null;
+  last_seen: Date | null;
+  last_event_device_id: number | null;
+  geo_country_code: string | null;
+  geo_city: string | null;
+  asn: string | null;
+  updated_at: Date;
+}
+
+interface IpEventRow {
+  id: number;
+  device_id: number | null;
+  hostname?: string | null;
+  ip: string;
+  username: string | null;
+  service: string;
+  event_type: string;
+  timestamp: Date;
+  raw_log: string | null;
+  tenant_id: number | null;
+  created_at: Date;
+}
+
+// ── Row → Model ──────────────────────────────────────────────────────────────
+
+function parseJsonArray(val: string[] | string | null | undefined): string[] {
+  if (!val) return [];
+  if (Array.isArray(val)) return val;
+  try {
+    const parsed = JSON.parse(val);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function rowToReputation(
+  row: IpReputationRow,
+  status: IpStatus = 'clean',
+): IpReputation {
+  return {
+    ip: row.ip,
+    totalFailures: Number(row.total_failures),
+    totalSuccesses: Number(row.total_successes),
+    affectedAgentsCount: Number(row.affected_agents_count),
+    affectedServices: parseJsonArray(row.affected_services),
+    attemptedUsernames: parseJsonArray(row.attempted_usernames),
+    firstSeen: row.first_seen ? row.first_seen.toISOString() : null,
+    lastSeen: row.last_seen ? row.last_seen.toISOString() : null,
+    lastEventDeviceId: row.last_event_device_id,
+    geoCountryCode: row.geo_country_code,
+    geoCity: row.geo_city,
+    asn: row.asn,
+    updatedAt: row.updated_at.toISOString(),
+    status,
+  };
+}
+
+function rowToEvent(row: IpEventRow): IpEvent {
+  return {
+    id: row.id,
+    deviceId: row.device_id,
+    deviceHostname: row.hostname ?? undefined,
+    ip: row.ip,
+    username: row.username,
+    service: row.service,
+    eventType: row.event_type as IpEvent['eventType'],
+    timestamp: row.timestamp instanceof Date ? row.timestamp.toISOString() : String(row.timestamp),
+    rawLog: row.raw_log,
+    tenantId: row.tenant_id,
+    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
+  };
+}
+
+// ── Service ──────────────────────────────────────────────────────────────────
+
+class IpReputationService {
+  /**
+   * Bulk-upserts reputation data from a batch of IP events.
+   * - auth_failure events increment total_failures
+   * - auth_success events increment total_successes
+   * - affected_services and attempted_usernames arrays are merged (deduped)
+   * - first_seen / last_seen timestamps are tracked
+   */
+  async upsertFromEvents(
+    events: Array<{
+      ip: string;
+      service: string;
+      username: string | null;
+      deviceId: number;
+      eventType: string;
+    }>,
+  ): Promise<void> {
+    if (events.length === 0) return;
+
+    // Group events by IP for efficient upsert
+    const byIp = new Map<
+      string,
+      {
+        ip: string;
+        services: Set<string>;
+        usernames: Set<string>;
+        failures: number;
+        successes: number;
+        deviceId: number;
+      }
+    >();
+
+    for (const ev of events) {
+      let entry = byIp.get(ev.ip);
+      if (!entry) {
+        entry = {
+          ip: ev.ip,
+          services: new Set(),
+          usernames: new Set(),
+          failures: 0,
+          successes: 0,
+          deviceId: ev.deviceId,
+        };
+        byIp.set(ev.ip, entry);
+      }
+      entry.services.add(ev.service);
+      if (ev.username) entry.usernames.add(ev.username);
+      if (ev.eventType === 'auth_failure') entry.failures++;
+      if (ev.eventType === 'auth_success') entry.successes++;
+      // Update deviceId to most recent
+      entry.deviceId = ev.deviceId;
+    }
+
+    const now = new Date();
+
+    for (const entry of byIp.values()) {
+      const servicesJson = JSON.stringify([...entry.services]);
+      const usernamesJson = JSON.stringify([...entry.usernames]);
+
+      // Use a raw upsert so we can do array-merging and counter increments atomically
+      await db.raw(
+        `
+        INSERT INTO ip_reputation (
+          ip,
+          total_failures,
+          total_successes,
+          affected_agents_count,
+          affected_services,
+          attempted_usernames,
+          first_seen,
+          last_seen,
+          last_event_device_id,
+          geo_country_code,
+          geo_city,
+          asn,
+          updated_at
+        ) VALUES (
+          ?,
+          ?,
+          ?,
+          1,
+          ?::jsonb,
+          ?::jsonb,
+          ?,
+          ?,
+          ?,
+          NULL,
+          NULL,
+          NULL,
+          ?
+        )
+        ON CONFLICT (ip) DO UPDATE SET
+          total_failures        = ip_reputation.total_failures + EXCLUDED.total_failures,
+          total_successes       = ip_reputation.total_successes + EXCLUDED.total_successes,
+          affected_agents_count = (
+            SELECT COUNT(DISTINCT device_id)
+            FROM ip_events
+            WHERE ip_events.ip = ip_reputation.ip
+          ),
+          affected_services     = (
+            SELECT jsonb_agg(DISTINCT val)
+            FROM (
+              SELECT jsonb_array_elements_text(COALESCE(ip_reputation.affected_services, '[]'::jsonb)) AS val
+              UNION
+              SELECT jsonb_array_elements_text(EXCLUDED.affected_services)
+            ) combined
+          ),
+          attempted_usernames   = (
+            SELECT jsonb_agg(DISTINCT val)
+            FROM (
+              SELECT jsonb_array_elements_text(COALESCE(ip_reputation.attempted_usernames, '[]'::jsonb)) AS val
+              UNION
+              SELECT jsonb_array_elements_text(EXCLUDED.attempted_usernames)
+            ) combined
+          ),
+          first_seen            = LEAST(ip_reputation.first_seen, EXCLUDED.first_seen),
+          last_seen             = GREATEST(ip_reputation.last_seen, EXCLUDED.last_seen),
+          last_event_device_id  = EXCLUDED.last_event_device_id,
+          updated_at            = EXCLUDED.updated_at
+        `,
+        [
+          entry.ip,
+          entry.failures,
+          entry.successes,
+          servicesJson,
+          usernamesJson,
+          now,
+          now,
+          entry.deviceId,
+          now,
+        ],
+      );
+    }
+  }
+
+  /**
+   * Lists IP reputation records with optional filters.
+   * Computes status by joining with ip_bans and ip_whitelist.
+   */
+  async list(filters: {
+    tenantId?: number;
+    status?: IpStatus;
+    search?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<{ data: IpReputation[]; total: number }> {
+    const limit = filters.limit ?? 50;
+    const offset = filters.offset ?? 0;
+
+    // Build a CTE that computes status per IP
+    const baseQuery = db
+      .from('ip_reputation as r')
+      .leftJoin('ip_bans as b', function () {
+        this.on('b.ip', '=', 'r.ip')
+          .andOn(db.raw('b.is_active = true'))
+          .andOn(db.raw('(b.expires_at IS NULL OR b.expires_at > NOW())'));
+      })
+      .leftJoin('ip_whitelist as w', 'w.ip', db.raw("r.ip::cidr::text"))
+      .select(
+        'r.*',
+        db.raw(`
+          CASE
+            WHEN b.id IS NOT NULL THEN 'banned'
+            WHEN w.id IS NOT NULL THEN 'whitelisted'
+            WHEN r.total_failures > 0 THEN 'suspicious'
+            ELSE 'clean'
+          END AS computed_status
+        `),
+      );
+
+    if (filters.search) {
+      baseQuery.where('r.ip', 'like', `%${filters.search}%`);
+    }
+
+    if (filters.status) {
+      baseQuery.havingRaw(
+        `CASE
+          WHEN b.id IS NOT NULL THEN 'banned'
+          WHEN w.id IS NOT NULL THEN 'whitelisted'
+          WHEN r.total_failures > 0 THEN 'suspicious'
+          ELSE 'clean'
+        END = ?`,
+        [filters.status],
+      );
+    }
+
+    // Count query (clone before adding limit/offset)
+    const countQuery = db
+      .from('ip_reputation as r')
+      .leftJoin('ip_bans as b', function () {
+        this.on('b.ip', '=', 'r.ip')
+          .andOn(db.raw('b.is_active = true'))
+          .andOn(db.raw('(b.expires_at IS NULL OR b.expires_at > NOW())'));
+      })
+      .leftJoin('ip_whitelist as w', 'w.ip', db.raw("r.ip::cidr::text"))
+      .count<Array<{ count: string }>>({ count: 'r.ip' });
+
+    if (filters.search) {
+      countQuery.where('r.ip', 'like', `%${filters.search}%`);
+    }
+
+    const [countResult] = await countQuery;
+    const total = Number(countResult?.count ?? 0);
+
+    const rows = await baseQuery
+      .orderBy('r.last_seen', 'desc')
+      .limit(limit)
+      .offset(offset);
+
+    const data = (rows as Array<IpReputationRow & { computed_status: string }>).map((row) =>
+      rowToReputation(row, row.computed_status as IpStatus),
+    );
+
+    return { data, total };
+  }
+
+  /**
+   * Fetches a single IP reputation record by IP address.
+   */
+  async getByIp(ip: string): Promise<IpReputation | null> {
+    const row = await db<IpReputationRow>('ip_reputation').where({ ip }).first();
+    if (!row) return null;
+
+    // Compute status
+    const ban = await db('ip_bans')
+      .where({ ip, is_active: true })
+      .where(function () {
+        this.whereNull('expires_at').orWhere('expires_at', '>', new Date());
+      })
+      .first();
+
+    let status: IpStatus = 'clean';
+    if (ban) {
+      status = 'banned';
+    } else {
+      const wl = await db('ip_whitelist').where({ ip }).first();
+      if (wl) {
+        status = 'whitelisted';
+      } else if (Number(row.total_failures) > 0) {
+        status = 'suspicious';
+      }
+    }
+
+    return rowToReputation(row, status);
+  }
+
+  /**
+   * Fetches recent IP events for a given IP address.
+   * Joins with agent_devices to include hostname.
+   */
+  async getRecentEvents(ip: string, limit = 50): Promise<IpEvent[]> {
+    const rows = await db<IpEventRow>('ip_events as e')
+      .leftJoin('agent_devices as d', 'd.id', 'e.device_id')
+      .where('e.ip', ip)
+      .select('e.*', 'd.hostname')
+      .orderBy('e.timestamp', 'desc')
+      .limit(limit);
+
+    return rows.map(rowToEvent);
+  }
+}
+
+export const ipReputationService = new IpReputationService();

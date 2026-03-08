@@ -1,5 +1,6 @@
 import { useRef, useState, useEffect } from 'react';
-import type { Heartbeat, MonitorStatus } from '@obliview/shared';
+import type { MonitorStatus } from '@obliview/shared';
+import type { Heartbeat } from '@/store/monitorStore';
 import { cn } from '@/utils/cn';
 
 interface HeartbeatBarProps {
@@ -86,7 +87,7 @@ export function HeartbeatBar({ heartbeats, maxBars }: HeartbeatBarProps) {
             } else if (hb.isRetrying) {
               barColor = 'bg-orange-500';
             } else {
-              barColor = statusColors[hb.status] || 'bg-border';
+              barColor = statusColors[hb.status as MonitorStatus] || 'bg-border';
             }
           }
           const maintenanceLabel = hb?.inMaintenance && hb.status !== 'up' ? ' · In maintenance' : '';
@@ -100,7 +101,7 @@ export function HeartbeatBar({ heartbeats, maxBars }: HeartbeatBarProps) {
               )}
               title={
                 hb
-                  ? `${hb.status.toUpperCase()}${hb.isRetrying ? ' (Retrying)' : ''}${maintenanceLabel} - ${hb.responseTime ? `${hb.responseTime}ms` : 'N/A'} - ${new Date(hb.createdAt).toLocaleString()}`
+                  ? `${hb.status.toUpperCase()}${hb.isRetrying ? ' (Retrying)' : ''}${maintenanceLabel} - ${hb.responseTime ? `${hb.responseTime}ms` : 'N/A'}${hb.createdAt ? ` - ${new Date(hb.createdAt).toLocaleString()}` : ''}`
                   : undefined
               }
             />

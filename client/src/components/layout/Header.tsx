@@ -1,9 +1,11 @@
-import { LogOut, Menu, Download } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { LogOut, Menu, Download, ExternalLink } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useAuthStore } from '@/store/authStore';
 import { useUiStore } from '@/store/uiStore';
 import { useSocketStore } from '@/store/socketStore';
+import { appConfigApi } from '@/api/appConfig.api';
 import { Button } from '@/components/common/Button';
 import { NotificationCenter } from './NotificationCenter';
 import { TenantSwitcher } from './TenantSwitcher';
@@ -18,19 +20,27 @@ export function Header() {
   const { user, logout } = useAuthStore();
   const { toggleSidebar, sidebarFloating } = useUiStore();
   const { status: socketStatus } = useSocketStore();
+  const [obliviewUrl, setObliviewUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    appConfigApi.getConfig()
+      .then(cfg => {
+        const url = (cfg as unknown as Record<string, unknown>).obliview_url;
+        if (url && typeof url === 'string' && url.trim()) {
+          setObliviewUrl(url.trim());
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   return (
     <header className="flex h-14 shrink-0 items-center justify-between border-b border-border bg-bg-secondary px-4">
       <div className="flex items-center gap-3">
-        {/* Logo — shown in the Header only when the sidebar is floating.
-            In pinned mode the logo lives inside the sidebar itself.
-            In floating mode (especially in the native desktop app where the native
-            tenant tab bar can cover the very top of the floating sidebar) the logo
-            is mirrored here so it remains always accessible. */}
+        {/* Logo — shown in the Header only when the sidebar is floating. */}
         {sidebarFloating && (
           <Link to="/" className="flex items-center gap-2 shrink-0">
-            <img src="/logo.webp" alt="Obliview" className="h-8 w-8 rounded-lg" />
-            <span className="hidden text-lg font-semibold text-text-primary sm:block">Obliview</span>
+            <img src="/logo.webp" alt="Obliguard" className="h-8 w-8 rounded-lg" />
+            <span className="hidden text-lg font-semibold text-text-primary sm:block">Obliguard</span>
           </Link>
         )}
 
@@ -47,6 +57,19 @@ export function Header() {
       </div>
 
       <div className="flex items-center gap-4">
+        {/* Obliview back-link — shown when obliview_url is configured */}
+        {obliviewUrl && (
+          <a
+            href={obliviewUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center gap-1.5 text-sm text-text-secondary hover:text-text-primary transition-colors"
+          >
+            <ExternalLink size={14} />
+            {t('header.obliviewLink', { defaultValue: '← Obliview' })}
+          </a>
+        )}
+
         {/* Download App link — hidden inside the native desktop app */}
         {!isNativeApp && (
           <Link

@@ -1,11 +1,8 @@
 import { useState } from 'react';
 import { X, Save } from 'lucide-react';
-import type { Monitor } from '@obliview/shared';
-import type { SettingsKey } from '@obliview/shared';
+import type { Monitor } from '@/store/monitorStore';
 import { monitorsApi } from '@/api/monitors.api';
-import { settingsApi } from '@/api/settings.api';
 import { useGroupStore } from '@/store/groupStore';
-import { useMonitorStore } from '@/store/monitorStore';
 import { Button } from '@/components/common/Button';
 import { Input } from '@/components/common/Input';
 import { GroupPicker } from '@/components/common/GroupPicker';
@@ -82,9 +79,7 @@ function FieldRow({
 export function BulkEditModal({ monitorIds, isAgentSelection, onClose }: BulkEditModalProps) {
   const { tree } = useGroupStore();
   const agentGroupTree = tree.filter((node) => node.kind === 'agent');
-  const monitorGroupTree = tree.filter((node) => node.kind === 'monitor');
-  const groupTree = isAgentSelection ? agentGroupTree : monitorGroupTree;
-  const { updateMonitor: updateStoreMonitor } = useMonitorStore();
+  const groupTree = isAgentSelection ? agentGroupTree : [];
   const [form, setForm] = useState<BulkFormState>(makeDefaultState);
   const [saving, setSaving] = useState(false);
 
@@ -101,8 +96,6 @@ export function BulkEditModal({ monitorIds, isAgentSelection, onClose }: BulkEdi
   const handleSubmit = async () => {
     // Direct monitor fields (table monitors)
     const directChanges: Partial<Monitor> = {};
-    // Timing fields go via settings table (monitor-level override, highest priority)
-    const timingOverrides: Array<{ key: SettingsKey; value: number }> = [];
 
     if (form.name.enabled && form.name.value.trim())
       directChanges.name = form.name.value.trim();
@@ -113,16 +106,7 @@ export function BulkEditModal({ monitorIds, isAgentSelection, onClose }: BulkEdi
     if (form.upsideDown.enabled)
       directChanges.upsideDown = form.upsideDown.value;
 
-    if (form.intervalSeconds.enabled && form.intervalSeconds.value)
-      timingOverrides.push({ key: 'check_interval', value: parseInt(form.intervalSeconds.value, 10) });
-    if (form.timeoutMs.enabled && form.timeoutMs.value)
-      timingOverrides.push({ key: 'timeout', value: parseInt(form.timeoutMs.value, 10) });
-    if (form.retryIntervalSeconds.enabled && form.retryIntervalSeconds.value)
-      timingOverrides.push({ key: 'retry_interval', value: parseInt(form.retryIntervalSeconds.value, 10) });
-    if (form.maxRetries.enabled && form.maxRetries.value)
-      timingOverrides.push({ key: 'max_retries', value: parseInt(form.maxRetries.value, 10) });
-
-    if (Object.keys(directChanges).length === 0 && timingOverrides.length === 0) {
+    if (Object.keys(directChanges).length === 0) {
       toast.error('No fields selected to update');
       return;
     }
@@ -134,16 +118,10 @@ export function BulkEditModal({ monitorIds, isAgentSelection, onClose }: BulkEdi
       // Always call bulkUpdate (even with empty changes) to restart workers so
       // they pick up the new settings-table overrides
       promises.push(
-        monitorsApi.bulkUpdate({ monitorIds, changes: directChanges })
-          .then((updated) => updated.forEach((m) => updateStoreMonitor(m.id, m))),
+        monitorsApi.bulkUpdate(monitorIds, directChanges),
       );
 
-      // Write timing overrides into settings table at monitor scope
-      if (timingOverrides.length > 0) {
-        for (const monitorId of monitorIds) {
-          promises.push(settingsApi.setBulk('monitor', String(monitorId), timingOverrides));
-        }
-      }
+      // Timing overrides at monitor scope were removed (monitors no longer exist in Obliguard)
 
       await Promise.all(promises);
       toast.success(`${monitorIds.length} ${isAgentSelection ? 'agent' : 'monitor'}${monitorIds.length > 1 ? 's' : ''} updated`);

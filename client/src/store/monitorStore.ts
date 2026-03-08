@@ -1,6 +1,46 @@
 import { create } from 'zustand';
-import type { Monitor, Heartbeat } from '@obliview/shared';
-import { monitorsApi } from '../api/monitors.api';
+
+// ── Local type stubs (Monitor/Heartbeat removed from @obliview/shared) ────────
+
+export interface Monitor {
+  id: number;
+  name: string;
+  type: string;
+  groupId: number | null;
+  isActive: boolean;
+  status: string;
+  intervalSeconds: number | null;
+  retryIntervalSeconds: number | null;
+  maxRetries: number | null;
+  timeoutMs: number | null;
+  isPaused: boolean;
+  inMaintenance: boolean;
+  agentDeviceId?: number | null;
+  valueWatcherPreviousValue?: string | null;
+  [key: string]: unknown;
+}
+
+export interface Heartbeat {
+  id?: number;
+  monitorId?: number;
+  status: string;
+  responseTime?: number | null;
+  message?: string | null;
+  inMaintenance?: boolean;
+  value?: string | null;
+  createdAt?: string;
+  [key: string]: unknown;
+}
+
+// ── Stub monitorsApi (monitors removed from Obliguard) ────────────────────────
+
+const monitorsApi = {
+  list: async (): Promise<Monitor[]> => [],
+  getSummary: async (): Promise<Record<number, { uptimePct: number; avgResponseTime: number | null }>> => ({}),
+  getAllHeartbeats: async (_count?: number): Promise<Record<string, Heartbeat[]>> => ({}),
+  getHeartbeatsByPeriod: async (_id: number, _period: string): Promise<Heartbeat[]> => [],
+  update: async (_id: number, _data: Partial<Monitor>): Promise<Monitor> => { throw new Error('monitors removed'); },
+};
 
 export interface MonitorSummary {
   uptimePct: number;
@@ -45,7 +85,7 @@ export const useMonitorStore = create<MonitorStore>((set, get) => ({
     try {
       const list = await monitorsApi.list();
       const monitors = new Map<number, Monitor>();
-      list.forEach((m) => monitors.set(m.id, m));
+      list.forEach((m: Monitor) => monitors.set(m.id, m));
       set({ monitors, isLoading: false });
     } catch {
       set({ isLoading: false });
@@ -67,7 +107,7 @@ export const useMonitorStore = create<MonitorStore>((set, get) => ({
       const data = await monitorsApi.getAllHeartbeats(count);
       set((state) => {
         const heartbeats = new Map(state.heartbeats);
-        for (const [idStr, hbs] of Object.entries(data)) {
+        for (const [idStr, hbs] of Object.entries(data) as [string, Heartbeat[]][]) {
           const id = Number(idStr);
           heartbeats.set(id, hbs.slice(-maxHeartbeats));
         }

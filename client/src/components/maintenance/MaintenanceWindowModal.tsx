@@ -133,7 +133,7 @@ export function MaintenanceWindowModal({
   const [active, setActive] = useState(true);
 
   // ── Edit-mode scope fields (single scope, from the existing window) ───────
-  const [editScopeType, setEditScopeType] = useState<MaintenanceScopeType>('monitor');
+  const [editScopeType, setEditScopeType] = useState<MaintenanceScopeType>('agent');
   const [editScopeId, setEditScopeId] = useState<number | ''>('');
 
   // ── Create-mode scope selection (multi-scope via ScopeSelector) ───────────
@@ -301,7 +301,6 @@ export function MaintenanceWindowModal({
                     value={editScopeType}
                     onChange={(e) => { setEditScopeType(e.target.value as MaintenanceScopeType); setEditScopeId(''); }}
                   >
-                    <option value="monitor">{t('common.monitor')}</option>
                     <option value="agent">{t('common.agent')}</option>
                     <option value="group">{t('common.group')}</option>
                     <option value="global">{t('maintenance.scopeGlobal')}</option>

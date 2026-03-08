@@ -6,11 +6,9 @@ import { db } from './db';
 import { config } from './config';
 import { logger } from './utils/logger';
 import { authService } from './services/auth.service';
-import { MonitorWorkerManager } from './workers/MonitorWorkerManager';
-import { heartbeatService } from './services/heartbeat.service';
 import { setAgentServiceIO, agentService } from './services/agent.service';
-import { maintenanceService } from './services/maintenance.service';
 import { setLiveAlertIO } from './services/liveAlert.service';
+import { banEngine } from './services/ban.service';
 
 async function main() {
   // 1. Run pending migrations
@@ -32,46 +30,36 @@ async function main() {
 
   // 5. Attach Socket.io
   const io = createSocketServer(server);
-
-  // Store io instance for later use
   app.set('io', io);
 
-  // Provide io to agent service for real-time push events
+  // Provide io to services for real-time push events
   setAgentServiceIO(io);
-  // Provide io to live alert service for real-time notification delivery
   setLiveAlertIO(io);
 
-  // Start maintenance background jobs (cleanup + transition notifications)
-  maintenanceService.startJobs();
-
-  // 6. Start monitor workers
-  const workerManager = MonitorWorkerManager.getInstance(io);
-  await workerManager.startAll();
+  // 6. Start BanEngine — evaluates IP thresholds and enforces bans every 30s
+  banEngine.start();
 
   // 7. Listen
   server.listen(config.port, () => {
-    logger.info(`Obliview server listening on port ${config.port}`);
+    logger.info(`Obliguard server listening on port ${config.port}`);
     logger.info(`Environment: ${config.nodeEnv}`);
-    logger.info(`Active monitors: ${workerManager.getRunningCount()}`);
   });
 
-  // 8. Heartbeat retention job — purge heartbeats older than 90 days every 6 hours
-  const RETENTION_DAYS = 90;
-  const RETENTION_INTERVAL_MS = 6 * 60 * 60 * 1000;
+  // 8. ip_events retention job — purge events older than configured days every 6 hours
+  const IP_EVENTS_RETENTION_DAYS = 90;
   const retentionTimer = setInterval(async () => {
     try {
-      const deleted = await heartbeatService.purgeOlderThan(RETENTION_DAYS);
+      const cutoff = new Date(Date.now() - IP_EVENTS_RETENTION_DAYS * 24 * 60 * 60 * 1000);
+      const deleted = await db('ip_events').where('timestamp', '<', cutoff).delete();
       if (deleted > 0) {
-        logger.info(`Retention: purged ${deleted} heartbeats older than ${RETENTION_DAYS} days`);
+        logger.info(`Retention: purged ${deleted} ip_events older than ${IP_EVENTS_RETENTION_DAYS} days`);
       }
     } catch (err) {
-      logger.error(err, 'Retention job failed');
+      logger.error(err, 'ip_events retention job failed');
     }
-  }, RETENTION_INTERVAL_MS);
+  }, 6 * 60 * 60 * 1000);
 
   // 9. Agent cleanup job — auto-delete devices whose uninstall command was delivered
-  //    more than 10 minutes ago (they've had enough time to uninstall and stop pushing).
-  const AGENT_CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // every 5 minutes
   const agentCleanupTimer = setInterval(async () => {
     try {
       await agentService.cleanupUninstalledDevices();
@@ -79,15 +67,31 @@ async function main() {
     } catch (err) {
       logger.error(err, 'Agent cleanup job failed');
     }
-  }, AGENT_CLEANUP_INTERVAL_MS);
+  }, 5 * 60 * 1000);
 
-  // 10. Graceful shutdown
+  // 10. ip_bans expiry job — mark expired bans as inactive every 5 minutes
+  const banExpiryTimer = setInterval(async () => {
+    try {
+      const expired = await db('ip_bans')
+        .where('is_active', true)
+        .whereNotNull('expires_at')
+        .where('expires_at', '<', new Date())
+        .update({ is_active: false });
+      if (expired > 0) {
+        logger.info(`BanExpiry: deactivated ${expired} expired bans`);
+      }
+    } catch (err) {
+      logger.error(err, 'Ban expiry job failed');
+    }
+  }, 5 * 60 * 1000);
+
+  // 11. Graceful shutdown
   const shutdown = async (signal: string) => {
     logger.info(`Received ${signal}, shutting down...`);
     clearInterval(retentionTimer);
     clearInterval(agentCleanupTimer);
-    maintenanceService.stopJobs();
-    await workerManager.stopAll();
+    clearInterval(banExpiryTimer);
+    banEngine.stop();
     server.close();
     await db.destroy();
     process.exit(0);
@@ -98,6 +102,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  logger.fatal(err, 'Failed to start server');
+  logger.fatal(err, 'Failed to start Obliguard server');
   process.exit(1);
 });

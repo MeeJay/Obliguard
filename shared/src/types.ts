@@ -1,4 +1,4 @@
-import type { MonitorType, MonitorStatus, UserRole } from './monitorTypes';
+import type { UserRole } from './monitorTypes';
 import type { SettingsKey } from './settingsDefaults';
 
 // ============================================
@@ -10,7 +10,7 @@ export interface UserPreferences {
   multiTenantNotificationsEnabled?: boolean;
 }
 
-/** Shape of a live alert as returned by the server (used in socket NOTIFICATION_NEW + REST API). */
+/** Shape of a live alert as returned by the server. */
 export interface LiveAlertData {
   id: number;
   tenantId: number;
@@ -21,7 +21,7 @@ export interface LiveAlertData {
   navigateTo: string | null;
   stableKey: string | null;
   read: boolean;
-  createdAt: string; // ISO 8601
+  createdAt: string;
 }
 
 export interface User {
@@ -45,129 +45,6 @@ export interface UserWithPassword extends User {
 }
 
 // ============================================
-// Monitor types
-// ============================================
-export interface Monitor {
-  id: number;
-  name: string;
-  description: string | null;
-  type: MonitorType;
-  groupId: number | null;
-  isActive: boolean;
-  status: MonitorStatus;
-
-  // Common config
-  intervalSeconds: number | null;
-  retryIntervalSeconds: number | null;
-  maxRetries: number | null;
-  timeoutMs: number | null;
-  upsideDown: boolean;
-
-  // HTTP / JSON API
-  url: string | null;
-  method: string | null;
-  headers: Record<string, string> | null;
-  body: string | null;
-  expectedStatusCodes: number[] | null;
-  keyword: string | null;
-  keywordIsPresent: boolean | null;
-  ignoreSsl: boolean;
-
-  // JSON API
-  jsonPath: string | null;
-  jsonExpectedValue: string | null;
-
-  // Ping / TCP
-  hostname: string | null;
-  port: number | null;
-
-  // DNS
-  dnsRecordType: string | null;
-  dnsResolver: string | null;
-  dnsExpectedValue: string | null;
-
-  // SSL
-  sslWarnDays: number | null;
-
-  // SMTP
-  smtpHost: string | null;
-  smtpPort: number | null;
-
-  // Docker
-  dockerHost: string | null;
-  dockerContainerName: string | null;
-
-  // Game server
-  gameType: string | null;
-  gameHost: string | null;
-  gamePort: number | null;
-
-  // Push
-  pushToken: string | null;
-  pushMaxIntervalSec: number | null;
-
-  // Script
-  scriptCommand: string | null;
-  scriptExpectedExit: number | null;
-
-  // Browser (Playwright)
-  browserUrl: string | null;
-  browserKeyword: string | null;
-  browserKeywordIsPresent: boolean | null;
-  browserWaitForSelector: string | null;
-  browserScreenshotOnFailure: boolean;
-
-  // Value Watcher
-  valueWatcherUrl: string | null;
-  valueWatcherJsonPath: string | null;
-  valueWatcherOperator: string | null;
-  valueWatcherThreshold: number | null;
-  valueWatcherThresholdMax: number | null;
-  valueWatcherPreviousValue: string | null;
-  valueWatcherHeaders: Record<string, string> | null;
-
-  // Agent Monitor
-  agentDeviceId: number | null;
-  agentDeviceName: string | null;  // display name from agent_devices.name (null if not set)
-  agentThresholds: AgentThresholds | null;
-
-  // Metadata
-  createdBy: number | null;
-  createdAt: string;
-  updatedAt: string;
-  inMaintenance?: boolean;
-}
-
-// ============================================
-// Heartbeat types
-// ============================================
-export interface Heartbeat {
-  id: number;
-  monitorId: number;
-  status: MonitorStatus;
-  responseTime: number | null;
-  statusCode: number | null;
-  message: string | null;
-  ping: number | null;
-  isRetrying: boolean;
-  value: string | null;
-  inMaintenance?: boolean;
-  createdAt: string;
-}
-
-export interface HeartbeatStats {
-  monitorId: number;
-  period: string;
-  uptimePct: number;
-  avgResponse: number | null;
-  maxResponse: number | null;
-  minResponse: number | null;
-  totalChecks: number;
-  totalUp: number;
-  totalDown: number;
-}
-
-// ============================================
 // Group types
 // ============================================
 export interface MonitorGroup {
@@ -179,7 +56,7 @@ export interface MonitorGroup {
   sortOrder: number;
   isGeneral: boolean;
   groupNotifications: boolean;
-  kind: 'monitor' | 'agent';
+  kind: 'agent';
   agentThresholds?: AgentThresholds | null;
   agentGroupConfig?: AgentGroupConfig | null;
   createdAt: string;
@@ -188,7 +65,6 @@ export interface MonitorGroup {
 
 export interface GroupTreeNode extends MonitorGroup {
   children: GroupTreeNode[];
-  monitors: Monitor[];
 }
 
 // ============================================
@@ -201,9 +77,7 @@ export interface NotificationChannel {
   config: Record<string, unknown>;
   isEnabled: boolean;
   createdBy: number | null;
-  /** Owner tenant of this channel */
   tenantId?: number;
-  /** True when this channel belongs to another tenant and is shared to the current one */
   isShared?: boolean;
   createdAt: string;
   updatedAt: string;
@@ -211,10 +85,33 @@ export interface NotificationChannel {
 
 export type OverrideMode = 'merge' | 'replace' | 'exclude';
 
+export interface NotificationBinding {
+  id: number;
+  channelId: number;
+  scope: 'global' | 'group' | 'agent';
+  scopeId: number | null;
+  overrideMode: OverrideMode;
+}
+
+export interface NotificationPluginMeta {
+  type: string;
+  name: string;
+  description: string;
+  configFields: NotificationConfigField[];
+}
+
+export interface NotificationConfigField {
+  key: string;
+  label: string;
+  type: 'text' | 'password' | 'number' | 'url' | 'textarea' | 'boolean' | 'smtp_server_select';
+  placeholder?: string;
+  required?: boolean;
+}
+
 // ============================================
 // Settings types
 // ============================================
-export type SettingsScope = 'global' | 'group' | 'monitor';
+export type SettingsScope = 'global' | 'group';
 
 export interface SettingValue {
   value: number;
@@ -226,23 +123,9 @@ export interface SettingValue {
 export type ResolvedSettings = Record<SettingsKey, SettingValue>;
 
 // ============================================
-// Incident types
-// ============================================
-export interface Incident {
-  id: number;
-  monitorId: number;
-  startedAt: string;
-  resolvedAt: string | null;
-  durationSec: number | null;
-  previousStatus: MonitorStatus;
-  newStatus: MonitorStatus;
-  message: string | null;
-}
-
-// ============================================
 // Maintenance Window types
 // ============================================
-export type MaintenanceScopeType = 'global' | 'group' | 'monitor' | 'agent';
+export type MaintenanceScopeType = 'global' | 'group' | 'agent';
 export type MaintenanceScheduleType = 'one_time' | 'recurring';
 export type MaintenanceRecurrenceType = 'daily' | 'weekly';
 
@@ -250,41 +133,37 @@ export interface MaintenanceWindow {
   id: number;
   name: string;
   scopeType: MaintenanceScopeType;
-  scopeId: number | null;       // null for 'global' scope
-  isOverride: boolean;          // DEPRECATED — kept for DB compat, ignored in logic
+  scopeId: number | null;
+  isOverride: boolean;
   scheduleType: MaintenanceScheduleType;
-  // one_time
   startAt: string | null;
   endAt: string | null;
-  // recurring
-  startTime: string | null;   // 'HH:MM'
-  endTime: string | null;     // 'HH:MM'
+  startTime: string | null;
+  endTime: string | null;
   recurrenceType: MaintenanceRecurrenceType | null;
-  daysOfWeek: number[] | null; // 0=Mon … 6=Sun
+  daysOfWeek: number[] | null;
   timezone: string;
   notifyChannelIds: number[];
   lastNotifiedStartAt: string | null;
   lastNotifiedEndAt: string | null;
   active: boolean;
   createdAt: string;
-  // Computed by server (always present on API responses)
   isActiveNow?: boolean;
   scopeName?: string;
-  // Computed for effective-windows view (present when fetched via /effective endpoint)
   source?: 'local' | 'group' | 'global';
-  sourceId?: number | null;     // id of the owning group/monitor/agent (null for global)
-  sourceName?: string;          // display name of the owning scope
-  isDisabledHere?: boolean;     // true if this scope has disabled this inherited window
-  canEdit?: boolean;            // true if the current scope owns this window
-  canDelete?: boolean;          // true if the current scope owns this window
-  canDisable?: boolean;         // true if inherited AND not yet disabled at this scope
-  canEnable?: boolean;          // true if inherited AND currently disabled at this scope
+  sourceId?: number | null;
+  sourceName?: string;
+  isDisabledHere?: boolean;
+  canEdit?: boolean;
+  canDelete?: boolean;
+  canDisable?: boolean;
+  canEnable?: boolean;
 }
 
 export interface MaintenanceWindowDisable {
   id: number;
   windowId: number;
-  scopeType: 'group' | 'monitor' | 'agent';
+  scopeType: 'group' | 'agent';
   scopeId: number;
   createdAt: string;
 }
@@ -292,8 +171,8 @@ export interface MaintenanceWindowDisable {
 export interface CreateMaintenanceWindowRequest {
   name: string;
   scopeType: MaintenanceScopeType;
-  scopeId?: number | null;      // omit / null for 'global'
-  isOverride?: boolean;         // DEPRECATED, accepted for backward compat
+  scopeId?: number | null;
+  isOverride?: boolean;
   scheduleType: MaintenanceScheduleType;
   startAt?: string | null;
   endAt?: string | null;
@@ -324,11 +203,6 @@ export interface PaginatedResponse<T> extends ApiResponse<T[]> {
   pageSize: number;
 }
 
-export interface BulkEditRequest {
-  monitorIds: number[];
-  changes: Partial<Monitor>;
-}
-
 export interface CreateGroupRequest {
   name: string;
   description?: string | null;
@@ -336,7 +210,7 @@ export interface CreateGroupRequest {
   sortOrder?: number;
   isGeneral?: boolean;
   groupNotifications?: boolean;
-  kind?: 'monitor' | 'agent';
+  kind?: 'agent';
 }
 
 export interface UpdateGroupRequest {
@@ -368,29 +242,6 @@ export interface UpdateNotificationChannelRequest {
   isEnabled?: boolean;
 }
 
-export interface NotificationBinding {
-  id: number;
-  channelId: number;
-  scope: 'global' | 'group' | 'monitor';
-  scopeId: number | null;
-  overrideMode: OverrideMode;
-}
-
-export interface NotificationPluginMeta {
-  type: string;
-  name: string;
-  description: string;
-  configFields: NotificationConfigField[];
-}
-
-export interface NotificationConfigField {
-  key: string;
-  label: string;
-  type: 'text' | 'password' | 'number' | 'url' | 'textarea' | 'boolean' | 'smtp_server_select';
-  placeholder?: string;
-  required?: boolean;
-}
-
 // ============================================
 // SMTP Server types
 // ============================================
@@ -413,25 +264,20 @@ export interface AppConfig {
   allow_2fa: boolean;
   force_2fa: boolean;
   otp_smtp_server_id: number | null;
+  /** URL of the companion Obliview instance. When set, a "Switch to Obliview" button appears in the header. */
+  obliview_url: string | null;
 }
 
 /**
  * Global agent defaults stored in app_config as JSON under key "agent_global_config".
- * These apply to all agents and agent groups unless overridden at the group or device level.
- * null = use the hardcoded system default.
  */
 export interface AgentGlobalConfig {
-  /** Default push interval in seconds (null = 60) */
   checkIntervalSeconds: number | null;
-  /** Default heartbeat monitoring toggle (null = true) */
   heartbeatMonitoring: boolean | null;
-  /** Default max missed pushes before offline (null = 2) */
   maxMissedPushes: number | null;
-  /** Default notification types (null fields = use hardcoded DEFAULT_NOTIFICATION_TYPES) */
   notificationTypes: NotificationTypeConfig | null;
 }
 
-/** Hardcoded fallback for agent global config (bottom of inheritance chain) */
 export const DEFAULT_AGENT_GLOBAL_CONFIG: Required<{
   checkIntervalSeconds: number;
   heartbeatMonitoring: boolean;
@@ -446,7 +292,7 @@ export const DEFAULT_AGENT_GLOBAL_CONFIG: Required<{
 // Team & Permission types
 // ============================================
 export type PermissionLevel = 'ro' | 'rw';
-export type PermissionScope = 'group' | 'monitor';
+export type PermissionScope = 'group' | 'agent';
 
 export interface UserTeam {
   id: number;
@@ -454,7 +300,7 @@ export interface UserTeam {
   description: string | null;
   canCreate: boolean;
   tenantId: number;
-  tenantName?: string; // populated by JOIN in getAll()
+  tenantName?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -470,7 +316,6 @@ export interface TeamPermission {
 export interface UserPermissions {
   canCreate: boolean;
   teams: number[];
-  /** map of "group:<id>" or "monitor:<id>" → permission level */
   permissions: Record<string, PermissionLevel>;
 }
 
@@ -536,19 +381,17 @@ export interface AgentMetricThreshold {
   op: '>' | '<' | '>=' | '<=';
 }
 
-/** Per-sensor temperature override (key = sensor label) */
 export interface AgentTempSensorOverride {
-  enabled: boolean;   // true = this sensor has its own settings (overrides global)
+  enabled: boolean;
   op: '>' | '<' | '>=' | '<=';
-  threshold: number;  // °C
+  threshold: number;
 }
 
-/** Global temperature threshold + optional per-sensor overrides */
 export interface AgentTempThreshold {
-  globalEnabled: boolean;              // master on/off for all temp monitoring
-  op: '>' | '<' | '>=' | '<=';        // global operator
-  threshold: number;                   // global threshold in °C
-  overrides: Record<string, AgentTempSensorOverride>;  // key = sensor label
+  globalEnabled: boolean;
+  op: '>' | '<' | '>=' | '<=';
+  threshold: number;
+  overrides: Record<string, AgentTempSensorOverride>;
 }
 
 export interface AgentThresholds {
@@ -564,31 +407,19 @@ export const DEFAULT_AGENT_THRESHOLDS: AgentThresholds = {
   cpu:    { enabled: true,  threshold: 90,         op: '>' },
   memory: { enabled: true,  threshold: 90,         op: '>' },
   disk:   { enabled: true,  threshold: 90,         op: '>' },
-  // Network thresholds stored in bytes/sec; 100 Mbps = 100 × 125 000 bytes/sec
   netIn:  { enabled: false, threshold: 12_500_000, op: '>' },
   netOut: { enabled: false, threshold: 12_500_000, op: '>' },
   temp:   { globalEnabled: false, op: '>', threshold: 85, overrides: {} },
 };
 
-/**
- * Per-type notification toggles.
- * Each field is `boolean | null` where null means "inherit from parent group / system default".
- * System defaults: global=true, down=true, up=true, alert=true, update=false.
- */
 export interface NotificationTypeConfig {
-  /** Master switch — if false no notifications are sent (channels remain bound but muted) */
   global: boolean | null;
-  /** Notify when agent/monitor goes DOWN / offline */
   down: boolean | null;
-  /** Notify when agent/monitor recovers (back UP) */
   up: boolean | null;
-  /** Notify when agent threshold is breached (alert status) */
   alert: boolean | null;
-  /** Notify when agent starts a self-update (default off) */
   update: boolean | null;
 }
 
-/** System defaults for notification types (used when no group/device override is set) */
 export const DEFAULT_NOTIFICATION_TYPES: Required<{ [K in keyof NotificationTypeConfig]: boolean }> = {
   global: true,
   down:   true,
@@ -597,15 +428,10 @@ export const DEFAULT_NOTIFICATION_TYPES: Required<{ [K in keyof NotificationType
   update: false,
 };
 
-/** Default group-level config for agent groups */
 export interface AgentGroupConfig {
-  /** Default push interval for agents in this group (null = device keeps its own) */
   pushIntervalSeconds: number | null;
-  /** Default heartbeat monitoring toggle (null = device keeps its own) */
   heartbeatMonitoring: boolean | null;
-  /** Consecutive missed pushes before declaring agent offline (null = system default of 2) */
   maxMissedPushes: number | null;
-  /** Notification type toggles (null = inherit from parent group / system defaults) */
   notificationTypes: NotificationTypeConfig | null;
 }
 
@@ -622,52 +448,34 @@ export interface AgentApiKey {
   deviceCount?: number;
 }
 
-/**
- * Per-device UI display preferences stored in agent_devices.display_config (JSONB).
- * All fields are optional; missing fields fall back to defaults (everything visible).
- */
 export interface AgentDisplayConfig {
   cpu: {
-    /** Show 2 stacked mini-bars per physical core instead of 2-column thread grid */
     groupCoreThreads: boolean;
-    /** Physical core indices (0-based) to hide from the overview card */
     hiddenCores: number[];
-    /** Temperature sensor label to use for the CPU temp chart (null = average all) */
     tempSensor: string | null;
-    /** Detail-page chart IDs to hide: 'load-avg' | 'temp' | 'freq' */
     hiddenCharts: string[];
   };
   ram: {
     hideUsed: boolean;
     hideFree: boolean;
     hideSwap: boolean;
-    /** Detail-page chart IDs to hide: 'pct' | 'used-mb' | 'swap' */
     hiddenCharts: string[];
   };
   gpu: {
-    /** Row labels to hide from the overview card (e.g. 'Copy', 'Encode', 'VRAM') */
     hiddenRows: string[];
-    /** Detail-page chart IDs to hide: 'util' | 'vram' | 'temp' */
     hiddenCharts: string[];
   };
   drives: {
-    /** Mount paths to hide from the overview card */
     hiddenMounts: string[];
-    /** mount → custom display name */
     renames: Record<string, string>;
-    /** Detail page: combine Read+Write into one dual-series chart */
     combineReadWrite: boolean;
   };
   network: {
-    /** Interface names to hide from the overview card */
     hiddenInterfaces: string[];
-    /** interface name → custom display name */
     renames: Record<string, string>;
-    /** Detail page: combine IN+OUT into one dual-series chart */
     combineInOut: boolean;
   };
   temps: {
-    /** Sensor labels to hide from the overview card */
     hiddenLabels: string[];
   };
 }
@@ -677,7 +485,6 @@ export interface AgentDevice {
   uuid: string;
   hostname: string;
   tenantId: number;
-  /** Custom display name — shown instead of hostname when set */
   name: string | null;
   ip: string | null;
   osInfo: {
@@ -689,7 +496,6 @@ export interface AgentDevice {
   agentVersion: string | null;
   apiKeyId: number | null;
   status: 'pending' | 'approved' | 'refused' | 'suspended';
-  /** When false: agent going offline → 'inactive' (grey), no notification */
   heartbeatMonitoring: boolean;
   checkIntervalSeconds: number;
   approvedBy: number | null;
@@ -697,63 +503,21 @@ export interface AgentDevice {
   groupId: number | null;
   createdAt: string;
   updatedAt: string;
-  /**
-   * Map of sensorKey → human-readable display name.
-   * Key format: "temp:<raw_label>" — matches threshold override keys.
-   * Example: { "temp:acpitz-acpi-0": "Motherboard", "temp:CPU Package": "CPU" }
-   */
   sensorDisplayNames: Record<string, string> | null;
-  /**
-   * When false the device inherits checkIntervalSeconds, heartbeatMonitoring and
-   * maxMissedPushes from the parent group's agent_group_config.
-   * The existing checkIntervalSeconds field holds the device-level value and is
-   * used when overrideGroupSettings = true.
-   */
   overrideGroupSettings: boolean;
-  /** Resolved effective settings (accounts for group inheritance when override=false) */
   resolvedSettings: {
     checkIntervalSeconds: number;
     heartbeatMonitoring: boolean;
     maxMissedPushes: number;
   };
-  /**
-   * Raw agent_group_config from the parent group (null if device has no group or
-   * the group has no config set).  Unlike resolvedSettings this is never affected
-   * by overrideGroupSettings — it always reflects what the group itself defines.
-   * The UI uses this to display "inherited from group" values and to write the
-   * correct value to the device column when a per-field override is disabled.
-   */
   groupSettings: AgentGroupConfig | null;
-  /** Parent group's agent_thresholds — used as the "inherited" baseline in the threshold editor */
   groupThresholds?: AgentThresholds | null;
-  /** Per-device UI display preferences (hidden cores, renamed drives, combined charts, etc.) */
   displayConfig: AgentDisplayConfig | null;
-  /**
-   * Command queued by an admin, delivered to the agent on its next push.
-   * Cleared once the command has been sent to the agent.
-   * Example values: 'uninstall'
-   */
   pendingCommand?: string | null;
-  /**
-   * Timestamp at which the 'uninstall' command was delivered to the agent.
-   * Used by the cleanup job to auto-delete the device ~10 minutes after delivery.
-   */
   uninstallCommandedAt?: string | null;
-  /**
-   * Set when the agent notifies the server it is about to self-update.
-   * While set (and within 10 minutes), the device shows "UPDATING" status and
-   * is excluded from downtime / uptime calculations.
-   * Cleared on the next successful push, or by the cleanup job after 10 minutes.
-   */
   updatingSince?: string | null;
   inMaintenance?: boolean;
-  /**
-   * Device-level notification type override.
-   * null = inherit from parent group chain (see resolvedNotificationTypes for effective values).
-   * When set, overrides the group's notification type settings.
-   */
   notificationTypes?: NotificationTypeConfig | null;
-  /** Resolved effective notification types (device → group hierarchy → defaults) */
   resolvedNotificationTypes?: {
     global: boolean;
     down: boolean;
@@ -771,7 +535,6 @@ export type RemediationTrigger   = 'down' | 'up' | 'both';
 export type RemediationRunStatus = 'success' | 'failed' | 'timeout' | 'cooldown_skip';
 export type OverrideModeR        = 'merge' | 'replace' | 'exclude';
 
-/** Config shapes stored in remediation_actions.config (JSONB) */
 export interface WebhookRemediationConfig {
   platform?: 'n8n' | 'make' | 'zapier' | null;
   url: string;
@@ -797,7 +560,6 @@ export interface SshRemediationConfig {
   port?: number;
   username: string;
   authType: 'password' | 'key';
-  /** AES-256-GCM encrypted credential — never returned in plaintext */
   credentialEnc?: string;
   command: string;
   timeoutMs?: number;
@@ -816,7 +578,7 @@ export interface RemediationAction {
 export interface RemediationBinding {
   id: number;
   actionId: number;
-  scope: 'global' | 'group' | 'monitor';
+  scope: 'global' | 'group' | 'agent';
   scopeId: number | null;
   overrideMode: OverrideModeR;
   triggerOn: RemediationTrigger;
@@ -825,20 +587,20 @@ export interface RemediationBinding {
 
 export interface ResolvedRemediationBinding extends RemediationBinding {
   action: RemediationAction;
-  inheritedFrom?: 'global' | 'group';  // present when not directly bound at this scope
+  inheritedFrom?: 'global' | 'group';
 }
 
 export interface RemediationRun {
   id: number;
   actionId: number;
-  monitorId: number;
+  agentDeviceId: number;
   triggeredBy: 'down' | 'up';
   status: RemediationRunStatus;
   output: string | null;
   error: string | null;
   durationMs: number | null;
   triggeredAt: string;
-  actionName?: string;  // joined
+  actionName?: string;
 }
 
 export interface CreateRemediationActionRequest {
@@ -856,7 +618,7 @@ export interface UpdateRemediationActionRequest {
 
 export interface AddRemediationBindingRequest {
   actionId: number;
-  scope: 'global' | 'group' | 'monitor';
+  scope: 'global' | 'group' | 'agent';
   scopeId?: number | null;
   overrideMode?: OverrideModeR;
   triggerOn?: RemediationTrigger;
@@ -864,7 +626,7 @@ export interface AddRemediationBindingRequest {
 }
 
 // ============================================
-// Tenant types (multi-tenancy)
+// Tenant types
 // ============================================
 export interface Tenant {
   id: number;
@@ -884,11 +646,285 @@ export interface TenantWithRole extends Tenant {
   role: 'admin' | 'member';
 }
 
-/** Returned by GET /api/users/:id/tenants — all tenants with this user's membership info */
 export interface UserTenantAssignment {
   tenantId: number;
   tenantName: string;
   tenantSlug: string;
   isMember: boolean;
   role: 'admin' | 'member';
+}
+
+// ============================================
+// Obliguard — Service template types
+// ============================================
+export type BuiltinServiceType = 'ssh' | 'rdp' | 'nginx' | 'apache' | 'iis' | 'ftp' | 'mail' | 'mysql';
+export type ServiceType = BuiltinServiceType | 'custom';
+
+export interface ServiceTemplate {
+  id: number;
+  name: string;
+  serviceType: ServiceType;
+  isBuiltin: boolean;
+  defaultLogPath: string | null;
+  /** Named-group regex: (?P<ip>...) (?P<username>...). NULL for built-in templates. */
+  customRegex: string | null;
+  threshold: number;
+  windowSeconds: number;
+  enabled: boolean;
+  /** NULL = platform-wide; non-null = tenant-scoped custom template */
+  tenantId: number | null;
+  createdBy: number | null;
+  createdAt: string;
+  updatedAt: string;
+  /** Assignments for this template (populated when fetching detail) */
+  assignments?: ServiceTemplateAssignment[];
+}
+
+export interface ServiceTemplateAssignment {
+  id: number;
+  templateId: number;
+  scope: 'group' | 'agent';
+  scopeId: number;
+  /** NULL = inherit from template */
+  logPathOverride: string | null;
+  thresholdOverride: number | null;
+  windowSecondsOverride: number | null;
+  enabledOverride: boolean | null;
+  /** When true, agent will include log sample lines in next push */
+  sampleRequested: boolean;
+  createdAt: string;
+}
+
+/** Fully-resolved service config for a given agent (after inheritance) */
+export interface ResolvedServiceConfig {
+  templateId: number;
+  name: string;
+  serviceType: ServiceType;
+  isBuiltin: boolean;
+  logPath: string | null;
+  customRegex: string | null;
+  threshold: number;
+  windowSeconds: number;
+  enabled: boolean;
+  sampleRequested: boolean;
+}
+
+export interface CreateServiceTemplateRequest {
+  name: string;
+  serviceType: ServiceType;
+  defaultLogPath?: string | null;
+  customRegex?: string | null;
+  threshold?: number;
+  windowSeconds?: number;
+  enabled?: boolean;
+}
+
+export interface UpdateServiceTemplateRequest {
+  name?: string;
+  defaultLogPath?: string | null;
+  customRegex?: string | null;
+  threshold?: number;
+  windowSeconds?: number;
+  enabled?: boolean;
+}
+
+export interface UpsertServiceAssignmentRequest {
+  logPathOverride?: string | null;
+  thresholdOverride?: number | null;
+  windowSecondsOverride?: number | null;
+  enabledOverride?: boolean | null;
+  sampleRequested?: boolean;
+}
+
+// ============================================
+// Obliguard — IP event types
+// ============================================
+export type IpEventType = 'auth_failure' | 'auth_success' | 'port_scan';
+
+export interface IpEvent {
+  id: number;
+  deviceId: number | null;
+  /** Device hostname (joined) */
+  deviceHostname?: string;
+  ip: string;
+  username: string | null;
+  service: string;
+  eventType: IpEventType;
+  timestamp: string;
+  rawLog: string | null;
+  tenantId: number | null;
+  createdAt: string;
+}
+
+// ============================================
+// Obliguard — IP reputation types
+// ============================================
+export interface IpReputation {
+  ip: string;
+  totalFailures: number;
+  totalSuccesses: number;
+  affectedAgentsCount: number;
+  affectedServices: string[];
+  attemptedUsernames: string[];
+  firstSeen: string | null;
+  lastSeen: string | null;
+  lastEventDeviceId: number | null;
+  geoCountryCode: string | null;
+  geoCity: string | null;
+  asn: string | null;
+  updatedAt: string;
+  /** Computed: 'banned' | 'whitelisted' | 'suspicious' | 'clean' */
+  status?: IpStatus;
+}
+
+export type IpStatus = 'banned' | 'whitelisted' | 'suspicious' | 'clean';
+
+// ============================================
+// Obliguard — Ban types
+// ============================================
+export type BanScope = 'global' | 'tenant' | 'group' | 'agent';
+export type BanType = 'auto' | 'manual';
+
+export interface IpBan {
+  id: number;
+  ip: string;
+  cidrPrefix: number | null;
+  reason: string | null;
+  banType: BanType;
+  scope: BanScope;
+  scopeId: number | null;
+  tenantId: number | null;
+  /**
+   * Which tenant's agent triggered this auto-ban.
+   * Only visible to platform admins (role='admin').
+   * Tenants see this as null (hidden by API).
+   */
+  originTenantId: number | null;
+  /** origin_tenant_id resolved to a name (admin only) */
+  originTenantName?: string;
+  bannedByUserId: number | null;
+  bannedAt: string;
+  expiresAt: string | null;
+  isActive: boolean;
+}
+
+export interface CreateBanRequest {
+  ip: string;
+  cidrPrefix?: number | null;
+  reason?: string | null;
+  scope?: BanScope;
+  scopeId?: number | null;
+  expiresAt?: string | null;
+}
+
+export interface UpdateBanRequest {
+  reason?: string | null;
+  expiresAt?: string | null;
+  isActive?: boolean;
+}
+
+// ============================================
+// Obliguard — Whitelist types
+// ============================================
+export type WhitelistScope = 'global' | 'tenant' | 'group' | 'agent';
+
+export interface IpWhitelist {
+  id: number;
+  /** CIDR notation (e.g. "192.168.0.0/24" or "1.2.3.4/32") */
+  ip: string;
+  label: string | null;
+  scope: WhitelistScope;
+  scopeId: number | null;
+  tenantId: number | null;
+  createdBy: number | null;
+  createdAt: string;
+}
+
+export interface CreateWhitelistRequest {
+  ip: string;
+  label?: string | null;
+  scope?: WhitelistScope;
+  scopeId?: number | null;
+}
+
+// ============================================
+// Obliguard — Agent push payload types
+// ============================================
+
+/** Service detected on the agent machine */
+export interface AgentDetectedService {
+  type: ServiceType;
+  port: number | null;
+  active: boolean;
+}
+
+/** Single auth event reported by the agent */
+export interface AgentIpEvent {
+  /** Local UUID to avoid duplicate processing */
+  id: string;
+  ip: string;
+  username: string | null;
+  service: string;
+  eventType: IpEventType;
+  timestamp: string;
+  rawLog: string | null;
+}
+
+/** New Obliguard push request body (agent → server) */
+export interface ObliguardPushBody {
+  hostname: string;
+  agentVersion: string;
+  osInfo: {
+    platform: string;
+    distro: string | null;
+    release: string | null;
+    arch: string;
+  };
+  /** Detected services on this machine */
+  services?: AgentDetectedService[];
+  /** Auth events since last push */
+  events?: AgentIpEvent[];
+  /** IPs currently banned in the local firewall */
+  firewallBanned?: string[];
+  /** Firewall implementation in use (ufw, firewalld, iptables, nftables, windows, macos_pf) */
+  firewallName?: string;
+  /**
+   * Log samples requested by the server.
+   * Key = log file path, value = last N lines.
+   */
+  logSamples?: Record<string, string[]>;
+}
+
+/** Per-service config sent back to the agent */
+export interface AgentServiceConfig {
+  enabled: boolean;
+  threshold: number;
+  windowSeconds: number;
+  /** Only for custom services: named-group regex */
+  customRegex?: string | null;
+  /** Request the agent to include last 50 lines in next push */
+  sampleRequested?: boolean;
+}
+
+/** Obliguard push response (server → agent) */
+export interface ObliguardPushResponse {
+  status: 'ok' | 'pending' | 'refused';
+  latestVersion?: string;
+  config?: {
+    pushIntervalSeconds: number;
+  };
+  banList?: {
+    /** IPs to add to the local firewall */
+    add: string[];
+    /** IPs to remove from the local firewall */
+    remove: string[];
+  };
+  /** Resolved whitelist CIDRs — agent skips banning these */
+  whitelist?: string[];
+  /**
+   * Per-service config keyed by serviceType ('ssh', 'nginx', etc.)
+   * or by log path for custom services ('custom:/var/log/tomcat/catalina.out')
+   */
+  services?: Record<string, AgentServiceConfig>;
+  command?: string;
 }

@@ -1,32 +1,24 @@
 import { useEffect, useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
-  Pencil, Pause, Play, Trash2, ArrowLeft, FolderOpen, RotateCcw, Globe,
-  Server, Settings2, Thermometer, Bell,
+  Pencil, Trash2, ArrowLeft, FolderOpen,
+  Server, Settings2, Thermometer, Bell, Globe, RotateCcw,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { cn } from '@/utils/cn';
 import { useGroupStore } from '@/store/groupStore';
 import { useAuthStore } from '@/store/authStore';
 import { groupsApi } from '@/api/groups.api';
-import { monitorsApi } from '@/api/monitors.api';
-import { MONITOR_TYPE_LABELS } from '@obliview/shared';
+import { agentApi } from '@/api/agent.api';
 import type {
-  MonitorGroup, Monitor, Heartbeat,
+  MonitorGroup, AgentDevice,
   AgentThresholds, AgentMetricThreshold, AgentTempThreshold,
   NotificationTypeConfig,
 } from '@obliview/shared';
 import { DEFAULT_AGENT_THRESHOLDS } from '@obliview/shared';
-import { MonitorStatusBadge } from '@/components/monitors/MonitorStatusBadge';
-import { HeartbeatChart } from '@/components/monitors/HeartbeatChart';
-import { HeartbeatBar } from '@/components/monitors/HeartbeatBar';
 import { Button } from '@/components/common/Button';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
-import { PeriodSelector } from '@/components/common/PeriodSelector';
-import { SettingsPanel } from '@/components/settings/SettingsPanel';
 import { NotificationBindingsPanel } from '@/components/notifications/NotificationBindingsPanel';
-import { RemediationBindingsPanel } from '@/components/remediation/RemediationBindingsPanel';
-import { MaintenanceWindowList } from '@/components/maintenance/MaintenanceWindowList';
 import { NotificationTypesPanel } from '@/components/agent/NotificationTypesPanel';
 import toast from 'react-hot-toast';
 
@@ -53,34 +45,7 @@ function Switch({ on, onChange, disabled = false }: { on: boolean; onChange: (v:
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Agent Group Stats
-// ─────────────────────────────────────────────────────────────────────────────
-
-interface AgentGroupStats {
-  total: number;
-  online: number;   // up status
-  alert: number;    // alert status
-  offline: number;  // down status
-  pending: number;  // pending status
-  alertAgentNames: string[];
-  offlineAgentNames: string[];
-}
-
-function computeAgentGroupStats(monitors: Monitor[]): AgentGroupStats {
-  const agentMonitors = monitors.filter(m => m.type === 'agent' || m.agentDeviceId !== null);
-  const stats: AgentGroupStats = { total: 0, online: 0, alert: 0, offline: 0, pending: 0, alertAgentNames: [], offlineAgentNames: [] };
-  for (const m of agentMonitors) {
-    stats.total++;
-    if (m.status === 'up') stats.online++;
-    else if (m.status === 'alert') { stats.alert++; stats.alertAgentNames.push(m.name); }
-    else if (m.status === 'down' || m.status === 'inactive') { stats.offline++; stats.offlineAgentNames.push(m.name); }
-    else { stats.pending++; }
-  }
-  return stats;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Agent Group Threshold Editor (inline, not a modal)
+// Agent Group Threshold Editor
 // ─────────────────────────────────────────────────────────────────────────────
 
 const OPS = ['>', '>=', '<', '<='] as const;
@@ -239,7 +204,7 @@ function AgentGroupSettingsPanel({ group, onUpdate }: { group: MonitorGroup; onU
           pushIntervalSeconds: interval.trim() ? Number(interval) : null,
           heartbeatMonitoring: heartbeat,
           maxMissedPushes: maxMissed.trim() ? Number(maxMissed) : null,
-          notificationTypes: cfg.notificationTypes, // preserve existing notifTypes
+          notificationTypes: cfg.notificationTypes,
         },
       });
       onUpdate(updated);
@@ -357,16 +322,6 @@ function AgentGroupSettingsPanel({ group, onUpdate }: { group: MonitorGroup; onU
 // Main GroupDetailPage
 // ─────────────────────────────────────────────────────────────────────────────
 
-interface GroupStats {
-  total: number;
-  up: number;
-  down: number;
-  uptimePct: number;
-  avgResponseTime: number | null;
-  monitorCount: number;
-  downMonitorNames: string[];
-}
-
 export function GroupDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -379,24 +334,22 @@ export function GroupDetailPage() {
   const canWrite = canWriteGroup(groupId);
 
   const [group, setGroup] = useState<MonitorGroup | null>(storeGroup ?? null);
-  const [monitors, setMonitors] = useState<Monitor[]>([]);
+  const [devices, setDevices] = useState<AgentDevice[]>([]);
   const [loading, setLoading] = useState(true);
-  const [period, setPeriod] = useState('24h');
-  const [periodHeartbeats, setPeriodHeartbeats] = useState<Heartbeat[]>([]);
-  const [stats, setStats] = useState<GroupStats | null>(null);
 
   const isAgentGroup = group?.kind === 'agent';
 
-  // Fetch group + monitors on mount
+  // Fetch group + agent devices on mount
   useEffect(() => {
     async function loadData() {
       try {
-        const [g, m] = await Promise.all([
-          groupsApi.getById(groupId),
-          groupsApi.getMonitors(groupId, true),
-        ]);
+        const g = await groupsApi.getById(groupId);
         setGroup(g);
-        setMonitors(m);
+
+        if (g.kind === 'agent') {
+          const all = await agentApi.listDevices('approved');
+          setDevices(all.filter(d => d.groupId === groupId));
+        }
       } catch {
         // group may come from store
       }
@@ -404,21 +357,6 @@ export function GroupDetailPage() {
     }
     loadData();
   }, [groupId]);
-
-  // Fetch heartbeats + stats by period (only for monitor groups)
-  useEffect(() => {
-    if (isAgentGroup) return;
-    Promise.all([
-      groupsApi.getHeartbeats(groupId, period),
-      groupsApi.getDetailStats(groupId, period),
-    ]).then(([hbs, s]) => {
-      setPeriodHeartbeats(hbs);
-      setStats(s);
-    }).catch(() => {
-      setPeriodHeartbeats([]);
-      setStats(null);
-    });
-  }, [groupId, period, isAgentGroup]);
 
   if (loading && !group) {
     return (
@@ -453,40 +391,8 @@ export function GroupDetailPage() {
     }
   };
 
-  const handlePauseAll = async () => {
-    const active = monitors.filter((m) => m.status !== 'paused');
-    if (active.length === 0) { toast(t('groups.noActive')); return; }
-    try {
-      await Promise.all(active.map((m) => monitorsApi.pause(m.id)));
-      toast.success(t('groups.pausedAll', { count: active.length }));
-      const m = await groupsApi.getMonitors(groupId, true);
-      setMonitors(m);
-    } catch { toast.error(t('groups.failedPause')); }
-  };
-
-  const handleResumeAll = async () => {
-    const paused = monitors.filter((m) => m.status === 'paused');
-    if (paused.length === 0) { toast(t('groups.noPaused')); return; }
-    try {
-      await Promise.all(paused.map((m) => monitorsApi.pause(m.id)));
-      toast.success(t('groups.resumedAll', { count: paused.length }));
-      const m = await groupsApi.getMonitors(groupId, true);
-      setMonitors(m);
-    } catch { toast.error(t('groups.failedResume')); }
-  };
-
-  const handleClearHeartbeats = async () => {
-    if (!confirm(t('groups.confirmClear', { name: group.name }))) return;
-    try {
-      const result = await groupsApi.clearHeartbeats(groupId);
-      toast.success(t('groups.cleared', { heartbeats: result.deleted, monitors: result.monitorCount }));
-      setPeriodHeartbeats([]);
-    } catch { toast.error(t('groups.failedClear')); }
-  };
-
-  const pausedCount = monitors.filter((m) => m.status === 'paused').length;
-  const hasPaused = pausedCount > 0;
-  const agentStats = isAgentGroup ? computeAgentGroupStats(monitors) : null;
+  // Agent device stats
+  const onlineCount = devices.filter(d => d.status === 'approved').length;
 
   return (
     <div className="p-6">
@@ -541,21 +447,6 @@ export function GroupDetailPage() {
                 {t('common.edit')}
               </Button>
             </Link>
-            {!isAgentGroup && (hasPaused ? (
-              <Button variant="secondary" size="sm" onClick={handleResumeAll}>
-                <Play size={14} className="mr-1.5" />
-                {t('groups.detail.resumeAll')}
-              </Button>
-            ) : (
-              <Button variant="secondary" size="sm" onClick={handlePauseAll}>
-                <Pause size={14} className="mr-1.5" />
-                {t('groups.detail.pauseAll')}
-              </Button>
-            ))}
-            <Button variant="secondary" size="sm" onClick={handleClearHeartbeats}>
-              <RotateCcw size={14} className="mr-1.5" />
-              {t('groups.detail.clearData')}
-            </Button>
             <Button variant="danger" size="sm" onClick={handleDelete}>
               <Trash2 size={14} className="mr-1.5" />
               {t('common.delete')}
@@ -565,135 +456,44 @@ export function GroupDetailPage() {
       </div>
 
       {/* ── Agent group stats ── */}
-      {isAgentGroup && agentStats && (
+      {isAgentGroup && (
         <div className="grid gap-4 mb-6" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))' }}>
           <div className="rounded-lg border border-border bg-bg-secondary p-4">
             <div className="text-sm text-text-secondary mb-1">{t('groups.detail.totalAgents')}</div>
-            <div className="text-xl font-mono font-semibold text-text-primary">{agentStats.total}</div>
+            <div className="text-xl font-mono font-semibold text-text-primary">{devices.length}</div>
           </div>
           <div className="rounded-lg border border-status-up/30 bg-bg-secondary p-4">
             <div className="text-sm text-text-secondary mb-1">{t('groups.detail.online')}</div>
-            <div className="text-xl font-mono font-semibold text-status-up">{agentStats.online}</div>
-          </div>
-          {agentStats.alert > 0 && (
-            <div className="rounded-lg border border-orange-500/30 bg-bg-secondary p-4">
-              <div className="text-sm text-text-secondary mb-1">{t('groups.detail.alert')}</div>
-              <div className="text-xl font-mono font-semibold text-orange-400">{agentStats.alert}</div>
-              <div className="text-xs text-text-muted mt-0.5 truncate">{agentStats.alertAgentNames.join(', ')}</div>
-            </div>
-          )}
-          {agentStats.offline > 0 && (
-            <div className="rounded-lg border border-status-down/30 bg-bg-secondary p-4">
-              <div className="text-sm text-text-secondary mb-1">{t('groups.detail.offline')}</div>
-              <div className="text-xl font-mono font-semibold text-status-down">{agentStats.offline}</div>
-              <div className="text-xs text-text-muted mt-0.5 truncate">{agentStats.offlineAgentNames.join(', ')}</div>
-            </div>
-          )}
-          {agentStats.pending > 0 && (
-            <div className="rounded-lg border border-yellow-500/30 bg-bg-secondary p-4">
-              <div className="text-sm text-text-secondary mb-1">{t('groups.detail.pending')}</div>
-              <div className="text-xl font-mono font-semibold text-yellow-400">{agentStats.pending}</div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* ── Monitor group stats ── */}
-      {!isAgentGroup && stats && (
-        <div className="grid gap-4 mb-6" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' }}>
-          <div className="rounded-lg border border-border bg-bg-secondary p-4">
-            <div className="text-sm text-text-secondary mb-1">{t('groups.detail.uptime')}</div>
-            <div className={cn('text-xl font-mono font-semibold',
-              stats.uptimePct >= 99 ? 'text-status-up' : stats.uptimePct >= 95 ? 'text-yellow-500' : 'text-status-down'
-            )}>
-              {stats.uptimePct}%
-            </div>
-          </div>
-          <div className="rounded-lg border border-border bg-bg-secondary p-4">
-            <div className="text-sm text-text-secondary mb-1">{t('groups.detail.monitors')}</div>
-            <div className="text-xl font-mono font-semibold text-text-primary">{stats.monitorCount}</div>
-            <div className="text-xs text-text-muted mt-0.5">
-              {stats.monitorCount - stats.downMonitorNames.length} up / {stats.downMonitorNames.length} down
-            </div>
-          </div>
-          {stats.downMonitorNames.length > 0 && (
-            <div className="rounded-lg border border-status-down/30 bg-status-down-bg p-4">
-              <div className="text-sm text-text-secondary mb-1">{t('groups.detail.downMonitors')}</div>
-              <div className="text-xl font-mono font-semibold text-status-down">{stats.downMonitorNames.length}</div>
-              <div className="text-xs text-text-muted mt-0.5 truncate">{stats.downMonitorNames.join(', ')}</div>
-            </div>
-          )}
-          <div className="rounded-lg border border-border bg-bg-secondary p-4">
-            <div className="text-sm text-text-secondary mb-1">{t('groups.detail.avgResponse')}</div>
-            <div className="text-xl font-mono font-semibold text-text-primary">
-              {stats.avgResponseTime ? `${stats.avgResponseTime}ms` : t('common.na')}
-            </div>
-          </div>
-          <div className="rounded-lg border border-border bg-bg-secondary p-4">
-            <div className="text-sm text-text-secondary mb-1">{t('groups.detail.totalChecks')}</div>
-            <div className="text-xl font-mono font-semibold text-text-primary">{stats.total.toLocaleString()}</div>
+            <div className="text-xl font-mono font-semibold text-status-up">{onlineCount}</div>
           </div>
         </div>
       )}
 
-      {/* ── Monitor group charts ── */}
-      {!isAgentGroup && (
-        <>
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wide">{t('monitors.history')}</h3>
-            <PeriodSelector value={period} onChange={setPeriod} />
-          </div>
-          <div className="mb-6 rounded-lg border border-border bg-bg-secondary p-4">
-            <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wide mb-3">{t('monitors.heartbeatHistory')}</h3>
-            <HeartbeatBar heartbeats={periodHeartbeats} />
-          </div>
-          <div className="mb-6 rounded-lg border border-border bg-bg-secondary p-4">
-            <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wide mb-3">{t('monitors.responseTime')}</h3>
-            <HeartbeatChart heartbeats={periodHeartbeats} height={250} period={period} />
-          </div>
-        </>
-      )}
-
-      {/* ── Agent list (for agent groups) ── */}
-      {isAgentGroup && monitors.length > 0 && (
+      {/* ── Agent devices list ── */}
+      {isAgentGroup && devices.length > 0 && (
         <div className="mb-6 rounded-lg border border-border bg-bg-secondary">
           <div className="px-4 py-3 border-b border-border">
-            <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wide">{t('groups.detail.agentList', { count: monitors.filter(m => m.type === 'agent').length })}</h3>
-          </div>
-          <div className="divide-y divide-border">
-            {monitors.filter(m => m.type === 'agent').map(m => (
-              <Link
-                key={m.id}
-                to={m.agentDeviceId ? `/agents/${m.agentDeviceId}` : '#'}
-                className="flex items-center gap-3 px-4 py-2.5 hover:bg-bg-hover transition-colors"
-              >
-                <MonitorStatusBadge status={m.status} size="sm" inMaintenance={m.inMaintenance} />
-                <span className="flex-1 text-sm text-text-primary truncate">{m.name}</span>
-                <span className="text-xs text-text-muted">{t('common.agent')}</span>
-              </Link>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* ── Monitor list (for monitor groups) ── */}
-      {!isAgentGroup && monitors.length > 0 && (
-        <div className="mb-6 rounded-lg border border-border bg-bg-secondary">
-          <div className="flex items-center justify-between px-4 py-3 border-b border-border">
             <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wide">
-              {t('groups.detail.monitorList', { count: monitors.length })}
+              {t('groups.detail.agentList', { count: devices.length })}
             </h3>
           </div>
           <div className="divide-y divide-border">
-            {monitors.map((m) => (
+            {devices.map(device => (
               <Link
-                key={m.id}
-                to={`/monitor/${m.id}`}
+                key={device.id}
+                to={`/agents/${device.id}`}
                 className="flex items-center gap-3 px-4 py-2.5 hover:bg-bg-hover transition-colors"
               >
-                <MonitorStatusBadge status={m.status} size="sm" inMaintenance={m.inMaintenance} />
-                <span className="flex-1 text-sm text-text-primary truncate">{m.name}</span>
-                <span className="text-xs text-text-muted">{MONITOR_TYPE_LABELS[m.type]}</span>
+                <span className={cn(
+                  'inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold',
+                  device.status === 'approved' ? 'bg-green-500/10 text-green-400' : 'bg-gray-500/10 text-gray-400',
+                )}>
+                  {device.status.toUpperCase()}
+                </span>
+                <span className="flex-1 text-sm text-text-primary truncate">
+                  {device.name ?? device.hostname}
+                </span>
+                <span className="text-xs text-text-muted">{device.hostname}</span>
               </Link>
             ))}
           </div>
@@ -711,7 +511,7 @@ export function GroupDetailPage() {
         </div>
       )}
 
-      {/* ── Agent group: Notification Types (standalone section, below notification channels) ── */}
+      {/* ── Agent group: Notification Types ── */}
       {isAdmin() && isAgentGroup && (
         <div className="mt-6">
           <NotificationTypesPanel
@@ -728,45 +528,10 @@ export function GroupDetailPage() {
         </div>
       )}
 
-      {/* Remediation Bindings (admin only) */}
-      {isAdmin() && (
-        <div className="mt-6">
-          <RemediationBindingsPanel
-            scope="group"
-            scopeId={groupId}
-            title={t('monitors.sectionRemediations')}
-          />
-        </div>
-      )}
-
-      {/* Maintenance Windows (admin only) */}
-      {isAdmin() && (
-        <div className="mt-4 rounded-lg border border-border bg-bg-secondary p-4">
-          <MaintenanceWindowList
-            scopeType="group"
-            scopeId={groupId}
-            channels={[]}
-            defaultScopeType="group"
-            defaultScopeId={groupId}
-          />
-        </div>
-      )}
-
       {/* ── Agent group settings ── */}
       {isAdmin() && isAgentGroup && (
         <div className="mt-6">
           <AgentGroupSettingsPanel group={group} onUpdate={setGroup} />
-        </div>
-      )}
-
-      {/* ── Monitor group settings ── */}
-      {isAdmin() && !isAgentGroup && (
-        <div className="mt-6">
-          <SettingsPanel
-            scope="group"
-            scopeId={groupId}
-            title={t('monitors.sectionSettings')}
-          />
         </div>
       )}
     </div>

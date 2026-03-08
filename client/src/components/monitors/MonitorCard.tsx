@@ -1,6 +1,7 @@
 import { Link } from 'react-router-dom';
-import type { Monitor, Heartbeat } from '@obliview/shared';
+import type { Monitor, Heartbeat } from '@/store/monitorStore';
 import { MONITOR_TYPE_LABELS } from '@obliview/shared';
+import type { MonitorStatus } from '@obliview/shared';
 import { MonitorStatusBadge } from './MonitorStatusBadge';
 import { HeartbeatBar } from './HeartbeatBar';
 import { MiniSparkline } from './MiniSparkline';
@@ -84,15 +85,15 @@ export function MonitorCard({
         className="flex flex-1 items-center gap-3 min-w-0"
         onClick={selectionMode ? (e) => e.preventDefault() : undefined}
       >
-        <MonitorStatusBadge status={monitor.status} size="sm" inMaintenance={monitor.inMaintenance} />
+        <MonitorStatusBadge status={monitor.status as MonitorStatus} size="sm" inMaintenance={monitor.inMaintenance as boolean} />
 
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
             <span className="truncate font-medium text-text-primary text-sm">
-              {isAgent ? (monitor.agentDeviceName || monitor.name) : monitor.name}
+              {isAgent ? ((monitor.agentDeviceName as string | null) || monitor.name) : monitor.name}
             </span>
             <span className="text-xs text-text-muted">
-              {MONITOR_TYPE_LABELS[monitor.type]}
+              {MONITOR_TYPE_LABELS[monitor.type as keyof typeof MONITOR_TYPE_LABELS]}
             </span>
             {/* Agent metric summary inline */}
             {isAgent && agentMetricSummary && monitor.status !== 'down' && monitor.status !== 'alert' && (

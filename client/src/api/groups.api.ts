@@ -5,8 +5,6 @@ import type {
   ApiResponse,
   CreateGroupRequest,
   UpdateGroupRequest,
-  Heartbeat,
-  Monitor,
   AgentThresholds,
   AgentGroupConfig,
 } from '@obliview/shared';
@@ -60,13 +58,6 @@ export const groupsApi = {
     return res.data.data!;
   },
 
-  async getHeartbeats(id: number, period: string = '24h'): Promise<Heartbeat[]> {
-    const res = await apiClient.get<ApiResponse<Heartbeat[]>>(`/groups/${id}/heartbeats`, {
-      params: { period },
-    });
-    return res.data.data!;
-  },
-
   async getDetailStats(id: number, period: string = '24h'): Promise<{
     total: number;
     up: number;
@@ -85,13 +76,6 @@ export const groupsApi = {
       monitorCount: number;
       downMonitorNames: string[];
     }>>(`/groups/${id}/detail-stats`, { params: { period } });
-    return res.data.data!;
-  },
-
-  async getMonitors(id: number, descendants: boolean = false): Promise<Monitor[]> {
-    const res = await apiClient.get<ApiResponse<Monitor[]>>(`/groups/${id}/monitors`, {
-      params: descendants ? { descendants: 'true' } : {},
-    });
     return res.data.data!;
   },
 

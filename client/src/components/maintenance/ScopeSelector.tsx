@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
 import { Globe, Monitor, Server, Folder, RefreshCw, Check } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import type { MonitorGroup, Monitor as MonitorType, AgentDevice, MaintenanceScopeType } from '@obliview/shared';
+import type { MonitorGroup, AgentDevice, MaintenanceScopeType } from '@obliview/shared';
+import type { Monitor as MonitorType } from '@/store/monitorStore';
 import { groupsApi } from '@/api/groups.api';
 import { monitorsApi } from '@/api/monitors.api';
 import { agentApi } from '@/api/agent.api';
@@ -13,7 +14,7 @@ export interface ScopeTarget {
   scopeType: MaintenanceScopeType;
   scopeId: number | null;
   /** Children to disable after creating the group-scoped window */
-  disables?: Array<{ scopeType: 'monitor' | 'agent'; scopeId: number }>;
+  disables?: Array<{ scopeType: 'agent'; scopeId: number }>;
 }
 
 // ── Internal selection state ──────────────────────────────────────────────────
@@ -60,7 +61,7 @@ function cloneSelection(s: Selection): Selection {
 
 function resolveTargets(
   sel: Selection,
-  monitorsByGroup: Map<number, MonitorType[]>,
+  _monitorsByGroup: Map<number, MonitorType[]>,
   agentsByGroup: Map<number, AgentDevice[]>,
 ): ScopeTarget[] {
   if (sel.global) return [{ scopeType: 'global', scopeId: null }];
@@ -68,15 +69,11 @@ function resolveTargets(
   const targets: ScopeTarget[] = [];
 
   for (const gId of sel.monitorGroupIds) {
-    const disables = (monitorsByGroup.get(gId) ?? [])
-      .filter((m) => sel.deselectedMonitorIds.has(m.id))
-      .map((m) => ({ scopeType: 'monitor' as const, scopeId: m.id }));
-    targets.push({ scopeType: 'group', scopeId: gId, disables: disables.length ? disables : undefined });
+    // Monitor groups/monitors are no longer used in Obliguard
+    targets.push({ scopeType: 'group', scopeId: gId, disables: undefined });
   }
 
-  for (const mId of sel.individualMonitorIds) {
-    targets.push({ scopeType: 'monitor', scopeId: mId });
-  }
+  // individualMonitorIds are no longer used in Obliguard
 
   for (const gId of sel.agentGroupIds) {
     const disables = (agentsByGroup.get(gId) ?? [])
@@ -125,8 +122,8 @@ export function ScopeSelector({ defaultScopeType, defaultScopeId, onChange }: Pr
       .then(([groups, monitors, devices]) => {
         if (!mounted) return;
 
-        const mGroups = groups.filter((g) => g.kind === 'monitor');
-        const aGroups = groups.filter((g) => g.kind === 'agent');
+        const mGroups: MonitorGroup[] = []; // monitors removed from Obliguard
+        const aGroups = groups.filter((g: MonitorGroup) => g.kind === 'agent');
 
         const mByGroup = new Map<number, MonitorType[]>();
         const ungM: MonitorType[] = [];
@@ -139,7 +136,7 @@ export function ScopeSelector({ defaultScopeType, defaultScopeId, onChange }: Pr
           }
         }
 
-        const approved = devices.filter((a) => a.status === 'approved');
+        const approved = devices.filter((a: AgentDevice) => a.status === 'approved');
         const aByGroup = new Map<number, AgentDevice[]>();
         const ungA: AgentDevice[] = [];
         for (const a of approved) {
@@ -152,12 +149,12 @@ export function ScopeSelector({ defaultScopeType, defaultScopeId, onChange }: Pr
         }
 
         // Sort everything alphabetically — same visual order as the sidebar
-        mGroups.sort((a, b) => a.name.localeCompare(b.name));
-        aGroups.sort((a, b) => a.name.localeCompare(b.name));
-        mByGroup.forEach((arr) => arr.sort((a, b) => a.name.localeCompare(b.name)));
-        aByGroup.forEach((arr) => arr.sort((a, b) => (a.name ?? a.hostname).localeCompare(b.name ?? b.hostname)));
-        ungM.sort((a, b) => a.name.localeCompare(b.name));
-        ungA.sort((a, b) => (a.name ?? a.hostname).localeCompare(b.name ?? b.hostname));
+        mGroups.sort((a: MonitorGroup, b: MonitorGroup) => a.name.localeCompare(b.name));
+        aGroups.sort((a: MonitorGroup, b: MonitorGroup) => a.name.localeCompare(b.name));
+        mByGroup.forEach((arr) => arr.sort((a: MonitorType, b: MonitorType) => a.name.localeCompare(b.name)));
+        aByGroup.forEach((arr) => arr.sort((a: AgentDevice, b: AgentDevice) => (a.name ?? a.hostname).localeCompare(b.name ?? b.hostname)));
+        ungM.sort((a: MonitorType, b: MonitorType) => a.name.localeCompare(b.name));
+        ungA.sort((a: AgentDevice, b: AgentDevice) => (a.name ?? a.hostname).localeCompare(b.name ?? b.hostname));
 
         setMonitorGroups(mGroups);
         setAgentGroups(aGroups);
@@ -173,11 +170,8 @@ export function ScopeSelector({ defaultScopeType, defaultScopeId, onChange }: Pr
           if (defaultScopeType === 'global') {
             init.global = true;
           } else if (defaultScopeType === 'group') {
-            const g = groups.find((gr) => gr.id === defaultScopeId);
-            if (g?.kind === 'monitor') init.monitorGroupIds.add(defaultScopeId);
-            else if (g?.kind === 'agent') init.agentGroupIds.add(defaultScopeId);
-          } else if (defaultScopeType === 'monitor') {
-            init.individualMonitorIds.add(defaultScopeId);
+            const g = groups.find((gr: MonitorGroup) => gr.id === defaultScopeId);
+            if (g?.kind === 'agent') init.agentGroupIds.add(defaultScopeId);
           } else if (defaultScopeType === 'agent') {
             init.individualAgentIds.add(defaultScopeId);
           }
@@ -206,9 +200,6 @@ export function ScopeSelector({ defaultScopeType, defaultScopeId, onChange }: Pr
           column = monitorScrollRef.current;
           key = `group-${defaultScopeId}`;
         }
-      } else if (defaultScopeType === 'monitor') {
-        column = monitorScrollRef.current;
-        key = `monitor-${defaultScopeId}`;
       } else if (defaultScopeType === 'agent') {
         column = agentScrollRef.current;
         key = `agent-${defaultScopeId}`;

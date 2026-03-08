@@ -5,7 +5,8 @@ import { useGroupStore } from '../store/groupStore';
 import { useAuthStore } from '../store/authStore';
 import { useLiveAlertsStore } from '../store/liveAlertsStore';
 import { SOCKET_EVENTS } from '@obliview/shared';
-import type { Monitor, MonitorGroup, Heartbeat, LiveAlertData } from '@obliview/shared';
+import type { MonitorGroup, LiveAlertData } from '@obliview/shared';
+import type { Monitor, Heartbeat } from '../store/monitorStore';
 
 /** Dispatch a sound notification to the native desktop app overlay. */
 function notifyNative(type: 'probe_down' | 'probe_up' | 'agent_alert' | 'agent_fixed') {

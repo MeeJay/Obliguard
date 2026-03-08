@@ -18,10 +18,10 @@ import toast from 'react-hot-toast';
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 
-const SOURCE_BADGE: Record<'global' | 'group' | 'monitor', { label: string; className: string }> = {
+const SOURCE_BADGE: Record<'global' | 'group' | 'agent', { label: string; className: string }> = {
   global:  { label: 'Global',  className: 'bg-blue-500/10 text-blue-400' },
   group:   { label: 'Group',   className: 'bg-purple-500/10 text-purple-400' },
-  monitor: { label: 'Monitor', className: 'bg-green-500/10 text-green-400' },
+  agent:   { label: 'Agent',   className: 'bg-green-500/10 text-green-400' },
 };
 
 const TRIGGER_LABELS: Record<RemediationTrigger, string> = {
@@ -67,7 +67,7 @@ type AnyConfig = Record<string, unknown>;
 // ─── ResolvedEntry type (server returns extra source fields) ───────────────────
 
 type ResolvedEntry = ResolvedRemediationBinding & {
-  source: 'global' | 'group' | 'monitor';
+  source: 'global' | 'group' | 'agent';
   sourceId: number | null;
   isDirect: boolean;
 };
@@ -474,7 +474,7 @@ export function RemediationBindingsPanel({
   groupId,
   title,
 }: {
-  scope: 'group' | 'monitor';
+  scope: 'group' | 'agent';
   scopeId: number;
   groupId?: number | null;
   title?: string;
@@ -497,11 +497,11 @@ export function RemediationBindingsPanel({
 
       // Build direct bindings map from scope bindings
       const direct = await remediationApi.getBindings(scope, scopeId);
-      const map = new Map(direct.map(b => [b.actionId, b]));
+      const map = new Map<number, RemediationBinding>(direct.map((b: RemediationBinding) => [b.actionId, b]));
       setDirectMap(map);
 
       // Detect current override mode from direct non-exclude bindings
-      const replaceBinding = direct.find(b => b.overrideMode === 'replace');
+      const replaceBinding = direct.find((b: RemediationBinding) => b.overrideMode === 'replace');
       setOverrideMode(replaceBinding ? 'replace' : 'merge');
     } catch {
       toast.error('Failed to load remediation bindings');

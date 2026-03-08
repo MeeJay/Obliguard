@@ -18,7 +18,7 @@ interface Props {
    * When set, the list fetches effective windows for this scope (local + inherited).
    * When not set (admin page), all windows are listed flat.
    */
-  scopeType?: 'monitor' | 'agent' | 'group';
+  scopeType?: 'agent' | 'group';
   scopeId?: number;
   /**
    * scopeOptions is no longer used — the modal fetches its own data.
@@ -399,7 +399,6 @@ function FlatList({
     all: t('maintenance.filterAll'),
     global: t('maintenance.filterGlobal'),
     group: t('maintenance.filterGroups'),
-    monitor: t('maintenance.filterMonitors'),
     agent: t('maintenance.filterAgents'),
   };
 
@@ -471,7 +470,7 @@ function FlatList({
     <div>
       {/* Filter chips */}
       <div className="flex items-center gap-2 mb-4 flex-wrap">
-        {['all', 'global', 'group', 'monitor', 'agent'].map((s) => (
+        {['all', 'global', 'group', 'agent'].map((s) => (
           <button
             key={s}
             onClick={() => setFilterScope(s)}

@@ -19,7 +19,7 @@ import { cn } from '@/utils/cn';
 import { estimateMaxBars } from '@/components/monitors/HeartbeatBar';
 import { monitorsApi } from '@/api/monitors.api';
 import toast from 'react-hot-toast';
-import type { Monitor } from '@obliview/shared';
+import type { Monitor } from '@/store/monitorStore';
 
 interface GroupTreeProps {
   selectedGroupId?: number | null;
@@ -166,7 +166,7 @@ export function GroupTree({ selectedGroupId, onSelectGroup, searchQuery = '' }: 
       <DragOverlay dropAnimation={null}>
         {draggingMonitor && (
           <div className="flex items-center gap-2 rounded-md bg-bg-secondary border border-accent px-3 py-1.5 text-sm shadow-lg">
-            <MonitorStatusBadge status={draggingMonitor.status} size="sm" inMaintenance={draggingMonitor.inMaintenance} />
+            <MonitorStatusBadge status={draggingMonitor.status as import('@obliview/shared').MonitorStatus} size="sm" inMaintenance={draggingMonitor.inMaintenance as boolean} />
             <span className="text-text-primary">{draggingMonitor.name}</span>
           </div>
         )}
@@ -282,7 +282,7 @@ export function DraggableMonitor({
       )}
       style={{ paddingLeft: `${depth * 16 + 8}px` }}
     >
-      <MonitorStatusBadge status={monitor.status} size="sm" inMaintenance={monitor.inMaintenance} />
+      <MonitorStatusBadge status={monitor.status as import('@obliview/shared').MonitorStatus} size="sm" inMaintenance={monitor.inMaintenance as boolean} />
       <span className="truncate flex-1 text-left">{monitor.name}</span>
 
       {isValueWatcher ? (

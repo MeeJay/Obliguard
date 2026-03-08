@@ -2,9 +2,9 @@
 
 package main
 
-import "fmt"
+import "errors"
 
-// loadConfigFromRegistry is not available on non-Windows platforms.
+// loadConfigFromRegistry is a no-op stub on non-Windows platforms.
 func loadConfigFromRegistry() (*Config, error) {
-	return nil, fmt.Errorf("registry not available on this platform")
+	return nil, errors.New("registry not available on this platform")
 }

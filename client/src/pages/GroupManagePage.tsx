@@ -30,7 +30,7 @@ interface GroupFormData {
   parentId: number | null;
   isGeneral: boolean;
   groupNotifications: boolean;
-  kind: 'monitor' | 'agent';
+  kind: 'agent';
 }
 
 const emptyForm: GroupFormData = {
@@ -39,7 +39,7 @@ const emptyForm: GroupFormData = {
   parentId: null,
   isGeneral: false,
   groupNotifications: false,
-  kind: 'monitor',
+  kind: 'agent',
 };
 
 /** Flatten the tree to an ordered list */
@@ -310,18 +310,6 @@ export function GroupManagePage() {
                 <div className="flex gap-2">
                   <button
                     type="button"
-                    onClick={() => setForm({ ...form, kind: 'monitor' })}
-                    className={`flex-1 flex items-center justify-center gap-2 rounded-md border px-3 py-2 text-sm transition-colors ${
-                      form.kind === 'monitor'
-                        ? 'border-accent bg-accent/10 text-accent font-medium'
-                        : 'border-border text-text-muted hover:text-text-primary hover:bg-bg-hover'
-                    }`}
-                  >
-                    <FolderTree size={14} />
-                    {t('groups.monitorGroup')}
-                  </button>
-                  <button
-                    type="button"
                     onClick={() => setForm({ ...form, kind: 'agent' })}
                     className={`flex-1 flex items-center justify-center gap-2 rounded-md border px-3 py-2 text-sm transition-colors ${
                       form.kind === 'agent'
@@ -334,9 +322,7 @@ export function GroupManagePage() {
                   </button>
                 </div>
                 <p className="text-xs text-text-muted">
-                  {form.kind === 'agent'
-                    ? t('groups.form.agentGroupDesc')
-                    : t('groups.form.monitorGroupDesc')}
+                  {t('groups.form.agentGroupDesc')}
                 </p>
               </div>
             )}
@@ -354,7 +340,7 @@ export function GroupManagePage() {
                 />
               </div>
             )}
-            {form.kind === 'monitor' && (
+            {false && (
               <>
                 <div className="flex items-center gap-2">
                   <input

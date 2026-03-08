@@ -33,9 +33,9 @@ func init() {
 		if programData == "" {
 			programData = `C:\ProgramData`
 		}
-		configDir = filepath.Join(programData, "ObliviewAgent")
+		configDir = filepath.Join(programData, "ObliguardAgent")
 	} else {
-		configDir = "/etc/obliview-agent"
+		configDir = "/etc/obliguard-agent"
 	}
 	configFile = filepath.Join(configDir, "config.json")
 }
@@ -43,12 +43,14 @@ func init() {
 // ── Config ────────────────────────────────────────────────────────────────────
 
 type Config struct {
-	ServerURL            string `json:"serverUrl"`
-	APIKey               string `json:"apiKey"`
-	DeviceUUID           string `json:"deviceUuid"`
-	CheckIntervalSeconds int    `json:"checkIntervalSeconds"`
-	AgentVersion         string `json:"agentVersion"`
-	BackoffUntil         int64  `json:"_backoffUntil,omitempty"`
+	ServerURL            string                        `json:"serverUrl"`
+	APIKey               string                        `json:"apiKey"`
+	DeviceUUID           string                        `json:"deviceUuid"`
+	CheckIntervalSeconds int                           `json:"checkIntervalSeconds"`
+	AgentVersion         string                        `json:"agentVersion"`
+	BackoffUntil         int64                         `json:"_backoffUntil,omitempty"`
+	// Cached service configs received from server (restored on restart)
+	ServiceConfigs       map[string]AgentServiceConfig `json:"serviceConfigs,omitempty"`
 }
 
 func loadConfig() (*Config, error) {
@@ -88,7 +90,7 @@ func setupConfig(urlArg, keyArg string) *Config {
 	if cfg == nil {
 		if urlArg == "" || keyArg == "" {
 			fmt.Fprintf(os.Stderr, "First run: provide --url <serverUrl> --key <apiKey>\n")
-			fmt.Fprintf(os.Stderr, "Example: obliview-agent --url https://obliview.example.com --key your-api-key\n")
+			fmt.Fprintf(os.Stderr, "Example: obliview-agent --url https://obliguard.example.com --key your-api-key\n")
 			os.Exit(1)
 		}
 		cfg = &Config{
@@ -225,9 +227,9 @@ func applyUpdateIfNewer(cfg *Config, remoteVersion string) {
 	// On other platforms we download the bare binary.
 	var filename string
 	if runtime.GOOS == "windows" {
-		filename = "obliview-agent.msi"
+		filename = "obliguard-agent.msi"
 	} else {
-		filename = fmt.Sprintf("obliview-agent-%s-%s", runtime.GOOS, runtime.GOARCH)
+		filename = fmt.Sprintf("obliguard-agent-%s-%s", runtime.GOOS, runtime.GOARCH)
 	}
 
 	client := &http.Client{Timeout: 120 * time.Second} // larger timeout for MSI download
@@ -244,7 +246,7 @@ func applyUpdateIfNewer(cfg *Config, remoteVersion string) {
 
 	if runtime.GOOS == "windows" {
 		// Save MSI to a temp path — it does not need to be next to the exe.
-		msiPath := filepath.Join(os.TempDir(), "obliview-agent-update.msi")
+		msiPath := filepath.Join(os.TempDir(), "obliguard-agent-update.msi")
 		f, err := os.OpenFile(msiPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 		if err != nil {
 			log.Printf("Auto-update: cannot write MSI temp file: %v", err)
@@ -308,10 +310,10 @@ func applyUpdateIfNewer(cfg *Config, remoteVersion string) {
 // outlives the service process (the agent exits immediately after Start()).
 //
 // msiexec /quiet handles the full install sequence:
-//  1. Stop the ObliviewAgent service (WiX <ServiceControl Stop="both">)
-//  2. Overwrite obliview-agent.exe and any other packaged files
+//  1. Stop the ObliguardAgent service (WiX <ServiceControl Stop="both">)
+//  2. Overwrite obliguard-agent.exe and any other packaged files
 //  3. Run deferred custom actions (e.g. PawnIO kernel driver installation)
-//  4. Restart the ObliviewAgent service with the new binary
+//  4. Restart the ObliguardAgent service with the new binary
 //
 // SERVERURL and APIKEY are forwarded so that the service arguments in the MSI
 // are populated even when config.json already exists (belt-and-suspenders).
@@ -338,14 +340,20 @@ var backoffSteps = []int{5 * 60, 10 * 60, 30 * 60, 60 * 60}
 var backoffLevel = 0
 
 func mainLoop(cfg *Config) {
-	log.Printf("Obliview Agent v%s starting", cfg.AgentVersion)
+	log.Printf("Obliguard Agent v%s starting", cfg.AgentVersion)
 	log.Printf("Server: %s", cfg.ServerURL)
 	log.Printf("Device UUID: %s", cfg.DeviceUUID)
 
+	// Detect and initialise the local firewall backend
+	fw := DetectFirewall()
+	log.Printf("Firewall backend: %s", fw.Name())
+
+	// Start log watcher with any cached service configs
+	lw := NewLogWatcher(cfg.ServiceConfigs)
+	lw.Start()
+	defer lw.Stop()
+
 	// Check for a newer version before entering the main loop.
-	// On Linux/macOS: atomic rename + exit (service manager restarts with new binary).
-	// On Windows: writes %TEMP%\obliview-update.bat, exits; batch stops service,
-	//             moves new exe in place, restarts service.
 	checkForUpdate(cfg)
 
 	for {
@@ -360,7 +368,7 @@ func mainLoop(cfg *Config) {
 			continue
 		}
 
-		push(cfg)
+		push(cfg, lw, fw)
 		time.Sleep(time.Duration(cfg.CheckIntervalSeconds) * time.Second)
 	}
 }

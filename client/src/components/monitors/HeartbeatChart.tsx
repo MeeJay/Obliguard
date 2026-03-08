@@ -9,7 +9,7 @@ import {
   CartesianGrid,
   ReferenceArea,
 } from 'recharts';
-import type { Heartbeat } from '@obliview/shared';
+import type { Heartbeat } from '@/store/monitorStore';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -120,12 +120,13 @@ function buildPoints(
 
   // Distribute heartbeats into buckets by index
   for (const hb of heartbeats) {
+    if (!hb.createdAt) continue;
     const hbMs = new Date(hb.createdAt).getTime();
     const idx  = Math.min(N_BUCKETS - 1, Math.max(0, Math.floor((hbMs - rangeStart) / bucketMs)));
     const b    = buckets.get(slotList[idx]);
     if (!b) continue;
     b.total++;
-    if (hb.status === 'up' && hb.responseTime !== null) b.upRts.push(hb.responseTime);
+    if (hb.status === 'up' && hb.responseTime != null) b.upRts.push(hb.responseTime);
   }
 
   return slotList.map(ts => {
@@ -303,8 +304,8 @@ export function HeartbeatChart({
   // ── value_watcher mode (unchanged) ───────────────────────────────────────
   if (valueMode) {
     const vdata = heartbeats
-      .filter(h => h.value != null)
-      .map(h => ({ time: new Date(h.createdAt).toLocaleTimeString(), value: Number(h.value) }))
+      .filter(h => h.value != null && h.createdAt != null)
+      .map(h => ({ time: new Date(h.createdAt!).toLocaleTimeString(), value: Number(h.value) }))
       .filter(d => !isNaN(d.value));
     if (!vdata.length) return <EmptyChart height={height} msg="No value data available" />;
     return (
