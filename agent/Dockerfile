@@ -10,15 +10,15 @@ RUN go mod download
 # Build Linux amd64 binary
 COPY . .
 ENV CGO_ENABLED=0 GOOS=linux GOARCH=amd64
-RUN go build -ldflags="-s -w" -o obliview-agent .
+RUN go build -ldflags="-s -w" -o obliguard-agent .
 
 # ---- Production stage ----
 FROM alpine:latest
 
-# ca-certificates for HTTPS checks (HTTP monitor, SSL checks)
+# ca-certificates for HTTPS
 RUN apk add --no-cache ca-certificates
 
 WORKDIR /app
-COPY --from=builder /app/obliview-agent .
+COPY --from=builder /app/obliguard-agent .
 
-ENTRYPOINT ["/app/obliview-agent"]
+ENTRYPOINT ["/app/obliguard-agent"]

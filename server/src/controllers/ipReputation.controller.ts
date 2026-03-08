@@ -4,7 +4,7 @@ import { AppError } from '../middleware/errorHandler';
 
 export async function listReputation(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const status = req.query.status as string | undefined;
+    const status = req.query.status as import('@obliview/shared').IpStatus | undefined;
     const search = req.query.search as string | undefined;
     const limit = req.query.limit !== undefined ? parseInt(req.query.limit as string, 10) : 50;
     const offset = req.query.offset !== undefined ? parseInt(req.query.offset as string, 10) : 0;

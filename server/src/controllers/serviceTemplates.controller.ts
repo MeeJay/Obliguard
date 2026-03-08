@@ -1,16 +1,7 @@
 import type { Request, Response, NextFunction } from 'express';
+import type { CreateServiceTemplateRequest } from '@obliview/shared';
 import { serviceTemplateService } from '../services/serviceTemplate.service';
 import { AppError } from '../middleware/errorHandler';
-
-export interface CreateServiceTemplateRequest {
-  name: string;
-  serviceType: string;
-  defaultLogPath?: string | null;
-  customRegex?: string | null;
-  threshold?: number;
-  windowSeconds?: number;
-  enabled?: boolean;
-}
 
 export interface UpsertServiceAssignmentRequest {
   logPathOverride?: string | null;
@@ -21,7 +12,8 @@ export interface UpsertServiceAssignmentRequest {
 
 export async function listTemplates(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const templates = await serviceTemplateService.list(req.tenantId);
+    const isAdmin = req.session?.role === 'admin';
+    const templates = await serviceTemplateService.list(req.tenantId, isAdmin);
     res.json({ success: true, data: templates });
   } catch (err) {
     next(err);
@@ -35,7 +27,8 @@ export async function getTemplate(req: Request, res: Response, next: NextFunctio
       throw new AppError(400, 'Invalid template ID');
     }
 
-    const template = await serviceTemplateService.getById(id, req.tenantId);
+    const isAdmin = req.session?.role === 'admin';
+    const template = await serviceTemplateService.getById(id, req.tenantId, isAdmin);
     if (!template) {
       throw new AppError(404, 'Service template not found');
     }
@@ -57,11 +50,7 @@ export async function createTemplate(req: Request, res: Response, next: NextFunc
       throw new AppError(400, 'serviceType is required');
     }
 
-    const template = await serviceTemplateService.create({
-      ...body,
-      tenantId: req.tenantId,
-      createdBy: req.session?.userId,
-    });
+    const template = await serviceTemplateService.create(body, req.session?.userId ?? 0, req.tenantId);
 
     res.status(201).json({ success: true, data: template });
   } catch (err) {
@@ -94,10 +83,7 @@ export async function deleteTemplate(req: Request, res: Response, next: NextFunc
       throw new AppError(400, 'Invalid template ID');
     }
 
-    const ok = await serviceTemplateService.delete(id, req.tenantId);
-    if (!ok) {
-      throw new AppError(404, 'Service template not found');
-    }
+    await serviceTemplateService.delete(id, req.tenantId);
 
     res.json({ success: true });
   } catch (err) {
@@ -148,10 +134,7 @@ export async function deleteAssignment(req: Request, res: Response, next: NextFu
       throw new AppError(400, 'Invalid scopeId');
     }
 
-    const ok = await serviceTemplateService.deleteAssignment(id, scope, scopeId);
-    if (!ok) {
-      throw new AppError(404, 'Assignment not found');
-    }
+    await serviceTemplateService.deleteAssignment(id, scope, scopeId);
 
     res.json({ success: true });
   } catch (err) {

@@ -9,12 +9,12 @@ function parseScope(req: Request): { scope: SettingsScope; scopeId: number | nul
   const { scope, scopeId } = req.params;
 
   if (scope === 'global') return { scope: 'global', scopeId: null };
-  if (scope === 'group' || scope === 'monitor') {
+  if (scope === 'group') {
     const id = parseInt(scopeId, 10);
     if (isNaN(id)) throw new AppError(400, 'Invalid scope ID');
     return { scope, scopeId: id };
   }
-  throw new AppError(400, 'Invalid scope. Must be global, group, or monitor');
+  throw new AppError(400, 'Invalid scope. Must be global or group');
 }
 
 export const settingsController = {
@@ -40,23 +40,10 @@ export const settingsController = {
     }
   },
 
-  // GET /api/settings/monitor/:scopeId/resolved
-  async getMonitorResolved(req: Request, res: Response, next: NextFunction): Promise<void> {
+  // GET /api/settings/monitor/:scopeId/resolved — stub (no monitors in Obliguard)
+  async getMonitorResolved(_req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const monitorId = parseInt(req.params.scopeId, 10);
-      if (isNaN(monitorId)) throw new AppError(400, 'Invalid monitor ID');
-
-      // Need the monitor's group_id
-      const { db: database } = await import('../db');
-      const monitor = await database('monitors').where({ id: monitorId }).first();
-      if (!monitor) throw new AppError(404, 'Monitor not found');
-
-      const resolved = await settingsService.resolveForMonitor(monitorId, monitor.group_id);
-
-      // Also get monitor-level overrides specifically
-      const overrides = await settingsService.getByScope('monitor', monitorId);
-
-      res.json({ success: true, data: { resolved, overrides } });
+      res.status(404).json({ success: false, error: 'Monitors not supported in Obliguard' });
     } catch (err) {
       next(err);
     }

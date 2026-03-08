@@ -3,8 +3,8 @@ services:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_DB: obliview
-      POSTGRES_USER: obliview
+      POSTGRES_DB: obliguard
+      POSTGRES_USER: obliguard
       POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme}
     volumes:
       - postgres_data:/var/lib/postgresql/data
@@ -13,14 +13,14 @@ services:
     #ports:
     #  - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U obliview"]
+      test: ["CMD-SHELL", "pg_isready -U obliguard"]
       interval: 5s
       timeout: 5s
       retries: 10
       start_period: 60s
 
   server:
-    image: meejay/obliview-server:${OBLIVIEW_VERSION:-latest}
+    image: meejay/obliguard-server:${OBLIGUARD_VERSION:-latest}
     restart: unless-stopped
     depends_on:
       postgres:
@@ -28,7 +28,7 @@ services:
     environment:
       NODE_ENV: production
       PORT: 3001
-      DATABASE_URL: postgres://obliview:${DB_PASSWORD:-changeme}@postgres:5432/obliview
+      DATABASE_URL: postgres://obliguard:${DB_PASSWORD:-changeme}@postgres:5432/obliguard
       SESSION_SECRET: ${SESSION_SECRET:-change-this-in-production}
       CLIENT_ORIGIN: ${CLIENT_ORIGIN:-http://localhost}
       DEFAULT_ADMIN_USERNAME: ${DEFAULT_ADMIN_USERNAME:-admin}
@@ -39,7 +39,7 @@ services:
       - ${CUSTOM_DIR:-./custom}:/custom
 
   client:
-    image: meejay/obliview-client:${OBLIVIEW_VERSION:-latest}
+    image: meejay/obliguard-client:${OBLIGUARD_VERSION:-latest}
     restart: unless-stopped
     depends_on:
       server:
@@ -49,7 +49,7 @@ services:
 
   # ─── Watchtower (optional) ────────────────────────────────────────────────
   # Automatically pulls & restarts containers when a new image is pushed.
-  # Works per image tag: set OBLIVIEW_VERSION=latest/dev/stable etc.
+  # Works per image tag: set OBLIGUARD_VERSION=latest/dev/stable etc.
   # Enable: docker compose --profile watchtower up -d
   # Or add COMPOSE_PROFILES=watchtower to your .env
   watchtower:

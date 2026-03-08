@@ -28,15 +28,15 @@ RUN go mod tidy
 # agent/main.go uses `var agentVersion = "dev"` overridden here via -X ldflags.
 RUN VERSION=$(cat VERSION) && \
     CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
-        go build -ldflags="-s -w -X main.agentVersion=${VERSION}" -o dist/obliview-agent.exe . && \
+        go build -ldflags="-s -w -X main.agentVersion=${VERSION}" -o dist/obliguard-agent.exe . && \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-        go build -ldflags="-s -w -X main.agentVersion=${VERSION}" -o dist/obliview-agent-linux-amd64 . && \
+        go build -ldflags="-s -w -X main.agentVersion=${VERSION}" -o dist/obliguard-agent-linux-amd64 . && \
     CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
-        go build -ldflags="-s -w -X main.agentVersion=${VERSION}" -o dist/obliview-agent-linux-arm64 . && \
+        go build -ldflags="-s -w -X main.agentVersion=${VERSION}" -o dist/obliguard-agent-linux-arm64 . && \
     CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 \
-        go build -ldflags="-s -w -X main.agentVersion=${VERSION}" -o dist/obliview-agent-darwin-amd64 . && \
+        go build -ldflags="-s -w -X main.agentVersion=${VERSION}" -o dist/obliguard-agent-darwin-amd64 . && \
     CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 \
-        go build -ldflags="-s -w -X main.agentVersion=${VERSION}" -o dist/obliview-agent-darwin-arm64 .
+        go build -ldflags="-s -w -X main.agentVersion=${VERSION}" -o dist/obliguard-agent-darwin-arm64 .
 
 # ---- Production stage ----
 FROM node:24-alpine AS production
@@ -59,11 +59,11 @@ COPY agent/VERSION ./agent/
 
 # Agent binaries from Go cross-compilation
 RUN mkdir -p ./agent/dist
-COPY --from=go-agent-builder /build/dist/obliview-agent.exe            ./agent/dist/
-COPY --from=go-agent-builder /build/dist/obliview-agent-linux-amd64   ./agent/dist/
-COPY --from=go-agent-builder /build/dist/obliview-agent-linux-arm64   ./agent/dist/
-COPY --from=go-agent-builder /build/dist/obliview-agent-darwin-amd64  ./agent/dist/
-COPY --from=go-agent-builder /build/dist/obliview-agent-darwin-arm64  ./agent/dist/
+COPY --from=go-agent-builder /build/dist/obliguard-agent.exe            ./agent/dist/
+COPY --from=go-agent-builder /build/dist/obliguard-agent-linux-amd64   ./agent/dist/
+COPY --from=go-agent-builder /build/dist/obliguard-agent-linux-arm64   ./agent/dist/
+COPY --from=go-agent-builder /build/dist/obliguard-agent-darwin-amd64  ./agent/dist/
+COPY --from=go-agent-builder /build/dist/obliguard-agent-darwin-arm64  ./agent/dist/
 
 # Pre-built Windows MSI (build on Windows: cd agent && build-msi.bat)
 # If absent, the /api/agent/installer/windows.msi endpoint returns 404.
@@ -73,8 +73,8 @@ COPY agent/dist/ ./agent/dist/
 # Must be present — without it the endpoint returns 0.0.0 and the banner never fires.
 COPY desktop-app/VERSION ./desktop-app/
 
-# Desktop app release binaries (build on Windows: build_icon_and_obliview.ps1 → dist/Obliview.exe)
-#                              (build on macOS:   desktop-app/build-mac.sh   → dist/Obliview.zip)
+# Desktop app release binaries (build on Windows: build_icon_and_obliguard.ps1 → dist/Obliguard.exe)
+#                              (build on macOS:   desktop-app/build-mac.sh   → dist/Obliguard.zip)
 # If absent, the /downloads/:filename endpoint returns 404 (no hard failure).
 RUN mkdir -p ./desktop-app/dist
 COPY desktop-app/dist/ ./desktop-app/dist/

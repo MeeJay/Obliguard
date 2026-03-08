@@ -216,7 +216,7 @@ class WhitelistService {
     if (rows.length === 0) return false;
 
     // Use PostgreSQL to check CIDR containment for each applicable CIDR
-    for (const row of rows as Array<{ ip: string }>) {
+    for (const row of rows as unknown as Array<{ ip: string }>) {
       const result = await db
         .raw<{ rows: Array<{ contained: boolean }> }>(
           'SELECT ?::inet << ?::cidr AS contained',

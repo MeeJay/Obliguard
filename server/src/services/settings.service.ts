@@ -136,12 +136,12 @@ export const settingsService = {
     }
 
     // 4. Apply monitor-level overrides
-    const monitorOverrides = await this.getByScope('monitor', monitorId);
+    const monitorOverrides = await this.getByScope('monitor' as unknown as SettingsScope, monitorId);
     for (const key of allKeys) {
       if (monitorOverrides[key] !== undefined) {
         resolved[key] = {
           value: monitorOverrides[key],
-          source: 'monitor',
+          source: 'monitor' as unknown as SettingsScope,
           sourceId: monitorId,
           sourceName: 'This monitor',
         };

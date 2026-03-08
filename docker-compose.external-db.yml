@@ -2,12 +2,12 @@
 # Usage: docker compose -f docker-compose.external-db.yml up -d
 #
 # Required .env variables:
-#   DATABASE_URL=postgres://obliview:<password>@<host>:5432/obliview
+#   DATABASE_URL=postgres://obliguard:<password>@<host>:5432/obliguard
 #   SESSION_SECRET=<random-string>
 
 services:
   server:
-    image: meejay/obliview-server:${OBLIVIEW_VERSION:-latest}
+    image: meejay/obliguard-server:${OBLIGUARD_VERSION:-latest}
     restart: unless-stopped
     environment:
       NODE_ENV: production
@@ -23,7 +23,7 @@ services:
       - ${CUSTOM_DIR:-./custom}:/custom
 
   client:
-    image: meejay/obliview-client:${OBLIVIEW_VERSION:-latest}
+    image: meejay/obliguard-client:${OBLIGUARD_VERSION:-latest}
     restart: unless-stopped
     depends_on:
       server:

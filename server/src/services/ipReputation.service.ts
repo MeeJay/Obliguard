@@ -333,6 +333,38 @@ class IpReputationService {
   }
 
   /**
+   * Returns detailed info about a specific IP: reputation + recent events.
+   */
+  async getIpDetail(ip: string, tenantId?: number): Promise<{ reputation: IpReputation | null; recentEvents: IpEvent[] } | null> {
+    const row = await db<IpReputationRow>('ip_reputation').where({ ip }).first();
+    const ban = await db('ip_bans').where({ ip, is_active: true }).first();
+
+    let status: IpStatus = 'clean';
+    if (ban) {
+      status = 'banned';
+    } else {
+      const wl = await db('ip_whitelist').where({ ip }).first();
+      if (wl) { status = 'whitelisted'; }
+      else if (row && Number(row.total_failures) > 0) { status = 'suspicious'; }
+    }
+
+    const reputation = row ? rowToReputation(row, status) : null;
+
+    const eventQ = db<IpEventRow>('ip_events as e')
+      .leftJoin('agent_devices as d', 'd.id', 'e.device_id')
+      .where('e.ip', ip)
+      .select('e.*', 'd.hostname')
+      .orderBy('e.timestamp', 'desc')
+      .limit(50);
+    if (tenantId) { eventQ.where('e.tenant_id', tenantId); }
+    const eventRows = await eventQ;
+    const recentEvents = eventRows.map(rowToEvent);
+
+    if (!reputation && recentEvents.length === 0) return null;
+    return { reputation, recentEvents };
+  }
+
+  /**
    * Fetches recent IP events for a given IP address.
    * Joins with agent_devices to include hostname.
    */

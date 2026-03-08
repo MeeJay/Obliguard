@@ -238,7 +238,7 @@ export const groupService = {
 
     // Initialize nodes
     for (const g of allGroups) {
-      groupMap.set(g.id, { ...g, children: [], monitors: [] });
+      groupMap.set(g.id, { ...g, children: [] });
     }
 
     // Build tree

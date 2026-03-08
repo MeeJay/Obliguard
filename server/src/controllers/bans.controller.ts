@@ -20,8 +20,10 @@ export async function listBans(req: Request, res: Response, next: NextFunction):
     const search = req.query.search as string | undefined;
     const page = req.query.page !== undefined ? parseInt(req.query.page as string, 10) : 1;
     const pageSize = req.query.pageSize !== undefined ? parseInt(req.query.pageSize as string, 10) : 25;
+    const isAdmin = req.session?.role === 'admin';
+    const offset = (page - 1) * pageSize;
 
-    const result = await banService.list({ active, search, page, pageSize, tenantId: req.tenantId });
+    const result = await banService.list({ onlyActive: active, search, limit: pageSize, offset, tenantId: req.tenantId, isAdmin });
     res.json({ success: true, data: result.data, total: result.total });
   } catch (err) {
     next(err);
@@ -36,11 +38,8 @@ export async function createBan(req: Request, res: Response, next: NextFunction)
       throw new AppError(400, 'ip is required');
     }
 
-    const ban = await banService.create({
-      ...body,
-      tenantId: req.tenantId,
-      bannedByUserId: req.session?.userId,
-    });
+    const isAdmin = req.session?.role === 'admin';
+    const ban = await banService.create(body, req.session?.userId ?? 0, req.tenantId, isAdmin);
 
     res.status(201).json({ success: true, data: ban });
   } catch (err) {
@@ -55,10 +54,8 @@ export async function liftBan(req: Request, res: Response, next: NextFunction): 
       throw new AppError(400, 'Invalid ban ID');
     }
 
-    const ok = await banService.lift(id);
-    if (!ok) {
-      throw new AppError(404, 'Ban not found');
-    }
+    const isAdmin = req.session?.role === 'admin';
+    await banService.lift(id, req.tenantId, isAdmin);
 
     res.json({ success: true });
   } catch (err) {

@@ -2,7 +2,6 @@ import type { Request, Response } from 'express';
 import path from 'path';
 import fs from 'fs';
 import { agentService } from '../services/agent.service';
-import { maintenanceService } from '../services/maintenance.service';
 import type { AgentThresholds } from '@obliview/shared';
 
 // ── Push endpoint (called by agent) ──────────────────────────────────────────
@@ -87,13 +86,13 @@ export function desktopVersion(_req: Request, res: Response): void {
 
 const ALLOWED_AGENT_BINARIES: Record<string, string> = {
   // Windows: full MSI installer (handles service, PawnIO driver, etc.)
-  'obliview-agent.msi':             'obliview-agent.msi',
+  'obliguard-agent.msi':             'obliguard-agent.msi',
   // Windows: bare exe (kept for manual / legacy use)
-  'obliview-agent.exe':             'obliview-agent.exe',
-  'obliview-agent-linux-amd64':     'obliview-agent-linux-amd64',
-  'obliview-agent-linux-arm64':     'obliview-agent-linux-arm64',
-  'obliview-agent-darwin-amd64':    'obliview-agent-darwin-amd64',
-  'obliview-agent-darwin-arm64':    'obliview-agent-darwin-arm64',
+  'obliguard-agent.exe':             'obliguard-agent.exe',
+  'obliguard-agent-linux-amd64':     'obliguard-agent-linux-amd64',
+  'obliguard-agent-linux-arm64':     'obliguard-agent-linux-arm64',
+  'obliguard-agent-darwin-amd64':    'obliguard-agent-darwin-amd64',
+  'obliguard-agent-darwin-arm64':    'obliguard-agent-darwin-arm64',
 };
 
 export function agentDownload(req: Request, res: Response): void {
@@ -186,14 +185,14 @@ export function agentInstallerMacos(req: Request, res: Response): void {
 }
 
 export function agentInstallerWindowsMsi(_req: Request, res: Response): void {
-  const msiPath = path.resolve(__dirname, '../../../../agent/dist/obliview-agent.msi');
+  const msiPath = path.resolve(__dirname, '../../../../agent/dist/obliguard-agent.msi');
   if (!fs.existsSync(msiPath)) {
     res.status(404).json({ error: 'MSI installer not available (not yet built)' });
     return;
   }
 
   res.setHeader('Content-Type', 'application/x-msi');
-  res.setHeader('Content-Disposition', 'attachment; filename="obliview-agent.msi"');
+  res.setHeader('Content-Disposition', 'attachment; filename="obliguard-agent.msi"');
   res.sendFile(msiPath);
 }
 
@@ -234,8 +233,7 @@ export async function getDevice(req: Request, res: Response): Promise<void> {
     res.status(404).json({ success: false, error: 'Device not found' });
     return;
   }
-  const inMaintenance = await maintenanceService.isInMaintenance('agent', id, device.groupId);
-  res.json({ success: true, data: { ...device, inMaintenance } });
+  res.json({ success: true, data: device });
 }
 
 export async function listDevices(req: Request, res: Response): Promise<void> {
@@ -246,13 +244,7 @@ export async function listDevices(req: Request, res: Response): Promise<void> {
     validStatuses.includes(status ?? '') ? (status as 'pending' | 'approved' | 'refused' | 'suspended') : undefined,
   );
 
-  // Batch resolve maintenance state using the service (cached, includes global + group + own)
-  const enriched = await Promise.all(devices.map(async (d) => {
-    const inMaintenance = await maintenanceService.isInMaintenance('agent', d.id, d.groupId);
-    return { ...d, inMaintenance };
-  }));
-
-  res.json({ success: true, data: enriched });
+  res.json({ success: true, data: devices });
 }
 
 export async function updateDevice(req: Request, res: Response): Promise<void> {
@@ -337,26 +329,9 @@ export async function updateDevice(req: Request, res: Response): Promise<void> {
 
 // ── Admin: Device Metrics ────────────────────────────────────────────────────
 
-export async function getDeviceMetrics(req: Request, res: Response): Promise<void> {
-  const id = Number(req.params.id);
-  // Try in-memory first, fall back to DB (handles server restarts)
-  const snapshot = agentService.getLatestMetrics(id) ?? await agentService.getMetricsFromDB(id);
-  if (!snapshot) {
-    res.status(404).json({ success: false, error: 'No metrics available yet for this device' });
-    return;
-  }
-  res.json({
-    success: true,
-    data: {
-      monitorId: snapshot.monitorId,
-      receivedAt: snapshot.receivedAt instanceof Date
-        ? snapshot.receivedAt.toISOString()
-        : snapshot.receivedAt,
-      metrics: snapshot.metrics,
-      violations: snapshot.violations,
-      overallStatus: snapshot.overallStatus,
-    },
-  });
+export async function getDeviceMetrics(_req: Request, res: Response): Promise<void> {
+  // Obliguard agents push IP events, not hardware metrics.
+  res.status(404).json({ success: false, error: 'No metrics available for Obliguard agents' });
 }
 
 export async function deleteDevice(req: Request, res: Response): Promise<void> {

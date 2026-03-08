@@ -15,7 +15,7 @@ interface TeamRow {
 interface PermissionRow {
   id: number;
   team_id: number;
-  scope: 'group' | 'monitor';
+  scope: 'group' | 'agent';
   scope_id: number;
   level: 'ro' | 'rw';
 }
@@ -164,7 +164,7 @@ export const teamService = {
 
   async addPermission(
     teamId: number,
-    scope: 'group' | 'monitor',
+    scope: 'group' | 'agent',
     scopeId: number,
     level: 'ro' | 'rw',
   ): Promise<TeamPermission> {

@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction } from 'express';
 import { whitelistService } from '../services/whitelist.service';
 import { AppError } from '../middleware/errorHandler';
+import type { WhitelistScope } from '@obliview/shared';
 
 export interface CreateWhitelistRequest {
   ip: string;
@@ -11,12 +12,13 @@ export interface CreateWhitelistRequest {
 
 export async function listWhitelist(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const scope = req.query.scope as string | undefined;
-    const scopeId = req.query.scopeId !== undefined
+    const scope = ((req.query.scope as string | undefined) ?? 'tenant') as WhitelistScope;
+    const scopeId = req.query.scopeId !== undefined && req.query.scopeId !== ''
       ? parseInt(req.query.scopeId as string, 10)
-      : undefined;
+      : null;
+    const isAdmin = req.session?.role === 'admin';
 
-    const entries = await whitelistService.list({ scope, scopeId, tenantId: req.tenantId });
+    const entries = await whitelistService.listByScope(scope, scopeId, req.tenantId, isAdmin);
     res.json({ success: true, data: entries });
   } catch (err) {
     next(err);
@@ -31,11 +33,7 @@ export async function createWhitelistEntry(req: Request, res: Response, next: Ne
       throw new AppError(400, 'ip is required');
     }
 
-    const entry = await whitelistService.create({
-      ...body,
-      tenantId: req.tenantId,
-      createdBy: req.session?.userId,
-    });
+    const entry = await whitelistService.create(body, req.session?.userId ?? 0, req.tenantId);
 
     res.status(201).json({ success: true, data: entry });
   } catch (err) {
@@ -50,10 +48,8 @@ export async function deleteWhitelistEntry(req: Request, res: Response, next: Ne
       throw new AppError(400, 'Invalid whitelist entry ID');
     }
 
-    const ok = await whitelistService.delete(id);
-    if (!ok) {
-      throw new AppError(404, 'Whitelist entry not found');
-    }
+    const isAdmin = req.session?.role === 'admin';
+    await whitelistService.delete(id, req.tenantId, isAdmin);
 
     res.json({ success: true });
   } catch (err) {

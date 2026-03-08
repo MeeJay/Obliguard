@@ -775,6 +775,12 @@ export const agentService = {
     logger.info(`Agent updating cleanup: cleared ${ids.length} stuck update(s).`);
   },
 
+  /** Obliguard: no hardware metrics (IPS uses events not sensors) */
+  getLatestMetrics(_deviceId: number): null { return null; },
+
+  /** Obliguard: no hardware metrics in DB */
+  async getMetricsFromDB(_deviceId: number): Promise<null> { return null; },
+
   getDesktopVersion(): { version: string } {
     // 1. Try desktop-app/VERSION (plain text "X.Y.Z\n")
     try {
