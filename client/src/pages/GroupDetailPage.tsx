@@ -14,8 +14,9 @@ import { MONITOR_TYPE_LABELS } from '@obliview/shared';
 import type {
   MonitorGroup, Monitor, Heartbeat,
   AgentThresholds, AgentMetricThreshold, AgentTempThreshold,
+  NotificationTypeConfig,
 } from '@obliview/shared';
-import { DEFAULT_AGENT_THRESHOLDS } from '@obliview/shared';
+import { DEFAULT_AGENT_THRESHOLDS, DEFAULT_NOTIFICATION_TYPES } from '@obliview/shared';
 import { MonitorStatusBadge } from '@/components/monitors/MonitorStatusBadge';
 import { HeartbeatChart } from '@/components/monitors/HeartbeatChart';
 import { HeartbeatBar } from '@/components/monitors/HeartbeatBar';
@@ -219,15 +220,32 @@ function AgentGroupThresholdEditor({
 // Agent Group Settings Panel
 // ─────────────────────────────────────────────────────────────────────────────
 
+/** Notification type switch rows */
+const NOTIF_TYPE_ROWS: Array<{
+  key: keyof NotificationTypeConfig;
+  label: string;
+  desc: string;
+}> = [
+  { key: 'global', label: 'Global', desc: 'Master switch — disabling stops all notifications (channels remain bound)' },
+  { key: 'down',   label: 'Down',   desc: 'Notify when the agent/monitor goes offline or down' },
+  { key: 'up',     label: 'Up',     desc: 'Notify when the agent/monitor recovers' },
+  { key: 'alert',  label: 'Alert',  desc: 'Notify when a threshold is breached' },
+  { key: 'update', label: 'Update', desc: 'Notify when the agent starts a self-update (off by default)' },
+];
+
 function AgentGroupSettingsPanel({ group, onUpdate }: { group: MonitorGroup; onUpdate: (g: MonitorGroup) => void }) {
   const { t } = useTranslation();
-  const cfg = group.agentGroupConfig ?? { pushIntervalSeconds: null, heartbeatMonitoring: null, maxMissedPushes: null };
+  const cfg = group.agentGroupConfig ?? { pushIntervalSeconds: null, heartbeatMonitoring: null, maxMissedPushes: null, notificationTypes: null };
   const thr = group.agentThresholds ?? DEFAULT_AGENT_THRESHOLDS;
 
   const [interval, setInterval] = useState<string>(cfg.pushIntervalSeconds !== null ? String(cfg.pushIntervalSeconds) : '');
   const [heartbeat, setHeartbeat] = useState<boolean | null>(cfg.heartbeatMonitoring);
   const [maxMissed, setMaxMissed] = useState<string>(cfg.maxMissedPushes !== null ? String(cfg.maxMissedPushes) : '');
   const [saving, setSaving] = useState(false);
+
+  // Notification types draft: null = inherit from parent / system defaults
+  const [notifTypes, setNotifTypes] = useState<NotificationTypeConfig | null>(cfg.notificationTypes ?? null);
+  const [savingNotif, setSavingNotif] = useState(false);
 
   const handleSaveConfig = async () => {
     setSaving(true);
@@ -237,6 +255,7 @@ function AgentGroupSettingsPanel({ group, onUpdate }: { group: MonitorGroup; onU
           pushIntervalSeconds: interval.trim() ? Number(interval) : null,
           heartbeatMonitoring: heartbeat,
           maxMissedPushes: maxMissed.trim() ? Number(maxMissed) : null,
+          notificationTypes: cfg.notificationTypes, // preserve existing notifTypes
         },
       });
       onUpdate(updated);
@@ -245,9 +264,38 @@ function AgentGroupSettingsPanel({ group, onUpdate }: { group: MonitorGroup; onU
     finally { setSaving(false); }
   };
 
+  const handleSaveNotifTypes = async (override?: NotificationTypeConfig | null) => {
+    const typesToSave = override !== undefined ? override : notifTypes;
+    setSavingNotif(true);
+    try {
+      const updated = await groupsApi.updateAgentGroupConfig(group.id, {
+        agentGroupConfig: {
+          pushIntervalSeconds: cfg.pushIntervalSeconds,
+          heartbeatMonitoring: cfg.heartbeatMonitoring,
+          maxMissedPushes: cfg.maxMissedPushes,
+          notificationTypes: typesToSave,
+        },
+      });
+      onUpdate(updated);
+      toast.success(t('groups.detail.saveSettings'));
+    } catch { toast.error(t('groups.failedUpdate')); }
+    finally { setSavingNotif(false); }
+  };
+
   const handleSaveThresholds = async (thresholds: AgentThresholds) => {
     const updated = await groupsApi.updateAgentGroupConfig(group.id, { agentThresholds: thresholds });
     onUpdate(updated);
+  };
+
+  // When override is activated: start with system defaults
+  const handleEnableNotifOverride = () => {
+    setNotifTypes({
+      global: DEFAULT_NOTIFICATION_TYPES.global,
+      down:   DEFAULT_NOTIFICATION_TYPES.down,
+      up:     DEFAULT_NOTIFICATION_TYPES.up,
+      alert:  DEFAULT_NOTIFICATION_TYPES.alert,
+      update: DEFAULT_NOTIFICATION_TYPES.update,
+    });
   };
 
   return (
@@ -307,6 +355,64 @@ function AgentGroupSettingsPanel({ group, onUpdate }: { group: MonitorGroup; onU
           className="px-4 py-2 text-sm rounded-lg bg-accent text-white hover:bg-accent/90 disabled:opacity-60 transition-colors">
           {saving ? t('common.saving') : t('groups.detail.saveSettings')}
         </button>
+      </div>
+
+      {/* ── Notification Types ── */}
+      <div className="border-t border-border pt-4">
+        <div className="flex items-center justify-between mb-4">
+          <div className="text-xs font-medium text-text-muted uppercase tracking-wide flex items-center gap-1.5">
+            <Bell size={11} /> Notification Types
+          </div>
+          {notifTypes === null ? (
+            <button
+              onClick={handleEnableNotifOverride}
+              className="px-2.5 py-1 text-xs rounded border border-amber-500/40 text-amber-400 hover:bg-amber-500/10 transition-colors"
+            >
+              Override
+            </button>
+          ) : (
+            <div className="flex items-center gap-2">
+              <button
+                onClick={async () => { setNotifTypes(null); await handleSaveNotifTypes(null); }}
+                className="text-xs text-text-muted hover:text-text-primary transition-colors"
+                title="Reset to inherited"
+              >
+                <X size={12} />
+              </button>
+              <button
+                onClick={() => handleSaveNotifTypes()}
+                disabled={savingNotif}
+                className="px-2.5 py-1 text-xs rounded bg-accent text-white hover:bg-accent/90 disabled:opacity-60 transition-colors"
+              >
+                {savingNotif ? t('common.saving') : t('common.save')}
+              </button>
+            </div>
+          )}
+        </div>
+
+        {notifTypes === null ? (
+          <p className="text-xs text-text-muted italic">
+            Inheriting from parent group or system defaults (Global: on, Down: on, Up: on, Alert: on, Update: off)
+          </p>
+        ) : (
+          <div className="space-y-3">
+            {NOTIF_TYPE_ROWS.map(({ key, label, desc }) => {
+              const val = notifTypes[key] ?? DEFAULT_NOTIFICATION_TYPES[key];
+              return (
+                <div key={key} className="flex items-center justify-between">
+                  <div>
+                    <div className="text-sm font-medium text-text-primary">{label}</div>
+                    <div className="text-xs text-text-muted">{desc}</div>
+                  </div>
+                  <Switch
+                    on={val}
+                    onChange={v => setNotifTypes(prev => ({ ...prev!, [key]: v }))}
+                  />
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* Divider */}

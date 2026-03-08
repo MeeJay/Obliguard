@@ -1,5 +1,6 @@
 import { db } from '../db';
-import type { NotificationChannel, NotificationBinding, OverrideMode } from '@obliview/shared';
+import type { NotificationChannel, NotificationBinding, NotificationTypeConfig, OverrideMode } from '@obliview/shared';
+import { DEFAULT_NOTIFICATION_TYPES } from '@obliview/shared';
 import type { NotificationPayload } from '../notifications/types';
 import { getPlugin } from '../notifications/registry';
 import { smtpServerService } from './smtpServer.service';
@@ -631,6 +632,74 @@ export const notificationService = {
   },
 
   /**
+   * Resolve the effective notification types for an agent device.
+   * Chain: device notification_types → group agentGroupConfig.notificationTypes (ancestor chain) → system defaults.
+   * Each field uses the first non-null value found in the chain.
+   */
+  async resolveNotificationTypesForDevice(deviceId: number): Promise<{
+    global: boolean; down: boolean; up: boolean; alert: boolean; update: boolean;
+  }> {
+    // Accumulated values — undefined means "not yet resolved"
+    let global: boolean | undefined;
+    let down: boolean | undefined;
+    let up: boolean | undefined;
+    let alert: boolean | undefined;
+    let update: boolean | undefined;
+
+    const applyConfig = (cfg: NotificationTypeConfig | null | undefined) => {
+      if (!cfg) return;
+      if (global === undefined && cfg.global !== null && cfg.global !== undefined) global = cfg.global;
+      if (down   === undefined && cfg.down   !== null && cfg.down   !== undefined) down   = cfg.down;
+      if (up     === undefined && cfg.up     !== null && cfg.up     !== undefined) up     = cfg.up;
+      if (alert  === undefined && cfg.alert  !== null && cfg.alert  !== undefined) alert  = cfg.alert;
+      if (update === undefined && cfg.update !== null && cfg.update !== undefined) update = cfg.update;
+    };
+
+    // 1. Device-level override
+    const deviceRow = await db('agent_devices')
+      .where({ id: deviceId })
+      .select('group_id', 'notification_types')
+      .first() as { group_id: number | null; notification_types: unknown } | undefined;
+
+    if (deviceRow?.notification_types) {
+      const nt = typeof deviceRow.notification_types === 'string'
+        ? JSON.parse(deviceRow.notification_types)
+        : deviceRow.notification_types as NotificationTypeConfig;
+      applyConfig(nt);
+    }
+
+    // 2. Walk up the group hierarchy (leaf → root)
+    if (deviceRow?.group_id) {
+      const ancestorRows = await db('group_closure')
+        .where('descendant_id', deviceRow.group_id)
+        .orderBy('depth', 'asc')
+        .select('ancestor_id');
+
+      for (const row of ancestorRows) {
+        const groupRow = await db('monitor_groups')
+          .where({ id: row.ancestor_id })
+          .select('agent_group_config')
+          .first() as { agent_group_config: unknown } | undefined;
+        if (groupRow?.agent_group_config) {
+          const cfg = typeof groupRow.agent_group_config === 'string'
+            ? JSON.parse(groupRow.agent_group_config)
+            : groupRow.agent_group_config as { notificationTypes?: NotificationTypeConfig | null };
+          applyConfig(cfg.notificationTypes);
+        }
+      }
+    }
+
+    // 3. Apply system defaults for any still-unresolved fields
+    return {
+      global: global ?? DEFAULT_NOTIFICATION_TYPES.global,
+      down:   down   ?? DEFAULT_NOTIFICATION_TYPES.down,
+      up:     up     ?? DEFAULT_NOTIFICATION_TYPES.up,
+      alert:  alert  ?? DEFAULT_NOTIFICATION_TYPES.alert,
+      update: update ?? DEFAULT_NOTIFICATION_TYPES.update,
+    };
+  },
+
+  /**
    * Send notifications for an agent device threshold alert.
    * Resolves channels using the global → agent chain.
    */
@@ -640,9 +709,30 @@ export const notificationService = {
     newStatus: string,
     previousStatus: string,
     violations?: string[],
+    notifType?: 'alert' | 'up' | 'update',
   ): Promise<void> {
     // Only notify on status transitions (up → alert or alert → up)
     if (newStatus === previousStatus) return;
+
+    // Check notification type preferences
+    const types = await this.resolveNotificationTypesForDevice(deviceId);
+    if (!types.global) {
+      logger.info(`Agent notification suppressed (global=off) for device ${deviceId}`);
+      return;
+    }
+    const effectiveType = notifType ?? (newStatus === 'alert' ? 'alert' : 'up');
+    if (effectiveType === 'alert' && !types.alert) {
+      logger.info(`Agent notification suppressed (alert type disabled) for device ${deviceId}`);
+      return;
+    }
+    if (effectiveType === 'up' && !types.up) {
+      logger.info(`Agent notification suppressed (up type disabled) for device ${deviceId}`);
+      return;
+    }
+    if (effectiveType === 'update' && !types.update) {
+      logger.info(`Agent notification suppressed (update type disabled) for device ${deviceId}`);
+      return;
+    }
 
     const channelIds = await this.resolveChannelsForAgent(deviceId);
     if (channelIds.length === 0) {

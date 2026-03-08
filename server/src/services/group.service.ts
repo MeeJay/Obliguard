@@ -289,7 +289,7 @@ export const groupService = {
     return row ? rowToGroup(row) : null;
   },
 
-  /** Update the agent-group config (push interval, heartbeat monitoring, max missed pushes) */
+  /** Update the agent-group config (push interval, heartbeat monitoring, max missed pushes, notification types) */
   async updateAgentGroupConfig(id: number, config: Partial<AgentGroupConfig>): Promise<MonitorGroup | null> {
     // Merge with existing config
     const existing = await db('monitor_groups').where({ id }).select('agent_group_config').first() as
@@ -298,6 +298,7 @@ export const groupService = {
       pushIntervalSeconds: null,
       heartbeatMonitoring: null,
       maxMissedPushes: null,
+      notificationTypes: null,
       ...(typeof existing?.agent_group_config === 'string'
         ? JSON.parse(existing.agent_group_config)
         : (existing?.agent_group_config ?? {})),

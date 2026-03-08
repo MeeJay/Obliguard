@@ -285,6 +285,7 @@ export function GroupEditPage() {
               tree={tree}
               placeholder={t('groups.form.parentNone')}
               excludeId={groupId}
+              kindFilter={group.kind}
             />
             {pendingParentId !== undefined && (
               <div className="flex items-center gap-2 mt-2">

@@ -323,6 +323,31 @@ export abstract class BaseMonitorWorker {
       this.lastProblemNotifiedAt = Date.now();
     }
 
+    // ── Notification type filtering for agent monitors ─────────────────────────
+    // If this is an agent monitor, check the device's notification type preferences
+    // before dispatching any channel notifications.
+    if (this.config.agentDeviceId) {
+      const types = await notificationService.resolveNotificationTypesForDevice(this.config.agentDeviceId as number);
+      if (!types.global) {
+        logger.info(
+          `Monitor "${this.config.name}" (id: ${this.config.id}): notification suppressed (global=off)`,
+        );
+        return;
+      }
+      if (newStatus === 'down' && !types.down) {
+        logger.info(
+          `Monitor "${this.config.name}" (id: ${this.config.id}): notification suppressed (down type disabled)`,
+        );
+        return;
+      }
+      if (newStatus === 'up' && !types.up) {
+        logger.info(
+          `Monitor "${this.config.name}" (id: ${this.config.id}): notification suppressed (up type disabled)`,
+        );
+        return;
+      }
+    }
+
     // Trigger notifications
     try {
       // Check if this monitor is covered by a group with groupNotifications

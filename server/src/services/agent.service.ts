@@ -2,7 +2,7 @@ import type { Server as SocketIOServer } from 'socket.io';
 import * as fs from 'fs';
 import * as path from 'path';
 import { db } from '../db';
-import type { AgentApiKey, AgentDevice, AgentDisplayConfig, AgentGroupConfig, AgentThresholds } from '@obliview/shared';
+import type { AgentApiKey, AgentDevice, AgentDisplayConfig, AgentGroupConfig, AgentThresholds, NotificationTypeConfig } from '@obliview/shared';
 import { DEFAULT_AGENT_THRESHOLDS, SOCKET_EVENTS, prettifySensorLabel } from '@obliview/shared';
 import { heartbeatService } from './heartbeat.service';
 import { notificationService } from './notification.service';
@@ -60,6 +60,8 @@ interface AgentDeviceRow {
   tenant_id: number;
   // migration 040
   updating_since: Date | null;
+  // migration 042
+  notification_types: unknown;
 }
 
 function rowToApiKey(row: AgentApiKeyRow): AgentApiKey {
@@ -122,6 +124,11 @@ function rowToDevice(row: AgentDeviceRow, groupConfig?: AgentGroupConfig | null,
     pendingCommand: row.pending_command ?? null,
     uninstallCommandedAt: row.uninstall_commanded_at ? row.uninstall_commanded_at.toISOString() : null,
     updatingSince: row.updating_since ? row.updating_since.toISOString() : null,
+    notificationTypes: row.notification_types
+      ? (typeof row.notification_types === 'string'
+          ? JSON.parse(row.notification_types)
+          : row.notification_types as NotificationTypeConfig)
+      : null,
   };
 }
 
@@ -320,6 +327,7 @@ export const agentService = {
     sensorDisplayNames?: Record<string, string> | null;
     overrideGroupSettings?: boolean;
     displayConfig?: AgentDisplayConfig | null;
+    notificationTypes?: NotificationTypeConfig | null;
   }): Promise<AgentDevice | null> {
     const update: Record<string, unknown> = { updated_at: new Date() };
     if (data.status !== undefined) update.status = data.status;
@@ -332,6 +340,9 @@ export const agentService = {
     if (data.sensorDisplayNames !== undefined) update.sensor_display_names = data.sensorDisplayNames;
     if (data.overrideGroupSettings !== undefined) update.override_group_settings = data.overrideGroupSettings;
     if (data.displayConfig !== undefined) update.display_config = data.displayConfig;
+    if ('notificationTypes' in data) update.notification_types = data.notificationTypes
+      ? JSON.stringify(data.notificationTypes)
+      : null;
 
     const [row] = await db('agent_devices')
       .where({ id })
@@ -952,6 +963,11 @@ export const agentService = {
       }
       _io.to('role:admin').emit(SOCKET_EVENTS.AGENT_STATUS_CHANGED, payload);
     }
+
+    // Send "update" notification if the update type is enabled for this device
+    notificationService.sendForAgent(deviceId, label, 'updating', 'up', [], 'update').catch(
+      (err) => logger.error(err, `Failed to send update notification for device ${deviceId}`),
+    );
   },
 
   /**

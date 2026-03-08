@@ -8,8 +8,8 @@ import {
   Pencil, Check, X, LayoutDashboard,
   MemoryStick, Wifi, RotateCcw,
 } from 'lucide-react';
-import type { AgentDevice, AgentThresholds, AgentMetricThreshold, AgentTempThreshold, AgentDisplayConfig, NotificationChannel } from '@obliview/shared';
-import { DEFAULT_AGENT_THRESHOLDS, SOCKET_EVENTS } from '@obliview/shared';
+import type { AgentDevice, AgentThresholds, AgentMetricThreshold, AgentTempThreshold, AgentDisplayConfig, NotificationChannel, NotificationTypeConfig } from '@obliview/shared';
+import { DEFAULT_AGENT_THRESHOLDS, DEFAULT_NOTIFICATION_TYPES, SOCKET_EVENTS } from '@obliview/shared';
 import { AgentDisplayConfigModal } from '../components/agent/AgentDisplayConfigModal';
 import { agentApi } from '../api/agent.api';
 import { monitorsApi } from '../api/monitors.api';
@@ -2275,6 +2275,134 @@ const NAV_ITEMS: Array<{ id: View; icon: React.ReactNode; label: string }> = [
 // Note: NAV_ITEMS labels are used as tooltip titles (title={item.label}), so they stay as English constants.
 // Translation is applied at the usage point inside the component where t() is available.
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Notification Types panel (per-device override)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const NOTIF_TYPE_ROWS_AGENT: Array<{
+  key: keyof NotificationTypeConfig;
+  label: string;
+  desc: string;
+}> = [
+  { key: 'global', label: 'Global',  desc: 'Master switch — disabling stops all notifications (channels remain bound)' },
+  { key: 'down',   label: 'Down',    desc: 'Notify when this agent goes offline or down' },
+  { key: 'up',     label: 'Up',      desc: 'Notify when this agent recovers' },
+  { key: 'alert',  label: 'Alert',   desc: 'Notify when a threshold is breached' },
+  { key: 'update', label: 'Update',  desc: 'Notify when this agent starts a self-update (off by default)' },
+];
+
+function AgentNotifTypesPanel({
+  device,
+  onDeviceUpdate,
+}: {
+  device: AgentDevice;
+  onDeviceUpdate: (d: AgentDevice) => void;
+}) {
+  const { t } = useTranslation();
+  const [draft, setDraft] = useState<NotificationTypeConfig | null>(device.notificationTypes ?? null);
+  const [saving, setSaving] = useState(false);
+
+  const isOverriding = draft !== null;
+
+  const handleSave = async (typesToSave: NotificationTypeConfig | null) => {
+    setSaving(true);
+    try {
+      const updated = await agentApi.updateDevice(device.id, { notificationTypes: typesToSave });
+      onDeviceUpdate(updated);
+      setDraft(updated.notificationTypes ?? null);
+    } catch {
+      // keep draft
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleOverride = () => {
+    // start with system defaults
+    setDraft({ ...DEFAULT_NOTIFICATION_TYPES });
+  };
+
+  const handleReset = async () => {
+    setDraft(null);
+    await handleSave(null);
+  };
+
+  return (
+    <div className="rounded-lg border border-border bg-bg-secondary p-5">
+      {/* Header */}
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-sm font-semibold text-text-secondary uppercase tracking-wide">
+          Notification Types
+        </h3>
+        {isOverriding ? (
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleReset}
+              disabled={saving}
+              className={cn(
+                'text-xs px-2 py-1 rounded border transition-colors whitespace-nowrap',
+                'border-amber-500/40 text-amber-400 hover:bg-amber-500/10',
+              )}
+            >
+              Reset
+            </button>
+            <button
+              onClick={() => handleSave(draft)}
+              disabled={saving}
+              className="text-xs px-2 py-1 rounded bg-accent text-white hover:bg-accent/90 disabled:opacity-60 transition-colors"
+            >
+              {saving ? t('common.saving') : t('common.save')}
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={handleOverride}
+            className={cn(
+              'text-xs px-2 py-1 rounded border transition-colors whitespace-nowrap',
+              'border-border text-text-muted hover:bg-bg-hover hover:text-text-secondary',
+            )}
+          >
+            Override
+          </button>
+        )}
+      </div>
+
+      {!isOverriding ? (
+        <p className="text-xs text-text-muted italic">
+          Inheriting from parent group or system defaults (Global: on, Down: on, Up: on, Alert: on, Update: off)
+        </p>
+      ) : (
+        <div className="space-y-4">
+          {NOTIF_TYPE_ROWS_AGENT.map(({ key, label, desc }) => {
+            const val = (draft?.[key]) ?? DEFAULT_NOTIFICATION_TYPES[key];
+            return (
+              <div key={key} className="flex items-center justify-between">
+                <div>
+                  <div className="text-sm font-medium text-text-primary">{label}</div>
+                  <div className="text-xs text-text-muted">{desc}</div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setDraft(prev => ({ ...prev!, [key]: !val }))}
+                  className={cn(
+                    'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors',
+                    val ? 'bg-accent' : 'bg-bg-tertiary border border-border',
+                  )}
+                >
+                  <span className={cn(
+                    'inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform',
+                    val ? 'translate-x-4' : 'translate-x-0.5',
+                  )} />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function AgentDetailPage() {
   const { t } = useTranslation();
   const { deviceId } = useParams<{ deviceId: string }>();
@@ -2698,6 +2826,12 @@ export function AgentDetailPage() {
         <NotificationBindingsPanel
           scope="agent"
           scopeId={device.id}
+        />
+
+        {/* ── Agent Notification Types ── */}
+        <AgentNotifTypesPanel
+          device={device}
+          onDeviceUpdate={setDevice}
         />
 
         {/* ── Agent Maintenance Windows ── */}

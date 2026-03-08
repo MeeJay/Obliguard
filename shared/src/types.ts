@@ -543,6 +543,33 @@ export const DEFAULT_AGENT_THRESHOLDS: AgentThresholds = {
   temp:   { globalEnabled: false, op: '>', threshold: 85, overrides: {} },
 };
 
+/**
+ * Per-type notification toggles.
+ * Each field is `boolean | null` where null means "inherit from parent group / system default".
+ * System defaults: global=true, down=true, up=true, alert=true, update=false.
+ */
+export interface NotificationTypeConfig {
+  /** Master switch — if false no notifications are sent (channels remain bound but muted) */
+  global: boolean | null;
+  /** Notify when agent/monitor goes DOWN / offline */
+  down: boolean | null;
+  /** Notify when agent/monitor recovers (back UP) */
+  up: boolean | null;
+  /** Notify when agent threshold is breached (alert status) */
+  alert: boolean | null;
+  /** Notify when agent starts a self-update (default off) */
+  update: boolean | null;
+}
+
+/** System defaults for notification types (used when no group/device override is set) */
+export const DEFAULT_NOTIFICATION_TYPES: Required<{ [K in keyof NotificationTypeConfig]: boolean }> = {
+  global: true,
+  down:   true,
+  up:     true,
+  alert:  true,
+  update: false,
+};
+
 /** Default group-level config for agent groups */
 export interface AgentGroupConfig {
   /** Default push interval for agents in this group (null = device keeps its own) */
@@ -551,6 +578,8 @@ export interface AgentGroupConfig {
   heartbeatMonitoring: boolean | null;
   /** Consecutive missed pushes before declaring agent offline (null = system default of 2) */
   maxMissedPushes: number | null;
+  /** Notification type toggles (null = inherit from parent group / system defaults) */
+  notificationTypes: NotificationTypeConfig | null;
 }
 
 // ============================================
@@ -691,6 +720,20 @@ export interface AgentDevice {
    */
   updatingSince?: string | null;
   inMaintenance?: boolean;
+  /**
+   * Device-level notification type override.
+   * null = inherit from parent group chain (see resolvedNotificationTypes for effective values).
+   * When set, overrides the group's notification type settings.
+   */
+  notificationTypes?: NotificationTypeConfig | null;
+  /** Resolved effective notification types (device → group hierarchy → defaults) */
+  resolvedNotificationTypes?: {
+    global: boolean;
+    down: boolean;
+    up: boolean;
+    alert: boolean;
+    update: boolean;
+  };
 }
 
 // ============================================
