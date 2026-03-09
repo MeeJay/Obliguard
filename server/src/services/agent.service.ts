@@ -663,9 +663,21 @@ export const agentService = {
     }
 
     // ── j. Update device last push time ──────────────────
+    const pushTime = new Date();
     await db('agent_devices')
       .where({ id: deviceId })
-      .update({ updated_at: new Date() });
+      .update({ updated_at: pushTime });
+
+    // Notify UI of push activity so AgentDetailPage can track online status.
+    // Uses a dedicated lightweight event to avoid interfering with the
+    // AGENT_DEVICE_UPDATED event which carries full device metadata.
+    if (_io) {
+      _io.emit('agent:pushHeartbeat', {
+        deviceId,
+        updatedAt: pushTime.toISOString(),
+        agentVersion: body.agentVersion ?? device.agentVersion,
+      });
+    }
 
     // ── k. Return ObliguardPushResponse ──────────────────
     return {

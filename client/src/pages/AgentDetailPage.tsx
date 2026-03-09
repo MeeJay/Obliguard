@@ -2334,17 +2334,13 @@ export function AgentDetailPage() {
 
   const loadData = useCallback(async () => {
     try {
-      const [dev, snap] = await Promise.all([agentApi.getDeviceById(id), agentApi.getDeviceMetrics(id)]);
+      const dev = await agentApi.getDeviceById(id);
       setDevice(dev);
-      // (push interval is now managed by AgentSettingsSection)
-      if (snap) {
-        setSnapshot(snap);
-        setLastPush(snap.receivedAt);
-        setHistory(prev => prev.length === 0 ? [snap] : prev);
-        try {
-          const monitor = await monitorsApi.getById(snap.monitorId);
-          if (monitor.agentThresholds) setThresholds(monitor.agentThresholds as import('@obliview/shared').AgentThresholds);
-        } catch { /* defaults */ }
+      // Obliguard agents don't produce metric snapshots (no hardware metrics).
+      // Seed lastPush from device.updatedAt so the initial online status is
+      // computed correctly before the first socket heartbeat arrives.
+      if (dev && dev.status === 'approved') {
+        setLastPush(dev.updatedAt);
       }
     } catch { /* ignore */ }
     finally { setLoading(false); }
@@ -2416,6 +2412,23 @@ export function AgentDetailPage() {
     return () => { socket.off(SOCKET_EVENTS.AGENT_STATUS_CHANGED, handler); };
   }, [id]);
 
+  // Track real-time push heartbeats for online status (Obliguard has no metric snapshots)
+  useEffect(() => {
+    const socket = getSocket();
+    if (!socket) return;
+    const handler = (data: { deviceId: number; updatedAt: string; agentVersion?: string | null }) => {
+      if (data.deviceId !== id) return;
+      setLastPush(data.updatedAt);
+      if (data.agentVersion) {
+        setDevice(prev => prev && prev.agentVersion !== data.agentVersion
+          ? { ...prev, agentVersion: data.agentVersion! }
+          : prev);
+      }
+    };
+    socket.on('agent:pushHeartbeat', handler);
+    return () => { socket.off('agent:pushHeartbeat', handler); };
+  }, [id]);
+
   // Fetch historical heartbeat data when switching away from realtime
   useEffect(() => {
     const monitorId = snapshot?.monitorId;
@@ -2484,11 +2497,13 @@ export function AgentDetailPage() {
   // ── Derived state ────────────────────────────────────────────────────────
 
   const m = snapshot?.metrics ?? null;
-  const isOnline = !!snapshot && (Date.now() - new Date(snapshot.receivedAt).getTime()) < (device.checkIntervalSeconds ?? 60) * 2000;
+  // Obliguard agents never produce metric snapshots — derive online status from
+  // lastPush (seeded from device.updatedAt on load, then updated by socket heartbeats).
+  const isOnline = !!lastPush && (Date.now() - new Date(lastPush).getTime()) < (device.checkIntervalSeconds ?? 60) * 2000;
   const isUpdating = liveStatus === 'updating' ||
     (device.updatingSince != null &&
       Date.now() - new Date(device.updatingSince).getTime() < 10 * 60 * 1000);
-  const overallStatus = isUpdating ? 'updating' : (!isOnline ? 'offline' : (snapshot?.overallStatus ?? 'pending'));
+  const overallStatus = isUpdating ? 'updating' : (!isOnline ? 'offline' : 'up');
   const violations = snapshot?.violations ?? [];
   const sc = {
     up:       { dot: 'bg-status-up',   text: 'text-status-up',   label: t('groups.detail.online'),  glow: 'shadow-[0_0_8px_2px] shadow-status-up/50' },
@@ -2583,7 +2598,6 @@ export function AgentDetailPage() {
                 {device.osInfo?.arch && <span>{device.osInfo.arch}</span>}
                 {device.agentVersion && <span>Agent v{device.agentVersion}</span>}
                 {lastPush            && <span>Last push: {fmtRelTime(lastPush)}</span>}
-                {!snapshot           && <span className="text-yellow-400">{t('status.pending')}…</span>}
               </div>
             </div>
           </div>
