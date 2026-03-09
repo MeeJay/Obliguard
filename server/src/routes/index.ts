@@ -20,6 +20,7 @@ import whitelistRoutes from './whitelist.routes';
 import ipEventsRoutes from './ipEvents.routes';
 import ipReputationRoutes from './ipReputation.routes';
 import serviceTemplatesRoutes from './serviceTemplates.routes';
+import geoRoutes from './geo.routes';
 
 const router = Router();
 
@@ -54,6 +55,7 @@ tenantRouter.use('/whitelist', whitelistRoutes);
 tenantRouter.use('/ip-events', ipEventsRoutes);
 tenantRouter.use('/ip-reputation', ipReputationRoutes);
 tenantRouter.use('/service-templates', serviceTemplatesRoutes);
+tenantRouter.use('/geo', geoRoutes);
 
 router.use('/', tenantRouter);
 

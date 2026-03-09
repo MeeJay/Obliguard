@@ -1,10 +1,12 @@
 /**
  * NetMapPage — Obliguard Network Graph
  *
- * Force-directed graph style:
- * - Agents clustered near center, linked if they share attacking IPs
- * - IPs orbit their agent(s); multi-agent IPs placed between agents
+ * Force-directed graph:
+ * - Agents clustered near centre, linked when sharing attacking IPs
+ * - IPs distributed in 240° arc around their agent (top zone clear for label)
  * - Labels only for banned / high-failure / multi-agent IPs
+ * - Heartbeat pulses travel between IPs and agents
+ * - Ripple shockwave on ban events
  * - IPs expire after 10 min of inactivity
  *
  * Pure Canvas 2D — no WebGL, no extra dependencies.
@@ -31,7 +33,7 @@ interface IpNode {
   ip: string;
   country: string;
   flag: string;
-  agentIds: number[];   // primary = [0]; multi-agent IPs placed between agents
+  agentIds: number[];   // can touch multiple agents
   x: number; y: number;
   dotR: number;
   color: string;
@@ -50,8 +52,25 @@ interface Particle {
   t: number; speed: number; color: string;
 }
 
+/** Slow heartbeat pulse travelling along an IP–agent line. */
+interface Pulse {
+  id: string;
+  sx: number; sy: number;
+  tx: number; ty: number;
+  t: number; speed: number;
+  color: string;
+}
+
+/** Expanding ring shockwave emitted on a ban event. */
+interface Ripple {
+  id: string;
+  x: number; y: number;
+  t: number; // 0 → 1
+}
+
 interface LiveEvent {
   id: string; ip: string; service: string; country: string;
+  agentName: string;
   time: Date; color: string;
   eventType: 'auth_success' | 'auth_failure' | 'ban';
   failures?: number;
@@ -73,6 +92,9 @@ const SVC_COLORS: Record<string, string> = {
   apache: '#22c55e', iis: '#3b82f6',
 };
 
+/** Services considered "dangerous" — shown in red in the live feed. */
+const DANGEROUS_SVCS = new Set(['ssh', 'rdp', 'ftp', 'mysql', 'telnet', 'smb', 'vnc']);
+
 // ── Pure helpers ───────────────────────────────────────────────────────────────
 
 function flagEmoji(code: string): string {
@@ -88,6 +110,10 @@ function svcColor(s: string): string {
   return '#f43f5e';
 }
 
+function isDangerousSvc(s: string): boolean {
+  return DANGEROUS_SVCS.has((s ?? '').toLowerCase().split('/')[0]);
+}
+
 function statusColor(st: string): string {
   if (st === 'banned')      return '#ef4444';
   if (st === 'suspicious')  return '#f97316';
@@ -101,19 +127,95 @@ function ipRand(ip: string, salt: number): number {
   return ((seed * 16807) % 2147483647) / 2147483647;
 }
 
-/** Place an IP near the centroid of its agents (or around a single agent). */
+/**
+ * Place a single IP within the 240° arc below/sides of its agent.
+ * Used for live socket events (not for batch init layout).
+ */
 function placeIp(ip: IpNode, agentMap: Map<number, AgentNode>) {
   const ags = ip.agentIds.map(id => agentMap.get(id)).filter(Boolean) as AgentNode[];
   if (!ags.length) return;
-  const cx = ags.reduce((s, a) => s + a.x, 0) / ags.length;
-  const cy = ags.reduce((s, a) => s + a.y, 0) / ags.length;
-  const angle = ipRand(ip.ip, 1) * Math.PI * 2;
-  // Single-agent: scatter at orbit distance. Multi-agent: cluster near centroid.
-  const dist = ags.length === 1
-    ? 60 + ipRand(ip.ip, 3) * 65
-    : 12 + ipRand(ip.ip, 5) * 32;
-  ip.x = cx + Math.cos(angle) * dist;
-  ip.y = cy + Math.sin(angle) * dist;
+
+  if (ags.length > 1) {
+    // Multi-agent: cluster near centroid
+    const cx = ags.reduce((s, a) => s + a.x, 0) / ags.length;
+    const cy = ags.reduce((s, a) => s + a.y, 0) / ags.length;
+    const angle = ipRand(ip.ip, 1) * Math.PI * 2;
+    const dist  = 14 + ipRand(ip.ip, 5) * 30;
+    ip.x = cx + Math.cos(angle) * dist;
+    ip.y = cy + Math.sin(angle) * dist;
+    return;
+  }
+
+  // Single-agent: use 240° arc, skip top 120° where agent label sits
+  const ag = ags[0];
+  const ARC_START = -Math.PI / 6;          // 330° (lower-right)
+  const ARC_SPAN  = (4 * Math.PI) / 3;     // 240°
+  const angle = ARC_START + ipRand(ip.ip, 1) * ARC_SPAN;
+  const dist  = 65 + ipRand(ip.ip, 3) * 80;
+  ip.x = ag.x + Math.cos(angle) * dist;
+  ip.y = ag.y + Math.sin(angle) * dist;
+}
+
+/**
+ * Batch layout: distribute all single-agent IPs around their agent in an ordered
+ * 240° arc (skipping the top 120° reserved for the agent label), using multiple
+ * concentric rings of 16 IPs each with small deterministic jitter.
+ * Multi-agent IPs are placed at the centroid of their agents.
+ */
+function distributeIpsAroundAgents(agents: AgentNode[], ips: IpNode[]) {
+  const INNER_R  = 70;   // first ring radius
+  const RING_GAP = 58;   // gap between rings
+  const PER_RING = 16;   // max IPs per ring
+  const ARC_START = -Math.PI / 6;       // 330° = bottom-right
+  const ARC_SPAN  = (4 * Math.PI) / 3; // 240°
+
+  const agentMap = new Map(agents.map(a => [a.id, a]));
+
+  // Group single-agent IPs by their agent
+  const byAgent = new Map<number, IpNode[]>();
+  for (const ip of ips) {
+    if (ip.agentIds.length === 1) {
+      const aid = ip.agentIds[0];
+      if (!byAgent.has(aid)) byAgent.set(aid, []);
+      byAgent.get(aid)!.push(ip);
+    }
+  }
+
+  for (const agent of agents) {
+    const group = (byAgent.get(agent.id) ?? []).sort((a, b) =>
+      a.ip < b.ip ? -1 : 1,
+    );
+
+    group.forEach((ip, idx) => {
+      const ring       = Math.floor(idx / PER_RING);
+      const posInRing  = idx % PER_RING;
+      const countInRing = Math.min(PER_RING, group.length - ring * PER_RING);
+
+      const angleStep = countInRing <= 1 ? 0 : ARC_SPAN / (countInRing - 1);
+      const baseAngle = ARC_START + posInRing * angleStep;
+
+      // Small deterministic jitter to avoid perfect grid look
+      const jitterA = (ipRand(ip.ip, 97) - 0.5) * angleStep * 0.40;
+      const jitterR = (ipRand(ip.ip, 83) - 0.5) * 16;
+
+      const r = INNER_R + ring * RING_GAP + jitterR;
+      ip.x = agent.x + Math.cos(baseAngle + jitterA) * r;
+      ip.y = agent.y + Math.sin(baseAngle + jitterA) * r;
+    });
+  }
+
+  // Multi-agent IPs: centroid + scatter
+  for (const ip of ips) {
+    if (ip.agentIds.length > 1) {
+      const ags = ip.agentIds.map(id => agentMap.get(id)).filter(Boolean) as AgentNode[];
+      const cx = ags.reduce((s, a) => s + a.x, 0) / ags.length;
+      const cy = ags.reduce((s, a) => s + a.y, 0) / ags.length;
+      const angle = ipRand(ip.ip, 1) * Math.PI * 2;
+      const dist  = 14 + ipRand(ip.ip, 5) * 30;
+      ip.x = cx + Math.cos(angle) * dist;
+      ip.y = cy + Math.sin(angle) * dist;
+    }
+  }
 }
 
 /** Spring relaxation — agents cluster near centre. */
@@ -204,6 +306,8 @@ export function NetMapPage() {
   const agentsRef    = useRef<AgentNode[]>([]);
   const ipsRef       = useRef<Map<string, IpNode>>(new Map());
   const particlesRef = useRef<Particle[]>([]);
+  const pulsesRef    = useRef<Pulse[]>([]);
+  const ripplesRef   = useRef<Ripple[]>([]);
 
   const transformRef = useRef({ x: 0, y: 0, k: 1 });
   const dragRef      = useRef<{ x: number; y: number; startX: number; startY: number } | null>(null);
@@ -220,6 +324,7 @@ export function NetMapPage() {
   const [ipCount,       setIpCount]       = useState(0);
   const [filters,       setFilters]       = useState<Set<FlowType>>(new Set(['auth_success', 'auth_failure', 'ban']));
   const [selectedAgent, setSelectedAgent] = useState<AgentNode | null>(null);
+  const [banningIp,     setBanningIp]     = useState<string | null>(null);
   const [tooltip, setTooltip] = useState<{
     x: number; y: number;
     ip: string; flag: string; country: string;
@@ -306,7 +411,7 @@ export function NetMapPage() {
     }
   }, []);
 
-  // ── Particle ──────────────────────────────────────────────────────────────
+  // ── Particle (fast bright dot on event) ──────────────────────────────────
 
   const spawnParticle = useCallback((ipNode: IpNode, agentId: number, color: string) => {
     const ag = agentsRef.current.find(a => a.id === agentId) ?? agentsRef.current[0];
@@ -319,12 +424,59 @@ export function NetMapPage() {
     }];
   }, []);
 
+  // ── Quick ban ─────────────────────────────────────────────────────────────
+
+  const quickBan = useCallback(async (ip: string) => {
+    setBanningIp(ip);
+    try {
+      await apiClient.post('/bans', { ip, reason: 'Manual ban from NetMap', scope: 'global' });
+      const node = ipsRef.current.get(ip);
+      if (node) {
+        node.status    = 'banned';
+        node.color     = EVENT_COLORS.ban;
+        node.glowUntil = Date.now() + 3000;
+        ripplesRef.current.push({ id: Math.random().toString(36).slice(2), x: node.x, y: node.y, t: 0 });
+      }
+      setStats(s => ({ ...s, banned: s.banned + 1 }));
+    } catch (err) {
+      console.error('Quick ban failed:', err);
+    } finally {
+      setBanningIp(null);
+    }
+  }, []);
+
+  // ── Geo lookup for unknown IPs ────────────────────────────────────────────
+
+  const fetchGeoForUnknownIps = useCallback(async () => {
+    const unknowns = [...ipsRef.current.values()]
+      .filter(n => !n.country || n.country === '??')
+      .map(n => n.ip)
+      .slice(0, 100);
+    if (!unknowns.length) return;
+    try {
+      const res = await apiClient.post<{ data: { query: string; countryCode: string }[] }>(
+        '/geo/batch', { ips: unknowns },
+      );
+      for (const row of (res.data?.data ?? [])) {
+        const node = ipsRef.current.get(row.query);
+        if (node && row.countryCode && row.countryCode.length === 2) {
+          node.country = row.countryCode.toUpperCase();
+          node.flag    = flagEmoji(node.country);
+        }
+      }
+    } catch (err) {
+      console.error('Geo batch lookup failed:', err);
+    }
+  }, []);
+
   // ── Init ──────────────────────────────────────────────────────────────────
 
   const init = useCallback(async () => {
     setLoading(true);
-    ipsRef.current = new Map();
+    ipsRef.current     = new Map();
     particlesRef.current = [];
+    pulsesRef.current  = [];
+    ripplesRef.current = [];
     setIpCount(0);
 
     try {
@@ -424,7 +576,6 @@ export function NetMapPage() {
           lastSeen:   Date.now(),
           glowUntil:  0,
         };
-        placeIp(node, agentMap);
         ipsRef.current.set(evIp, node);
         cnt++;
       }
@@ -450,17 +601,23 @@ export function NetMapPage() {
           status:     rep.status, failures: rep.failures, services: rep.services,
           eventCount: 0, lastSeen: Date.now(), glowUntil: 0,
         };
-        placeIp(node, agentMap);
         ipsRef.current.set(repIp, node);
         cnt++;
       }
+
+      // ── Batch layout: distribute IPs around agents in 240° arc ──────────
+      distributeIpsAroundAgents(agentsRef.current, [...ipsRef.current.values()]);
 
       setIpCount(ipsRef.current.size);
     } catch (err) {
       console.error('NetMap init error:', err);
     }
+
     setLoading(false);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+    // Geo lookup runs after loading indicator disappears
+    void fetchGeoForUnknownIps();
+  }, [fetchGeoForUnknownIps]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Animation loop ────────────────────────────────────────────────────────
 
@@ -472,9 +629,11 @@ export function NetMapPage() {
     const dt = Math.min((ts - lastTsRef.current) / 1000, 0.05);
     lastTsRef.current = ts;
 
-    // Expiry check every ~5 s (300 frames @ 60 fps)
-    frameRef.current = (frameRef.current + 1) % 300;
-    if (frameRef.current === 0) {
+    // Frame counter — wraps at 600 (10 s @ 60 fps)
+    frameRef.current = (frameRef.current + 1) % 600;
+
+    // IP expiry every ~5 s
+    if (frameRef.current % 300 === 0) {
       const now = Date.now();
       let changed = false;
       for (const [key, ip] of ipsRef.current) {
@@ -495,6 +654,24 @@ export function NetMapPage() {
     const agents  = agentsRef.current;
     const agMap   = new Map(agents.map(a => [a.id, a]));
     const ipNodes = [...ipsRef.current.values()];
+
+    // ── Ripples (ban shockwaves) ─────────────────────────────────────────
+    const aliveRipples: Ripple[] = [];
+    for (const rip of ripplesRef.current) {
+      rip.t += dt * 1.1;
+      if (rip.t >= 1.0) continue;
+      aliveRipples.push(rip);
+      const radius = rip.t * 58;
+      const alpha  = (1 - rip.t) * 0.55;
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.strokeStyle = '#ef4444';
+      ctx.shadowBlur  = 10; ctx.shadowColor = '#ef4444';
+      ctx.lineWidth   = 1.5 / k;
+      ctx.beginPath(); ctx.arc(rip.x, rip.y, radius, 0, Math.PI * 2);
+      ctx.stroke(); ctx.restore();
+    }
+    ripplesRef.current = aliveRipples;
 
     // Build agent↔agent edges from shared IPs
     const agentEdges = new Set<string>();
@@ -568,7 +745,6 @@ export function NetMapPage() {
       ctx.restore();
 
       if (!dimmed && shouldLabel(ip)) {
-        // Use country code (not emoji flag) — emoji flags have no glyph in Canvas on Windows
         badges.push({ flag: ip.country, ip: ip.ip, sx: ip.x, sy: ip.y, r, color: ip.color, alpha: Math.min(0.95, alpha + 0.1) });
       }
     }
@@ -610,17 +786,9 @@ export function NetMapPage() {
     }
 
     // ── Smart badge placement ─────────────────────────────────────────────
-    // Labels for suspicious/banned IPs only; placed so they don't cover other dots.
-    // Tries 4 candidate positions (below → above → right → left), skips if all blocked.
-
-    // All IP dot footprints (used for collision — exclude own dot per badge)
     const dotFP = ipNodes.map(ip => ({ x: ip.x, y: ip.y, r: ip.dotR + 2 }));
-
-    // Already-placed badge rects
     const placedRects: { x: number; y: number; w: number }[] = [];
 
-    /** True if a candidate rect (rx,ry,rw×BADGE_H) intersects any dot or placed badge.
-     *  ownX/ownY: the badge's own IP dot, excluded from dot collision. */
     const badgeCollides = (rx: number, ry: number, rw: number, ownX: number, ownY: number): boolean => {
       for (const dot of dotFP) {
         if (dot.x === ownX && dot.y === ownY) continue;
@@ -637,28 +805,74 @@ export function NetMapPage() {
     ctx.font = BADGE_FONT;
     for (const b of badges) {
       const txt = badgeText(b.flag, b.ip);
-      const bw  = ctx.measureText(txt).width + 9; // 2×pad(4) + border
-
-      // 4 candidate positions: below (preferred), above, right, left
+      const bw  = ctx.measureText(txt).width + 9;
       const gap = b.r + 4;
       const candidates: [number, number][] = [
-        [b.sx - bw / 2,   b.sy + gap],               // below
-        [b.sx - bw / 2,   b.sy - gap - BADGE_H],     // above
-        [b.sx + gap,      b.sy - BADGE_H / 2],        // right
-        [b.sx - bw - gap, b.sy - BADGE_H / 2],        // left
+        [b.sx - bw / 2,   b.sy + gap],
+        [b.sx - bw / 2,   b.sy - gap - BADGE_H],
+        [b.sx + gap,      b.sy - BADGE_H / 2],
+        [b.sx - bw - gap, b.sy - BADGE_H / 2],
       ];
-
       for (const [bx, by] of candidates) {
         if (!badgeCollides(bx, by, bw, b.sx, b.sy)) {
           drawBadgeAt(ctx, txt, bx, by, bw, b.color, b.alpha);
           placedRects.push({ x: bx, y: by, w: bw });
-          break; // found a clear spot — move to next badge
+          break;
         }
       }
-      // All 4 positions blocked → skip cleanly (don't render overlapping label)
     }
 
-    // ── Flow particles ───────────────────────────────────────────────────
+    // ── Heartbeat pulse generation (every ~2 s) ───────────────────────────
+    if (frameRef.current % 120 === 0 && ipNodes.length > 0) {
+      // Sample up to 25 IPs — avoid flooding with hundreds of pulses
+      const sample = ipNodes.slice(0, 25);
+      for (const ip of sample) {
+        for (const aid of ip.agentIds) {
+          const ag = agMap.get(aid);
+          if (!ag) continue;
+          // IP → Agent
+          pulsesRef.current.push({
+            id:    Math.random().toString(36).slice(2),
+            sx: ip.x, sy: ip.y, tx: ag.x, ty: ag.y,
+            t: 0, speed: 0.11 + Math.random() * 0.06,
+            color: ip.color,
+          });
+          // Agent → IP (less frequent — reverse heartbeat)
+          if (Math.random() < 0.35) {
+            pulsesRef.current.push({
+              id:    Math.random().toString(36).slice(2),
+              sx: ag.x, sy: ag.y, tx: ip.x, ty: ip.y,
+              t: ipRand(ip.ip, 17) * 0.5, // staggered start
+              speed: 0.09 + Math.random() * 0.05,
+              color: '#22d3ee',
+            });
+          }
+        }
+      }
+      if (pulsesRef.current.length > 300) {
+        pulsesRef.current = pulsesRef.current.slice(-300);
+      }
+    }
+
+    // ── Draw heartbeat pulses ─────────────────────────────────────────────
+    const alivePulses: Pulse[] = [];
+    for (const p of pulsesRef.current) {
+      p.t += dt * p.speed;
+      if (p.t >= 1.0) continue;
+      alivePulses.push(p);
+      const px   = p.sx + (p.tx - p.sx) * p.t;
+      const py   = p.sy + (p.ty - p.sy) * p.t;
+      const fade = p.t < 0.82 ? 1 : (1 - p.t) / 0.18;
+      ctx.save();
+      ctx.globalAlpha = 0.38 * fade;
+      ctx.shadowBlur  = 8; ctx.shadowColor = p.color;
+      ctx.fillStyle   = p.color;
+      ctx.beginPath(); ctx.arc(px, py, 2.2, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+    }
+    pulsesRef.current = alivePulses;
+
+    // ── Fast event particles ──────────────────────────────────────────────
     const alive: Particle[] = [];
     for (const part of particlesRef.current) {
       part.t += dt * part.speed;
@@ -747,12 +961,14 @@ export function NetMapPage() {
       setLiveEvents(prev => [{
         id: Math.random().toString(36).slice(2),
         ip: data.ip, service: data.service, country: cc,
+        agentName: agent.label,
         time: new Date(), color: col, eventType: data.eventType,
       }, ...prev].slice(0, 40));
     };
 
-    const onBanAuto = (data: { ip: string; service: string; failureCount: number }) => {
+    const onBanAuto = (data: { ip: string; service: string; failureCount: number; deviceId?: number }) => {
       const agents = agentsRef.current;
+      const agent  = agents.find(a => a.id === data.deviceId) ?? agents[0];
       let node = ipsRef.current.get(data.ip);
       if (!node && agents[0]) {
         upsertIp(data.ip, '??', agents[0].id, 'banned', data.failureCount, [data.service], 1, true);
@@ -761,10 +977,15 @@ export function NetMapPage() {
         node.status = 'banned'; node.color = EVENT_COLORS.ban;
         node.glowUntil = Date.now() + 3000; node.lastSeen = Date.now();
       }
+      // Ripple shockwave
+      if (node) {
+        ripplesRef.current.push({ id: Math.random().toString(36).slice(2), x: node.x, y: node.y, t: 0 });
+      }
       if (node && filtersRef.current.has('ban')) spawnParticle(node, node.agentIds[0], EVENT_COLORS.ban);
       setLiveEvents(prev => [{
         id: Math.random().toString(36).slice(2),
         ip: data.ip, service: data.service, country: node?.country ?? '??',
+        agentName: agent?.label ?? 'Server',
         time: new Date(), color: EVENT_COLORS.ban, eventType: 'ban' as const,
         failures: data.failureCount,
       }, ...prev].slice(0, 40));
@@ -1052,30 +1273,88 @@ export function NetMapPage() {
           <span className="font-mono text-[8px] text-slate-600 tracking-widest uppercase">Live Events</span>
           <span className="ml-auto font-mono text-[8px] text-slate-700">{liveEvents.length} captured</span>
         </div>
-        <div className="h-[5.5rem] overflow-hidden px-4 py-1.5">
+
+        <div className="h-[7rem] overflow-hidden px-3 py-1.5">
           {liveEvents.length === 0 ? (
-            <span className="font-mono text-[10px] text-slate-700">Monitoring for events…</span>
+            <span className="font-mono text-[10px] text-slate-700 pl-1">Monitoring for events…</span>
           ) : (
-            <div className="flex flex-col gap-0.5">
-              {liveEvents.slice(0, 5).map(ev => (
-                <div key={ev.id} className="flex items-center gap-2.5 font-mono text-[10px]">
-                  <span className="text-slate-700 w-20 shrink-0">{ev.time.toLocaleTimeString()}</span>
-                  <div className="w-1.5 h-1.5 rounded-full shrink-0"
-                    style={{ backgroundColor: ev.color, boxShadow: `0 0 4px ${ev.color}` }} />
-                  <span className="uppercase text-[8px] w-16 shrink-0 tracking-wide font-bold" style={{ color: ev.color }}>
-                    {ev.eventType === 'auth_success' ? 'success' : ev.eventType === 'ban' ? '🔒 ban' : 'failure'}
-                  </span>
-                  <span className="uppercase w-10 shrink-0" style={{ color: svcColor(ev.service) }}>
-                    {ev.service.slice(0, 8)}
-                  </span>
-                  <span className="text-slate-600 w-28 truncate shrink-0">{ev.ip}</span>
-                  <span className="text-slate-700 shrink-0">→</span>
-                  <span className="text-slate-600">{flagEmoji(ev.country)} {ev.country}</span>
-                  {ev.failures != null && ev.failures > 0 && (
-                    <span className="text-orange-600/60 text-[9px]">{ev.failures}×</span>
-                  )}
-                </div>
-              ))}
+            <div className="flex flex-col gap-[3px]">
+              {liveEvents.slice(0, 6).map(ev => {
+                const isBan     = ev.eventType === 'ban';
+                const isFailure = ev.eventType === 'auth_failure';
+                const dangerSvc = isDangerousSvc(ev.service);
+                const svcDisplay = (ev.service || '?').slice(0, 8).toUpperCase();
+
+                return (
+                  <div
+                    key={ev.id}
+                    className={`flex items-center gap-2 font-mono text-[10px] rounded px-1.5 py-[1px] ${
+                      isBan ? 'bg-red-950/35' : isFailure ? 'bg-orange-950/25' : ''
+                    }`}
+                  >
+                    {/* Time */}
+                    <span className="text-slate-700 w-[4.5rem] shrink-0 text-[9px]">
+                      {ev.time.toLocaleTimeString()}
+                    </span>
+
+                    {/* Dot */}
+                    <div
+                      className="w-1.5 h-1.5 rounded-full shrink-0"
+                      style={{ backgroundColor: ev.color, boxShadow: `0 0 4px ${ev.color}` }}
+                    />
+
+                    {/* Event type label */}
+                    <span
+                      className="uppercase text-[8px] w-12 shrink-0 tracking-wide font-bold"
+                      style={{ color: ev.color }}
+                    >
+                      {isBan ? '🔒 BAN' : isFailure ? 'FAIL' : 'OK'}
+                    </span>
+
+                    {/* Service — red if dangerous */}
+                    <span
+                      className={`uppercase text-[9px] w-10 shrink-0 font-semibold ${dangerSvc ? 'text-red-400' : ''}`}
+                      style={dangerSvc ? {} : { color: svcColor(ev.service) }}
+                    >
+                      {svcDisplay}
+                    </span>
+
+                    {/* IP — line-through + red if banned, orange if failure */}
+                    <span
+                      className={`text-[10px] w-[6.5rem] shrink-0 truncate ${
+                        isBan ? 'line-through text-red-400/55' : isFailure ? 'text-orange-300/75' : 'text-slate-400'
+                      }`}
+                    >
+                      {ev.ip}
+                    </span>
+
+                    {/* Arrow + agent */}
+                    <span className="text-slate-800 shrink-0 text-[9px]">▸</span>
+                    <span className="text-slate-500 text-[9px] shrink-0 max-w-[5rem] truncate">
+                      {ev.agentName || 'Server'}
+                    </span>
+
+                    {/* Failure count */}
+                    {ev.failures != null && ev.failures > 0 && (
+                      <span className="text-orange-700/60 text-[9px] shrink-0">
+                        {ev.failures}×
+                      </span>
+                    )}
+
+                    {/* Quick ban button — only show when not already banned */}
+                    {!isBan && (
+                      <button
+                        onClick={() => void quickBan(ev.ip)}
+                        disabled={banningIp === ev.ip}
+                        className="ml-auto shrink-0 px-1.5 py-0.5 rounded text-[8px] font-mono border border-red-900/40 text-red-700/60 hover:text-red-400 hover:border-red-500/50 transition-colors disabled:opacity-40 leading-none"
+                        title={`Ban ${ev.ip}`}
+                      >
+                        {banningIp === ev.ip ? '…' : '⛔'}
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>
