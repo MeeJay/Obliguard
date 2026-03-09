@@ -31,7 +31,10 @@ export function connectSocket(userId: number, tenantId?: number): Socket {
 
   socket = io(window.location.origin, {
     auth: { userId, tenantId },
-    transports: ['websocket', 'polling'],
+    // polling first ensures the initial handshake works behind reverse proxies
+    // that may not support WebSocket upgrades. socket.io then auto-upgrades
+    // to WebSocket in the background if the proxy supports it.
+    transports: ['polling', 'websocket'],
     withCredentials: true,
   });
 

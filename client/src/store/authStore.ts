@@ -5,6 +5,7 @@ import { connectSocket, disconnectSocket } from '../socket/socketClient';
 import { useLiveAlertsStore } from './liveAlertsStore';
 import { setLanguage } from '../i18n';
 import { useTenantStore } from './tenantStore';
+import { useGroupStore } from './groupStore';
 
 function syncPreferencesToStore(user: User) {
   const prefs = user.preferences;
@@ -107,6 +108,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       connectSocket(user.id, currentTenantId ?? undefined);
       useTenantStore.getState().fetchTenants();
       useLiveAlertsStore.getState().fetchAlerts();
+      useGroupStore.getState().fetchTree();
       if (currentTenantId != null) {
         useTenantStore.setState({ currentTenantId });
       }

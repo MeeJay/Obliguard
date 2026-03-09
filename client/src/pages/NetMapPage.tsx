@@ -3,12 +3,12 @@
  *
  * Kaspersky/Radware-style canvas-based world map.
  * Shows ALL traffic flows hitting protected agents:
- *   - Blue arcs   = successful connections (auth_success)
+ *   - Cyan arcs   = successful connections (auth_success)
  *   - Orange arcs = failed auth attempts   (auth_failure)
  *   - Red arcs    = auto-banned IPs        (ban:auto)
  *
  * IP dots on the map are sized by failure count and coloured by status.
- * Hover over any dot to see IP details.
+ * Hover over any dot to see IP details. Scroll to zoom, drag to pan.
  */
 
 import { useEffect, useRef, useState, useCallback } from 'react';
@@ -231,6 +231,12 @@ export function NetMapPage() {
   const agentRef  = useRef<AgentMarker[]>([]);
   const lastTsRef = useRef<number>(0);
 
+  // ── Pan / zoom ────────────────────────────────────────────────────────────
+  const transformRef = useRef({ scale: 1, tx: 0, ty: 0 });
+  const dragRef      = useRef<{ x: number; y: number } | null>(null);
+  const [transform, setTransform] = useState({ scale: 1, tx: 0, ty: 0 });
+  const [isDragging, setIsDragging] = useState(false);
+
   // Active flow-type filters — stored in a ref so the animation loop reads the
   // latest value without needing a re-render, and mirrored in state for the UI.
   type FlowType = 'auth_success' | 'auth_failure' | 'ban';
@@ -262,6 +268,13 @@ export function NetMapPage() {
   const getSize = useCallback((): [number, number] => {
     const el = containerRef.current;
     return el ? [el.clientWidth, el.clientHeight] : [1280, 640];
+  }, []);
+
+  // ── Reset pan/zoom ────────────────────────────────────────────────────────
+
+  const resetTransform = useCallback(() => {
+    transformRef.current = { scale: 1, tx: 0, ty: 0 };
+    setTransform({ scale: 1, tx: 0, ty: 0 });
   }, []);
 
   // ── Spawn one arc ─────────────────────────────────────────────────────────
@@ -297,15 +310,15 @@ export function NetMapPage() {
     canvas.width = w; canvas.height = h;
     const ctx = canvas.getContext('2d')!;
 
-    // Deep-space gradient background
+    // Dark grey gradient background
     const bg = ctx.createRadialGradient(w * 0.5, h * 0.35, 0, w * 0.5, h * 0.5, Math.max(w, h) * 0.9);
-    bg.addColorStop(0, '#06172e');
-    bg.addColorStop(1, '#020b18');
+    bg.addColorStop(0, '#0d0d0d');
+    bg.addColorStop(1, '#050505');
     ctx.fillStyle = bg;
     ctx.fillRect(0, 0, w, h);
 
     // Subtle dot grid
-    ctx.fillStyle = 'rgba(0,160,220,0.045)';
+    ctx.fillStyle = 'rgba(140,140,140,0.04)';
     for (let x = 0; x < w; x += 40) {
       for (let y = 0; y < h; y += 40) {
         ctx.beginPath();
@@ -325,16 +338,16 @@ export function NetMapPage() {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const { features } = (window as any).topojson.feature(world, world.objects.countries);
 
-      // Country fill (very dark navy)
-      ctx.fillStyle = 'rgba(4,28,58,0.88)';
+      // Country fill (dark grey)
+      ctx.fillStyle = 'rgba(20,20,20,0.90)';
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       for (const f of features as any[]) ctx.fill(geoToPath(f.geometry, w, h));
 
-      // Country borders with soft cyan glow
+      // Country borders with soft grey glow
       ctx.save();
       ctx.shadowBlur = 2.5;
-      ctx.shadowColor = 'rgba(0,180,255,0.28)';
-      ctx.strokeStyle = 'rgba(0,180,255,0.18)';
+      ctx.shadowColor = 'rgba(130,130,130,0.25)';
+      ctx.strokeStyle = 'rgba(110,110,110,0.35)';
       ctx.lineWidth = 0.5;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       for (const f of features as any[]) ctx.stroke(geoToPath(f.geometry, w, h));
@@ -464,16 +477,16 @@ export function NetMapPage() {
       // Outer pulse ring
       ctx.beginPath();
       ctx.arc(ag.x, ag.y, 14 + p2 * 5, 0, Math.PI * 2);
-      ctx.strokeStyle = `rgba(0,210,255,${0.05 + p2 * 0.12})`;
+      ctx.strokeStyle = `rgba(160,160,160,${0.04 + p2 * 0.10})`;
       ctx.lineWidth = 1.2;
       ctx.stroke();
 
       // Solid ring with glow
       ctx.shadowBlur = 10;
-      ctx.shadowColor = '#00d2ff';
+      ctx.shadowColor = '#aaaaaa';
       ctx.beginPath();
       ctx.arc(ag.x, ag.y, 8, 0, Math.PI * 2);
-      ctx.strokeStyle = 'rgba(0,210,255,0.78)';
+      ctx.strokeStyle = 'rgba(200,200,200,0.78)';
       ctx.lineWidth = 1.5;
       ctx.stroke();
 
@@ -481,12 +494,12 @@ export function NetMapPage() {
       ctx.shadowBlur = 15;
       ctx.beginPath();
       ctx.arc(ag.x, ag.y, 3.5, 0, Math.PI * 2);
-      ctx.fillStyle = '#00e8ff';
+      ctx.fillStyle = '#e0e0e0';
       ctx.fill();
       ctx.restore();
 
       // Label
-      ctx.fillStyle = 'rgba(0,210,255,0.75)';
+      ctx.fillStyle = 'rgba(180,180,180,0.75)';
       ctx.font = '9px "Courier New", monospace';
       ctx.textAlign = 'center';
       ctx.fillText(ag.label.slice(0, 16), ag.x, ag.y + 24);
@@ -573,7 +586,6 @@ export function NetMapPage() {
         if (!c) continue;
         const ag = agents[spawned % agents.length];
         if (!ag) continue;
-        // Colour based on status: banned = red, suspicious = orange, else cyan
         const arcColor = rep.status === 'banned'
           ? EVENT_COLORS.ban
           : rep.totalFailures > 0
@@ -622,10 +634,6 @@ export function NetMapPage() {
     const socket = getSocket();
     if (!socket) return;
 
-    /**
-     * ip:flow — emitted by agent push handler for every unique IP seen in
-     * a push cycle, with event_type 'auth_success' or 'auth_failure'.
-     */
     const onIpFlow = (data: {
       ip: string; service: string;
       eventType: 'auth_success' | 'auth_failure'; deviceId: number;
@@ -656,10 +664,6 @@ export function NetMapPage() {
       setLiveEvents(prev => [ev, ...prev].slice(0, 40));
     };
 
-    /**
-     * ban:auto — emitted by BanEngine when an IP crosses the failure threshold.
-     * Shows as a red arc.
-     */
     const onBanAuto = (data: { ip: string; service: string; failureCount: number }) => {
       const ccs = Object.keys(CENTROIDS);
       const cc  = ccs[Math.floor(Math.random() * ccs.length)];
@@ -687,14 +691,65 @@ export function NetMapPage() {
     };
   }, [spawnArc]);
 
-  // ── Hover tooltip — detect nearest IP dot ────────────────────────────────
+  // ── Wheel zoom (non-passive so we can preventDefault) ─────────────────────
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const rect = el.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+      const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+      const tr = transformRef.current;
+      const newScale = Math.min(Math.max(tr.scale * factor, 0.5), 8);
+      const newTx = mx - (mx - tr.tx) * (newScale / tr.scale);
+      const newTy = my - (my - tr.ty) * (newScale / tr.scale);
+      transformRef.current = { scale: newScale, tx: newTx, ty: newTy };
+      setTransform({ scale: newScale, tx: newTx, ty: newTy });
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Pan handlers ─────────────────────────────────────────────────────────
+
+  const handleMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    dragRef.current = { x: e.clientX, y: e.clientY };
+    setIsDragging(true);
+  }, []);
+
+  const handlePanEnd = useCallback(() => {
+    dragRef.current = null;
+    setIsDragging(false);
+  }, []);
+
+  // ── Hover tooltip — detect nearest IP dot (with inverse transform) ─────────
 
   const handleMouseMove = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    // Pan if dragging
+    if (dragRef.current) {
+      const dx = e.clientX - dragRef.current.x;
+      const dy = e.clientY - dragRef.current.y;
+      dragRef.current = { x: e.clientX, y: e.clientY };
+      const tr = transformRef.current;
+      const newTr = { ...tr, tx: tr.tx + dx, ty: tr.ty + dy };
+      transformRef.current = newTr;
+      setTransform(newTr);
+      return;
+    }
+
+    // Tooltip: inverse-transform mouse position back to canvas space
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     const mx = e.clientX - rect.left;
     const my = e.clientY - rect.top;
+    const { scale, tx, ty } = transformRef.current;
+    const cx = (mx - tx) / scale;
+    const cy = (my - ty) / scale;
+
     for (const dot of dotsRef.current) {
-      const dx = mx - dot.x, dy = my - dot.y;
+      const dx = cx - dot.x, dy = cy - dot.y;
       if (Math.sqrt(dx * dx + dy * dy) <= dot.radius + 8) {
         setTooltip({
           visible: true, x: mx, y: my,
@@ -720,27 +775,32 @@ export function NetMapPage() {
 
   useEffect(() => {
     let t: ReturnType<typeof setTimeout>;
-    const onResize = () => { clearTimeout(t); t = setTimeout(() => void init(), 350); };
+    const onResize = () => {
+      clearTimeout(t);
+      t = setTimeout(() => { resetTransform(); void init(); }, 350);
+    };
     window.addEventListener('resize', onResize);
     return () => { window.removeEventListener('resize', onResize); clearTimeout(t); };
-  }, [init]);
+  }, [init, resetTransform]);
+
+  const isTransformed = transform.scale !== 1 || transform.tx !== 0 || transform.ty !== 0;
 
   // ── JSX ───────────────────────────────────────────────────────────────────
 
   return (
-    <div className="flex flex-col h-[calc(100vh-4rem)] bg-[#020c18] overflow-hidden select-none">
+    <div className="flex flex-col h-[calc(100vh-4rem)] bg-[#090909] overflow-hidden select-none">
 
       {/* ── Header ──────────────────────────────────────────────────────── */}
-      <div className="flex items-center justify-between px-5 py-2 border-b border-[#0b2540] shrink-0 bg-[#040f1e]">
+      <div className="flex items-center justify-between px-5 py-2 border-b border-[#1e1e1e] shrink-0 bg-[#111111]">
         <div className="flex items-center gap-3">
           <span className="relative flex h-2 w-2">
             <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
             <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
           </span>
-          <span className="font-mono text-[11px] tracking-widest text-cyan-400/80 uppercase">
+          <span className="font-mono text-[11px] tracking-widest text-[#888] uppercase">
             Live Threat Map
           </span>
-          <span className="text-[#0b2540] font-mono text-[10px]">· OBLIGUARD IPS</span>
+          <span className="text-[#1e1e1e] font-mono text-[10px]">· OBLIGUARD IPS</span>
         </div>
 
         <div className="flex items-center gap-6">
@@ -753,12 +813,12 @@ export function NetMapPage() {
             <div key={label} className="flex items-center gap-1.5">
               <Icon size={11} style={{ color: c }} />
               <span className="font-mono text-sm font-bold" style={{ color: c }}>{value}</span>
-              <span className="font-mono text-[9px] text-[#1a3850] tracking-widest">{label}</span>
+              <span className="font-mono text-[9px] text-[#383838] tracking-widest">{label}</span>
             </div>
           ))}
           <button
             onClick={() => void init()}
-            className="ml-1 p-1.5 rounded border border-[#0b2540] text-[#1a3850] hover:text-cyan-400 hover:border-cyan-700 transition-colors"
+            className="ml-1 p-1.5 rounded border border-[#1e1e1e] text-[#383838] hover:text-[#aaa] hover:border-[#555] transition-colors"
             title="Refresh"
           >
             <RefreshCw size={11} className={loading ? 'animate-spin' : ''} />
@@ -766,185 +826,220 @@ export function NetMapPage() {
         </div>
       </div>
 
-      {/* ── Canvas area ─────────────────────────────────────────────────── */}
+      {/* ── Canvas area — 2:1 aspect ratio, centered ────────────────────── */}
       <div
-        ref={containerRef}
-        className="flex-1 relative overflow-hidden"
-        onMouseMove={handleMouseMove}
-        onMouseLeave={() => setTooltip(t => ({ ...t, visible: false }))}
+        className="flex-1 overflow-hidden flex items-center justify-center bg-[#090909]"
+        onMouseUp={handlePanEnd}
       >
-        <canvas ref={baseRef} className="absolute inset-0 pointer-events-none" />
-        <canvas ref={animRef} className="absolute inset-0 pointer-events-none" />
-
-        {loading && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#020c18]/85 z-10">
-            <div className="w-10 h-10 border-2 border-t-transparent border-cyan-500 rounded-full animate-spin mb-3" />
-            <p className="font-mono text-[10px] text-cyan-500/55 tracking-widest">
-              LOADING THREAT MAP...
-            </p>
-          </div>
-        )}
-
-        {/* ── Left legend ──────────────────────────────────────────────── */}
-        <div className="absolute top-4 left-4 bg-[#040f1e]/90 border border-[#0b2540] rounded-sm p-3 backdrop-blur-sm min-w-[132px]">
-
-          {/* Flow type toggles */}
-          <div className="font-mono text-[8px] text-[#1a3850] tracking-widest mb-2 uppercase">
-            Flow Filters
-          </div>
-          {(
-            [
-              { type: 'auth_success' as const, color: EVENT_COLORS.auth_success, label: 'Success' },
-              { type: 'auth_failure' as const, color: EVENT_COLORS.auth_failure, label: 'Auth Failure' },
-              { type: 'ban'          as const, color: EVENT_COLORS.ban,          label: 'Auto-Ban' },
-            ] satisfies { type: FlowType; color: string; label: string }[]
-          ).map(({ type, color, label }) => {
-            const on = filters.has(type);
-            return (
-              <button
-                key={type}
-                onClick={() => toggleFilter(type)}
-                className="flex items-center gap-2 py-[4px] w-full group"
-                title={on ? `Hide ${label}` : `Show ${label}`}
-              >
-                {/* Toggle indicator */}
-                <div
-                  className="w-5 h-0.5 shrink-0 rounded transition-all duration-200"
-                  style={{
-                    backgroundColor: on ? color : '#1a3850',
-                    boxShadow: on ? `0 0 5px ${color}` : 'none',
-                  }}
-                />
-                {/* Checkbox dot */}
-                <div
-                  className="w-2.5 h-2.5 shrink-0 rounded-sm border transition-all duration-200 flex items-center justify-center"
-                  style={{
-                    borderColor: on ? color : '#1a3850',
-                    backgroundColor: on ? `${color}22` : 'transparent',
-                  }}
-                >
-                  {on && (
-                    <div
-                      className="w-1.5 h-1.5 rounded-sm"
-                      style={{ backgroundColor: color }}
-                    />
-                  )}
-                </div>
-                <span
-                  className="font-mono text-[10px] transition-colors duration-200"
-                  style={{ color: on ? '#4a8aaa' : '#1a3850' }}
-                >
-                  {label}
-                </span>
-              </button>
-            );
-          })}
-
-          {/* Service types */}
-          <div className="mt-3 pt-2 border-t border-[#0b2540]">
-            <div className="font-mono text-[8px] text-[#1a3850] tracking-widest mb-2 uppercase">
-              Services
-            </div>
-            {Object.entries(SVC_COLORS)
-              .filter(([, ], i, a) => a.findIndex(([, v]) => v === a[i][1]) === i) // dedupe by color
-              .map(([svc, color]) => (
-                <div key={svc} className="flex items-center gap-2 py-[2px]">
-                  <div className="w-1.5 h-1.5 rounded-full shrink-0"
-                    style={{ backgroundColor: color, boxShadow: `0 0 4px ${color}60` }} />
-                  <span className="font-mono text-[9px] uppercase tracking-wide text-[#2a5a7a]">{svc}</span>
-                </div>
-              ))}
-          </div>
-
-          {/* IP status */}
-          <div className="mt-3 pt-2 border-t border-[#0b2540]">
-            <div className="font-mono text-[8px] text-[#1a3850] tracking-widest mb-2 uppercase">
-              IP Status
-            </div>
-            {[
-              { label: 'Banned',     color: '#ef4444' },
-              { label: 'Suspicious', color: '#f97316' },
-              { label: 'Clean',      color: '#475569' },
-            ].map(({ label, color }) => (
-              <div key={label} className="flex items-center gap-2 py-[2px]">
-                <div className="w-1.5 h-1.5 rounded-full shrink-0"
-                  style={{ backgroundColor: color, boxShadow: `0 0 4px ${color}60` }} />
-                <span className="font-mono text-[9px] text-[#2a5a7a]">{label}</span>
-              </div>
-            ))}
-            <div className="mt-1.5 font-mono text-[8px] text-[#1a3850]">
-              Dot size = failure count
-            </div>
-          </div>
-        </div>
-
-        {/* ── IP tooltip on hover ───────────────────────────────────────── */}
-        {tooltip.visible && (
+        <div
+          ref={containerRef}
+          className="relative overflow-hidden"
+          style={{
+            aspectRatio: '2 / 1',
+            width: '100%',
+            maxHeight: '100%',
+            cursor: isDragging ? 'grabbing' : 'grab',
+          }}
+          onMouseDown={handleMouseDown}
+          onMouseMove={handleMouseMove}
+          onMouseLeave={() => {
+            dragRef.current = null;
+            setIsDragging(false);
+            setTooltip(t => ({ ...t, visible: false }));
+          }}
+          onMouseUp={handlePanEnd}
+        >
+          {/* Pan/zoom transformed layer — canvases live here */}
           <div
-            className="absolute z-20 pointer-events-none bg-[#050f1e]/96 border border-[#0b2540] rounded p-2.5 backdrop-blur-sm"
             style={{
-              left: tooltip.x + 14,
-              top:  tooltip.y - 8,
-              transform: tooltip.x > (getSize()[0] * 0.72) ? 'translateX(-110%)' : undefined,
+              position: 'absolute',
+              inset: 0,
+              transform: `translate(${transform.tx}px, ${transform.ty}px) scale(${transform.scale})`,
+              transformOrigin: '0 0',
             }}
           >
-            <div className="font-mono text-[11px] text-cyan-300 mb-1.5 font-bold tracking-wide">
-              {tooltip.ip}
-            </div>
-            {[
-              { label: 'Country',  value: `${flag(tooltip.country)} ${tooltip.country}` },
-              { label: 'Failures', value: tooltip.failures.toLocaleString(), color: '#fb923c' },
-              { label: 'Status',   value: tooltip.status.toUpperCase(), color: statusColor(tooltip.status) },
-            ].map(({ label, value, color }) => (
-              <div key={label} className="flex items-center gap-2 mb-1">
-                <span className="font-mono text-[8px] text-[#1a3850] uppercase tracking-wider w-14 shrink-0">
-                  {label}
-                </span>
-                <span className="font-mono text-[10px]" style={{ color: color ?? '#3a7090' }}>
-                  {value}
-                </span>
-              </div>
-            ))}
-            {tooltip.services.length > 0 && (
-              <div className="flex items-center gap-2">
-                <span className="font-mono text-[8px] text-[#1a3850] uppercase tracking-wider w-14 shrink-0">
-                  Services
-                </span>
-                <span className="font-mono text-[10px] text-[#3a7090]">
-                  {tooltip.services.slice(0, 4).join(', ')}
-                </span>
-              </div>
-            )}
+            <canvas ref={baseRef} className="absolute inset-0 pointer-events-none" />
+            <canvas ref={animRef} className="absolute inset-0 pointer-events-none" />
           </div>
-        )}
+
+          {loading && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#090909]/85 z-10">
+              <div className="w-10 h-10 border-2 border-t-transparent border-[#666] rounded-full animate-spin mb-3" />
+              <p className="font-mono text-[10px] text-[#555] tracking-widest">
+                LOADING THREAT MAP...
+              </p>
+            </div>
+          )}
+
+          {/* ── Left legend ──────────────────────────────────────────────── */}
+          <div className="absolute top-4 left-4 bg-[#111111]/90 border border-[#1e1e1e] rounded-sm p-3 backdrop-blur-sm min-w-[132px] z-10">
+
+            {/* Flow type toggles */}
+            <div className="font-mono text-[8px] text-[#383838] tracking-widest mb-2 uppercase">
+              Flow Filters
+            </div>
+            {(
+              [
+                { type: 'auth_success' as const, color: EVENT_COLORS.auth_success, label: 'Success' },
+                { type: 'auth_failure' as const, color: EVENT_COLORS.auth_failure, label: 'Auth Failure' },
+                { type: 'ban'          as const, color: EVENT_COLORS.ban,          label: 'Auto-Ban' },
+              ] satisfies { type: FlowType; color: string; label: string }[]
+            ).map(({ type, color, label }) => {
+              const on = filters.has(type);
+              return (
+                <button
+                  key={type}
+                  onClick={() => toggleFilter(type)}
+                  className="flex items-center gap-2 py-[4px] w-full group"
+                  title={on ? `Hide ${label}` : `Show ${label}`}
+                >
+                  <div
+                    className="w-5 h-0.5 shrink-0 rounded transition-all duration-200"
+                    style={{
+                      backgroundColor: on ? color : '#2c2c2c',
+                      boxShadow: on ? `0 0 5px ${color}` : 'none',
+                    }}
+                  />
+                  <div
+                    className="w-2.5 h-2.5 shrink-0 rounded-sm border transition-all duration-200 flex items-center justify-center"
+                    style={{
+                      borderColor: on ? color : '#2c2c2c',
+                      backgroundColor: on ? `${color}22` : 'transparent',
+                    }}
+                  >
+                    {on && (
+                      <div
+                        className="w-1.5 h-1.5 rounded-sm"
+                        style={{ backgroundColor: color }}
+                      />
+                    )}
+                  </div>
+                  <span
+                    className="font-mono text-[10px] transition-colors duration-200"
+                    style={{ color: on ? '#888' : '#383838' }}
+                  >
+                    {label}
+                  </span>
+                </button>
+              );
+            })}
+
+            {/* Service types */}
+            <div className="mt-3 pt-2 border-t border-[#1e1e1e]">
+              <div className="font-mono text-[8px] text-[#383838] tracking-widest mb-2 uppercase">
+                Services
+              </div>
+              {Object.entries(SVC_COLORS)
+                .filter(([, ], i, a) => a.findIndex(([, v]) => v === a[i][1]) === i)
+                .map(([svc, color]) => (
+                  <div key={svc} className="flex items-center gap-2 py-[2px]">
+                    <div className="w-1.5 h-1.5 rounded-full shrink-0"
+                      style={{ backgroundColor: color, boxShadow: `0 0 4px ${color}60` }} />
+                    <span className="font-mono text-[9px] uppercase tracking-wide text-[#555]">{svc}</span>
+                  </div>
+                ))}
+            </div>
+
+            {/* IP status */}
+            <div className="mt-3 pt-2 border-t border-[#1e1e1e]">
+              <div className="font-mono text-[8px] text-[#383838] tracking-widest mb-2 uppercase">
+                IP Status
+              </div>
+              {[
+                { label: 'Banned',     color: '#ef4444' },
+                { label: 'Suspicious', color: '#f97316' },
+                { label: 'Clean',      color: '#475569' },
+              ].map(({ label, color }) => (
+                <div key={label} className="flex items-center gap-2 py-[2px]">
+                  <div className="w-1.5 h-1.5 rounded-full shrink-0"
+                    style={{ backgroundColor: color, boxShadow: `0 0 4px ${color}60` }} />
+                  <span className="font-mono text-[9px] text-[#555]">{label}</span>
+                </div>
+              ))}
+              <div className="mt-1.5 font-mono text-[8px] text-[#383838]">
+                Dot size = failure count
+              </div>
+            </div>
+          </div>
+
+          {/* ── IP tooltip on hover ───────────────────────────────────────── */}
+          {tooltip.visible && (
+            <div
+              className="absolute z-20 pointer-events-none bg-[#0e0e0e]/96 border border-[#1e1e1e] rounded p-2.5 backdrop-blur-sm"
+              style={{
+                left: tooltip.x + 14,
+                top:  tooltip.y - 8,
+                transform: tooltip.x > (getSize()[0] * 0.72) ? 'translateX(-110%)' : undefined,
+              }}
+            >
+              <div className="font-mono text-[11px] text-[#ccc] mb-1.5 font-bold tracking-wide">
+                {tooltip.ip}
+              </div>
+              {[
+                { label: 'Country',  value: `${flag(tooltip.country)} ${tooltip.country}` },
+                { label: 'Failures', value: tooltip.failures.toLocaleString(), color: '#fb923c' },
+                { label: 'Status',   value: tooltip.status.toUpperCase(), color: statusColor(tooltip.status) },
+              ].map(({ label, value, color }) => (
+                <div key={label} className="flex items-center gap-2 mb-1">
+                  <span className="font-mono text-[8px] text-[#383838] uppercase tracking-wider w-14 shrink-0">
+                    {label}
+                  </span>
+                  <span className="font-mono text-[10px]" style={{ color: color ?? '#666' }}>
+                    {value}
+                  </span>
+                </div>
+              ))}
+              {tooltip.services.length > 0 && (
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-[8px] text-[#383838] uppercase tracking-wider w-14 shrink-0">
+                    Services
+                  </span>
+                  <span className="font-mono text-[10px] text-[#666]">
+                    {tooltip.services.slice(0, 4).join(', ')}
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ── Reset view button (shown only when panned/zoomed) ─────────── */}
+          {isTransformed && (
+            <button
+              onClick={resetTransform}
+              className="absolute bottom-3 right-3 z-20 px-2 py-1 rounded font-mono text-[9px] bg-[#1e1e1e]/90 border border-[#333] text-[#888] hover:text-[#ccc] hover:border-[#555] transition-colors backdrop-blur-sm"
+              title="Reset view"
+            >
+              ⌖ reset view
+            </button>
+          )}
+        </div>
       </div>
 
       {/* ── Bottom live feed ─────────────────────────────────────────────── */}
-      <div className="shrink-0 border-t border-[#0b2540] bg-[#040f1e]">
-        <div className="flex items-center gap-2 px-4 py-1 border-b border-[#061520]">
+      <div className="shrink-0 border-t border-[#1e1e1e] bg-[#111111]">
+        <div className="flex items-center gap-2 px-4 py-1 border-b border-[#161616]">
           <span className="relative flex h-1.5 w-1.5">
             <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-500 opacity-75" />
             <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-red-500" />
           </span>
-          <span className="font-mono text-[8px] text-[#1a3850] tracking-widest uppercase">
+          <span className="font-mono text-[8px] text-[#383838] tracking-widest uppercase">
             Live Events
           </span>
-          <span className="ml-auto font-mono text-[8px] text-[#1a3850]">{liveEvents.length} captured</span>
+          <span className="ml-auto font-mono text-[8px] text-[#383838]">{liveEvents.length} captured</span>
         </div>
 
         <div className="h-[5.5rem] overflow-hidden px-4 py-1.5">
           {liveEvents.length === 0 ? (
-            <span className="font-mono text-[10px] text-[#0a2030]">Monitoring for events...</span>
+            <span className="font-mono text-[10px] text-[#1a1a1a]">Monitoring for events...</span>
           ) : (
             <div className="flex flex-col gap-0.5">
               {liveEvents.slice(0, 5).map(ev => (
                 <div key={ev.id} className="flex items-center gap-2.5 font-mono text-[10px]">
-                  <span className="text-[#1a3850] w-20 shrink-0">{ev.time.toLocaleTimeString()}</span>
+                  <span className="text-[#383838] w-20 shrink-0">{ev.time.toLocaleTimeString()}</span>
                   <div
                     className="w-1.5 h-1.5 rounded-full shrink-0"
                     style={{ backgroundColor: ev.color, boxShadow: `0 0 4px ${ev.color}` }}
                   />
-                  {/* Event type badge */}
                   <span
                     className="uppercase text-[8px] w-16 shrink-0 tracking-wide font-bold"
                     style={{ color: ev.color }}
@@ -956,9 +1051,9 @@ export function NetMapPage() {
                   <span className="uppercase w-10 shrink-0" style={{ color: svcColor(ev.service) }}>
                     {ev.service.slice(0, 8)}
                   </span>
-                  <span className="text-[#2a5a7a] w-28 truncate shrink-0">{ev.ip}</span>
-                  <span className="text-[#1a4060] shrink-0">→</span>
-                  <span className="text-[#3a7090]">
+                  <span className="text-[#555] w-28 truncate shrink-0">{ev.ip}</span>
+                  <span className="text-[#363636] shrink-0">→</span>
+                  <span className="text-[#666]">
                     {flag(ev.country)} {ev.country}
                   </span>
                   {ev.failures != null && ev.failures > 0 && (

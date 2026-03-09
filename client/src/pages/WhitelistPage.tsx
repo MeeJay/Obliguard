@@ -226,7 +226,9 @@ export function WhitelistPage() {
 
       const res = await fetch(`/api/whitelist?${params.toString()}`);
       if (!res.ok) throw new Error('Failed to load whitelist');
-      const data: IpWhitelist[] = await res.json();
+      const json = await res.json();
+      // API wraps responses in { success, data: [...] }
+      const data: IpWhitelist[] = Array.isArray(json) ? json : (json.data ?? []);
       setEntries(data);
     } catch {
       toast.error('Failed to load whitelist');
