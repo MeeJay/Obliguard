@@ -187,24 +187,24 @@ function drawBadge(
 ) {
   ctx.save();
   ctx.globalAlpha = alpha;
-  ctx.font = '7.5px "Courier New", monospace';
+  ctx.font = '7.5px "Inter", "Segoe UI", ui-sans-serif, sans-serif';
   const text = `${flagStr} ${ip}`;
   const tw   = ctx.measureText(text).width;
   const pad = 5, bh = 13, bw = tw + pad * 2;
   const bx = sx - bw / 2;
   const by = sy + dotR + 5;
   // Background
-  ctx.fillStyle = 'rgba(3,3,20,0.88)';
+  ctx.fillStyle = 'rgba(4,6,22,0.85)';
   ctx.beginPath();
   if (typeof ctx.roundRect === 'function') ctx.roundRect(bx, by, bw, bh, 3.5);
   else ctx.rect(bx, by, bw, bh);
   ctx.fill();
-  // Border
-  ctx.strokeStyle = color + '68';
-  ctx.lineWidth = 0.65;
+  // Border — status color (thin, tinted)
+  ctx.strokeStyle = color + '72';
+  ctx.lineWidth = 0.7;
   ctx.stroke();
-  // Text
-  ctx.fillStyle = color;
+  // Text — neutral light grey
+  ctx.fillStyle = '#c8d4df';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText(text, sx, by + bh / 2);
@@ -589,21 +589,14 @@ export function NetMapPage() {
         ctx.restore();
       }
 
-      // Core dot
+      // Core dot — neutral grey asteroid, status color via shadow glow only
       ctx.save();
       ctx.globalAlpha = alpha;
-      ctx.shadowBlur  = r * 2.5;
+      ctx.shadowBlur  = r * 2;
       ctx.shadowColor = ip.color;
-      ctx.fillStyle   = ip.color;
+      ctx.fillStyle   = '#c2cedd';
       ctx.beginPath();
       ctx.arc(ip.x, ip.y, r, 0, Math.PI * 2);
-      ctx.fill();
-      // Specular highlight
-      ctx.shadowBlur  = 0;
-      ctx.globalAlpha = alpha * 0.50;
-      ctx.fillStyle   = '#ffffff';
-      ctx.beginPath();
-      ctx.arc(ip.x - r * 0.26, ip.y - r * 0.26, Math.max(0.5, r * 0.34), 0, Math.PI * 2);
       ctx.fill();
       ctx.restore();
 
@@ -620,64 +613,55 @@ export function NetMapPage() {
       const alpha  = dimmed ? 0.22 : 1.0;
       const nr     = agent.r;
 
-      // Outer halo ring 1
+      // Halo ring — single, subtle, white
       ctx.save();
-      ctx.globalAlpha = alpha * (0.055 + pulse * 0.095);
-      ctx.strokeStyle = isSel ? '#aaffee' : '#22d3ee';
-      ctx.shadowBlur  = 22;
-      ctx.shadowColor = isSel ? '#aaffee' : '#22d3ee';
-      ctx.lineWidth   = 0.85 / k;
+      ctx.globalAlpha = alpha * (0.04 + pulse * 0.05);
+      ctx.strokeStyle = '#ddeeff';
+      ctx.shadowBlur  = 16;
+      ctx.shadowColor = '#ddeeff';
+      ctx.lineWidth   = 0.7 / k;
       ctx.beginPath();
-      ctx.arc(agent.x, agent.y, nr + 22 + pulse * 7, 0, Math.PI * 2);
+      ctx.arc(agent.x, agent.y, nr + 20 + pulse * 5, 0, Math.PI * 2);
       ctx.stroke();
       ctx.restore();
 
-      // Halo ring 2
-      ctx.save();
-      ctx.globalAlpha = alpha * (0.14 + pulse * 0.12);
-      ctx.strokeStyle = '#4dd9f0';
-      ctx.shadowBlur  = 14;
-      ctx.shadowColor = '#22d3ee';
-      ctx.lineWidth   = 0.90 / k;
-      ctx.beginPath();
-      ctx.arc(agent.x, agent.y, nr + 10, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.restore();
-
-      // Core radial glow
+      // Core radial glow — white, no blue tint
       ctx.save();
       ctx.globalAlpha = alpha;
-      ctx.shadowBlur  = 22;
-      ctx.shadowColor = isSel ? '#ffffff' : '#22d3ee';
+      ctx.shadowBlur  = 18;
+      ctx.shadowColor = '#ffffff';
       const g = ctx.createRadialGradient(agent.x, agent.y, 0, agent.x, agent.y, nr);
       g.addColorStop(0,    '#ffffff');
-      g.addColorStop(0.30, isSel ? '#ccffee' : '#88eeff');
-      g.addColorStop(1,    'rgba(34,211,238,0)');
+      g.addColorStop(0.42, 'rgba(220,235,255,0.48)');
+      g.addColorStop(1,    'rgba(200,220,255,0)');
       ctx.fillStyle = g;
       ctx.beginPath();
       ctx.arc(agent.x, agent.y, nr, 0, Math.PI * 2);
       ctx.fill();
       ctx.restore();
 
-      // Labels: NAME above · AGENT below (ARK Starmap)
+      // Label: NAME above — modern sans-serif, no sub-label
       const fs = Math.round(Math.max(9, 12 * Math.min(k, 1.2)));
       ctx.save();
-      ctx.globalAlpha  = alpha * 0.92;
-      ctx.font         = `bold ${fs}px "Courier New", monospace`;
-      ctx.fillStyle    = isSel ? '#ccffee' : '#d4f6ff';
+      ctx.globalAlpha  = alpha * 0.90;
+      ctx.font         = `600 ${fs}px "Inter", "Segoe UI", ui-sans-serif, sans-serif`;
+      ctx.fillStyle    = isSel ? '#f0f8ff' : '#ddeeff';
       ctx.textAlign    = 'center';
       ctx.textBaseline = 'bottom';
-      ctx.fillText(agent.label, agent.x, agent.y - nr - 8);
-      ctx.font         = `${Math.max(8, fs - 2)}px "Courier New", monospace`;
-      ctx.fillStyle    = '#22d3ee';
-      ctx.textBaseline = 'top';
-      ctx.fillText('AGENT', agent.x, agent.y + nr + 6);
+      ctx.shadowBlur   = 7;
+      ctx.shadowColor  = 'rgba(0,0,0,0.85)';
+      ctx.fillText(agent.label, agent.x, agent.y - nr - 7);
       ctx.restore();
     }
 
-    // ── IP badges (drawn after nodes so they appear on top) ──────────────
+    // ── IP badges — culling pour éviter les superpositions de texte ─────
+    const drawnPos: { x: number; y: number }[] = [];
     for (const b of badges) {
+      // Seuil en espace-monde : plus on est zoomé, plus on en montre
+      const minGap = 46 / k;
+      if (drawnPos.some(p => (p.x - b.sx) ** 2 + (p.y - b.sy) ** 2 < minGap * minGap)) continue;
       drawBadge(ctx, b.flag, b.ip, b.sx, b.sy, b.r, b.color, b.alpha);
+      drawnPos.push({ x: b.sx, y: b.sy });
     }
 
     // ── Flow particles ────────────────────────────────────────────────────
