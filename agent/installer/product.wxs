@@ -18,7 +18,7 @@
            Manufacturer="Obliguard"
            Version="AGENT_VERSION_PLACEHOLDER"
            Language="1033"
-           UpgradeCode="3A7B2C1D-4E5F-6789-ABCD-EF0123456789">
+           UpgradeCode="8D56E26E-B218-4788-81B6-4E5088F285F6">
 
     <MajorUpgrade DowngradeErrorMessage="A newer version of Obliguard Agent is already installed." />
     <MediaTemplate EmbedCab="yes" />
