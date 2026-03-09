@@ -3,20 +3,20 @@ import { Monitor, Apple, Download, ExternalLink, FolderOpen, Loader2, CheckCircl
 import { useTranslation } from 'react-i18next';
 
 // ── Native desktop-app Go bindings ───────────────────────────────────────────
-// These are injected by the Go overlay into window when running inside Obliview.
+// These are injected by the Go overlay into window when running inside Obliguard.
 
 type NativeWindow = Window & {
-  __obliview_is_native_app?: boolean;
+  __obliguard_is_native_app?: boolean;
   /** Returns the currently saved download folder, or "" if not yet set. */
   __go_getDownloadDir?: () => Promise<string>;
   /** Opens a native OS folder-picker, saves the choice, returns the path. Rejects on cancel. */
   __go_chooseDownloadDir?: () => Promise<string>;
-  /** Downloads relUrl from the Obliview server to the saved folder (opens picker if unset). Returns the full path. */
+  /** Downloads relUrl from the Obliguard server to the saved folder (opens picker if unset). Returns the full path. */
   __go_downloadFile?: (relUrl: string, filename: string) => Promise<string>;
 };
 
 const nw = typeof window !== 'undefined' ? (window as NativeWindow) : null;
-const isNativeApp = !!nw?.__obliview_is_native_app;
+const isNativeApp = !!nw?.__obliguard_is_native_app;
 
 // ── Static data ───────────────────────────────────────────────────────────────
 
@@ -47,13 +47,13 @@ export function DownloadPage() {
         {
           label: t('download.installer'),
           sublabel: t('download.installerSub'),
-          filename: 'ObliviewSetup.msi',
+          filename: 'ObliguardSetup.msi',
           primary: true,
         },
         {
           label: t('download.portable'),
           sublabel: t('download.portableSub'),
-          filename: 'Obliview.exe',
+          filename: 'Obliguard.exe',
         },
       ],
     },
@@ -64,24 +64,24 @@ export function DownloadPage() {
         {
           label: t('download.dmg'),
           sublabel: t('download.dmgSubArm'),
-          filename: 'Obliview-arm64.dmg',
+          filename: 'Obliguard-arm64.dmg',
           primary: true,
         },
         {
           label: t('download.dmg'),
           sublabel: t('download.dmgSubIntel'),
-          filename: 'Obliview-amd64.dmg',
+          filename: 'Obliguard-amd64.dmg',
           primary: true,
         },
         {
           label: t('download.zip'),
           sublabel: t('download.dmgSubArm'),
-          filename: 'Obliview-arm64.zip',
+          filename: 'Obliguard-arm64.zip',
         },
         {
           label: t('download.zip'),
           sublabel: t('download.dmgSubIntel'),
-          filename: 'Obliview-amd64.zip',
+          filename: 'Obliguard-amd64.zip',
         },
       ],
     },

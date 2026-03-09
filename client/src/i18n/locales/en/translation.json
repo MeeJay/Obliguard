@@ -87,6 +87,7 @@
     "settings": "Settings",
     "profile": "Profile",
     "downloadApp": "Download App",
+    "workspaces": "Workspaces",
     "signOut": "Sign out",
     "pinSidebar": "Pin sidebar",
     "floatSidebar": "Float sidebar"
@@ -164,7 +165,7 @@
 
     "language": {
       "title": "Choose your language",
-      "subtitle": "Select the language for the Obliview interface."
+      "subtitle": "Select the language for the Obliguard interface."
     },
 
     "profile": {
@@ -885,7 +886,7 @@
     "exported": "Export downloaded",
     "failedExport": "Export failed",
     "importTitle": "Import",
-    "importDesc": "Upload an Obliview export file.",
+    "importDesc": "Upload an Obliguard export file.",
     "dropzone": "Click or drag & drop an export file (.json)",
     "dropzoneActive": "Drop the file here",
     "sectionsFound": "{{count}} section(s) found",
@@ -909,7 +910,7 @@
   },
 
   "download": {
-    "title": "Obliview Desktop",
+    "title": "Obliguard Desktop",
     "description": "A lightweight native wrapper for your Obliview instance.\nGet system-level sound notifications and a distraction-free monitoring experience.",
     "downloadFolder": "Download folder: ",
     "downloadFolderPlaceholder": "Will ask on first download",

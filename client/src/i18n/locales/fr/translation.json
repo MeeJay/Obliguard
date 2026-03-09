@@ -84,6 +84,7 @@
     "settings": "Paramètres",
     "profile": "Profil",
     "downloadApp": "Télécharger l'appli",
+    "workspaces": "Workspaces",
     "signOut": "Se déconnecter"
   },
   "login": {
@@ -758,7 +759,7 @@
     "statSkipped": "{{count}} ignoré(s)"
   },
   "download": {
-    "title": "Obliview Desktop",
+    "title": "Obliguard Desktop",
     "description": "Une interface native légère pour votre instance Obliview.\nObtenez des notifications sonores et une expérience de surveillance sans distraction.",
     "downloadFolder": "Dossier de téléchargement : ",
     "downloadFolderPlaceholder": "Demandé au premier téléchargement",

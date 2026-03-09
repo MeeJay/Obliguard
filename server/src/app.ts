@@ -88,12 +88,12 @@ export function createApp() {
   // Desktop app downloads — serves pre-built binaries from desktop-app/dist/.
   // Whitelist prevents directory traversal; graceful 404 if a file isn't built yet.
   const DESKTOP_FILES: Record<string, string> = {
-    'Obliview.exe':          'Obliview.exe',          // Windows binary (portable)
-    'ObliviewSetup.msi':     'ObliviewSetup.msi',     // Windows installer (Start Menu shortcut)
-    'Obliview-arm64.zip':    'Obliview-arm64.zip',    // macOS Apple Silicon — .app zipped
-    'Obliview-amd64.zip':    'Obliview-amd64.zip',    // macOS Intel — .app zipped
-    'Obliview-arm64.dmg':    'Obliview-arm64.dmg',    // macOS Apple Silicon — drag-to-Applications DMG
-    'Obliview-amd64.dmg':    'Obliview-amd64.dmg',    // macOS Intel — drag-to-Applications DMG
+    'Obliguard.exe':          'Obliguard.exe',          // Windows binary (portable)
+    'ObliguardSetup.msi':     'ObliguardSetup.msi',     // Windows installer (Start Menu shortcut)
+    'Obliguard-arm64.zip':    'Obliguard-arm64.zip',    // macOS Apple Silicon — .app zipped
+    'Obliguard-amd64.zip':    'Obliguard-amd64.zip',    // macOS Intel — .app zipped
+    'Obliguard-arm64.dmg':    'Obliguard-arm64.dmg',    // macOS Apple Silicon — drag-to-Applications DMG
+    'Obliguard-amd64.dmg':    'Obliguard-amd64.dmg',    // macOS Intel — drag-to-Applications DMG
   };
   // process.cwd() = server/ directory (both in dev with npx tsx and in production).
   // Go one level up to reach the project root, then into desktop-app/dist.
