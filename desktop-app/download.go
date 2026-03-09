@@ -54,9 +54,9 @@ func revealFile(path string) {
 }
 
 // buildAbsoluteURL resolves a server-relative path against the saved server URL.
-// Example: ("http://192.168.1.1:3001", "/downloads/Obliview.exe")
+// Example: ("http://192.168.1.1:3001", "/downloads/Obliguard.exe")
 //
-//	→ "http://192.168.1.1:3001/downloads/Obliview.exe"
+//	→ "http://192.168.1.1:3001/downloads/Obliguard.exe"
 func buildAbsoluteURL(serverURL, relPath string) string {
 	return strings.TrimRight(serverURL, "/") + relPath
 }

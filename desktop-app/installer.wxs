@@ -1,20 +1,20 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  installer.wxs - WiX v4 source for the Obliview Windows installer
+  installer.wxs - WiX v4 source for the Obliguard Windows installer
 
   Requirements:
     dotnet tool install -global wix
     wix extension add WixToolset.UI.wixext  (optional, for UI)
 
   Build (from desktop-app/ directory):
-    wix build installer.wxs -o dist\ObliviewSetup.msi
+    wix build installer.wxs -o dist\ObliguardSetup.msi
 
   Or use build-windows.ps1 which handles the full pipeline.
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <Package
-      Name="Obliview"
-      Manufacturer="Obliview"
+      Name="Obliguard"
+      Manufacturer="Obliguard"
       Version="DESKTOP_VERSION_PLACEHOLDER"
       UpgradeCode="F8A2C3D4-E5B6-4789-9ABC-DEF012345678"
       Compressed="yes">
@@ -30,19 +30,19 @@
       If the user has a NEWER version, show a friendly error and abort.
     -->
     <MajorUpgrade
-        DowngradeErrorMessage="A newer version of Obliview is already installed. Uninstall it first." />
+        DowngradeErrorMessage="A newer version of Obliguard is already installed. Uninstall it first." />
 
-    <!-- Install to %ProgramFiles%\Obliview\ -->
+    <!-- Install to %ProgramFiles%\Obliguard\ -->
     <StandardDirectory Id="ProgramFilesFolder">
-      <Directory Id="INSTALLFOLDER" Name="Obliview">
+      <Directory Id="INSTALLFOLDER" Name="Obliguard">
 
         <!-- Main component: the executable + Start Menu shortcut -->
         <Component Id="MainExecutable">
-          <File Source="dist\Obliview.exe" KeyPath="yes">
+          <File Source="dist\Obliguard.exe" KeyPath="yes">
             <Shortcut
                 Id="StartMenuShortcut"
                 Directory="ProgramMenuFolder"
-                Name="Obliview"
+                Name="Obliguard"
                 WorkingDirectory="INSTALLFOLDER"
                 Icon="AppIcon"
                 Advertise="no" />
@@ -57,13 +57,13 @@
       <Component Id="DesktopShortcutComponent">
         <Shortcut
             Id="DesktopShortcut"
-            Name="Obliview"
+            Name="Obliguard"
             WorkingDirectory="INSTALLFOLDER"
-            Target="[INSTALLFOLDER]Obliview.exe"
+            Target="[INSTALLFOLDER]Obliguard.exe"
             Icon="AppIcon" />
         <RegistryValue
             Root="HKCU"
-            Key="Software\Obliview\Obliview"
+            Key="Software\Obliguard\Obliguard"
             Name="DesktopShortcut"
             Value="1"
             Type="integer"
@@ -75,7 +75,7 @@
     <StandardDirectory Id="ProgramMenuFolder" />
 
     <!-- Feature tree -->
-    <Feature Id="Main" Title="Obliview" Level="1" AllowAbsent="no">
+    <Feature Id="Main" Title="Obliguard" Level="1" AllowAbsent="no">
       <ComponentRef Id="MainExecutable" />
     </Feature>
 
@@ -86,7 +86,7 @@
     <!-- App icon (title bar, Add/Remove Programs) -->
     <Icon Id="AppIcon" SourceFile="logo.ico" />
     <Property Id="ARPPRODUCTICON" Value="AppIcon" />
-    <Property Id="ARPHELPLINK"    Value="https://obliview.app" />
+    <Property Id="ARPHELPLINK"    Value="https://obliguard.app" />
 
   </Package>
 </Wix>

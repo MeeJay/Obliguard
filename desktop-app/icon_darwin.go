@@ -39,7 +39,7 @@ static void setup_macos_menu(void) {
 		NSMenu *appMenu = [NSMenu new];
 		[appItem setSubmenu:appMenu];
 
-		[appMenu addItemWithTitle:@"Quit Obliview"
+		[appMenu addItemWithTitle:@"Quit Obliguard"
 		                   action:@selector(terminate:)
 		            keyEquivalent:@"q"];
 

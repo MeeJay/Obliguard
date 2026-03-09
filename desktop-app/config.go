@@ -26,15 +26,15 @@ type Config struct {
 }
 
 // configPath returns the OS-appropriate path for config.json:
-//   - Windows : %APPDATA%\Obliview\config.json
-//   - macOS   : ~/Library/Application Support/Obliview/config.json
-//   - Linux   : ~/.config/obliview/config.json
+//   - Windows : %APPDATA%\Obliguard\config.json
+//   - macOS   : ~/Library/Application Support/Obliguard/config.json
+//   - Linux   : ~/.config/obliguard/config.json
 func configPath() (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "Obliview", "config.json"), nil
+	return filepath.Join(dir, "Obliguard", "config.json"), nil
 }
 
 // loadConfig reads the config file and returns the parsed Config.

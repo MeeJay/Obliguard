@@ -24,9 +24,9 @@ var appVersion = "1.0.0"
 //     same-origin navigations that don't fully reload the engine.
 //
 // Exposes:
-//   - window.__obliview_is_native_app = true   (React app uses this to hide
+//   - window.__obliguard_is_native_app = true   (React app uses this to hide
 //     the "Download App" header link)
-//   - Listens for 'obliview:notify' CustomEvents dispatched by the React app
+//   - Listens for 'obliguard:notify' CustomEvents dispatched by the React app
 //     and plays a distinct audio beep per notification type:
 //       probe_down  · probe_up  · agent_alert  · agent_fixed
 //   - Bottom-right ⚙ gear button that opens a URL-change dialog.
@@ -35,7 +35,7 @@ const overlayJS = `(function(){
   if(!/^https?:/.test(location.protocol))return;
   if(window.__ov_injected)return;
   window.__ov_injected=true;
-  window.__obliview_is_native_app=true;
+  window.__obliguard_is_native_app=true;
 
   /* ── Sounds ──────────────────────────────────────────────── */
   function tone(f,t,d,v){
@@ -69,7 +69,7 @@ const overlayJS = `(function(){
       setTimeout(function(){tone(784,'sine',.2,.08)},230);
     }
   };
-  window.addEventListener('obliview:notify',function(e){
+  window.addEventListener('obliguard:notify',function(e){
     var f=S[e.detail&&e.detail.type];
     if(f)f();
   });
@@ -81,9 +81,9 @@ const overlayJS = `(function(){
     var bx=document.createElement('div');
     bx.style.cssText='background:#1e1e2e;border:1px solid rgba(255,255,255,.12);border-radius:12px;padding:28px 32px;width:400px;color:#e0e0e0;font-family:system-ui,sans-serif;box-shadow:0 20px 60px rgba(0,0,0,.55)';
     bx.innerHTML=
-      '<h3 style="margin:0 0 8px;font-size:16px;font-weight:600;color:#fff">Change Obliview URL</h3>'+
-      '<p style="margin:0 0 18px;font-size:13px;color:#888;line-height:1.55">Enter the URL of your Obliview server. The app will reload.</p>'+
-      '<input id="__ov_i" type="url" placeholder="https://obliview.example.com"'+
+      '<h3 style="margin:0 0 8px;font-size:16px;font-weight:600;color:#fff">Change Obliguard URL</h3>'+
+      '<p style="margin:0 0 18px;font-size:13px;color:#888;line-height:1.55">Enter the URL of your Obliguard server. The app will reload.</p>'+
+      '<input id="__ov_i" type="url" placeholder="https://obliguard.example.com"'+
         ' style="width:100%;box-sizing:border-box;padding:9px 12px;background:#252538;border:1px solid rgba(255,255,255,.15);border-radius:6px;color:#e0e0e0;font-size:14px;outline:none;margin-bottom:16px">'+
       '<div style="display:flex;gap:8px;justify-content:flex-end">'+
         '<button id="__ov_c" style="padding:7px 16px;border-radius:6px;background:transparent;border:1px solid rgba(255,255,255,.15);color:#aaa;cursor:pointer;font-size:13px">Cancel</button>'+
@@ -110,7 +110,7 @@ const overlayJS = `(function(){
     if(document.getElementById('__ov_g'))return;
     var b=document.createElement('button');
     b.id='__ov_g';
-    b.title='Change Obliview URL';
+    b.title='Change Obliguard URL';
     b.textContent='\u2699';
     b.style.cssText=[
       'position:fixed','bottom:14px','right:14px',
@@ -197,7 +197,7 @@ const tabBarJS = `(function(){
       if(res[0].ok){var da=await res[0].json();tenants=da.data||[];}
       if(res[1].ok){var db=await res[1].json();currentTenantId=(db.data&&db.data.currentTenantId)||null;}
     }catch(e){
-      console.warn('[obliview-tabs] bootstrap fetch error:',e);
+      console.warn('[obliguard-tabs] bootstrap fetch error:',e);
       return;
     }
     if(tenants.length<=1)return;
@@ -221,7 +221,7 @@ const tabBarJS = `(function(){
         injectBar(tenants,currentTenantId,tabCfg);
         startCyclers(tenants,currentTenantId,tabCfg);
       }catch(e){
-        console.error('[obliview-tabs] injectBar error:',e);
+        console.error('[obliguard-tabs] injectBar error:',e);
       }
     });
   })();
@@ -712,7 +712,7 @@ const setupHTML = `<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Obliview</title>
+<title>Obliguard</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#0f0f17;color:#e0e0e0;font-family:system-ui,-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh}
@@ -735,12 +735,12 @@ button:hover{opacity:.88}
 <div class="card">
   <div class="logo">
     <div class="ico">&#x1F441;</div>
-    <div class="name">Obliview</div>
+    <div class="name">Obliguard</div>
   </div>
   <h2>Welcome</h2>
-  <p>Enter the URL of your Obliview instance to connect. You can change it at any time using the &#x2699; icon.</p>
+  <p>Enter the URL of your Obliguard instance to connect. You can change it at any time using the &#x2699; icon.</p>
   <label>Server URL</label>
-  <input id="u" type="url" placeholder="https://obliview.example.com" autocomplete="off">
+  <input id="u" type="url" placeholder="https://obliguard.example.com" autocomplete="off">
   <button onclick="go()">Connect &#x2192;</button>
   <div class="err" id="e"></div>
 </div>
@@ -778,7 +778,7 @@ func main() {
 	w := webview.New(false)
 	defer w.Destroy()
 
-	w.SetTitle("Obliview")
+	w.SetTitle("Obliguard")
 	w.SetSize(winW, winH, webview.HintNone)
 
 	// Apply the app icon to the window (title bar on Windows, Dock on macOS).
@@ -792,10 +792,10 @@ func main() {
 	if err := w.Bind("__go_saveURL", func(url string) {
 		cfg.URL = url
 		if err := saveConfig(cfg); err != nil {
-			fmt.Println("[obliview] error saving config:", err)
+			fmt.Println("[obliguard] error saving config:", err)
 		}
 	}); err != nil {
-		fmt.Println("[obliview] bind error:", err)
+		fmt.Println("[obliguard] bind error:", err)
 	}
 
 	// __go_saveSize is called from overlayJS (debounced resize listener).
@@ -806,7 +806,7 @@ func main() {
 			cfg.Height = int(height)
 		}
 	}); err != nil {
-		fmt.Println("[obliview] bind error:", err)
+		fmt.Println("[obliguard] bind error:", err)
 	}
 
 	// __go_getDownloadDir returns the currently saved download folder (or "" if
@@ -814,7 +814,7 @@ func main() {
 	if err := w.Bind("__go_getDownloadDir", func() string {
 		return cfg.DownloadDir
 	}); err != nil {
-		fmt.Println("[obliview] bind error:", err)
+		fmt.Println("[obliguard] bind error:", err)
 	}
 
 	// __go_chooseDownloadDir opens a native OS folder-picker dialog, persists
@@ -826,18 +826,18 @@ func main() {
 		}
 		cfg.DownloadDir = dir
 		if saveErr := saveConfig(cfg); saveErr != nil {
-			fmt.Println("[obliview] error saving config:", saveErr)
+			fmt.Println("[obliguard] error saving config:", saveErr)
 		}
 		return dir, nil
 	}); err != nil {
-		fmt.Println("[obliview] bind error:", err)
+		fmt.Println("[obliguard] bind error:", err)
 	}
 
-	// __go_downloadFile(relURL, filename) downloads a file from the Obliview
+	// __go_downloadFile(relURL, filename) downloads a file from the Obliguard
 	// server to the configured download folder. Opens the folder-picker first
 	// if no download folder has been set yet. After a successful download the
 	// file is revealed in the system file manager.
-	// relURL is a server-relative path such as "/downloads/ObliviewSetup.msi".
+	// relURL is a server-relative path such as "/downloads/ObliguardSetup.msi".
 	if err := w.Bind("__go_downloadFile", func(relURL, filename string) (string, error) {
 		dir := cfg.DownloadDir
 		if dir == "" {
@@ -847,7 +847,7 @@ func main() {
 			}
 			cfg.DownloadDir = chosen
 			if saveErr := saveConfig(cfg); saveErr != nil {
-				fmt.Println("[obliview] error saving config:", saveErr)
+				fmt.Println("[obliguard] error saving config:", saveErr)
 			}
 			dir = chosen
 		}
@@ -859,7 +859,7 @@ func main() {
 		revealFile(dest)
 		return dest, nil
 	}); err != nil {
-		fmt.Println("[obliview] bind error:", err)
+		fmt.Println("[obliguard] bind error:", err)
 	}
 
 	// __go_getTabConfig returns the current tab-cycling configuration.
@@ -867,7 +867,7 @@ func main() {
 	if err := w.Bind("__go_getTabConfig", func() TabConfig {
 		return cfg.TabConfig
 	}); err != nil {
-		fmt.Println("[obliview] bind error:", err)
+		fmt.Println("[obliguard] bind error:", err)
 	}
 
 	// __go_saveTabConfig persists tab-cycling settings to disk.
@@ -878,10 +878,10 @@ func main() {
 		cfg.TabConfig.AutoCycleIntervalS = int(autoCycleIntervalS)
 		cfg.TabConfig.FollowAlertsEnabled = followAlertsEnabled
 		if err := saveConfig(cfg); err != nil {
-			fmt.Println("[obliview] error saving tab config:", err)
+			fmt.Println("[obliguard] error saving tab config:", err)
 		}
 	}); err != nil {
-		fmt.Println("[obliview] bind error:", err)
+		fmt.Println("[obliguard] bind error:", err)
 	}
 
 	// Inject the overlay script on every page load.
@@ -890,13 +890,13 @@ func main() {
 	w.Init(tabBarJS)
 	// Inject the app version so the React app can compare against the server's
 	// latest-desktop-version endpoint and show an update banner if needed.
-	w.Init(fmt.Sprintf("window.__obliview_app_version=%q;", appVersion))
+	w.Init(fmt.Sprintf("window.__obliguard_app_version=%q;", appVersion))
 
 	if cfg.URL == "" {
 		// First run — show the local setup page.
 		w.SetHtml(setupHTML)
 	} else {
-		// Navigate directly to the configured Obliview instance.
+		// Navigate directly to the configured Obliguard instance.
 		w.Navigate(cfg.URL)
 	}
 
@@ -904,6 +904,6 @@ func main() {
 
 	// Window closed — persist the final config (URL + last-known window size).
 	if err := saveConfig(cfg); err != nil {
-		fmt.Println("[obliview] error saving config on exit:", err)
+		fmt.Println("[obliguard] error saving config on exit:", err)
 	}
 }
