@@ -1,13 +1,13 @@
 #!/bin/sh
 set -e
 
-REPO="https://raw.githubusercontent.com/MeeJay/obliview/main"
-INSTALL_DIR="${OBLIVIEW_DIR:-./obliview}"
+REPO="https://raw.githubusercontent.com/MeeJay/obliguard/main"
+INSTALL_DIR="${OBLIGUARD_DIR:-./obliguard}"
 
 echo ""
-echo "  ╔═══════════════════════════════╗"
-echo "  ║     Obliview — Installer      ║"
-echo "  ╚═══════════════════════════════╝"
+echo "  ╔════════════════════════════════╗"
+echo "  ║     Obliguard — Installer      ║"
+echo "  ╚════════════════════════════════╝"
 echo ""
 
 # Check docker
@@ -62,17 +62,17 @@ fi
 # Create custom directory structure
 mkdir -p custom/scripts custom/.ssh
 
-echo "→ Starting Obliview..."
+echo "→ Starting Obliguard..."
 echo ""
 docker compose pull
 docker compose up -d
 
 echo ""
-echo "  ╔══════════════════════════════════════╗"
-echo "  ║        Obliview is running!          ║"
-echo "  ╚══════════════════════════════════════╝"
+echo "  ╔═══════════════════════════════════════╗"
+echo "  ║        Obliguard is running!          ║"
+echo "  ╚═══════════════════════════════════════╝"
 echo ""
-echo "  → Open: http://localhost:3000"
+echo "  → Open: http://localhost:3002"
 echo "  → Default login: admin / admin123"
 echo "  → Change the default password after first login!"
 echo ""

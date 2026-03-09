@@ -90,7 +90,7 @@ func setupConfig(urlArg, keyArg string) *Config {
 	if cfg == nil {
 		if urlArg == "" || keyArg == "" {
 			fmt.Fprintf(os.Stderr, "First run: provide --url <serverUrl> --key <apiKey>\n")
-			fmt.Fprintf(os.Stderr, "Example: obliview-agent --url https://obliguard.example.com --key your-api-key\n")
+			fmt.Fprintf(os.Stderr, "Example: obliguard-agent --url https://obliguard.example.com --key your-api-key\n")
 			os.Exit(1)
 		}
 		cfg = &Config{
@@ -318,8 +318,8 @@ func applyUpdateIfNewer(cfg *Config, remoteVersion string) {
 // SERVERURL and APIKEY are forwarded so that the service arguments in the MSI
 // are populated even when config.json already exists (belt-and-suspenders).
 func applyWindowsMSIUpdate(msiPath, serverURL, apiKey string) error {
-	logPath := filepath.Join(os.TempDir(), "obliview-update.log")
-	scriptPath := filepath.Join(os.TempDir(), "obliview-msi-update.bat")
+	logPath := filepath.Join(os.TempDir(), "obliguard-update.log")
+	scriptPath := filepath.Join(os.TempDir(), "obliguard-msi-update.bat")
 	script := fmt.Sprintf(
 		"@echo off\r\n"+
 			"timeout /t 2 /nobreak >nul\r\n"+

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Obliview Agent Installer for Linux
+# Obliguard Agent Installer for Linux
 # Usage: curl -fsSL "https://your-server/api/agent/installer/linux?key=<apikey>" | bash
 # Or:    bash install.sh --url https://your-server --key <apikey>
 
@@ -7,10 +7,10 @@ set -e
 
 SERVER_URL="__SERVER_URL__"
 API_KEY="__API_KEY__"
-INSTALL_DIR="/opt/obliview-agent"
-CONFIG_DIR="/etc/obliview-agent"
-SERVICE_NAME="obliview-agent"
-BINARY_NAME="obliview-agent"
+INSTALL_DIR="/opt/obliguard-agent"
+CONFIG_DIR="/etc/obliguard-agent"
+SERVICE_NAME="obliguard-agent"
+BINARY_NAME="obliguard-agent"
 
 # Parse args (override injected values)
 for i in "$@"; do
@@ -30,7 +30,7 @@ if [ -z "$API_KEY" ] || [ "$API_KEY" = "__API_KEY__" ]; then
 fi
 
 echo "=============================="
-echo " Obliview Agent Installer"
+echo " Obliguard Agent Installer"
 echo "=============================="
 echo "Server URL : $SERVER_URL"
 echo "Install dir: $INSTALL_DIR"
@@ -54,7 +54,7 @@ echo "[1/4] Architecture: $ARCH"
 
 echo "[2/4] Downloading agent binary..."
 mkdir -p "$INSTALL_DIR"
-curl -fsSL "${SERVER_URL}/api/agent/download/obliview-agent-${BINARY_SUFFIX}" \
+curl -fsSL "${SERVER_URL}/api/agent/download/obliguard-agent-${BINARY_SUFFIX}" \
   -o "$INSTALL_DIR/$BINARY_NAME"
 chmod +x "$INSTALL_DIR/$BINARY_NAME"
 
@@ -85,7 +85,7 @@ echo "[4/4] Installing service..."
 if command -v systemctl &>/dev/null; then
   cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<EOF
 [Unit]
-Description=Obliview Monitoring Agent
+Description=Obliguard Monitoring Agent
 After=network.target
 StartLimitIntervalSec=0
 
@@ -136,6 +136,6 @@ echo ""
 echo "=============================="
 echo " Installation complete!"
 echo " The agent will appear in"
-echo " the Obliview admin panel"
+echo " the Obliguard admin panel"
 echo " once approved."
 echo "=============================="

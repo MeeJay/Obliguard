@@ -1,4 +1,4 @@
-// Obliview Agent — Diagnostic tool
+// Obliguard Agent — Diagnostic tool
 // Compile + run on the target machine to check which metrics work.
 //
 // Usage (from the agent/ directory):
@@ -31,7 +31,7 @@ func info(label, val string)  { fmt.Printf("  ℹ️   %-28s  → %s\n", label, 
 func sep(title string) { fmt.Printf("\n── %s %s\n", title, strings.Repeat("─", 40-len(title))) }
 
 func main() {
-	fmt.Printf("\nObliview Agent — Diagnostics\n")
+	fmt.Printf("\nObliguard Agent — Diagnostics\n")
 	fmt.Printf("Platform : %s / %s\n", runtime.GOOS, runtime.GOARCH)
 
 	// ── OS Info ───────────────────────────────────────────────────────────────

@@ -1,5 +1,5 @@
 # ============================================================
-# Obliview Agent - Windows Temperature Diagnostic v3
+# Obliguard Agent - Windows Temperature Diagnostic v3
 # Focused on: NVMe temps + ASUS ATK WMI driver
 # Run as Administrator for full sensor access.
 # ============================================================

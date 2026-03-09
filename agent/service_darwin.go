@@ -12,10 +12,10 @@ import (
 )
 
 const (
-	launchdLabel    = "com.obliview.agent"
-	launchdPlist    = "/Library/LaunchDaemons/com.obliview.agent.plist"
-	installBinPath  = "/usr/local/bin/obliview-agent"
-	logFile         = "/var/log/obliview-agent.log"
+	launchdLabel    = "com.obliguard.agent"
+	launchdPlist    = "/Library/LaunchDaemons/com.obliguard.agent.plist"
+	installBinPath  = "/usr/local/bin/obliguard-agent"
+	logFile         = "/var/log/obliguard-agent.log"
 )
 
 // runAsService checks for "install" / "uninstall" positional arguments
@@ -37,13 +37,13 @@ func runAsService(urlFlag, keyFlag *string) bool {
 }
 
 // installLaunchdService:
-//  1. Initialises the agent config (saves to /etc/obliview-agent/config.json)
-//  2. Copies the current binary to /usr/local/bin/obliview-agent
+//  1. Initialises the agent config (saves to /etc/obliguard-agent/config.json)
+//  2. Copies the current binary to /usr/local/bin/obliguard-agent
 //  3. Writes the launchd plist
 //  4. Loads the daemon (launchctl load)
 func installLaunchdService(urlArg, keyArg string) {
 	if urlArg == "" || keyArg == "" {
-		fmt.Fprintln(os.Stderr, "Usage: sudo obliview-agent --url <URL> --key <KEY> install")
+		fmt.Fprintln(os.Stderr, "Usage: sudo obliguard-agent --url <URL> --key <KEY> install")
 		os.Exit(1)
 	}
 
@@ -118,10 +118,10 @@ func installLaunchdService(urlArg, keyArg string) {
 		os.Exit(1)
 	}
 
-	fmt.Printf("\n✓ Obliview Agent installed and running (label: %s)\n", launchdLabel)
+	fmt.Printf("\n✓ Obliguard Agent installed and running (label: %s)\n", launchdLabel)
 	fmt.Printf("  Logs: %s\n", logFile)
 	fmt.Println("  To stop:      sudo launchctl unload " + launchdPlist)
-	fmt.Println("  To uninstall: sudo obliview-agent uninstall")
+	fmt.Println("  To uninstall: sudo obliguard-agent uninstall")
 	_ = cfg // config already saved
 }
 
@@ -140,7 +140,7 @@ func uninstallLaunchdService() {
 		}
 	}
 
-	fmt.Println("\n✓ Obliview Agent uninstalled.")
+	fmt.Println("\n✓ Obliguard Agent uninstalled.")
 	fmt.Println("  Config and logs were kept. Remove manually if needed:")
 	fmt.Printf("    sudo rm -rf %s %s\n", configDir, logFile)
 }

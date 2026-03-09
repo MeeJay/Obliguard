@@ -18,7 +18,7 @@ type agentSvc struct {
 // Execute implements svc.Handler — called by the Windows SCM when the service starts.
 func (s *agentSvc) Execute(_ []string, r <-chan svc.ChangeRequest, status chan<- svc.Status) (bool, uint32) {
 	// In service mode, stderr goes to NUL — redirect log to a file so it's readable.
-	// Log file: C:\ProgramData\ObliviewAgent\agent.log
+	// Log file: C:\ProgramData\ObliguardAgent\agent.log
 	logPath := filepath.Join(configDir, "agent.log")
 	if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644); err == nil {
 		log.SetOutput(f)
@@ -42,7 +42,7 @@ func (s *agentSvc) Execute(_ []string, r <-chan svc.ChangeRequest, status chan<-
 		c := <-r
 		switch c.Cmd {
 		case svc.Stop, svc.Shutdown:
-			log.Printf("Obliview Agent stopping...")
+			log.Printf("Obliguard Agent stopping...")
 			status <- svc.Status{State: svc.StopPending}
 			return false, 0
 		case svc.Interrogate:
@@ -61,7 +61,7 @@ func runAsService(urlFlag, keyFlag *string) bool {
 	if !isService {
 		return false
 	}
-	if err := svc.Run("ObliviewAgent", &agentSvc{urlFlag, keyFlag}); err != nil {
+	if err := svc.Run("ObliguardAgent", &agentSvc{urlFlag, keyFlag}); err != nil {
 		log.Fatalf("Service run failed: %v", err)
 	}
 	return true

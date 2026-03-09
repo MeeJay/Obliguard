@@ -348,8 +348,8 @@ export function ImportExportPage() {
           {t('importExport.description')}
         </p>
         <a
-          href="/obliview-import-example.json"
-          download="obliview-import-example.json"
+          href="/obliguard-import-example.json"
+          download="obliguard-import-example.json"
           className="mt-2 inline-flex items-center gap-1.5 text-xs text-accent hover:underline"
         >
           <ExternalLink size={11} />

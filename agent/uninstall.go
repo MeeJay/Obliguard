@@ -50,13 +50,13 @@ func handleUninstallCommand(cfg *Config) {
 // PawnIO kernel driver (via WiX ServiceControl + CA.UninstallPawnIO).
 func handleWindowsUninstall(cfg *Config) error {
 	// Download the MSI to a temp path
-	msiPath := filepath.Join(os.TempDir(), "obliview-uninstall.msi")
-	if err := downloadFile(cfg.ServerURL+"/api/agent/download/obliview-agent.msi", msiPath); err != nil {
+	msiPath := filepath.Join(os.TempDir(), "obliguard-uninstall.msi")
+	if err := downloadFile(cfg.ServerURL+"/api/agent/download/obliguard-agent.msi", msiPath); err != nil {
 		return fmt.Errorf("download MSI: %w", err)
 	}
 
-	logPath := filepath.Join(os.TempDir(), "obliview-uninstall.log")
-	scriptPath := filepath.Join(os.TempDir(), "obliview-uninstall.bat")
+	logPath := filepath.Join(os.TempDir(), "obliguard-uninstall.log")
+	scriptPath := filepath.Join(os.TempDir(), "obliguard-uninstall.bat")
 
 	script := fmt.Sprintf(
 		"@echo off\r\n"+
@@ -76,20 +76,20 @@ func handleWindowsUninstall(cfg *Config) error {
 // ── Linux ─────────────────────────────────────────────────────────────────────
 
 // handleLinuxUninstall writes a shell script that stops and removes the
-// obliview-agent systemd (or init.d) service and its binary, then runs it
+// obliguard-agent systemd (or init.d) service and its binary, then runs it
 // detached so it survives the agent process exit.
 func handleLinuxUninstall() error {
-	scriptPath := "/tmp/obliview-uninstall.sh"
+	scriptPath := "/tmp/obliguard-uninstall.sh"
 	script := "#!/bin/sh\n" +
 		"sleep 2\n" +
 		// Stop and disable — works for both systemd and SysV init
-		"systemctl stop obliview-agent 2>/dev/null || service obliview-agent stop 2>/dev/null || true\n" +
-		"systemctl disable obliview-agent 2>/dev/null || true\n" +
+		"systemctl stop obliguard-agent 2>/dev/null || service obliguard-agent stop 2>/dev/null || true\n" +
+		"systemctl disable obliguard-agent 2>/dev/null || true\n" +
 		// Remove service unit / init script
-		"rm -f /etc/systemd/system/obliview-agent.service /etc/init.d/obliview-agent\n" +
+		"rm -f /etc/systemd/system/obliguard-agent.service /etc/init.d/obliguard-agent\n" +
 		"systemctl daemon-reload 2>/dev/null || true\n" +
-		// Remove binary and install directory (config at /etc/obliview-agent/ is kept)
-		"rm -rf /opt/obliview-agent/\n" +
+		// Remove binary and install directory (config at /etc/obliguard-agent/ is kept)
+		"rm -rf /opt/obliguard-agent/\n" +
 		// Self-delete
 		"rm -f \"$0\"\n"
 
@@ -104,13 +104,13 @@ func handleLinuxUninstall() error {
 
 // handleDarwinUninstall writes a shell script that unloads the launchd daemon,
 // removes the plist and the installed binary, then runs it detached.
-// Config and logs at /etc/obliview-agent/ and /var/log/obliview-agent.log are
-// preserved (same behaviour as `obliview-agent uninstall`).
+// Config and logs at /etc/obliguard-agent/ and /var/log/obliguard-agent.log are
+// preserved (same behaviour as `obliguard-agent uninstall`).
 func handleDarwinUninstall() error {
-	const plist = "/Library/LaunchDaemons/com.obliview.agent.plist"
-	const binary = "/usr/local/bin/obliview-agent"
+	const plist = "/Library/LaunchDaemons/com.obliguard.agent.plist"
+	const binary = "/usr/local/bin/obliguard-agent"
 
-	scriptPath := "/tmp/obliview-uninstall.sh"
+	scriptPath := "/tmp/obliguard-uninstall.sh"
 	script := "#!/bin/sh\n" +
 		"sleep 2\n" +
 		// Unload the launchd daemon (prevents auto-restart)

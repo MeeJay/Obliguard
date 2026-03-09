@@ -1,5 +1,5 @@
 #!/bin/bash
-# Obliview Agent Installer for macOS (Intel + Apple Silicon)
+# Obliguard Agent Installer for macOS (Intel + Apple Silicon)
 #
 # Recommended usage (key pre-injected by server):
 #   sudo bash -c "$(curl -fsSL 'https://your-server/api/agent/installer/macos?key=<apikey>')"
@@ -11,7 +11,7 @@ set -e
 
 SERVER_URL="__SERVER_URL__"
 API_KEY="__API_KEY__"
-TMP_BINARY="/tmp/obliview-agent-install"
+TMP_BINARY="/tmp/obliguard-agent-install"
 
 # ── Parse optional override args ──────────────────────────────────────────────
 
@@ -27,12 +27,12 @@ done
 
 if [ -z "$SERVER_URL" ] || [ "$SERVER_URL" = "__SERVER_URL__" ]; then
   echo "Error: Server URL not set."
-  echo "Use the URL provided in the Obliview admin panel, or pass --url <serverUrl>."
+  echo "Use the URL provided in the Obliguard admin panel, or pass --url <serverUrl>."
   exit 1
 fi
 if [ -z "$API_KEY" ] || [ "$API_KEY" = "__API_KEY__" ]; then
   echo "Error: API key not set."
-  echo "Use the URL provided in the Obliview admin panel, or pass --key <apiKey>."
+  echo "Use the URL provided in the Obliguard admin panel, or pass --key <apiKey>."
   exit 1
 fi
 
@@ -47,7 +47,7 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 echo "=============================="
-echo " Obliview Agent Installer"
+echo " Obliguard Agent Installer"
 echo " macOS"
 echo "=============================="
 echo "Server : $SERVER_URL"
@@ -65,12 +65,12 @@ case "$ARCH" in
     ;;
 esac
 
-echo "[1/3] Architecture: $ARCH → obliview-agent-${BINARY_SUFFIX}"
+echo "[1/3] Architecture: $ARCH → obliguard-agent-${BINARY_SUFFIX}"
 
 # ── 2. Download agent binary ──────────────────────────────────────────────────
 
 echo "[2/3] Downloading binary..."
-curl -fsSL "${SERVER_URL}/api/agent/download/obliview-agent-${BINARY_SUFFIX}" \
+curl -fsSL "${SERVER_URL}/api/agent/download/obliguard-agent-${BINARY_SUFFIX}" \
   -o "$TMP_BINARY"
 chmod +x "$TMP_BINARY"
 
@@ -79,9 +79,9 @@ chmod +x "$TMP_BINARY"
 echo "[3/3] Installing service..."
 
 # The binary's "install" subcommand:
-#   - Writes /etc/obliview-agent/config.json (generates device UUID)
-#   - Copies itself to /usr/local/bin/obliview-agent
-#   - Writes /Library/LaunchDaemons/com.obliview.agent.plist
+#   - Writes /etc/obliguard-agent/config.json (generates device UUID)
+#   - Copies itself to /usr/local/bin/obliguard-agent
+#   - Writes /Library/LaunchDaemons/com.obliguard.agent.plist
 #   - Runs: launchctl load <plist>
 "$TMP_BINARY" --url "$SERVER_URL" --key "$API_KEY" install
 
@@ -93,9 +93,9 @@ echo "=============================="
 echo " Installation complete!"
 echo ""
 echo " The agent is now running and"
-echo " will appear in the Obliview"
+echo " will appear in the Obliguard"
 echo " admin panel once approved."
 echo ""
 echo " To uninstall:"
-echo "   sudo obliview-agent uninstall"
+echo "   sudo obliguard-agent uninstall"
 echo "=============================="

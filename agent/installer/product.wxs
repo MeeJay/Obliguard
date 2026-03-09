@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Obliview Agent - Windows MSI Installer
+  Obliguard Agent - Windows MSI Installer
   Built with WiX v4+ on Windows.
 
   Prerequisites (one-time setup):
@@ -11,16 +11,16 @@
     build-msi.bat
 
   Install command:
-    msiexec /i obliview-agent.msi SERVERURL="https://..." APIKEY="your-key" /quiet
+    msiexec /i obliguard-agent.msi SERVERURL="https://..." APIKEY="your-key" /quiet
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
-  <Package Name="Obliview Agent"
-           Manufacturer="Obliview"
+  <Package Name="Obliguard Agent"
+           Manufacturer="Obliguard"
            Version="AGENT_VERSION_PLACEHOLDER"
            Language="1033"
            UpgradeCode="3A7B2C1D-4E5F-6789-ABCD-EF0123456789">
 
-    <MajorUpgrade DowngradeErrorMessage="A newer version of Obliview Agent is already installed." />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Obliguard Agent is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
     <!-- Properties passed via: msiexec /i ... SERVERURL="..." APIKEY="..." -->
@@ -28,7 +28,7 @@
     <Property Id="APIKEY" Secure="yes" />
 
     <StandardDirectory Id="ProgramFiles64Folder">
-      <Directory Id="INSTALLFOLDER" Name="ObliviewAgent">
+      <Directory Id="INSTALLFOLDER" Name="ObliguardAgent">
 
         <!--
           The Go binary is a proper Windows service executable.
@@ -45,19 +45,19 @@
             on disk (e.g. leftover from a failed previous install), leaving the wrong binary in place.
             65535.0.0.0 is always greater than any real version, so the source file always wins.
           -->
-          <File Id="AgentExeFile" Source="dist\obliview-agent.exe" Name="obliview-agent.exe"
+          <File Id="AgentExeFile" Source="dist\obliguard-agent.exe" Name="obliguard-agent.exe"
                 DefaultVersion="65535.0.0.0" />
           <ServiceInstall Id="AgentSvc"
-                          Name="ObliviewAgent"
-                          DisplayName="Obliview Monitoring Agent"
-                          Description="Sends system metrics to the Obliview monitoring platform."
+                          Name="ObliguardAgent"
+                          DisplayName="Obliguard Monitoring Agent"
+                          Description="Sends system metrics to the Obliguard monitoring platform."
                           Start="auto"
                           Type="ownProcess"
                           Account="LocalSystem"
                           ErrorControl="normal"
                           Arguments='--url "[SERVERURL]" --key "[APIKEY]"' />
-          <ServiceControl Id="AgentSvcStart" Name="ObliviewAgent" Start="install" />
-          <ServiceControl Id="AgentSvcStop"  Name="ObliviewAgent" Stop="both" Remove="uninstall" Wait="yes" />
+          <ServiceControl Id="AgentSvcStart" Name="ObliguardAgent" Start="install" />
+          <ServiceControl Id="AgentSvcStop"  Name="ObliguardAgent" Stop="both" Remove="uninstall" Wait="yes" />
         </Component>
 
         <!--
@@ -121,9 +121,9 @@
           Written to 64-bit hive via -arch x64 build flag.
         -->
         <Component Id="AgentConfig" Guid="B2C3D4E5-F6A7-8901-BCDE-EF1234560002">
-          <RegistryValue Root="HKLM" Key="SOFTWARE\ObliviewAgent"
+          <RegistryValue Root="HKLM" Key="SOFTWARE\ObliguardAgent"
                          Name="ServerUrl" Type="string" Value="[SERVERURL]" KeyPath="yes" />
-          <RegistryValue Root="HKLM" Key="SOFTWARE\ObliviewAgent"
+          <RegistryValue Root="HKLM" Key="SOFTWARE\ObliguardAgent"
                          Name="ApiKey"    Type="string" Value="[APIKEY]" />
         </Component>
 
@@ -137,7 +137,7 @@
                            Runs PawnIO_setup.exe -install -silent to install and start
                            the PawnIO kernel driver.  Return="asyncNoWait" so the driver
                            installs in the background and MSI immediately continues to
-                           StartServices (starts ObliviewAgent) without waiting.
+                           StartServices (starts ObliguardAgent) without waiting.
                            Condition: only on fresh install or reinstall.
 
       CA.UninstallPawnIO — deferred, elevated, Before RemoveFiles.
@@ -152,7 +152,7 @@
       Return="asyncNoWait" is critical here.
       Return="ignore" only ignores the exit code but STILL WAITS for the process to finish.
       If PawnIO_setup.exe -install hangs (e.g. when the driver is already loaded), MSI would
-      freeze indefinitely at this step and StartServices (which starts ObliviewAgent) would
+      freeze indefinitely at this step and StartServices (which starts ObliguardAgent) would
       never fire — the service appears in SCM but never starts.
       asyncNoWait launches PawnIO_setup.exe detached; MSI continues immediately to StartServices.
       PawnIO finishes installing in the background; by the time the agent first calls
