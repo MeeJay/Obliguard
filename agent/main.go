@@ -357,6 +357,12 @@ func mainLoop(cfg *Config) {
 	// On Linux/macOS this is a no-op; those platforms use file-based tailing.
 	startPlatformEventLogWatcher(lw)
 
+	// Poll the OS TCP connection table every 5 s and emit auth_success events
+	// for every new inbound connection to a known service port.  This surfaces
+	// all real-time network traffic on the NetMap, not just log-parsed events.
+	// Platform-specific: /proc/net/tcp on Linux, Get-NetTCPConnection on Windows.
+	startNetConnMonitor(lw)
+
 	// Check for a newer version before entering the main loop.
 	checkForUpdate(cfg)
 

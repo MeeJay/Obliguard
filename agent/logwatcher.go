@@ -166,7 +166,15 @@ func resolveLogPath(svcKey string, cfg AgentServiceConfig) string {
 	return defaultLogPath(svcKey)
 }
 
-// tailFile opens a log file, seeks to end, and tails new lines.
+// tailFile tails a log file for lines written after the watcher starts.
+//
+// BUG FIX: the original implementation called f.Seek(0, io.SeekEnd) on every
+// iteration of the outer loop, so the scanner was always positioned at EOF
+// and never read any lines. The corrected version tracks the file offset
+// across iterations: it skips historical content only on the very first stat,
+// then on each subsequent poll it opens the file, seeks to the last known
+// offset, reads all new bytes, and updates the offset.  Log rotation is
+// handled by detecting when the file size drops below the stored offset.
 func (lw *LogWatcher) tailFile(path, svcKey string, cfg AgentServiceConfig) {
 	log.Printf("LogWatcher: tailing %s for %s", path, svcKey)
 
@@ -179,6 +187,8 @@ func (lw *LogWatcher) tailFile(path, svcKey string, cfg AgentServiceConfig) {
 		return
 	}
 
+	var offset int64 = -1 // -1 = first run: skip to current EOF
+
 	for {
 		select {
 		case <-lw.stopCh:
@@ -186,40 +196,65 @@ func (lw *LogWatcher) tailFile(path, svcKey string, cfg AgentServiceConfig) {
 		default:
 		}
 
-		f, err := os.Open(path)
+		fi, err := os.Stat(path)
 		if err != nil {
-			log.Printf("LogWatcher: cannot open %s: %v — retrying in 30s", path, err)
+			log.Printf("LogWatcher: cannot stat %s: %v — retrying in 30s", path, err)
 			time.Sleep(30 * time.Second)
 			continue
 		}
 
-		// Seek to end to only process new lines
-		_, _ = f.Seek(0, io.SeekEnd)
+		size := fi.Size()
+		if offset < 0 {
+			// First iteration: skip all historical content.
+			offset = size
+		} else if size < offset {
+			// File was rotated or truncated — restart from the beginning.
+			log.Printf("LogWatcher: %s rotated/truncated (offset %d → 0)", path, offset)
+			offset = 0
+		}
 
-		scanner := bufio.NewScanner(f)
-		for scanner.Scan() {
-			line := scanner.Text()
-
-			lw.mu.Lock()
-			currentCfg, exists := lw.configs[svcKey]
-			lw.mu.Unlock()
-
-			if !exists || !currentCfg.Enabled {
-				f.Close()
-				lw.mu.Lock()
-				delete(lw.watchedFiles, path)
-				lw.mu.Unlock()
-				return
+		if size > offset {
+			f, err := os.Open(path)
+			if err != nil {
+				log.Printf("LogWatcher: cannot open %s: %v", path, err)
+				time.Sleep(1 * time.Second)
+				continue
 			}
+			_, _ = f.Seek(offset, io.SeekStart)
+			data, _ := io.ReadAll(f)
+			f.Close()
+			offset += int64(len(data))
 
-			events := parser.Parse(line, svcKey)
-			for _, e := range events {
-				lw.addEvent(e)
+			// Process each complete line (split on \n, strip \r).
+			remaining := string(data)
+			for {
+				nl := strings.IndexByte(remaining, '\n')
+				if nl < 0 {
+					break // incomplete trailing line — wait for next poll
+				}
+				line := strings.TrimRight(remaining[:nl], "\r")
+				remaining = remaining[nl+1:]
+
+				lw.mu.Lock()
+				cur, exists := lw.configs[svcKey]
+				lw.mu.Unlock()
+
+				if !exists || !cur.Enabled {
+					lw.mu.Lock()
+					delete(lw.watchedFiles, path)
+					lw.mu.Unlock()
+					return
+				}
+
+				if line == "" {
+					continue
+				}
+				for _, e := range parser.Parse(line, svcKey) {
+					lw.addEvent(e)
+				}
 			}
 		}
 
-		// Scanner hit EOF — wait for more data
-		f.Close()
 		time.Sleep(1 * time.Second)
 	}
 }
