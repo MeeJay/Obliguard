@@ -645,7 +645,7 @@ export function NetMapPage() {
       setLiveEvents(prev => [{
         id: Math.random().toString(36).slice(2),
         ip: data.ip, service: data.service, country: cc,
-        time: new Date(), color: EVENT_COLORS.ban, eventType: 'ban', failures: data.failureCount,
+        time: new Date(), color: EVENT_COLORS.ban, eventType: 'ban' as const, failures: data.failureCount,
       }, ...prev].slice(0, 40));
       setStats(s => ({ ...s, today: s.today + 1, banned: s.banned + 1 }));
     };
