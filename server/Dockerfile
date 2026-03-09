@@ -82,10 +82,10 @@ COPY desktop-app/dist/ ./desktop-app/dist/
 COPY server/docker-entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-EXPOSE 3001
+EXPOSE ${PORT:-3001}
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:3001/health || exit 1
+    CMD sh -c "wget --no-verbose --tries=1 --spider http://localhost:${PORT:-3001}/health || exit 1"
 
 WORKDIR /app/server
 ENTRYPOINT ["/entrypoint.sh"]
