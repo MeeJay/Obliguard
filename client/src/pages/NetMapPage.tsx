@@ -1,14 +1,16 @@
 /**
  * NetMapPage — Obliguard Live Threat Map
  *
- * Kaspersky/Radware-style canvas-based world map.
- * Shows ALL traffic flows hitting protected agents:
- *   - Cyan arcs   = successful connections (auth_success)
- *   - Orange arcs = failed auth attempts   (auth_failure)
- *   - Red arcs    = auto-banned IPs        (ban:auto)
+ * Canvas-based world map showing traffic flows hitting protected agents.
  *
- * IP dots on the map are sized by failure count and coloured by status.
- * Hover over any dot to see IP details. Scroll to zoom, drag to pan.
+ * Pan/zoom architecture: canvas context transform (ctx.setTransform) rather
+ * than CSS scale, so the canvas always renders at native resolution (no blur).
+ * The world map base is pre-rendered to an offscreen canvas and blitted each
+ * frame via ctx.drawImage, which scales crisply.
+ *
+ * Aspect ratio: a ResizeObserver on the outer wrapper computes the largest
+ * 2:1 rectangle that fits without overflow and applies it to the inner
+ * container as explicit pixel dimensions — no CSS aspect-ratio hacks needed.
  */
 
 import { useEffect, useRef, useState, useCallback } from 'react';
@@ -35,26 +37,21 @@ interface AgentDev {
   ip?: string | null;
 }
 
-/** A single animated arc between an IP source and an agent target */
 interface Arc {
   id: string;
   sx: number; sy: number;
   tx: number; ty: number;
   cx: number; cy: number;
-  /** Hex colour for the arc */
   color: string;
   service: string;
   country: string;
   sourceIp: string;
   failures: number;
-  /** Determines which filter toggles can hide this arc */
   eventType: 'auth_success' | 'auth_failure' | 'ban';
-  /** 0 → travel → 1 → fade → 2.x = remove */
   progress: number;
   speed: number;
 }
 
-/** A static dot rendered at an IP's geo location */
 interface IpDot {
   ip: string;
   x: number; y: number;
@@ -66,7 +63,6 @@ interface IpDot {
   country: string;
 }
 
-/** A protected agent server marker */
 interface AgentMarker {
   x: number; y: number;
   label: string;
@@ -108,14 +104,12 @@ const CENTROIDS: Record<string, [number, number]> = {
 
 // ── Colour palette ────────────────────────────────────────────────────────────
 
-/** Arc colours by event type */
 const EVENT_COLORS = {
-  auth_success: '#22d3ee',   // cyan — legitimate connection
-  auth_failure: '#f97316',   // orange — bad password / auth failure
-  ban:          '#ef4444',   // red — IP auto-banned
+  auth_success: '#22d3ee',
+  auth_failure: '#f97316',
+  ban:          '#ef4444',
 } as const;
 
-/** Service colours (shown in legend and used as fallback) */
 const SVC_COLORS: Record<string, string> = {
   ssh:    '#f97316',
   rdp:    '#a855f7',
@@ -221,9 +215,14 @@ function geoToPath(geometry: any, w: number, h: number): Path2D {
 // ── NetMapPage component ──────────────────────────────────────────────────────
 
 export function NetMapPage() {
-  const baseRef      = useRef<HTMLCanvasElement>(null);
+  // The only visible canvas; base map is drawn offscreen and blitted each frame.
   const animRef      = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const outerRef     = useRef<HTMLDivElement>(null);
+
+  // Offscreen canvas: world map pre-rendered, blitted via ctx.drawImage each frame.
+  // Zoom uses canvas transform → drawImage scales smoothly, no CSS pixelation.
+  const offscreenBaseRef = useRef<HTMLCanvasElement | null>(null);
 
   const rafRef    = useRef<number>(0);
   const arcsRef   = useRef<Arc[]>([]);
@@ -231,14 +230,18 @@ export function NetMapPage() {
   const agentRef  = useRef<AgentMarker[]>([]);
   const lastTsRef = useRef<number>(0);
 
+  // ── Canvas dimensions — JS-computed 2:1 rectangle that fits the outer div ──
+  // Stored in a ref (fresh in callbacks) and mirrored in state (drives CSS).
+  const canvasDimRef = useRef({ w: 1280, h: 640 });
+  const [canvasDim, setCanvasDim] = useState({ w: 1280, h: 640 });
+
   // ── Pan / zoom ────────────────────────────────────────────────────────────
   const transformRef = useRef({ scale: 1, tx: 0, ty: 0 });
   const dragRef      = useRef<{ x: number; y: number } | null>(null);
   const [transform, setTransform] = useState({ scale: 1, tx: 0, ty: 0 });
   const [isDragging, setIsDragging] = useState(false);
 
-  // Active flow-type filters — stored in a ref so the animation loop reads the
-  // latest value without needing a re-render, and mirrored in state for the UI.
+  // ── Flow type filters ─────────────────────────────────────────────────────
   type FlowType = 'auth_success' | 'auth_failure' | 'ban';
   const ALL_FILTERS = new Set<FlowType>(['auth_success', 'auth_failure', 'ban']);
   const filtersRef = useRef<Set<FlowType>>(new Set(ALL_FILTERS));
@@ -263,11 +266,11 @@ export function NetMapPage() {
     status: string; services: string[];
   }>({ visible: false, x: 0, y: 0, ip: '', country: '', failures: 0, status: '', services: [] });
 
-  // ── Canvas sizing ─────────────────────────────────────────────────────────
+  // ── Canvas sizing (reads ref — always fresh inside async callbacks) ────────
 
   const getSize = useCallback((): [number, number] => {
-    const el = containerRef.current;
-    return el ? [el.clientWidth, el.clientHeight] : [1280, 640];
+    const { w, h } = canvasDimRef.current;
+    return [w, h];
   }, []);
 
   // ── Reset pan/zoom ────────────────────────────────────────────────────────
@@ -291,26 +294,24 @@ export function NetMapPage() {
     const [sx, sy] = project(srcLon, srcLat, w, h);
     const [tx, ty] = project(tgtLon, tgtLat, w, h);
     const [cx, cy] = ctrlPt(sx, sy, tx, ty);
-    const arc: Arc = {
+    arcsRef.current = [...arcsRef.current.slice(-39), {
       id: Math.random().toString(36).slice(2),
       sx, sy, tx, ty, cx, cy,
       color, service, country, sourceIp: ip, failures,
-      eventType,
-      progress: 0,
+      eventType, progress: 0,
       speed: 0.22 + Math.random() * 0.14,
-    };
-    arcsRef.current = [...arcsRef.current.slice(-39), arc];
+    }];
   }, [getSize]);
 
-  // ── Draw the static world map once ────────────────────────────────────────
+  // ── Draw world map to offscreen canvas ────────────────────────────────────
 
   const drawBase = useCallback(async (w: number, h: number) => {
-    const canvas = baseRef.current;
-    if (!canvas) return;
+    if (!offscreenBaseRef.current) offscreenBaseRef.current = document.createElement('canvas');
+    const canvas = offscreenBaseRef.current;
     canvas.width = w; canvas.height = h;
     const ctx = canvas.getContext('2d')!;
 
-    // Dark grey gradient background
+    // Dark grey radial gradient
     const bg = ctx.createRadialGradient(w * 0.5, h * 0.35, 0, w * 0.5, h * 0.5, Math.max(w, h) * 0.9);
     bg.addColorStop(0, '#0d0d0d');
     bg.addColorStop(1, '#050505');
@@ -327,7 +328,6 @@ export function NetMapPage() {
       }
     }
 
-    // Load world atlas + topojson-client from CDN
     try {
       await loadScript(
         'https://cdn.jsdelivr.net/npm/topojson-client@3/dist/topojson-client.min.js',
@@ -338,26 +338,26 @@ export function NetMapPage() {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const { features } = (window as any).topojson.feature(world, world.objects.countries);
 
-      // Country fill (dark grey)
       ctx.fillStyle = 'rgba(20,20,20,0.90)';
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       for (const f of features as any[]) ctx.fill(geoToPath(f.geometry, w, h));
 
-      // Country borders with soft grey glow
       ctx.save();
-      ctx.shadowBlur = 2.5;
-      ctx.shadowColor = 'rgba(130,130,130,0.25)';
-      ctx.strokeStyle = 'rgba(110,110,110,0.35)';
-      ctx.lineWidth = 0.5;
+      ctx.shadowBlur   = 2.5;
+      ctx.shadowColor  = 'rgba(130,130,130,0.25)';
+      ctx.strokeStyle  = 'rgba(110,110,110,0.35)';
+      ctx.lineWidth    = 0.5;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       for (const f of features as any[]) ctx.stroke(geoToPath(f.geometry, w, h));
       ctx.restore();
     } catch {
-      // World map failed to load — grid background remains
+      // World map failed — grid background remains
     }
   }, []);
 
   // ── Animation loop ────────────────────────────────────────────────────────
+  // Uses ctx.setTransform for pan/zoom so the canvas renders at native resolution.
+  // The offscreen base map is blitted via drawImage (smooth scaling, no CSS blur).
 
   const animate = useCallback((ts: number) => {
     const canvas = animRef.current;
@@ -367,13 +367,20 @@ export function NetMapPage() {
     const dt = Math.min((ts - lastTsRef.current) / 1000, 0.05);
     lastTsRef.current = ts;
 
+    // Clear at identity then apply pan/zoom transform
+    ctx.resetTransform();
     ctx.clearRect(0, 0, w, h);
+    const { scale, tx, ty } = transformRef.current;
+    ctx.setTransform(scale, 0, 0, scale, tx, ty);
+
+    // Blit offscreen world map (scales crisply via canvas interpolation)
+    const base = offscreenBaseRef.current;
+    if (base && base.width > 0) ctx.drawImage(base, 0, 0);
 
     // ── IP reputation dots ────────────────────────────────────────────────
     for (const dot of dotsRef.current) {
       const pulse = (Math.sin(ts / 1400 + dot.x * 0.012) + 1) / 2;
 
-      // Outer glow halo for threats
       if (dot.status === 'banned' || dot.status === 'suspicious') {
         ctx.save();
         ctx.globalAlpha = 0.08 + pulse * 0.07;
@@ -384,35 +391,32 @@ export function NetMapPage() {
         ctx.restore();
       }
 
-      // Core with glow
       ctx.save();
-      ctx.shadowBlur = dot.radius * 2.5;
+      ctx.shadowBlur  = dot.radius * 2.5;
       ctx.shadowColor = dot.color;
       ctx.beginPath();
       ctx.arc(dot.x, dot.y, dot.radius, 0, Math.PI * 2);
-      ctx.fillStyle = dot.color;
+      ctx.fillStyle   = dot.color;
       ctx.globalAlpha = 0.82;
       ctx.fill();
       ctx.restore();
 
-      // Bright inner core
       ctx.save();
       ctx.beginPath();
       ctx.arc(dot.x, dot.y, Math.max(1.4, dot.radius * 0.35), 0, Math.PI * 2);
-      ctx.fillStyle = '#ffffff';
+      ctx.fillStyle   = '#ffffff';
       ctx.globalAlpha = 0.45;
       ctx.fill();
       ctx.restore();
     }
 
-    // ── Attack / connection arcs ──────────────────────────────────────────
+    // ── Arcs ──────────────────────────────────────────────────────────────
     const alive: Arc[] = [];
     for (const arc of arcsRef.current) {
       arc.progress += dt * arc.speed;
       if (arc.progress > 2.4) continue;
       alive.push(arc);
 
-      // Skip drawing if the filter for this flow type is toggled off
       if (!filtersRef.current.has(arc.eventType)) continue;
 
       const tHead = Math.min(arc.progress, 1.0);
@@ -421,7 +425,6 @@ export function NetMapPage() {
         : 1.0;
       if (fade <= 0) continue;
 
-      // Glowing trail (segmented for gradient fade)
       const segs = 50;
       for (let i = 0; i < segs; i++) {
         const t0 = (i / segs) * tHead;
@@ -437,32 +440,30 @@ export function NetMapPage() {
         ctx.stroke();
       }
 
-      // Travelling particle (glowing head)
       if (tHead < 1.0) {
         const [px, py] = bezier(arc.sx, arc.sy, arc.cx, arc.cy, arc.tx, arc.ty, tHead);
         ctx.save();
-        ctx.shadowBlur = 18;
+        ctx.shadowBlur  = 18;
         ctx.shadowColor = arc.color;
         ctx.beginPath();
         ctx.arc(px, py, 3.5, 0, Math.PI * 2);
-        ctx.fillStyle = '#ffffff';
+        ctx.fillStyle   = '#ffffff';
         ctx.globalAlpha = fade;
         ctx.fill();
         ctx.restore();
       }
 
-      // Impact ring at target
       if (arc.progress >= 0.9 && arc.progress <= 1.9) {
         const pt = (arc.progress - 0.9) / 1.0;
         const r  = pt * 26;
         const pa = (1 - pt) * fade * 0.85;
         ctx.save();
-        ctx.shadowBlur = 12;
+        ctx.shadowBlur  = 12;
         ctx.shadowColor = arc.color;
         ctx.beginPath();
         ctx.arc(arc.tx, arc.ty, r, 0, Math.PI * 2);
         ctx.strokeStyle = arc.color + Math.round(pa * 255).toString(16).padStart(2, '0');
-        ctx.lineWidth = 1.5;
+        ctx.lineWidth   = 1.5;
         ctx.globalAlpha = pa;
         ctx.stroke();
         ctx.restore();
@@ -470,46 +471,43 @@ export function NetMapPage() {
     }
     arcsRef.current = alive;
 
-    // ── Agent server markers ──────────────────────────────────────────────
+    // ── Agent markers ─────────────────────────────────────────────────────
     const p2 = (Math.sin(ts / 900) + 1) / 2;
     for (const ag of agentRef.current) {
       ctx.save();
-      // Outer pulse ring
       ctx.beginPath();
       ctx.arc(ag.x, ag.y, 14 + p2 * 5, 0, Math.PI * 2);
       ctx.strokeStyle = `rgba(160,160,160,${0.04 + p2 * 0.10})`;
       ctx.lineWidth = 1.2;
       ctx.stroke();
 
-      // Solid ring with glow
-      ctx.shadowBlur = 10;
+      ctx.shadowBlur  = 10;
       ctx.shadowColor = '#aaaaaa';
       ctx.beginPath();
       ctx.arc(ag.x, ag.y, 8, 0, Math.PI * 2);
       ctx.strokeStyle = 'rgba(200,200,200,0.78)';
-      ctx.lineWidth = 1.5;
+      ctx.lineWidth   = 1.5;
       ctx.stroke();
 
-      // Centre dot
       ctx.shadowBlur = 15;
       ctx.beginPath();
       ctx.arc(ag.x, ag.y, 3.5, 0, Math.PI * 2);
-      ctx.fillStyle = '#e0e0e0';
+      ctx.fillStyle  = '#e0e0e0';
       ctx.fill();
       ctx.restore();
 
-      // Label
-      ctx.fillStyle = 'rgba(180,180,180,0.75)';
-      ctx.font = '9px "Courier New", monospace';
-      ctx.textAlign = 'center';
+      ctx.fillStyle  = 'rgba(180,180,180,0.75)';
+      ctx.font       = '9px "Courier New", monospace';
+      ctx.textAlign  = 'center';
       ctx.fillText(ag.label.slice(0, 16), ag.x, ag.y + 24);
     }
 
+    ctx.resetTransform();
     setArcCount(alive.length);
     rafRef.current = requestAnimationFrame(animate);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Fetch data + build layout ─────────────────────────────────────────────
+  // ── Fetch data + build positions ──────────────────────────────────────────
 
   const init = useCallback(async () => {
     setLoading(true);
@@ -531,41 +529,36 @@ export function NetMapPage() {
           .catch(() => ({ data: { data: { active: 0, today: 0 } } })),
       ]);
 
-      const ips   = repRes.data?.data ?? [] as IpRepItem[];
-      const devs  = (devRes.data?.data ?? [] as AgentDev[]).filter(d => d.status === 'approved');
-      const bs    = (banRes.data as { data: { active: number; today: number } })?.data
-                    ?? { active: 0, today: 0 };
+      const ips  = repRes.data?.data ?? [] as IpRepItem[];
+      const devs = (devRes.data?.data ?? [] as AgentDev[]).filter(d => d.status === 'approved');
+      const bs   = (banRes.data as { data: { active: number; today: number } })?.data
+                   ?? { active: 0, today: 0 };
 
       setStats({ agents: devs.length, banned: bs.active, today: bs.today });
 
-      // ── Agent positions (cluster near Paris as default) ───────────────
-      const BASE_LON = 2.35, BASE_LAT = 48.86;
-      const spread = 1.8;
+      const BASE_LON = 2.35, BASE_LAT = 48.86, spread = 1.8;
       const n = Math.max(devs.length, 1);
-      agentRef.current = (devs.length > 0 ? devs : [{ id: 0, hostname: 'Server', name: null, status: 'approved' }])
-        .slice(0, 12)
-        .map((d, i) => {
-          const angle = (i / n) * Math.PI * 2;
-          const lon = BASE_LON + Math.cos(angle) * (n > 1 ? spread : 0);
-          const lat = BASE_LAT + Math.sin(angle) * (n > 1 ? spread * 0.5 : 0);
-          const [x, y] = project(lon, lat, w, h);
-          return { x, y, label: ('name' in d ? d.name : null) ?? d.hostname, lon, lat };
-        });
+      agentRef.current = (devs.length > 0
+        ? devs
+        : [{ id: 0, hostname: 'Server', name: null, status: 'approved' }]
+      ).slice(0, 12).map((d, i) => {
+        const angle = (i / n) * Math.PI * 2;
+        const lon = BASE_LON + Math.cos(angle) * (n > 1 ? spread : 0);
+        const lat = BASE_LAT + Math.sin(angle) * (n > 1 ? spread * 0.5 : 0);
+        const [x, y] = project(lon, lat, w, h);
+        return { x, y, label: ('name' in d ? d.name : null) ?? d.hostname, lon, lat };
+      });
 
-      // ── IP dots placed at their geo location ──────────────────────────
       const dots: IpDot[] = [];
       for (const rep of ips) {
         const cc = rep.geoCountryCode?.toUpperCase();
         if (!cc) continue;
         const c = CENTROIDS[cc];
         if (!c) continue;
-        const jLon = c[1] + (Math.random() - 0.5) * 3.8;
-        const jLat = c[0] + (Math.random() - 0.5) * 2.8;
-        const [x, y] = project(jLon, jLat, w, h);
-        // Radius proportional to failure count (min 3, max 13)
-        const radius = 3 + Math.min(rep.totalFailures / 14, 10);
+        const [x, y] = project(c[1] + (Math.random() - 0.5) * 3.8, c[0] + (Math.random() - 0.5) * 2.8, w, h);
         dots.push({
-          ip: rep.ip, x, y, radius,
+          ip: rep.ip, x, y,
+          radius: 3 + Math.min(rep.totalFailures / 14, 10),
           color: statusColor(rep.status),
           status: rep.status,
           failures: rep.totalFailures,
@@ -575,7 +568,6 @@ export function NetMapPage() {
       }
       dotsRef.current = dots;
 
-      // ── Initial arcs from ip_reputation data ─────────────────────────
       const agents = agentRef.current;
       let spawned = 0;
       for (const rep of ips) {
@@ -586,25 +578,18 @@ export function NetMapPage() {
         if (!c) continue;
         const ag = agents[spawned % agents.length];
         if (!ag) continue;
-        const arcColor = rep.status === 'banned'
-          ? EVENT_COLORS.ban
-          : rep.totalFailures > 0
-            ? EVENT_COLORS.auth_failure
-            : EVENT_COLORS.auth_success;
+        const arcColor = rep.status === 'banned' ? EVENT_COLORS.ban
+          : rep.totalFailures > 0 ? EVENT_COLORS.auth_failure : EVENT_COLORS.auth_success;
         spawnArc(
-          c[1] + (Math.random() - 0.5) * 3,
-          c[0] + (Math.random() - 0.5) * 2,
-          ag.lon, ag.lat,
-          arcColor,
-          rep.affectedServices?.[0] ?? 'ssh',
-          cc, rep.ip,
+          c[1] + (Math.random() - 0.5) * 3, c[0] + (Math.random() - 0.5) * 2,
+          ag.lon, ag.lat, arcColor,
+          rep.affectedServices?.[0] ?? 'ssh', cc, rep.ip,
           rep.status === 'banned' ? 'ban' : rep.totalFailures > 0 ? 'auth_failure' : 'auth_success',
           rep.totalFailures,
         );
         spawned++;
       }
 
-      // Pad with generic arcs if not enough geo-tagged IPs
       if (spawned < 8) {
         const fill = ['CN','RU','US','BR','IN','KP','IR','NG','TR','UA'];
         for (let i = spawned; i < 10; i++) {
@@ -613,12 +598,9 @@ export function NetMapPage() {
           const ag = agents[i % agents.length] ?? agents[0];
           if (!ag) continue;
           spawnArc(
-            c[1] + (Math.random() - 0.5) * 4,
-            c[0] + (Math.random() - 0.5) * 3,
-            ag.lon, ag.lat,
-            EVENT_COLORS.auth_failure,
-            ['ssh','rdp','ftp','mail'][i % 4],
-            cc, '(historical)', 'auth_failure', 1,
+            c[1] + (Math.random() - 0.5) * 4, c[0] + (Math.random() - 0.5) * 3,
+            ag.lon, ag.lat, EVENT_COLORS.auth_failure,
+            ['ssh','rdp','ftp','mail'][i % 4], cc, '(historical)', 'auth_failure', 1,
           );
         }
       }
@@ -643,25 +625,14 @@ export function NetMapPage() {
       const c   = CENTROIDS[cc]!;
       const ag  = agentRef.current[Math.floor(Math.random() * Math.max(agentRef.current.length, 1))];
       if (!ag) return;
-
-      const arcColor = data.eventType === 'auth_success'
-        ? EVENT_COLORS.auth_success
-        : EVENT_COLORS.auth_failure;
-
-      spawnArc(
-        c[1] + (Math.random() - 0.5) * 3,
-        c[0] + (Math.random() - 0.5) * 2,
-        ag.lon, ag.lat,
-        arcColor, data.service, cc, data.ip, data.eventType, 0,
-      );
-
-      const ev: LiveEvent = {
+      const arcColor = data.eventType === 'auth_success' ? EVENT_COLORS.auth_success : EVENT_COLORS.auth_failure;
+      spawnArc(c[1] + (Math.random() - 0.5) * 3, c[0] + (Math.random() - 0.5) * 2,
+        ag.lon, ag.lat, arcColor, data.service, cc, data.ip, data.eventType, 0);
+      setLiveEvents(prev => [{
         id: Math.random().toString(36).slice(2),
         ip: data.ip, service: data.service, country: cc,
-        time: new Date(), color: arcColor,
-        eventType: data.eventType,
-      };
-      setLiveEvents(prev => [ev, ...prev].slice(0, 40));
+        time: new Date(), color: arcColor, eventType: data.eventType,
+      }, ...prev].slice(0, 40));
     };
 
     const onBanAuto = (data: { ip: string; service: string; failureCount: number }) => {
@@ -670,25 +641,18 @@ export function NetMapPage() {
       const c   = CENTROIDS[cc]!;
       const ag  = agentRef.current[0];
       if (!ag) return;
-
       spawnArc(c[1], c[0], ag.lon, ag.lat, EVENT_COLORS.ban, data.service, cc, data.ip, 'ban', data.failureCount);
-
-      const ev: LiveEvent = {
+      setLiveEvents(prev => [{
         id: Math.random().toString(36).slice(2),
         ip: data.ip, service: data.service, country: cc,
-        time: new Date(), color: EVENT_COLORS.ban,
-        eventType: 'ban', failures: data.failureCount,
-      };
-      setLiveEvents(prev => [ev, ...prev].slice(0, 40));
+        time: new Date(), color: EVENT_COLORS.ban, eventType: 'ban', failures: data.failureCount,
+      }, ...prev].slice(0, 40));
       setStats(s => ({ ...s, today: s.today + 1, banned: s.banned + 1 }));
     };
 
     socket.on('ip:flow',  onIpFlow);
     socket.on('ban:auto', onBanAuto);
-    return () => {
-      socket.off('ip:flow',  onIpFlow);
-      socket.off('ban:auto', onBanAuto);
-    };
+    return () => { socket.off('ip:flow', onIpFlow); socket.off('ban:auto', onBanAuto); };
   }, [spawnArc]);
 
   // ── Wheel zoom (non-passive so we can preventDefault) ─────────────────────
@@ -698,11 +662,11 @@ export function NetMapPage() {
     if (!el) return;
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
-      const rect = el.getBoundingClientRect();
-      const mx = e.clientX - rect.left;
-      const my = e.clientY - rect.top;
+      const rect   = el.getBoundingClientRect();
+      const mx     = e.clientX - rect.left;
+      const my     = e.clientY - rect.top;
       const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
-      const tr = transformRef.current;
+      const tr     = transformRef.current;
       const newScale = Math.min(Math.max(tr.scale * factor, 0.5), 8);
       const newTx = mx - (mx - tr.tx) * (newScale / tr.scale);
       const newTy = my - (my - tr.ty) * (newScale / tr.scale);
@@ -725,10 +689,7 @@ export function NetMapPage() {
     setIsDragging(false);
   }, []);
 
-  // ── Hover tooltip — detect nearest IP dot (with inverse transform) ─────────
-
   const handleMouseMove = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    // Pan if dragging
     if (dragRef.current) {
       const dx = e.clientX - dragRef.current.x;
       const dy = e.clientY - dragRef.current.y;
@@ -740,7 +701,7 @@ export function NetMapPage() {
       return;
     }
 
-    // Tooltip: inverse-transform mouse position back to canvas space
+    // Inverse-transform mouse position back to canvas/map space
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     const mx = e.clientX - rect.left;
     const my = e.clientY - rect.top;
@@ -751,37 +712,54 @@ export function NetMapPage() {
     for (const dot of dotsRef.current) {
       const dx = cx - dot.x, dy = cy - dot.y;
       if (Math.sqrt(dx * dx + dy * dy) <= dot.radius + 8) {
-        setTooltip({
-          visible: true, x: mx, y: my,
-          ip: dot.ip, country: dot.country,
-          failures: dot.failures, status: dot.status,
-          services: dot.services,
-        });
+        setTooltip({ visible: true, x: mx, y: my, ip: dot.ip, country: dot.country,
+          failures: dot.failures, status: dot.status, services: dot.services });
         return;
       }
     }
     setTooltip(t => ({ ...t, visible: false }));
   }, []);
 
-  // ── Lifecycle ─────────────────────────────────────────────────────────────
+  // ── Start animation loop (independent of data loading) ───────────────────
 
   useEffect(() => {
-    void init().then(() => {
-      lastTsRef.current = performance.now();
-      rafRef.current = requestAnimationFrame(animate);
-    });
+    lastTsRef.current = performance.now();
+    rafRef.current = requestAnimationFrame(animate);
     return () => { cancelAnimationFrame(rafRef.current); };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── ResizeObserver: compute 2:1 canvas dimensions + trigger (re)init ─────
+  //
+  // Computes w = min(outerWidth, outerHeight * 2), h = w / 2 — the largest
+  // 2:1 rectangle that fits without overflow. Drives both the div CSS size
+  // and the canvas drawing buffer size (via getSize → init).
+
   useEffect(() => {
-    let t: ReturnType<typeof setTimeout>;
-    const onResize = () => {
-      clearTimeout(t);
-      t = setTimeout(() => { resetTransform(); void init(); }, 350);
+    const el = outerRef.current;
+    if (!el) return;
+
+    let debounceTimer: ReturnType<typeof setTimeout>;
+
+    const compute = (debounce: boolean) => {
+      const { width, height } = el.getBoundingClientRect();
+      if (width <= 0 || height <= 0) return;
+      const w = Math.floor(Math.min(width, height * 2));
+      const h = Math.floor(w / 2);
+      // Skip if unchanged (avoids double-init when setCanvasDim triggers re-render)
+      if (w === canvasDimRef.current.w && h === canvasDimRef.current.h) return;
+      canvasDimRef.current = { w, h };
+      setCanvasDim({ w, h });
+      clearTimeout(debounceTimer);
+      const doInit = () => { resetTransform(); void init(); };
+      if (debounce) debounceTimer = setTimeout(doInit, 350);
+      else void doInit();
     };
-    window.addEventListener('resize', onResize);
-    return () => { window.removeEventListener('resize', onResize); clearTimeout(t); };
-  }, [init, resetTransform]);
+
+    compute(false); // immediate on mount
+    const ro = new ResizeObserver(() => compute(true)); // debounced on resize
+    ro.observe(el);
+    return () => { ro.disconnect(); clearTimeout(debounceTimer); };
+  }, [init, resetTransform]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const isTransformed = transform.scale !== 1 || transform.tx !== 0 || transform.ty !== 0;
 
@@ -826,18 +804,19 @@ export function NetMapPage() {
         </div>
       </div>
 
-      {/* ── Canvas area — 2:1 aspect ratio, centered ────────────────────── */}
+      {/* ── Outer centering wrapper — ResizeObserver watches this ───────── */}
       <div
+        ref={outerRef}
         className="flex-1 overflow-hidden flex items-center justify-center bg-[#090909]"
         onMouseUp={handlePanEnd}
       >
+        {/* Inner container — exact 2:1 pixel size computed by JS */}
         <div
           ref={containerRef}
           className="relative overflow-hidden"
           style={{
-            aspectRatio: '2 / 1',
-            width: '100%',
-            maxHeight: '100%',
+            width:  canvasDim.w,
+            height: canvasDim.h,
             cursor: isDragging ? 'grabbing' : 'grab',
           }}
           onMouseDown={handleMouseDown}
@@ -849,18 +828,11 @@ export function NetMapPage() {
           }}
           onMouseUp={handlePanEnd}
         >
-          {/* Pan/zoom transformed layer — canvases live here */}
-          <div
-            style={{
-              position: 'absolute',
-              inset: 0,
-              transform: `translate(${transform.tx}px, ${transform.ty}px) scale(${transform.scale})`,
-              transformOrigin: '0 0',
-            }}
-          >
-            <canvas ref={baseRef} className="absolute inset-0 pointer-events-none" />
-            <canvas ref={animRef} className="absolute inset-0 pointer-events-none" />
-          </div>
+          {/* Single canvas — pan/zoom via ctx.setTransform, no CSS scaling */}
+          <canvas
+            ref={animRef}
+            className="absolute inset-0 pointer-events-none"
+          />
 
           {loading && (
             <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#090909]/85 z-10">
@@ -874,7 +846,6 @@ export function NetMapPage() {
           {/* ── Left legend ──────────────────────────────────────────────── */}
           <div className="absolute top-4 left-4 bg-[#111111]/90 border border-[#1e1e1e] rounded-sm p-3 backdrop-blur-sm min-w-[132px] z-10">
 
-            {/* Flow type toggles */}
             <div className="font-mono text-[8px] text-[#383838] tracking-widest mb-2 uppercase">
               Flow Filters
             </div>
@@ -890,119 +861,85 @@ export function NetMapPage() {
                 <button
                   key={type}
                   onClick={() => toggleFilter(type)}
-                  className="flex items-center gap-2 py-[4px] w-full group"
+                  className="flex items-center gap-2 py-[4px] w-full"
                   title={on ? `Hide ${label}` : `Show ${label}`}
                 >
                   <div
                     className="w-5 h-0.5 shrink-0 rounded transition-all duration-200"
-                    style={{
-                      backgroundColor: on ? color : '#2c2c2c',
-                      boxShadow: on ? `0 0 5px ${color}` : 'none',
-                    }}
+                    style={{ backgroundColor: on ? color : '#2c2c2c', boxShadow: on ? `0 0 5px ${color}` : 'none' }}
                   />
                   <div
                     className="w-2.5 h-2.5 shrink-0 rounded-sm border transition-all duration-200 flex items-center justify-center"
-                    style={{
-                      borderColor: on ? color : '#2c2c2c',
-                      backgroundColor: on ? `${color}22` : 'transparent',
-                    }}
+                    style={{ borderColor: on ? color : '#2c2c2c', backgroundColor: on ? `${color}22` : 'transparent' }}
                   >
-                    {on && (
-                      <div
-                        className="w-1.5 h-1.5 rounded-sm"
-                        style={{ backgroundColor: color }}
-                      />
-                    )}
+                    {on && <div className="w-1.5 h-1.5 rounded-sm" style={{ backgroundColor: color }} />}
                   </div>
-                  <span
-                    className="font-mono text-[10px] transition-colors duration-200"
-                    style={{ color: on ? '#888' : '#383838' }}
-                  >
+                  <span className="font-mono text-[10px] transition-colors duration-200" style={{ color: on ? '#888' : '#383838' }}>
                     {label}
                   </span>
                 </button>
               );
             })}
 
-            {/* Service types */}
             <div className="mt-3 pt-2 border-t border-[#1e1e1e]">
-              <div className="font-mono text-[8px] text-[#383838] tracking-widest mb-2 uppercase">
-                Services
-              </div>
+              <div className="font-mono text-[8px] text-[#383838] tracking-widest mb-2 uppercase">Services</div>
               {Object.entries(SVC_COLORS)
                 .filter(([, ], i, a) => a.findIndex(([, v]) => v === a[i][1]) === i)
                 .map(([svc, color]) => (
                   <div key={svc} className="flex items-center gap-2 py-[2px]">
-                    <div className="w-1.5 h-1.5 rounded-full shrink-0"
-                      style={{ backgroundColor: color, boxShadow: `0 0 4px ${color}60` }} />
+                    <div className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: color, boxShadow: `0 0 4px ${color}60` }} />
                     <span className="font-mono text-[9px] uppercase tracking-wide text-[#555]">{svc}</span>
                   </div>
                 ))}
             </div>
 
-            {/* IP status */}
             <div className="mt-3 pt-2 border-t border-[#1e1e1e]">
-              <div className="font-mono text-[8px] text-[#383838] tracking-widest mb-2 uppercase">
-                IP Status
-              </div>
+              <div className="font-mono text-[8px] text-[#383838] tracking-widest mb-2 uppercase">IP Status</div>
               {[
                 { label: 'Banned',     color: '#ef4444' },
                 { label: 'Suspicious', color: '#f97316' },
                 { label: 'Clean',      color: '#475569' },
               ].map(({ label, color }) => (
                 <div key={label} className="flex items-center gap-2 py-[2px]">
-                  <div className="w-1.5 h-1.5 rounded-full shrink-0"
-                    style={{ backgroundColor: color, boxShadow: `0 0 4px ${color}60` }} />
+                  <div className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: color, boxShadow: `0 0 4px ${color}60` }} />
                   <span className="font-mono text-[9px] text-[#555]">{label}</span>
                 </div>
               ))}
-              <div className="mt-1.5 font-mono text-[8px] text-[#383838]">
-                Dot size = failure count
-              </div>
+              <div className="mt-1.5 font-mono text-[8px] text-[#383838]">Dot size = failure count</div>
             </div>
           </div>
 
-          {/* ── IP tooltip on hover ───────────────────────────────────────── */}
+          {/* ── IP tooltip ────────────────────────────────────────────────── */}
           {tooltip.visible && (
             <div
               className="absolute z-20 pointer-events-none bg-[#0e0e0e]/96 border border-[#1e1e1e] rounded p-2.5 backdrop-blur-sm"
               style={{
                 left: tooltip.x + 14,
                 top:  tooltip.y - 8,
-                transform: tooltip.x > (getSize()[0] * 0.72) ? 'translateX(-110%)' : undefined,
+                transform: tooltip.x > canvasDim.w * 0.72 ? 'translateX(-110%)' : undefined,
               }}
             >
-              <div className="font-mono text-[11px] text-[#ccc] mb-1.5 font-bold tracking-wide">
-                {tooltip.ip}
-              </div>
+              <div className="font-mono text-[11px] text-[#ccc] mb-1.5 font-bold tracking-wide">{tooltip.ip}</div>
               {[
                 { label: 'Country',  value: `${flag(tooltip.country)} ${tooltip.country}` },
                 { label: 'Failures', value: tooltip.failures.toLocaleString(), color: '#fb923c' },
                 { label: 'Status',   value: tooltip.status.toUpperCase(), color: statusColor(tooltip.status) },
               ].map(({ label, value, color }) => (
                 <div key={label} className="flex items-center gap-2 mb-1">
-                  <span className="font-mono text-[8px] text-[#383838] uppercase tracking-wider w-14 shrink-0">
-                    {label}
-                  </span>
-                  <span className="font-mono text-[10px]" style={{ color: color ?? '#666' }}>
-                    {value}
-                  </span>
+                  <span className="font-mono text-[8px] text-[#383838] uppercase tracking-wider w-14 shrink-0">{label}</span>
+                  <span className="font-mono text-[10px]" style={{ color: color ?? '#666' }}>{value}</span>
                 </div>
               ))}
               {tooltip.services.length > 0 && (
                 <div className="flex items-center gap-2">
-                  <span className="font-mono text-[8px] text-[#383838] uppercase tracking-wider w-14 shrink-0">
-                    Services
-                  </span>
-                  <span className="font-mono text-[10px] text-[#666]">
-                    {tooltip.services.slice(0, 4).join(', ')}
-                  </span>
+                  <span className="font-mono text-[8px] text-[#383838] uppercase tracking-wider w-14 shrink-0">Services</span>
+                  <span className="font-mono text-[10px] text-[#666]">{tooltip.services.slice(0, 4).join(', ')}</span>
                 </div>
               )}
             </div>
           )}
 
-          {/* ── Reset view button (shown only when panned/zoomed) ─────────── */}
+          {/* ── Reset view button ─────────────────────────────────────────── */}
           {isTransformed && (
             <button
               onClick={resetTransform}
@@ -1022,9 +959,7 @@ export function NetMapPage() {
             <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-500 opacity-75" />
             <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-red-500" />
           </span>
-          <span className="font-mono text-[8px] text-[#383838] tracking-widest uppercase">
-            Live Events
-          </span>
+          <span className="font-mono text-[8px] text-[#383838] tracking-widest uppercase">Live Events</span>
           <span className="ml-auto font-mono text-[8px] text-[#383838]">{liveEvents.length} captured</span>
         </div>
 
@@ -1036,30 +971,19 @@ export function NetMapPage() {
               {liveEvents.slice(0, 5).map(ev => (
                 <div key={ev.id} className="flex items-center gap-2.5 font-mono text-[10px]">
                   <span className="text-[#383838] w-20 shrink-0">{ev.time.toLocaleTimeString()}</span>
-                  <div
-                    className="w-1.5 h-1.5 rounded-full shrink-0"
-                    style={{ backgroundColor: ev.color, boxShadow: `0 0 4px ${ev.color}` }}
-                  />
-                  <span
-                    className="uppercase text-[8px] w-16 shrink-0 tracking-wide font-bold"
-                    style={{ color: ev.color }}
-                  >
-                    {ev.eventType === 'auth_success' ? 'success'
-                      : ev.eventType === 'ban' ? '🔒 ban'
-                      : 'failure'}
+                  <div className="w-1.5 h-1.5 rounded-full shrink-0"
+                    style={{ backgroundColor: ev.color, boxShadow: `0 0 4px ${ev.color}` }} />
+                  <span className="uppercase text-[8px] w-16 shrink-0 tracking-wide font-bold" style={{ color: ev.color }}>
+                    {ev.eventType === 'auth_success' ? 'success' : ev.eventType === 'ban' ? '🔒 ban' : 'failure'}
                   </span>
                   <span className="uppercase w-10 shrink-0" style={{ color: svcColor(ev.service) }}>
                     {ev.service.slice(0, 8)}
                   </span>
                   <span className="text-[#555] w-28 truncate shrink-0">{ev.ip}</span>
                   <span className="text-[#363636] shrink-0">→</span>
-                  <span className="text-[#666]">
-                    {flag(ev.country)} {ev.country}
-                  </span>
+                  <span className="text-[#666]">{flag(ev.country)} {ev.country}</span>
                   {ev.failures != null && ev.failures > 0 && (
-                    <span className="text-orange-600/60 text-[9px]">
-                      {ev.failures}×
-                    </span>
+                    <span className="text-orange-600/60 text-[9px]">{ev.failures}×</span>
                   )}
                 </div>
               ))}
