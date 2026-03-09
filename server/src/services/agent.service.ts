@@ -651,6 +651,19 @@ export const agentService = {
       serviceConfigsMap = {};
     }
 
+    // If no service templates are configured for this device/group, auto-enable
+    // all detected services with sensible defaults so log watching works
+    // out-of-the-box without requiring manual template configuration.
+    if (Object.keys(serviceConfigsMap).length === 0 && body.services && body.services.length > 0) {
+      for (const svc of body.services as { type: string }[]) {
+        serviceConfigsMap[svc.type] = {
+          enabled: true,
+          threshold: 5,
+          windowSeconds: 60,
+        };
+      }
+    }
+
     // ── i. Handle pending command ─────────────────────────
     let pendingCommand: string | undefined;
     if (device.pendingCommand) {
@@ -668,14 +681,20 @@ export const agentService = {
       .where({ id: deviceId })
       .update({ updated_at: pushTime });
 
-    // Notify UI of push activity so AgentDetailPage can track online status.
-    // Uses a dedicated lightweight event to avoid interfering with the
-    // AGENT_DEVICE_UPDATED event which carries full device metadata.
+    // Notify UI of push activity:
+    // 1. agent:pushHeartbeat — lightweight heartbeat for AgentDetailPage online status
+    // 2. AGENT_STATUS_CHANGED 'up' — updates the sidebar status dot
     if (_io) {
       _io.emit('agent:pushHeartbeat', {
         deviceId,
         updatedAt: pushTime.toISOString(),
         agentVersion: body.agentVersion ?? device.agentVersion,
+      });
+      _io.emit(SOCKET_EVENTS.AGENT_STATUS_CHANGED, {
+        deviceId,
+        status: 'up',
+        violations: [],
+        violationKeys: [],
       });
     }
 

@@ -352,6 +352,11 @@ func mainLoop(cfg *Config) {
 	lw.Start()
 	defer lw.Stop()
 
+	// On Windows, start the Security Event Log poller (reads RDP/auth failures
+	// from EventID 4625/4624 — no log file path needed).
+	// On Linux/macOS this is a no-op; those platforms use file-based tailing.
+	startPlatformEventLogWatcher(lw)
+
 	// Check for a newer version before entering the main loop.
 	checkForUpdate(cfg)
 
