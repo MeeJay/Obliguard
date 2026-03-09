@@ -12,8 +12,8 @@ import "os"
 //  3. Old exe calls restartWithNewBinary() → os.Exit(0)   (service stops)
 //  4. Batch waits 2 s, then runs:
 //       msiexec /i obliguard-agent.msi /quiet /norestart SERVERURL=... APIKEY=...
-//     MSI stop the service (already stopped), overwrites obliguard-agent.exe,
-//     runs deferred custom actions (PawnIO driver etc.), starts the service.
+//     MSI stops the service (already stopped), overwrites obliguard-agent.exe,
+//     then starts the service with the new binary.
 //  5. Batch cleans up the .msi and itself.
 func restartWithNewBinary(_ string) {
 	os.Exit(0)

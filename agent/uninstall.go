@@ -46,8 +46,7 @@ func handleUninstallCommand(cfg *Config) {
 // ── Windows ───────────────────────────────────────────────────────────────────
 
 // handleWindowsUninstall downloads the MSI and runs msiexec /x via a detached
-// batch script. The MSI uninstall stops the service, removes all files and the
-// PawnIO kernel driver (via WiX ServiceControl + CA.UninstallPawnIO).
+// batch script. The MSI uninstall stops the service and removes all files.
 func handleWindowsUninstall(cfg *Config) error {
 	// Download the MSI to a temp path
 	msiPath := filepath.Join(os.TempDir(), "obliguard-uninstall.msi")
