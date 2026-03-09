@@ -74,6 +74,11 @@
   },
   "nav": {
     "dashboard": "仪表板",
+    "netmap": "网络拓扑",
+    "ipReputation": "IP信誉",
+    "bans": "封禁",
+    "whitelist": "白名单",
+    "serviceTemplates": "服务模板",
     "groups": "分组",
     "notifications": "通知",
     "users": "用户",

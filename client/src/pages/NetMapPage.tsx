@@ -1,390 +1,976 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
-import { Network, RefreshCw, ZoomIn, ZoomOut, Maximize2, Info } from 'lucide-react';
-import toast from 'react-hot-toast';
+/**
+ * NetMapPage — Obliguard Live Threat Map
+ *
+ * Kaspersky/Radware-style canvas-based world map.
+ * Shows ALL traffic flows hitting protected agents:
+ *   - Blue arcs   = successful connections (auth_success)
+ *   - Orange arcs = failed auth attempts   (auth_failure)
+ *   - Red arcs    = auto-banned IPs        (ban:auto)
+ *
+ * IP dots on the map are sized by failure count and coloured by status.
+ * Hover over any dot to see IP details.
+ */
 
-// We load Cytoscape dynamically from CDN to avoid adding a build dependency.
-// The type is loosely declared here.
-declare global {
-  interface Window {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    cytoscape?: any;
-  }
-}
+import { useEffect, useRef, useState, useCallback } from 'react';
+import { Shield, Ban, Activity, RefreshCw, Zap } from 'lucide-react';
+import { getSocket } from '../socket/socketClient';
+import apiClient from '../api/client';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-interface IpReputationItem {
+interface IpRepItem {
   ip: string;
-  totalFailures: number;
-  affectedServices: string[];
-  affectedAgentsCount: number;
-  status?: string;
   geoCountryCode?: string | null;
+  totalFailures: number;
+  status: string;
+  affectedServices?: string[];
+  affectedAgentsCount?: number;
 }
 
-interface AgentDevice {
+interface AgentDev {
   id: number;
   hostname: string;
   name: string | null;
   status: string;
+  ip?: string | null;
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function getSubnet24(ip: string): string {
-  const parts = ip.split('.');
-  if (parts.length < 3) return ip;
-  return `${parts[0]}.${parts[1]}.${parts[2]}.0/24`;
+/** A single animated arc between an IP source and an agent target */
+interface Arc {
+  id: string;
+  sx: number; sy: number;
+  tx: number; ty: number;
+  cx: number; cy: number;
+  /** Hex colour for the arc */
+  color: string;
+  service: string;
+  country: string;
+  sourceIp: string;
+  failures: number;
+  /** Determines which filter toggles can hide this arc */
+  eventType: 'auth_success' | 'auth_failure' | 'ban';
+  /** 0 → travel → 1 → fade → 2.x = remove */
+  progress: number;
+  speed: number;
 }
 
-function ipNodeColor(status: string | undefined): string {
-  switch (status) {
-    case 'banned':      return '#ef4444';
-    case 'suspicious':  return '#eab308';
-    case 'whitelisted': return '#22c55e';
-    default:            return '#6b7280';
-  }
+/** A static dot rendered at an IP's geo location */
+interface IpDot {
+  ip: string;
+  x: number; y: number;
+  radius: number;
+  color: string;
+  status: string;
+  failures: number;
+  services: string[];
+  country: string;
 }
 
-function countryCodeToFlag(code: string | null | undefined): string {
+/** A protected agent server marker */
+interface AgentMarker {
+  x: number; y: number;
+  label: string;
+  lon: number; lat: number;
+}
+
+interface LiveEvent {
+  id: string;
+  ip: string;
+  service: string;
+  country: string;
+  time: Date;
+  color: string;
+  eventType: 'auth_success' | 'auth_failure' | 'ban';
+  failures?: number;
+}
+
+// ── Country centroids  [lat, lon] ─────────────────────────────────────────────
+
+const CENTROIDS: Record<string, [number, number]> = {
+  AF:[33.93,67.71], AL:[41.15,20.17], DZ:[28.03,1.66],  AO:[-11.20,17.87],
+  AR:[-38.42,-63.62],AU:[-25.27,133.78],AT:[47.52,14.55],AZ:[40.14,47.58],
+  BD:[23.68,90.36], BE:[50.50,4.47],  BG:[42.73,25.49], BR:[-14.24,-51.93],
+  CA:[56.13,-106.35],CN:[35.86,104.19],CO:[4.57,-74.30], CZ:[49.82,15.47],
+  DE:[51.17,10.45], DK:[56.26,9.50],  EG:[26.82,30.80], ES:[40.46,-3.75],
+  ET:[9.15,40.49],  FI:[61.92,25.75], FR:[46.23,2.21],  GB:[55.38,-3.44],
+  GE:[42.32,43.36], GH:[7.95,-1.02],  GR:[39.07,21.82], HK:[22.30,114.18],
+  HU:[47.16,19.50], ID:[-0.79,113.92],IN:[20.59,78.96],  IQ:[33.22,43.68],
+  IR:[32.43,53.69], IT:[41.87,12.57], JP:[36.20,138.25], KE:[-0.02,37.91],
+  KP:[40.34,127.51],KR:[35.91,127.77],KZ:[48.02,66.92],  LY:[26.34,17.23],
+  MA:[31.79,-7.09], MD:[47.41,28.37], MX:[23.63,-102.55],MY:[4.21,101.98],
+  NG:[9.08,8.68],   NL:[52.13,5.29],  NO:[60.47,8.47],  NZ:[-40.90,174.89],
+  PK:[30.38,69.35], PL:[51.92,19.15], PT:[39.40,-8.22],  RO:[45.94,24.97],
+  RS:[44.02,21.01], RU:[61.52,105.32],SA:[23.89,45.08],  SE:[60.13,18.64],
+  SG:[1.35,103.82], SY:[34.80,38.99], TH:[15.87,100.99], TN:[33.89,9.54],
+  TR:[38.96,35.24], TW:[23.70,121.00],UA:[48.38,31.17],  US:[37.09,-95.71],
+  UZ:[41.38,64.59], VE:[6.42,-66.59], VN:[14.06,108.28], ZA:[-30.56,22.94],
+};
+
+// ── Colour palette ────────────────────────────────────────────────────────────
+
+/** Arc colours by event type */
+const EVENT_COLORS = {
+  auth_success: '#22d3ee',   // cyan — legitimate connection
+  auth_failure: '#f97316',   // orange — bad password / auth failure
+  ban:          '#ef4444',   // red — IP auto-banned
+} as const;
+
+/** Service colours (shown in legend and used as fallback) */
+const SVC_COLORS: Record<string, string> = {
+  ssh:    '#f97316',
+  rdp:    '#a855f7',
+  ftp:    '#eab308',
+  mail:   '#06b6d4',
+  mysql:  '#ec4899',
+  nginx:  '#22c55e',
+  apache: '#22c55e',
+  iis:    '#3b82f6',
+};
+
+function svcColor(s: string): string {
+  const lc = (s ?? '').toLowerCase();
+  for (const [k, v] of Object.entries(SVC_COLORS)) if (lc.includes(k)) return v;
+  return '#f43f5e';
+}
+
+function statusColor(st: string): string {
+  if (st === 'banned')      return '#ef4444';
+  if (st === 'suspicious')  return '#f97316';
+  if (st === 'whitelisted') return '#22c55e';
+  return '#475569';
+}
+
+// ── Mercator projection ───────────────────────────────────────────────────────
+
+function project(lon: number, lat: number, w: number, h: number): [number, number] {
+  const x = ((lon + 180) / 360) * w;
+  const clat = Math.min(Math.max(lat, -79), 79);
+  const latR  = (clat * Math.PI) / 180;
+  const mercN = Math.log(Math.tan(Math.PI / 4 + latR / 2));
+  const maxN  = Math.log(Math.tan(Math.PI / 4 + (79 * Math.PI) / 360));
+  const y = h / 2 - (mercN / maxN) * (h / 2) * 0.92;
+  return [x, y];
+}
+
+// ── Bezier helpers ────────────────────────────────────────────────────────────
+
+function ctrlPt(sx: number, sy: number, tx: number, ty: number): [number, number] {
+  const mx = (sx + tx) / 2, my = (sy + ty) / 2;
+  const dx = tx - sx, dy = ty - sy;
+  const len = Math.sqrt(dx * dx + dy * dy) || 1;
+  const curve = Math.min(len * 0.38, 110);
+  return [mx - (dy / len) * curve * 0.6, my + (dx / len) * curve * 0.05 - curve * 0.55];
+}
+
+function bezier(
+  sx: number, sy: number, cx: number, cy: number,
+  tx: number, ty: number, t: number,
+): [number, number] {
+  const mt = 1 - t;
+  return [mt * mt * sx + 2 * mt * t * cx + t * t * tx,
+          mt * mt * sy + 2 * mt * t * cy + t * t * ty];
+}
+
+// ── Country flag emoji ────────────────────────────────────────────────────────
+
+function flag(code: string): string {
   if (!code || code.length !== 2) return '';
-  const offset = 127397;
   return Array.from(code.toUpperCase())
-    .map(c => String.fromCodePoint(c.codePointAt(0)! + offset))
+    .map(c => String.fromCodePoint(c.codePointAt(0)! + 127397))
     .join('');
 }
 
-// ── Load Cytoscape from CDN ───────────────────────────────────────────────────
+// ── Load a CDN script (idempotent) ────────────────────────────────────────────
 
-function loadCytoscape(): Promise<void> {
+function loadScript(url: string, windowKey: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    if (window.cytoscape) { resolve(); return; }
-    const script = document.createElement('script');
-    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.29.2/cytoscape.min.js';
-    script.onload = () => resolve();
-    script.onerror = () => reject(new Error('Failed to load Cytoscape'));
-    document.head.appendChild(script);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    if ((window as any)[windowKey]) { resolve(); return; }
+    const s = document.createElement('script');
+    s.src = url;
+    s.onload  = () => resolve();
+    s.onerror = reject;
+    document.head.appendChild(s);
   });
 }
 
-// ── NetMapPage ────────────────────────────────────────────────────────────────
+// ── Convert GeoJSON geometry → Path2D using Mercator ─────────────────────────
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function geoToPath(geometry: any, w: number, h: number): Path2D {
+  const path = new Path2D();
+  const rings = geometry.type === 'Polygon'
+    ? [geometry.coordinates]
+    : geometry.type === 'MultiPolygon'
+      ? geometry.coordinates
+      : [];
+  for (const poly of rings) {
+    for (const ring of poly as [number, number][][]) {
+      let first = true;
+      for (const [lon, lat] of ring) {
+        const [px, py] = project(lon, lat, w, h);
+        if (first) { path.moveTo(px, py); first = false; }
+        else path.lineTo(px, py);
+      }
+      path.closePath();
+    }
+  }
+  return path;
+}
+
+// ── NetMapPage component ──────────────────────────────────────────────────────
 
 export function NetMapPage() {
+  const baseRef      = useRef<HTMLCanvasElement>(null);
+  const animRef      = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const cyRef = useRef<any>(null);
-  const [loading, setLoading] = useState(true);
-  const [cyReady, setCyReady] = useState(false);
-  const [selectedNode, setSelectedNode] = useState<{
-    type: 'ip' | 'agent' | 'subnet';
-    id: string;
-    label: string;
-    details: Record<string, string | number>;
-  } | null>(null);
-  const [stats, setStats] = useState({ agents: 0, ips: 0, banned: 0, subnets: 0 });
 
-  const buildGraph = useCallback(async () => {
-    setLoading(true);
+  const rafRef    = useRef<number>(0);
+  const arcsRef   = useRef<Arc[]>([]);
+  const dotsRef   = useRef<IpDot[]>([]);
+  const agentRef  = useRef<AgentMarker[]>([]);
+  const lastTsRef = useRef<number>(0);
+
+  // Active flow-type filters — stored in a ref so the animation loop reads the
+  // latest value without needing a re-render, and mirrored in state for the UI.
+  type FlowType = 'auth_success' | 'auth_failure' | 'ban';
+  const ALL_FILTERS = new Set<FlowType>(['auth_success', 'auth_failure', 'ban']);
+  const filtersRef = useRef<Set<FlowType>>(new Set(ALL_FILTERS));
+  const [filters, setFilters] = useState<Set<FlowType>>(new Set(ALL_FILTERS));
+
+  const toggleFilter = useCallback((type: FlowType) => {
+    setFilters(prev => {
+      const next = new Set(prev);
+      if (next.has(type)) next.delete(type); else next.add(type);
+      filtersRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const [liveEvents, setLiveEvents] = useState<LiveEvent[]>([]);
+  const [stats, setStats]    = useState({ agents: 0, banned: 0, today: 0 });
+  const [arcCount, setArcCount] = useState(0);
+  const [loading, setLoading]   = useState(true);
+  const [tooltip, setTooltip]   = useState<{
+    visible: boolean; x: number; y: number;
+    ip: string; country: string; failures: number;
+    status: string; services: string[];
+  }>({ visible: false, x: 0, y: 0, ip: '', country: '', failures: 0, status: '', services: [] });
+
+  // ── Canvas sizing ─────────────────────────────────────────────────────────
+
+  const getSize = useCallback((): [number, number] => {
+    const el = containerRef.current;
+    return el ? [el.clientWidth, el.clientHeight] : [1280, 640];
+  }, []);
+
+  // ── Spawn one arc ─────────────────────────────────────────────────────────
+
+  const spawnArc = useCallback((
+    srcLon: number, srcLat: number,
+    tgtLon: number, tgtLat: number,
+    color: string, service: string,
+    country: string, ip: string,
+    eventType: 'auth_success' | 'auth_failure' | 'ban' = 'auth_failure',
+    failures = 0,
+  ) => {
+    const [w, h] = getSize();
+    const [sx, sy] = project(srcLon, srcLat, w, h);
+    const [tx, ty] = project(tgtLon, tgtLat, w, h);
+    const [cx, cy] = ctrlPt(sx, sy, tx, ty);
+    const arc: Arc = {
+      id: Math.random().toString(36).slice(2),
+      sx, sy, tx, ty, cx, cy,
+      color, service, country, sourceIp: ip, failures,
+      eventType,
+      progress: 0,
+      speed: 0.22 + Math.random() * 0.14,
+    };
+    arcsRef.current = [...arcsRef.current.slice(-39), arc];
+  }, [getSize]);
+
+  // ── Draw the static world map once ────────────────────────────────────────
+
+  const drawBase = useCallback(async (w: number, h: number) => {
+    const canvas = baseRef.current;
+    if (!canvas) return;
+    canvas.width = w; canvas.height = h;
+    const ctx = canvas.getContext('2d')!;
+
+    // Deep-space gradient background
+    const bg = ctx.createRadialGradient(w * 0.5, h * 0.35, 0, w * 0.5, h * 0.5, Math.max(w, h) * 0.9);
+    bg.addColorStop(0, '#06172e');
+    bg.addColorStop(1, '#020b18');
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, w, h);
+
+    // Subtle dot grid
+    ctx.fillStyle = 'rgba(0,160,220,0.045)';
+    for (let x = 0; x < w; x += 40) {
+      for (let y = 0; y < h; y += 40) {
+        ctx.beginPath();
+        ctx.arc(x, y, 0.65, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    // Load world atlas + topojson-client from CDN
     try {
-      // Load Cytoscape if needed
-      await loadCytoscape();
-      setCyReady(true);
+      await loadScript(
+        'https://cdn.jsdelivr.net/npm/topojson-client@3/dist/topojson-client.min.js',
+        'topojson',
+      );
+      const resp  = await fetch('https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json');
+      const world = await resp.json();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const { features } = (window as any).topojson.feature(world, world.objects.countries);
 
-      // Fetch data in parallel
-      const [repRes, devRes] = await Promise.all([
-        fetch('/api/ip-reputation?limit=200'),
-        fetch('/api/agent/devices'),
-      ]);
+      // Country fill (very dark navy)
+      ctx.fillStyle = 'rgba(4,28,58,0.88)';
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      for (const f of features as any[]) ctx.fill(geoToPath(f.geometry, w, h));
 
-      const repJson = repRes.ok ? await repRes.json() : { data: [] };
-      const devJson = devRes.ok ? await devRes.json() : { data: [] };
-
-      const ips: IpReputationItem[] = repJson.data ?? [];
-      const agents: AgentDevice[] = devJson.data ?? [];
-
-      // Build elements
-      const elements: object[] = [];
-      const subnetSet = new Set<string>();
-
-      // Agent nodes
-      for (const agent of agents) {
-        if (agent.status !== 'approved') continue;
-        elements.push({
-          data: {
-            id: `agent-${agent.id}`,
-            label: agent.name ?? agent.hostname,
-            type: 'agent',
-            color: '#3b82f6',
-          },
-        });
-      }
-
-      // IP nodes + subnet compound nodes
-      for (const rep of ips) {
-        const subnet = getSubnet24(rep.ip);
-        if (!subnetSet.has(subnet)) {
-          subnetSet.add(subnet);
-          elements.push({
-            data: { id: `subnet-${subnet}`, label: subnet, type: 'subnet' },
-          });
-        }
-
-        elements.push({
-          data: {
-            id: `ip-${rep.ip}`,
-            label: rep.ip,
-            parent: `subnet-${subnet}`,
-            type: 'ip',
-            status: rep.status ?? 'clean',
-            color: ipNodeColor(rep.status),
-            failures: rep.totalFailures,
-            services: (rep.affectedServices ?? []).join(', '),
-            flag: countryCodeToFlag(rep.geoCountryCode),
-          },
-        });
-
-        // Edges: connect IP to agents that reported it (we use affectedAgentsCount as approximate)
-        if (rep.affectedAgentsCount > 0) {
-          for (const agent of agents.slice(0, rep.affectedAgentsCount)) {
-            if (agent.status !== 'approved') continue;
-            elements.push({
-              data: {
-                id: `e-${agent.id}-${rep.ip}`,
-                source: `agent-${agent.id}`,
-                target: `ip-${rep.ip}`,
-                service: (rep.affectedServices ?? [])[0] ?? 'unknown',
-              },
-            });
-          }
-        }
-      }
-
-      setStats({
-        agents: agents.filter(a => a.status === 'approved').length,
-        ips: ips.length,
-        banned: ips.filter(r => r.status === 'banned').length,
-        subnets: subnetSet.size,
-      });
-
-      if (!containerRef.current || !window.cytoscape) return;
-
-      // Destroy previous instance
-      if (cyRef.current) { cyRef.current.destroy(); }
-
-      // Initialize Cytoscape
-      const cy = window.cytoscape({
-        container: containerRef.current,
-        elements,
-        style: [
-          {
-            selector: 'node[type = "subnet"]',
-            style: {
-              'background-color': '#1e293b',
-              'border-color': '#334155',
-              'border-width': 1,
-              'label': 'data(label)',
-              'color': '#64748b',
-              'font-size': '10px',
-              'text-valign': 'top',
-              'padding': '20px',
-            },
-          },
-          {
-            selector: 'node[type = "ip"]',
-            style: {
-              'background-color': 'data(color)',
-              'border-color': 'data(color)',
-              'border-width': 2,
-              'label': 'data(label)',
-              'color': '#f1f5f9',
-              'font-size': '9px',
-              'width': 28,
-              'height': 28,
-              'text-valign': 'bottom',
-              'text-margin-y': 4,
-            },
-          },
-          {
-            selector: 'node[type = "agent"]',
-            style: {
-              'background-color': '#3b82f6',
-              'border-color': '#60a5fa',
-              'border-width': 2,
-              'label': 'data(label)',
-              'color': '#f1f5f9',
-              'font-size': '10px',
-              'width': 36,
-              'height': 36,
-              'shape': 'rectangle',
-              'text-valign': 'bottom',
-              'text-margin-y': 4,
-            },
-          },
-          {
-            selector: 'edge',
-            style: {
-              'line-color': '#475569',
-              'width': 1,
-              'opacity': 0.5,
-              'curve-style': 'bezier',
-            },
-          },
-          {
-            selector: ':selected',
-            style: {
-              'border-color': '#f59e0b',
-              'border-width': 3,
-            },
-          },
-        ],
-        layout: {
-          name: 'cose',
-          animate: true,
-          animationDuration: 600,
-          nodeRepulsion: () => 5000,
-          idealEdgeLength: () => 80,
-          nodeOverlap: 10,
-          gravity: 0.3,
-        },
-        userZoomingEnabled: true,
-        userPanningEnabled: true,
-        boxSelectionEnabled: false,
-        minZoom: 0.1,
-        maxZoom: 4,
-      });
-
-      cyRef.current = cy;
-
-      // Node click handler
-      cy.on('tap', 'node', (evt: { target: { data: () => { id?: string; type: string; label: string; status?: string; failures?: number; services?: string } } }) => {
-        const node = evt.target;
-        const d = node.data();
-        setSelectedNode({
-          type: d.type as 'ip' | 'agent' | 'subnet',
-          id: d.id as string,
-          label: d.label as string,
-          details: d.type === 'ip'
-            ? { Status: d.status ?? 'clean', Failures: d.failures ?? 0, Services: d.services ?? '—' }
-            : d.type === 'agent'
-              ? { Role: 'Agent', Status: 'Approved' }
-              : { Type: 'Subnet /24' },
-        });
-      });
-
-      cy.on('tap', (evt: { target: { isNode: () => boolean } }) => {
-        if (evt.target === cy) setSelectedNode(null);
-      });
-
-    } catch (err) {
-      console.error(err);
-      toast.error('Failed to build network map');
-    } finally {
-      setLoading(false);
+      // Country borders with soft cyan glow
+      ctx.save();
+      ctx.shadowBlur = 2.5;
+      ctx.shadowColor = 'rgba(0,180,255,0.28)';
+      ctx.strokeStyle = 'rgba(0,180,255,0.18)';
+      ctx.lineWidth = 0.5;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      for (const f of features as any[]) ctx.stroke(geoToPath(f.geometry, w, h));
+      ctx.restore();
+    } catch {
+      // World map failed to load — grid background remains
     }
   }, []);
 
-  useEffect(() => {
-    void buildGraph();
-    return () => { if (cyRef.current) { cyRef.current.destroy(); cyRef.current = null; } };
-  }, [buildGraph]);
+  // ── Animation loop ────────────────────────────────────────────────────────
 
-  function handleZoomIn() { cyRef.current?.zoom(cyRef.current.zoom() * 1.3); }
-  function handleZoomOut() { cyRef.current?.zoom(cyRef.current.zoom() * 0.7); }
-  function handleFit() { cyRef.current?.fit(undefined, 40); }
+  const animate = useCallback((ts: number) => {
+    const canvas = animRef.current;
+    if (!canvas) { rafRef.current = requestAnimationFrame(animate); return; }
+    const ctx = canvas.getContext('2d')!;
+    const [w, h] = [canvas.width, canvas.height];
+    const dt = Math.min((ts - lastTsRef.current) / 1000, 0.05);
+    lastTsRef.current = ts;
+
+    ctx.clearRect(0, 0, w, h);
+
+    // ── IP reputation dots ────────────────────────────────────────────────
+    for (const dot of dotsRef.current) {
+      const pulse = (Math.sin(ts / 1400 + dot.x * 0.012) + 1) / 2;
+
+      // Outer glow halo for threats
+      if (dot.status === 'banned' || dot.status === 'suspicious') {
+        ctx.save();
+        ctx.globalAlpha = 0.08 + pulse * 0.07;
+        ctx.beginPath();
+        ctx.arc(dot.x, dot.y, dot.radius + 5 + pulse * 4, 0, Math.PI * 2);
+        ctx.fillStyle = dot.color;
+        ctx.fill();
+        ctx.restore();
+      }
+
+      // Core with glow
+      ctx.save();
+      ctx.shadowBlur = dot.radius * 2.5;
+      ctx.shadowColor = dot.color;
+      ctx.beginPath();
+      ctx.arc(dot.x, dot.y, dot.radius, 0, Math.PI * 2);
+      ctx.fillStyle = dot.color;
+      ctx.globalAlpha = 0.82;
+      ctx.fill();
+      ctx.restore();
+
+      // Bright inner core
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(dot.x, dot.y, Math.max(1.4, dot.radius * 0.35), 0, Math.PI * 2);
+      ctx.fillStyle = '#ffffff';
+      ctx.globalAlpha = 0.45;
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // ── Attack / connection arcs ──────────────────────────────────────────
+    const alive: Arc[] = [];
+    for (const arc of arcsRef.current) {
+      arc.progress += dt * arc.speed;
+      if (arc.progress > 2.4) continue;
+      alive.push(arc);
+
+      // Skip drawing if the filter for this flow type is toggled off
+      if (!filtersRef.current.has(arc.eventType)) continue;
+
+      const tHead = Math.min(arc.progress, 1.0);
+      const fade = arc.progress > 1.0
+        ? Math.max(0, 1 - (arc.progress - 1.0) * 2.0)
+        : 1.0;
+      if (fade <= 0) continue;
+
+      // Glowing trail (segmented for gradient fade)
+      const segs = 50;
+      for (let i = 0; i < segs; i++) {
+        const t0 = (i / segs) * tHead;
+        const t1 = ((i + 1) / segs) * tHead;
+        const [x0, y0] = bezier(arc.sx, arc.sy, arc.cx, arc.cy, arc.tx, arc.ty, t0);
+        const [x1, y1] = bezier(arc.sx, arc.sy, arc.cx, arc.cy, arc.tx, arc.ty, t1);
+        const a = (i / segs) * fade * 0.78;
+        ctx.beginPath();
+        ctx.moveTo(x0, y0);
+        ctx.lineTo(x1, y1);
+        ctx.strokeStyle = arc.color + Math.round(a * 255).toString(16).padStart(2, '0');
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+
+      // Travelling particle (glowing head)
+      if (tHead < 1.0) {
+        const [px, py] = bezier(arc.sx, arc.sy, arc.cx, arc.cy, arc.tx, arc.ty, tHead);
+        ctx.save();
+        ctx.shadowBlur = 18;
+        ctx.shadowColor = arc.color;
+        ctx.beginPath();
+        ctx.arc(px, py, 3.5, 0, Math.PI * 2);
+        ctx.fillStyle = '#ffffff';
+        ctx.globalAlpha = fade;
+        ctx.fill();
+        ctx.restore();
+      }
+
+      // Impact ring at target
+      if (arc.progress >= 0.9 && arc.progress <= 1.9) {
+        const pt = (arc.progress - 0.9) / 1.0;
+        const r  = pt * 26;
+        const pa = (1 - pt) * fade * 0.85;
+        ctx.save();
+        ctx.shadowBlur = 12;
+        ctx.shadowColor = arc.color;
+        ctx.beginPath();
+        ctx.arc(arc.tx, arc.ty, r, 0, Math.PI * 2);
+        ctx.strokeStyle = arc.color + Math.round(pa * 255).toString(16).padStart(2, '0');
+        ctx.lineWidth = 1.5;
+        ctx.globalAlpha = pa;
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+    arcsRef.current = alive;
+
+    // ── Agent server markers ──────────────────────────────────────────────
+    const p2 = (Math.sin(ts / 900) + 1) / 2;
+    for (const ag of agentRef.current) {
+      ctx.save();
+      // Outer pulse ring
+      ctx.beginPath();
+      ctx.arc(ag.x, ag.y, 14 + p2 * 5, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(0,210,255,${0.05 + p2 * 0.12})`;
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+
+      // Solid ring with glow
+      ctx.shadowBlur = 10;
+      ctx.shadowColor = '#00d2ff';
+      ctx.beginPath();
+      ctx.arc(ag.x, ag.y, 8, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(0,210,255,0.78)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      // Centre dot
+      ctx.shadowBlur = 15;
+      ctx.beginPath();
+      ctx.arc(ag.x, ag.y, 3.5, 0, Math.PI * 2);
+      ctx.fillStyle = '#00e8ff';
+      ctx.fill();
+      ctx.restore();
+
+      // Label
+      ctx.fillStyle = 'rgba(0,210,255,0.75)';
+      ctx.font = '9px "Courier New", monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(ag.label.slice(0, 16), ag.x, ag.y + 24);
+    }
+
+    setArcCount(alive.length);
+    rafRef.current = requestAnimationFrame(animate);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Fetch data + build layout ─────────────────────────────────────────────
+
+  const init = useCallback(async () => {
+    setLoading(true);
+    arcsRef.current  = [];
+    dotsRef.current  = [];
+    agentRef.current = [];
+
+    const [w, h] = getSize();
+    const ac = animRef.current;
+    if (ac) { ac.width = w; ac.height = h; }
+
+    await drawBase(w, h);
+
+    try {
+      const [repRes, devRes, banRes] = await Promise.all([
+        apiClient.get<{ data: IpRepItem[] }>('/ip-reputation?limit=200'),
+        apiClient.get<{ data: AgentDev[] }>('/agent/devices'),
+        apiClient.get<{ data: { active: number; today: number } }>('/bans/stats')
+          .catch(() => ({ data: { data: { active: 0, today: 0 } } })),
+      ]);
+
+      const ips   = repRes.data?.data ?? [] as IpRepItem[];
+      const devs  = (devRes.data?.data ?? [] as AgentDev[]).filter(d => d.status === 'approved');
+      const bs    = (banRes.data as { data: { active: number; today: number } })?.data
+                    ?? { active: 0, today: 0 };
+
+      setStats({ agents: devs.length, banned: bs.active, today: bs.today });
+
+      // ── Agent positions (cluster near Paris as default) ───────────────
+      const BASE_LON = 2.35, BASE_LAT = 48.86;
+      const spread = 1.8;
+      const n = Math.max(devs.length, 1);
+      agentRef.current = (devs.length > 0 ? devs : [{ id: 0, hostname: 'Server', name: null, status: 'approved' }])
+        .slice(0, 12)
+        .map((d, i) => {
+          const angle = (i / n) * Math.PI * 2;
+          const lon = BASE_LON + Math.cos(angle) * (n > 1 ? spread : 0);
+          const lat = BASE_LAT + Math.sin(angle) * (n > 1 ? spread * 0.5 : 0);
+          const [x, y] = project(lon, lat, w, h);
+          return { x, y, label: ('name' in d ? d.name : null) ?? d.hostname, lon, lat };
+        });
+
+      // ── IP dots placed at their geo location ──────────────────────────
+      const dots: IpDot[] = [];
+      for (const rep of ips) {
+        const cc = rep.geoCountryCode?.toUpperCase();
+        if (!cc) continue;
+        const c = CENTROIDS[cc];
+        if (!c) continue;
+        const jLon = c[1] + (Math.random() - 0.5) * 3.8;
+        const jLat = c[0] + (Math.random() - 0.5) * 2.8;
+        const [x, y] = project(jLon, jLat, w, h);
+        // Radius proportional to failure count (min 3, max 13)
+        const radius = 3 + Math.min(rep.totalFailures / 14, 10);
+        dots.push({
+          ip: rep.ip, x, y, radius,
+          color: statusColor(rep.status),
+          status: rep.status,
+          failures: rep.totalFailures,
+          services: rep.affectedServices ?? [],
+          country: cc,
+        });
+      }
+      dotsRef.current = dots;
+
+      // ── Initial arcs from ip_reputation data ─────────────────────────
+      const agents = agentRef.current;
+      let spawned = 0;
+      for (const rep of ips) {
+        if (spawned >= 20) break;
+        const cc = rep.geoCountryCode?.toUpperCase();
+        if (!cc) continue;
+        const c = CENTROIDS[cc];
+        if (!c) continue;
+        const ag = agents[spawned % agents.length];
+        if (!ag) continue;
+        // Colour based on status: banned = red, suspicious = orange, else cyan
+        const arcColor = rep.status === 'banned'
+          ? EVENT_COLORS.ban
+          : rep.totalFailures > 0
+            ? EVENT_COLORS.auth_failure
+            : EVENT_COLORS.auth_success;
+        spawnArc(
+          c[1] + (Math.random() - 0.5) * 3,
+          c[0] + (Math.random() - 0.5) * 2,
+          ag.lon, ag.lat,
+          arcColor,
+          rep.affectedServices?.[0] ?? 'ssh',
+          cc, rep.ip,
+          rep.status === 'banned' ? 'ban' : rep.totalFailures > 0 ? 'auth_failure' : 'auth_success',
+          rep.totalFailures,
+        );
+        spawned++;
+      }
+
+      // Pad with generic arcs if not enough geo-tagged IPs
+      if (spawned < 8) {
+        const fill = ['CN','RU','US','BR','IN','KP','IR','NG','TR','UA'];
+        for (let i = spawned; i < 10; i++) {
+          const cc = fill[i % fill.length];
+          const c  = CENTROIDS[cc]!;
+          const ag = agents[i % agents.length] ?? agents[0];
+          if (!ag) continue;
+          spawnArc(
+            c[1] + (Math.random() - 0.5) * 4,
+            c[0] + (Math.random() - 0.5) * 3,
+            ag.lon, ag.lat,
+            EVENT_COLORS.auth_failure,
+            ['ssh','rdp','ftp','mail'][i % 4],
+            cc, '(historical)', 'auth_failure', 1,
+          );
+        }
+      }
+    } catch (err) {
+      console.error('NetMap init error:', err);
+    }
+    setLoading(false);
+  }, [getSize, drawBase, spawnArc]);
+
+  // ── Socket.io — real-time flows ───────────────────────────────────────────
+
+  useEffect(() => {
+    const socket = getSocket();
+    if (!socket) return;
+
+    /**
+     * ip:flow — emitted by agent push handler for every unique IP seen in
+     * a push cycle, with event_type 'auth_success' or 'auth_failure'.
+     */
+    const onIpFlow = (data: {
+      ip: string; service: string;
+      eventType: 'auth_success' | 'auth_failure'; deviceId: number;
+    }) => {
+      const ccs = Object.keys(CENTROIDS);
+      const cc  = ccs[Math.floor(Math.random() * ccs.length)];
+      const c   = CENTROIDS[cc]!;
+      const ag  = agentRef.current[Math.floor(Math.random() * Math.max(agentRef.current.length, 1))];
+      if (!ag) return;
+
+      const arcColor = data.eventType === 'auth_success'
+        ? EVENT_COLORS.auth_success
+        : EVENT_COLORS.auth_failure;
+
+      spawnArc(
+        c[1] + (Math.random() - 0.5) * 3,
+        c[0] + (Math.random() - 0.5) * 2,
+        ag.lon, ag.lat,
+        arcColor, data.service, cc, data.ip, data.eventType, 0,
+      );
+
+      const ev: LiveEvent = {
+        id: Math.random().toString(36).slice(2),
+        ip: data.ip, service: data.service, country: cc,
+        time: new Date(), color: arcColor,
+        eventType: data.eventType,
+      };
+      setLiveEvents(prev => [ev, ...prev].slice(0, 40));
+    };
+
+    /**
+     * ban:auto — emitted by BanEngine when an IP crosses the failure threshold.
+     * Shows as a red arc.
+     */
+    const onBanAuto = (data: { ip: string; service: string; failureCount: number }) => {
+      const ccs = Object.keys(CENTROIDS);
+      const cc  = ccs[Math.floor(Math.random() * ccs.length)];
+      const c   = CENTROIDS[cc]!;
+      const ag  = agentRef.current[0];
+      if (!ag) return;
+
+      spawnArc(c[1], c[0], ag.lon, ag.lat, EVENT_COLORS.ban, data.service, cc, data.ip, 'ban', data.failureCount);
+
+      const ev: LiveEvent = {
+        id: Math.random().toString(36).slice(2),
+        ip: data.ip, service: data.service, country: cc,
+        time: new Date(), color: EVENT_COLORS.ban,
+        eventType: 'ban', failures: data.failureCount,
+      };
+      setLiveEvents(prev => [ev, ...prev].slice(0, 40));
+      setStats(s => ({ ...s, today: s.today + 1, banned: s.banned + 1 }));
+    };
+
+    socket.on('ip:flow',  onIpFlow);
+    socket.on('ban:auto', onBanAuto);
+    return () => {
+      socket.off('ip:flow',  onIpFlow);
+      socket.off('ban:auto', onBanAuto);
+    };
+  }, [spawnArc]);
+
+  // ── Hover tooltip — detect nearest IP dot ────────────────────────────────
+
+  const handleMouseMove = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    for (const dot of dotsRef.current) {
+      const dx = mx - dot.x, dy = my - dot.y;
+      if (Math.sqrt(dx * dx + dy * dy) <= dot.radius + 8) {
+        setTooltip({
+          visible: true, x: mx, y: my,
+          ip: dot.ip, country: dot.country,
+          failures: dot.failures, status: dot.status,
+          services: dot.services,
+        });
+        return;
+      }
+    }
+    setTooltip(t => ({ ...t, visible: false }));
+  }, []);
+
+  // ── Lifecycle ─────────────────────────────────────────────────────────────
+
+  useEffect(() => {
+    void init().then(() => {
+      lastTsRef.current = performance.now();
+      rafRef.current = requestAnimationFrame(animate);
+    });
+    return () => { cancelAnimationFrame(rafRef.current); };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    let t: ReturnType<typeof setTimeout>;
+    const onResize = () => { clearTimeout(t); t = setTimeout(() => void init(), 350); };
+    window.addEventListener('resize', onResize);
+    return () => { window.removeEventListener('resize', onResize); clearTimeout(t); };
+  }, [init]);
+
+  // ── JSX ───────────────────────────────────────────────────────────────────
 
   return (
-    <div className="flex flex-col h-[calc(100vh-4rem)] p-4 gap-3">
-      {/* Header */}
-      <div className="flex items-center justify-between shrink-0">
-        <div>
-          <h1 className="text-xl font-semibold text-text-primary flex items-center gap-2">
-            <Network size={20} className="text-text-muted" />
-            Network Map
-          </h1>
-          {!loading && (
-            <p className="text-xs text-text-muted mt-0.5">
-              {stats.agents} agents · {stats.ips} IPs · {stats.banned} banned · {stats.subnets} subnets
-            </p>
-          )}
+    <div className="flex flex-col h-[calc(100vh-4rem)] bg-[#020c18] overflow-hidden select-none">
+
+      {/* ── Header ──────────────────────────────────────────────────────── */}
+      <div className="flex items-center justify-between px-5 py-2 border-b border-[#0b2540] shrink-0 bg-[#040f1e]">
+        <div className="flex items-center gap-3">
+          <span className="relative flex h-2 w-2">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+            <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
+          </span>
+          <span className="font-mono text-[11px] tracking-widest text-cyan-400/80 uppercase">
+            Live Threat Map
+          </span>
+          <span className="text-[#0b2540] font-mono text-[10px]">· OBLIGUARD IPS</span>
         </div>
-        <div className="flex items-center gap-1">
+
+        <div className="flex items-center gap-6">
+          {[
+            { Icon: Shield,   label: 'AGENTS', value: stats.agents, c: '#22d3ee' },
+            { Icon: Ban,      label: 'BANNED', value: stats.banned, c: '#f87171' },
+            { Icon: Activity, label: 'TODAY',  value: stats.today,  c: '#fb923c' },
+            { Icon: Zap,      label: 'LIVE',   value: arcCount,     c: '#c084fc' },
+          ].map(({ Icon, label, value, c }) => (
+            <div key={label} className="flex items-center gap-1.5">
+              <Icon size={11} style={{ color: c }} />
+              <span className="font-mono text-sm font-bold" style={{ color: c }}>{value}</span>
+              <span className="font-mono text-[9px] text-[#1a3850] tracking-widest">{label}</span>
+            </div>
+          ))}
           <button
-            onClick={() => void buildGraph()}
-            className="p-2 rounded-lg text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors"
+            onClick={() => void init()}
+            className="ml-1 p-1.5 rounded border border-[#0b2540] text-[#1a3850] hover:text-cyan-400 hover:border-cyan-700 transition-colors"
             title="Refresh"
           >
-            <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
-          </button>
-          <button onClick={handleZoomIn} className="p-2 rounded-lg text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors" title="Zoom in">
-            <ZoomIn size={14} />
-          </button>
-          <button onClick={handleZoomOut} className="p-2 rounded-lg text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors" title="Zoom out">
-            <ZoomOut size={14} />
-          </button>
-          <button onClick={handleFit} className="p-2 rounded-lg text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors" title="Fit view">
-            <Maximize2 size={14} />
+            <RefreshCw size={11} className={loading ? 'animate-spin' : ''} />
           </button>
         </div>
       </div>
 
-      {/* Legend */}
-      <div className="flex items-center gap-4 shrink-0 text-xs text-text-muted">
-        {[
-          { color: '#3b82f6', label: 'Agent' },
-          { color: '#ef4444', label: 'Banned IP' },
-          { color: '#eab308', label: 'Suspicious IP' },
-          { color: '#22c55e', label: 'Whitelisted IP' },
-          { color: '#6b7280', label: 'Clean IP' },
-        ].map(({ color, label }) => (
-          <div key={label} className="flex items-center gap-1.5">
-            <div className="w-3 h-3 rounded-full" style={{ backgroundColor: color }} />
-            <span>{label}</span>
+      {/* ── Canvas area ─────────────────────────────────────────────────── */}
+      <div
+        ref={containerRef}
+        className="flex-1 relative overflow-hidden"
+        onMouseMove={handleMouseMove}
+        onMouseLeave={() => setTooltip(t => ({ ...t, visible: false }))}
+      >
+        <canvas ref={baseRef} className="absolute inset-0 pointer-events-none" />
+        <canvas ref={animRef} className="absolute inset-0 pointer-events-none" />
+
+        {loading && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#020c18]/85 z-10">
+            <div className="w-10 h-10 border-2 border-t-transparent border-cyan-500 rounded-full animate-spin mb-3" />
+            <p className="font-mono text-[10px] text-cyan-500/55 tracking-widest">
+              LOADING THREAT MAP...
+            </p>
           </div>
-        ))}
-      </div>
+        )}
 
-      {/* Map + Panel */}
-      <div className="flex-1 flex gap-3 min-h-0">
-        {/* Cytoscape container */}
-        <div className="relative flex-1 rounded-xl border border-border bg-bg-secondary overflow-hidden">
-          {loading && !cyReady && (
-            <div className="absolute inset-0 flex items-center justify-center z-10">
-              <div className="text-center">
-                <Network size={48} className="text-text-muted mx-auto mb-3 animate-pulse" />
-                <p className="text-sm text-text-muted">Building network map...</p>
-              </div>
+        {/* ── Left legend ──────────────────────────────────────────────── */}
+        <div className="absolute top-4 left-4 bg-[#040f1e]/90 border border-[#0b2540] rounded-sm p-3 backdrop-blur-sm min-w-[132px]">
+
+          {/* Flow type toggles */}
+          <div className="font-mono text-[8px] text-[#1a3850] tracking-widest mb-2 uppercase">
+            Flow Filters
+          </div>
+          {(
+            [
+              { type: 'auth_success' as const, color: EVENT_COLORS.auth_success, label: 'Success' },
+              { type: 'auth_failure' as const, color: EVENT_COLORS.auth_failure, label: 'Auth Failure' },
+              { type: 'ban'          as const, color: EVENT_COLORS.ban,          label: 'Auto-Ban' },
+            ] satisfies { type: FlowType; color: string; label: string }[]
+          ).map(({ type, color, label }) => {
+            const on = filters.has(type);
+            return (
+              <button
+                key={type}
+                onClick={() => toggleFilter(type)}
+                className="flex items-center gap-2 py-[4px] w-full group"
+                title={on ? `Hide ${label}` : `Show ${label}`}
+              >
+                {/* Toggle indicator */}
+                <div
+                  className="w-5 h-0.5 shrink-0 rounded transition-all duration-200"
+                  style={{
+                    backgroundColor: on ? color : '#1a3850',
+                    boxShadow: on ? `0 0 5px ${color}` : 'none',
+                  }}
+                />
+                {/* Checkbox dot */}
+                <div
+                  className="w-2.5 h-2.5 shrink-0 rounded-sm border transition-all duration-200 flex items-center justify-center"
+                  style={{
+                    borderColor: on ? color : '#1a3850',
+                    backgroundColor: on ? `${color}22` : 'transparent',
+                  }}
+                >
+                  {on && (
+                    <div
+                      className="w-1.5 h-1.5 rounded-sm"
+                      style={{ backgroundColor: color }}
+                    />
+                  )}
+                </div>
+                <span
+                  className="font-mono text-[10px] transition-colors duration-200"
+                  style={{ color: on ? '#4a8aaa' : '#1a3850' }}
+                >
+                  {label}
+                </span>
+              </button>
+            );
+          })}
+
+          {/* Service types */}
+          <div className="mt-3 pt-2 border-t border-[#0b2540]">
+            <div className="font-mono text-[8px] text-[#1a3850] tracking-widest mb-2 uppercase">
+              Services
             </div>
-          )}
-          <div ref={containerRef} className="w-full h-full" />
+            {Object.entries(SVC_COLORS)
+              .filter(([, ], i, a) => a.findIndex(([, v]) => v === a[i][1]) === i) // dedupe by color
+              .map(([svc, color]) => (
+                <div key={svc} className="flex items-center gap-2 py-[2px]">
+                  <div className="w-1.5 h-1.5 rounded-full shrink-0"
+                    style={{ backgroundColor: color, boxShadow: `0 0 4px ${color}60` }} />
+                  <span className="font-mono text-[9px] uppercase tracking-wide text-[#2a5a7a]">{svc}</span>
+                </div>
+              ))}
+          </div>
+
+          {/* IP status */}
+          <div className="mt-3 pt-2 border-t border-[#0b2540]">
+            <div className="font-mono text-[8px] text-[#1a3850] tracking-widest mb-2 uppercase">
+              IP Status
+            </div>
+            {[
+              { label: 'Banned',     color: '#ef4444' },
+              { label: 'Suspicious', color: '#f97316' },
+              { label: 'Clean',      color: '#475569' },
+            ].map(({ label, color }) => (
+              <div key={label} className="flex items-center gap-2 py-[2px]">
+                <div className="w-1.5 h-1.5 rounded-full shrink-0"
+                  style={{ backgroundColor: color, boxShadow: `0 0 4px ${color}60` }} />
+                <span className="font-mono text-[9px] text-[#2a5a7a]">{label}</span>
+              </div>
+            ))}
+            <div className="mt-1.5 font-mono text-[8px] text-[#1a3850]">
+              Dot size = failure count
+            </div>
+          </div>
         </div>
 
-        {/* Node detail panel */}
-        {selectedNode && (
-          <div className="w-64 shrink-0 rounded-xl border border-border bg-bg-secondary p-4 overflow-y-auto">
-            <div className="flex items-center gap-2 mb-3">
-              <Info size={14} className="text-text-muted" />
-              <h3 className="text-sm font-semibold text-text-primary truncate">{selectedNode.label}</h3>
+        {/* ── IP tooltip on hover ───────────────────────────────────────── */}
+        {tooltip.visible && (
+          <div
+            className="absolute z-20 pointer-events-none bg-[#050f1e]/96 border border-[#0b2540] rounded p-2.5 backdrop-blur-sm"
+            style={{
+              left: tooltip.x + 14,
+              top:  tooltip.y - 8,
+              transform: tooltip.x > (getSize()[0] * 0.72) ? 'translateX(-110%)' : undefined,
+            }}
+          >
+            <div className="font-mono text-[11px] text-cyan-300 mb-1.5 font-bold tracking-wide">
+              {tooltip.ip}
             </div>
-            <div className="space-y-2">
-              <div>
-                <p className="text-[10px] font-medium text-text-muted uppercase tracking-wide mb-1">Type</p>
-                <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
-                  selectedNode.type === 'agent' ? 'bg-blue-500/15 text-blue-400' :
-                  selectedNode.type === 'ip' ? 'bg-red-500/15 text-red-400' :
-                  'bg-bg-tertiary text-text-muted'
-                }`}>
-                  {selectedNode.type}
+            {[
+              { label: 'Country',  value: `${flag(tooltip.country)} ${tooltip.country}` },
+              { label: 'Failures', value: tooltip.failures.toLocaleString(), color: '#fb923c' },
+              { label: 'Status',   value: tooltip.status.toUpperCase(), color: statusColor(tooltip.status) },
+            ].map(({ label, value, color }) => (
+              <div key={label} className="flex items-center gap-2 mb-1">
+                <span className="font-mono text-[8px] text-[#1a3850] uppercase tracking-wider w-14 shrink-0">
+                  {label}
+                </span>
+                <span className="font-mono text-[10px]" style={{ color: color ?? '#3a7090' }}>
+                  {value}
                 </span>
               </div>
-              {Object.entries(selectedNode.details).map(([k, v]) => (
-                <div key={k}>
-                  <p className="text-[10px] font-medium text-text-muted uppercase tracking-wide mb-0.5">{k}</p>
-                  <p className="text-xs text-text-secondary font-mono">{String(v)}</p>
+            ))}
+            {tooltip.services.length > 0 && (
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-[8px] text-[#1a3850] uppercase tracking-wider w-14 shrink-0">
+                  Services
+                </span>
+                <span className="font-mono text-[10px] text-[#3a7090]">
+                  {tooltip.services.slice(0, 4).join(', ')}
+                </span>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* ── Bottom live feed ─────────────────────────────────────────────── */}
+      <div className="shrink-0 border-t border-[#0b2540] bg-[#040f1e]">
+        <div className="flex items-center gap-2 px-4 py-1 border-b border-[#061520]">
+          <span className="relative flex h-1.5 w-1.5">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-500 opacity-75" />
+            <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-red-500" />
+          </span>
+          <span className="font-mono text-[8px] text-[#1a3850] tracking-widest uppercase">
+            Live Events
+          </span>
+          <span className="ml-auto font-mono text-[8px] text-[#1a3850]">{liveEvents.length} captured</span>
+        </div>
+
+        <div className="h-[5.5rem] overflow-hidden px-4 py-1.5">
+          {liveEvents.length === 0 ? (
+            <span className="font-mono text-[10px] text-[#0a2030]">Monitoring for events...</span>
+          ) : (
+            <div className="flex flex-col gap-0.5">
+              {liveEvents.slice(0, 5).map(ev => (
+                <div key={ev.id} className="flex items-center gap-2.5 font-mono text-[10px]">
+                  <span className="text-[#1a3850] w-20 shrink-0">{ev.time.toLocaleTimeString()}</span>
+                  <div
+                    className="w-1.5 h-1.5 rounded-full shrink-0"
+                    style={{ backgroundColor: ev.color, boxShadow: `0 0 4px ${ev.color}` }}
+                  />
+                  {/* Event type badge */}
+                  <span
+                    className="uppercase text-[8px] w-16 shrink-0 tracking-wide font-bold"
+                    style={{ color: ev.color }}
+                  >
+                    {ev.eventType === 'auth_success' ? 'success'
+                      : ev.eventType === 'ban' ? '🔒 ban'
+                      : 'failure'}
+                  </span>
+                  <span className="uppercase w-10 shrink-0" style={{ color: svcColor(ev.service) }}>
+                    {ev.service.slice(0, 8)}
+                  </span>
+                  <span className="text-[#2a5a7a] w-28 truncate shrink-0">{ev.ip}</span>
+                  <span className="text-[#1a4060] shrink-0">→</span>
+                  <span className="text-[#3a7090]">
+                    {flag(ev.country)} {ev.country}
+                  </span>
+                  {ev.failures != null && ev.failures > 0 && (
+                    <span className="text-orange-600/60 text-[9px]">
+                      {ev.failures}×
+                    </span>
+                  )}
                 </div>
               ))}
             </div>
-          </div>
-        )}
+          )}
+        </div>
       </div>
     </div>
   );

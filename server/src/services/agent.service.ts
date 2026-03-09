@@ -235,6 +235,13 @@ export const agentService = {
     return rowToDevice(row, groupConfig, groupThresholds);
   },
 
+  async countOnlineDevices(tenantId: number): Promise<number> {
+    const [row] = await db('agent_devices')
+      .where({ tenant_id: tenantId, status: 'approved' })
+      .count<Array<{ count: string }>>({ count: '*' });
+    return Number(row?.count ?? 0);
+  },
+
   async getDeviceByUuid(uuid: string): Promise<AgentDevice | null> {
     const row = await db('agent_devices').where({ uuid }).first() as AgentDeviceRow | undefined;
     if (!row) return null;
@@ -281,13 +288,6 @@ export const agentService = {
     const groupConfig = row.group_id ? await getGroupAgentConfig(row.group_id) : null;
     const device = rowToDevice(row, groupConfig);
 
-    // Sync the associated monitor name whenever device.name is explicitly changed
-    if (data.name !== undefined) {
-      await db('monitors')
-        .where({ agent_device_id: id })
-        .update({ name: device.name ?? device.hostname });
-    }
-
     // Broadcast so the sidebar can update name/status/group without polling
     if (_io) {
       _io.to('role:admin').emit(SOCKET_EVENTS.AGENT_DEVICE_UPDATED, {
@@ -303,8 +303,6 @@ export const agentService = {
   },
 
   async deleteDevice(id: number): Promise<boolean> {
-    // Delete associated monitor first
-    await db('monitors').where({ agent_device_id: id }).del();
     const count = await db('agent_devices').where({ id }).del();
     return count > 0;
   },
@@ -313,7 +311,6 @@ export const agentService = {
 
   async bulkDeleteDevices(ids: number[]): Promise<void> {
     if (ids.length === 0) return;
-    await db('monitors').whereIn('agent_device_id', ids).del();
     await db('agent_devices').whereIn('id', ids).del();
     // Broadcast deletion events so the frontend updates in real-time
     if (_io) {
@@ -379,19 +376,14 @@ export const agentService = {
     logger.info(`Agent cleanup: auto-deleted ${ids.length} device(s) after uninstall command.`);
   },
 
-  /** Suspend a device: set status=suspended + pause the agent monitor */
+  /** Suspend a device: set status=suspended */
   async suspendDevice(id: number): Promise<void> {
     await db('agent_devices').where({ id }).update({ status: 'suspended', updated_at: new Date() });
-    await db('monitors')
-      .where({ agent_device_id: id, type: 'agent' })
-      .update({ is_active: false, status: 'paused', updated_at: new Date() });
   },
 
-  /** Reinstate a suspended device: re-activate the agent monitor */
+  /** Reinstate a suspended device: set status=approved */
   async reinstateDevice(id: number): Promise<void> {
-    await db('monitors')
-      .where({ agent_device_id: id, type: 'agent' })
-      .update({ is_active: true, status: 'pending', updated_at: new Date() });
+    await db('agent_devices').where({ id }).update({ status: 'approved', updated_at: new Date() });
   },
 
   // ── Approval ─────────────────────────────────────────────
@@ -432,44 +424,17 @@ export const agentService = {
       thresholds = customThresholds;
     }
 
-    // Remove any previously created monitors for this device (re-approval)
-    await db('monitors').where({ agent_device_id: deviceId }).del();
-
-    // Create ONE monitor for this device (use display name if set, fallback to hostname)
-    try {
-      await db('monitors').insert({
-        name: device.name ?? device.hostname,
-        type: 'agent',
-        group_id: groupId,
-        is_active: true,
-        status: 'pending',
-        agent_device_id: deviceId,
-        agent_thresholds: JSON.stringify(thresholds),
-        created_by: approvedBy,
-      });
-    } catch (error) {
-      logger.error(error, `Failed to create agent monitor for device ${deviceId}`);
-    }
-
     return updated;
   },
 
   // ── Update device thresholds ─────────────────────────────
-
-  /**
-   * Update the thresholds on the agent monitor associated with a device.
-   */
+  // Thresholds in Obliguard are stored on the group or resolved from defaults.
+  // This method is a no-op kept for API compatibility.
   async updateDeviceThresholds(
-    deviceId: number,
-    thresholds: AgentThresholds,
+    _deviceId: number,
+    _thresholds: AgentThresholds,
   ): Promise<boolean> {
-    const count = await db('monitors')
-      .where({ agent_device_id: deviceId, type: 'agent' })
-      .update({
-        agent_thresholds: JSON.stringify(thresholds),
-        updated_at: new Date(),
-      });
-    return count > 0;
+    return true;
   },
 
   // ── Push endpoint logic ───────────────────────────────────
@@ -588,6 +553,24 @@ export const agentService = {
             eventType: ev.eventType,
           })),
         );
+
+        // Emit real-time connection events to the live threat map
+        // One event per unique IP (deduplicated per push cycle)
+        if (_io) {
+          const seen = new Set<string>();
+          for (const ev of body.events as AgentIpEvent[]) {
+            const key = `${ev.ip}:${ev.eventType}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            _io.emit('ip:flow', {
+              ip: ev.ip,
+              service: ev.service,
+              eventType: ev.eventType,  // 'auth_failure' | 'auth_success'
+              deviceId,
+              tenantId: agentTenantId,
+            });
+          }
+        }
       } catch (err) {
         logger.warn({ err, deviceId }, 'handlePush: failed to insert ip_events');
       }

@@ -6,10 +6,13 @@ import {
   createBan,
   liftBan,
   promoteBan,
+  getBanStats,
 } from '../controllers/bans.controller';
 
 const router = Router();
 
+// ⚠️ /stats must be before /:id
+router.get('/stats', requireAuth, getBanStats);
 router.get('/', requireAuth, listBans);
 router.post('/', requireAuth, createBan);
 router.delete('/:id', requireAuth, liftBan);

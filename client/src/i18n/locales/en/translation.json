@@ -77,6 +77,11 @@
 
   "nav": {
     "dashboard": "Dashboard",
+    "netmap": "Network Map",
+    "ipReputation": "IP Reputation",
+    "bans": "Bans",
+    "whitelist": "Whitelist",
+    "serviceTemplates": "Service Templates",
     "groups": "Groups",
     "notifications": "Notifications",
     "users": "Users",

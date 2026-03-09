@@ -74,6 +74,11 @@
   },
   "nav": {
     "dashboard": "Панель управления",
+    "netmap": "Карта сети",
+    "ipReputation": "Репутация IP",
+    "bans": "Блокировки",
+    "whitelist": "Белый список",
+    "serviceTemplates": "Шаблоны сервисов",
     "groups": "Группы",
     "notifications": "Уведомления",
     "users": "Пользователи",

@@ -196,6 +196,13 @@ export function agentInstallerWindowsMsi(_req: Request, res: Response): void {
   res.sendFile(msiPath);
 }
 
+// ── Admin: Device Stats ──────────────────────────────────────────────────────
+
+export async function getDeviceStats(req: Request, res: Response): Promise<void> {
+  const online = await agentService.countOnlineDevices(req.tenantId);
+  res.json({ success: true, data: { online } });
+}
+
 // ── Admin: API Keys ──────────────────────────────────────────────────────────
 
 export async function listKeys(req: Request, res: Response): Promise<void> {

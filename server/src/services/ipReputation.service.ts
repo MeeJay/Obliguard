@@ -243,7 +243,7 @@ class IpReputationService {
           .andOn(db.raw('b.is_active = true'))
           .andOn(db.raw('(b.expires_at IS NULL OR b.expires_at > NOW())'));
       })
-      .leftJoin('ip_whitelist as w', 'w.ip', db.raw("r.ip::cidr::text"))
+      .leftJoin('ip_whitelist as w', db.raw("r.ip <<= w.ip"))
       .select(
         'r.*',
         db.raw(`
@@ -280,7 +280,7 @@ class IpReputationService {
           .andOn(db.raw('b.is_active = true'))
           .andOn(db.raw('(b.expires_at IS NULL OR b.expires_at > NOW())'));
       })
-      .leftJoin('ip_whitelist as w', 'w.ip', db.raw("r.ip::cidr::text"))
+      .leftJoin('ip_whitelist as w', db.raw("r.ip <<= w.ip"))
       .count<Array<{ count: string }>>({ count: 'r.ip' });
 
     if (filters.search) {

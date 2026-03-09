@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction } from 'express';
 import { banService } from '../services/ban.service';
 import { AppError } from '../middleware/errorHandler';
+import { db } from '../db';
 
 export interface CreateBanRequest {
   ip: string;
@@ -10,6 +11,34 @@ export interface CreateBanRequest {
   scope?: 'global' | 'tenant' | 'group' | 'agent';
   scopeId?: number | null;
   expiresAt?: string | null;
+}
+
+export async function getBanStats(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const isAdmin = req.session?.role === 'admin';
+    const tenantFilter = isAdmin ? {} : { tenant_id: req.tenantId };
+
+    const [[activeRow], [todayRow]] = await Promise.all([
+      db('ip_bans')
+        .where({ is_active: true, ...tenantFilter })
+        .whereRaw('(expires_at IS NULL OR expires_at > NOW())')
+        .count<Array<{ count: string }>>({ count: '*' }),
+      db('ip_bans')
+        .where(tenantFilter)
+        .whereRaw('banned_at >= CURRENT_DATE')
+        .count<Array<{ count: string }>>({ count: '*' }),
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        active: Number(activeRow?.count ?? 0),
+        today: Number(todayRow?.count ?? 0),
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
 }
 
 export async function listBans(req: Request, res: Response, next: NextFunction): Promise<void> {

@@ -17,6 +17,7 @@ import {
   createKey,
   deleteKey,
   getDevice,
+  getDeviceStats,
   listDevices,
   updateDevice,
   deleteDevice,
@@ -58,8 +59,9 @@ router.get('/keys', requireAuth, requireRole('admin'), requireTenant, listKeys);
 router.post('/keys', requireAuth, requireRole('admin'), requireTenant, createKey);
 router.delete('/keys/:id', requireAuth, requireRole('admin'), requireTenant, deleteKey);
 
-// ⚠️ Bulk routes MUST be declared before /:id routes — otherwise Express matches
-//    "bulk" as a device ID and the wrong handler fires.
+// ⚠️ Static routes MUST be declared before /:id routes — otherwise Express matches
+//    the literal segment as a device ID and the wrong handler fires.
+router.get('/devices/stats',          requireAuth, requireRole('admin'), requireTenant, getDeviceStats);
 router.delete('/devices/bulk',        requireAuth, requireRole('admin'), requireTenant, bulkDeleteDevices);
 router.patch('/devices/bulk',         requireAuth, requireRole('admin'), requireTenant, bulkUpdateDevices);
 router.post('/devices/bulk-command',  requireAuth, requireRole('admin'), requireTenant, bulkDeviceCommand);

@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"net"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -227,11 +227,11 @@ func probePort(port int) bool {
 // ── getHostname ───────────────────────────────────────────────────────────────
 
 func getHostname() string {
-	h, err := net.LookupAddr("127.0.0.1")
-	if err == nil && len(h) > 0 {
-		return strings.TrimSuffix(h[0], ".")
+	// Use the OS hostname directly — avoids DNS/PTR lookups that can return
+	// Docker Desktop artifacts like "kubernetes.docker.internal" on Windows.
+	if h, err := os.Hostname(); err == nil && h != "" {
+		return h
 	}
-	// Fall back to os.Hostname
 	out, _ := exec.Command("hostname").Output()
 	return strings.TrimSpace(string(out))
 }

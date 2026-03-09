@@ -74,6 +74,11 @@
   },
   "nav": {
     "dashboard": "Painel",
+    "netmap": "Mapa de rede",
+    "ipReputation": "Reputação de IP",
+    "bans": "Bloqueios",
+    "whitelist": "Lista branca",
+    "serviceTemplates": "Modelos de serviço",
     "groups": "Grupos",
     "notifications": "Notificações",
     "users": "Usuários",

@@ -74,6 +74,11 @@
   },
   "nav": {
     "dashboard": "ダッシュボード",
+    "netmap": "ネットワークマップ",
+    "ipReputation": "IPレピュテーション",
+    "bans": "ブロック",
+    "whitelist": "ホワイトリスト",
+    "serviceTemplates": "サービステンプレート",
     "groups": "グループ",
     "notifications": "通知",
     "users": "ユーザー",
