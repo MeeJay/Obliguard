@@ -29,4 +29,4 @@ services:
       server:
         condition: service_healthy
     ports:
-      - "${LISTEN_PORT:-3000}:80"
+      - "${LISTEN_PORT:-3002}:80"
