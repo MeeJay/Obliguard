@@ -132,13 +132,24 @@ function TriStateCheckbox({
 
   return (
     <label className="flex items-start gap-3 cursor-pointer group">
-      <input
-        ref={ref}
-        type="checkbox"
-        checked={value === true}
-        onChange={e => onChange(e.target.checked)}
-        className="mt-0.5 accent-accent w-4 h-4"
-      />
+      <div className="relative h-4 w-4 shrink-0 mt-0.5">
+        <input
+          ref={ref}
+          type="checkbox"
+          checked={value === true}
+          onChange={e => onChange(e.target.checked)}
+          data-indeterminate={value === null}
+          className="peer appearance-none h-4 w-4 rounded border cursor-pointer transition-colors bg-bg-tertiary border-border checked:bg-accent checked:border-accent data-[indeterminate=true]:bg-accent/60 data-[indeterminate=true]:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30"
+        />
+        <svg className="pointer-events-none absolute top-0 left-0 hidden h-4 w-4 text-white peer-checked:block" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M2.5 8L6 11.5L13.5 4.5" />
+        </svg>
+        {value === null && (
+          <svg className="pointer-events-none absolute top-0 left-0 h-4 w-4 text-white" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+            <path d="M4 8h8" />
+          </svg>
+        )}
+      </div>
       <div>
         <p className="text-sm font-medium text-text-primary group-hover:text-accent transition-colors">{label}</p>
         {description && <p className="text-xs text-text-muted leading-relaxed">{description}</p>}
@@ -283,12 +294,17 @@ function EditAgentModal({
 
           {/* Heartbeat monitoring toggle */}
           <label className="flex items-start gap-3 cursor-pointer group">
-            <input
-              type="checkbox"
-              checked={heartbeatMonitoring}
-              onChange={e => setHeartbeatMonitoring(e.target.checked)}
-              className="mt-0.5 accent-accent w-4 h-4"
-            />
+            <div className="relative h-4 w-4 shrink-0 mt-0.5">
+              <input
+                type="checkbox"
+                checked={heartbeatMonitoring}
+                onChange={e => setHeartbeatMonitoring(e.target.checked)}
+                className="peer appearance-none h-4 w-4 rounded border cursor-pointer transition-colors bg-bg-tertiary border-border checked:bg-accent checked:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30"
+              />
+              <svg className="pointer-events-none absolute top-0 left-0 hidden h-4 w-4 text-white peer-checked:block" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M2.5 8L6 11.5L13.5 4.5" />
+              </svg>
+            </div>
             <div>
               <p className="text-sm font-medium text-text-primary group-hover:text-accent transition-colors">
                 {t('agents.heartbeatMonitoring')}
@@ -301,12 +317,17 @@ function EditAgentModal({
 
           {/* Override group settings */}
           <label className="flex items-start gap-3 cursor-pointer group">
-            <input
-              type="checkbox"
-              checked={overrideGroupSettings}
-              onChange={e => setOverrideGroupSettings(e.target.checked)}
-              className="mt-0.5 accent-accent w-4 h-4"
-            />
+            <div className="relative h-4 w-4 shrink-0 mt-0.5">
+              <input
+                type="checkbox"
+                checked={overrideGroupSettings}
+                onChange={e => setOverrideGroupSettings(e.target.checked)}
+                className="peer appearance-none h-4 w-4 rounded border cursor-pointer transition-colors bg-bg-tertiary border-border checked:bg-accent checked:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30"
+              />
+              <svg className="pointer-events-none absolute top-0 left-0 hidden h-4 w-4 text-white peer-checked:block" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M2.5 8L6 11.5L13.5 4.5" />
+              </svg>
+            </div>
             <div>
               <p className="text-sm font-medium text-text-primary group-hover:text-accent transition-colors">
                 {t('agents.overrideGroupSettings')}
@@ -319,12 +340,17 @@ function EditAgentModal({
 
           {/* Suspend toggle */}
           <label className="flex items-start gap-3 cursor-pointer group">
-            <input
-              type="checkbox"
-              checked={suspended}
-              onChange={e => setSuspended(e.target.checked)}
-              className="mt-0.5 accent-accent w-4 h-4"
-            />
+            <div className="relative h-4 w-4 shrink-0 mt-0.5">
+              <input
+                type="checkbox"
+                checked={suspended}
+                onChange={e => setSuspended(e.target.checked)}
+                className="peer appearance-none h-4 w-4 rounded border cursor-pointer transition-colors bg-bg-tertiary border-border checked:bg-accent checked:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30"
+              />
+              <svg className="pointer-events-none absolute top-0 left-0 hidden h-4 w-4 text-white peer-checked:block" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M2.5 8L6 11.5L13.5 4.5" />
+              </svg>
+            </div>
             <div>
               <p className="text-sm font-medium text-text-primary group-hover:text-accent transition-colors">
                 {t('agents.suspended')}
@@ -916,14 +942,25 @@ export function AdminAgentPage() {
                 <thead>
                   <tr className="border-b border-border bg-bg-tertiary">
                     <th className="px-3 py-2.5 w-8">
-                      <input
-                        ref={selectAllRef}
-                        type="checkbox"
-                        checked={allSelected}
-                        onChange={toggleSelectAll}
-                        className="accent-accent w-4 h-4 cursor-pointer"
-                        title={allSelected ? 'Deselect all' : 'Select all'}
-                      />
+                      <div className="relative h-4 w-4">
+                        <input
+                          ref={selectAllRef}
+                          type="checkbox"
+                          checked={allSelected}
+                          onChange={toggleSelectAll}
+                          data-indeterminate={someSelected}
+                          title={allSelected ? 'Deselect all' : 'Select all'}
+                          className="peer appearance-none h-4 w-4 rounded border cursor-pointer transition-colors bg-bg-tertiary border-border checked:bg-accent checked:border-accent data-[indeterminate=true]:bg-accent/60 data-[indeterminate=true]:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30"
+                        />
+                        <svg className="pointer-events-none absolute top-0 left-0 hidden h-4 w-4 text-white peer-checked:block" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M2.5 8L6 11.5L13.5 4.5" />
+                        </svg>
+                        {someSelected && (
+                          <svg className="pointer-events-none absolute top-0 left-0 h-4 w-4 text-white" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                            <path d="M4 8h8" />
+                          </svg>
+                        )}
+                      </div>
                     </th>
                     <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">Hostname</th>
                     <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">IP</th>
@@ -942,12 +979,17 @@ export function AdminAgentPage() {
                     >
                       {/* Checkbox */}
                       <td className="px-3 py-3">
-                        <input
-                          type="checkbox"
-                          checked={selectedIds.has(device.id)}
-                          onChange={() => toggleSelect(device.id)}
-                          className="accent-accent w-4 h-4 cursor-pointer"
-                        />
+                        <div className="relative h-4 w-4">
+                          <input
+                            type="checkbox"
+                            checked={selectedIds.has(device.id)}
+                            onChange={() => toggleSelect(device.id)}
+                            className="peer appearance-none h-4 w-4 rounded border cursor-pointer transition-colors bg-bg-tertiary border-border checked:bg-accent checked:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30"
+                          />
+                          <svg className="pointer-events-none absolute top-0 left-0 hidden h-4 w-4 text-white peer-checked:block" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M2.5 8L6 11.5L13.5 4.5" />
+                          </svg>
+                        </div>
                       </td>
                       <td className="px-4 py-3">
                         {device.status === 'approved' ? (
