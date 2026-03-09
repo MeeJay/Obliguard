@@ -79,7 +79,7 @@ export function GlobalAddAgentModal() {
               const origin = window.location.origin;
               const linuxOneliner = `curl -fsSL "${linuxCmd}" | bash`;
               const macosOneliner = `sudo bash -c "$(curl -fsSL '${macosCmd}')"`;
-              const windowsCmd = `$m="$env:TEMP\\obliview-agent.msi"; Invoke-WebRequest "${msiUrl}" -OutFile $m -UseBasicParsing; Start-Process msiexec -ArgumentList "/i \`"$m\`" SERVERURL=\`"${origin}\`" APIKEY=\`"${apiKey.key}\`" /quiet" -Wait -Verb RunAs; Remove-Item $m`;
+              const windowsCmd = `$m="$env:TEMP\\obliguard-agent.msi"; Invoke-WebRequest "${msiUrl}" -OutFile $m -UseBasicParsing; Start-Process msiexec -ArgumentList "/i \`"$m\`" SERVERURL=\`"${origin}\`" APIKEY=\`"${apiKey.key}\`" /quiet" -Wait -Verb RunAs; Remove-Item $m`;
 
               return (
                 <div key={apiKey.id} className="rounded-lg border border-border bg-bg-secondary">
