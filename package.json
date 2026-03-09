@@ -21,5 +21,8 @@
     "server",
     "client",
     "agent"
-  ]
+  ],
+  "dependencies": {
+    "lucide-react": "^0.577.0"
+  }
 }
