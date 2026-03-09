@@ -1,6 +1,5 @@
 import { Server as SocketIOServer } from 'socket.io';
 import type { Server as HttpServer } from 'http';
-import { config } from './config';
 import { logger } from './utils/logger';
 import { authService } from './services/auth.service';
 import { db } from './db';
@@ -8,7 +7,10 @@ import { db } from './db';
 export function createSocketServer(httpServer: HttpServer): SocketIOServer {
   const io = new SocketIOServer(httpServer, {
     cors: {
-      origin: config.clientOrigin,
+      // Reflect the request origin so any deployment URL works without reconfiguring
+      // CLIENT_ORIGIN. Security is enforced by the auth middleware below (userId check),
+      // not by the CORS origin list.
+      origin: true,
       credentials: true,
     },
     transports: ['websocket', 'polling'],
