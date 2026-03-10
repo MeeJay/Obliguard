@@ -256,23 +256,25 @@ class IpReputationService {
         `),
       );
 
+    // CASE expression used in WHERE to filter by computed status (HAVING without GROUP BY
+    // is invalid in PostgreSQL — use a plain WHERE on the same expression instead).
+    const STATUS_CASE_SQL = `(CASE
+      WHEN b.id IS NOT NULL THEN 'banned'
+      WHEN w.id IS NOT NULL THEN 'whitelisted'
+      WHEN r.total_failures > 0 THEN 'suspicious'
+      ELSE 'clean'
+    END) = ?`;
+
     if (filters.search) {
-      baseQuery.where('r.ip', 'like', `%${filters.search}%`);
+      // inet columns must be cast to text before using ILIKE
+      baseQuery.whereRaw('r.ip::text ILIKE ?', [`%${filters.search}%`]);
     }
 
     if (filters.status) {
-      baseQuery.havingRaw(
-        `CASE
-          WHEN b.id IS NOT NULL THEN 'banned'
-          WHEN w.id IS NOT NULL THEN 'whitelisted'
-          WHEN r.total_failures > 0 THEN 'suspicious'
-          ELSE 'clean'
-        END = ?`,
-        [filters.status],
-      );
+      baseQuery.whereRaw(STATUS_CASE_SQL, [filters.status]);
     }
 
-    // Count query (clone before adding limit/offset)
+    // Count query (same joins + same filters, no limit/offset)
     const countQuery = db
       .from('ip_reputation as r')
       .leftJoin('ip_bans as b', function () {
@@ -284,7 +286,11 @@ class IpReputationService {
       .count<Array<{ count: string }>>({ count: 'r.ip' });
 
     if (filters.search) {
-      countQuery.where('r.ip', 'like', `%${filters.search}%`);
+      countQuery.whereRaw('r.ip::text ILIKE ?', [`%${filters.search}%`]);
+    }
+
+    if (filters.status) {
+      countQuery.whereRaw(STATUS_CASE_SQL, [filters.status]);
     }
 
     const [countResult] = await countQuery;

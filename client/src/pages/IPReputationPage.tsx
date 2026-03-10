@@ -25,6 +25,7 @@ import { Button } from '@/components/common/Button';
 import { Input } from '@/components/common/Input';
 import { cn } from '@/utils/cn';
 import toast from 'react-hot-toast';
+import apiClient from '../api/client';
 
 const PAGE_SIZE = 25;
 
@@ -148,10 +149,11 @@ function IPDetailDrawer({ ip, onClose, onBan, onWhitelist, onLiftBan }: IPDetail
   const loadEvents = useCallback(async () => {
     setLoadingEvents(true);
     try {
-      const res = await fetch(`/api/ip-events/${encodeURIComponent(ip.ip)}?limit=20`);
-      if (!res.ok) throw new Error('Failed to load events');
-      const data: IpEvent[] = await res.json();
-      setEvents(data);
+      const res = await apiClient.get<{ data: IpEvent[]; total: number }>(
+        `/ip-events/${encodeURIComponent(ip.ip)}`,
+        { params: { limit: 20 } },
+      );
+      setEvents(res.data?.data ?? []);
     } catch {
       toast.error('Failed to load IP events');
     } finally {
@@ -318,7 +320,7 @@ function IPDetailDrawer({ ip, onClose, onBan, onWhitelist, onLiftBan }: IPDetail
                         </td>
                         <td className="px-3 py-2 text-text-secondary">{ev.service ?? '—'}</td>
                         <td className="px-3 py-2 font-mono text-text-secondary">{ev.username ?? '—'}</td>
-                        <td className="px-3 py-2 text-text-muted">{ev.deviceHostname ?? '—'}</td>
+                        <td className="px-3 py-2 text-text-muted">{(ev as any).hostname ?? ev.deviceHostname ?? '—'}</td>
                         <td className="px-3 py-2 text-text-muted max-w-[180px]">
                           <span className="truncate block" title={ev.rawLog ?? undefined}>
                             {ev.rawLog ? ev.rawLog.slice(0, 60) + (ev.rawLog.length > 60 ? '…' : '') : '—'}
@@ -481,18 +483,19 @@ export function IPReputationPage() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const params = new URLSearchParams({
+      const params: Record<string, string> = {
         limit: String(PAGE_SIZE),
         offset: String(page * PAGE_SIZE),
-      });
-      if (statusFilter !== 'all') params.set('status', statusFilter);
-      if (debouncedSearch.trim()) params.set('search', debouncedSearch.trim());
+      };
+      if (statusFilter !== 'all') params.status = statusFilter;
+      if (debouncedSearch.trim()) params.search = debouncedSearch.trim();
 
-      const res = await fetch(`/api/ip-reputation?${params.toString()}`);
-      if (!res.ok) throw new Error('Failed to load IP reputation data');
-      const json: IpReputationListResponse = await res.json();
-      setRows(json.data);
-      setTotal(json.total);
+      const res = await apiClient.get<{ data: IpReputation[]; total: number }>(
+        '/ip-reputation',
+        { params },
+      );
+      setRows(res.data?.data ?? []);
+      setTotal(res.data?.total ?? 0);
     } catch {
       toast.error('Failed to load IP reputation data');
     } finally {
@@ -506,14 +509,12 @@ export function IPReputationPage() {
 
   const handleBan = async (ipAddr: string, scope: BanScope, reason: string) => {
     try {
-      const res = await fetch('/api/bans', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ip: ipAddr, reason, scope }),
-      });
-      if (!res.ok) throw new Error('Failed to ban IP');
-      const created: { id?: number; data?: { id: number } } = await res.json();
-      const banId = created.id ?? created.data?.id ?? null;
+      const res = await apiClient.post<{ id?: number; data?: { id: number } }>(
+        '/bans',
+        { ip: ipAddr, reason, scope },
+      );
+      const created = res.data;
+      const banId = created?.id ?? (created as any)?.data?.id ?? null;
       toast.success(`${ipAddr} banned`);
       setRows(prev => prev.map(r => r.ip === ipAddr ? { ...r, status: 'banned' } : r));
       if (selectedIp?.ip === ipAddr) {
@@ -528,12 +529,7 @@ export function IPReputationPage() {
 
   const handleWhitelist = async (ipAddr: string, label: string) => {
     try {
-      const res = await fetch('/api/whitelist', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ip: ipAddr, label: label || null }),
-      });
-      if (!res.ok) throw new Error('Failed to whitelist IP');
+      await apiClient.post('/whitelist', { ip: ipAddr, label: label || null });
       toast.success(`${ipAddr} whitelisted`);
       setRows(prev => prev.map(r => r.ip === ipAddr ? { ...r, status: 'whitelisted' } : r));
       if (selectedIp?.ip === ipAddr) {
@@ -547,8 +543,7 @@ export function IPReputationPage() {
 
   const handleLiftBanById = async (banId: number, ipAddr?: string) => {
     try {
-      const res = await fetch(`/api/bans/${banId}`, { method: 'DELETE' });
-      if (!res.ok) throw new Error('Failed to lift ban');
+      await apiClient.delete(`/bans/${banId}`);
       toast.success('Ban lifted');
       setRows(prev => prev.map(r => (!ipAddr || r.ip === ipAddr) ? { ...r, status: 'clean' } : r));
       if (selectedIp && (!ipAddr || selectedIp.ip === ipAddr)) {
@@ -772,9 +767,12 @@ export function IPReputationPage() {
             } else {
               // Fetch the ban ID from the API if we don't have it
               try {
-                const res = await fetch(`/api/bans?ip=${encodeURIComponent(selectedIp.ip)}&active=true&pageSize=1`);
-                if (res.ok) {
-                  const json: { data: Array<{ id: number }> } = await res.json();
+                const res = await apiClient.get<{ data: Array<{ id: number }> }>(
+                  '/bans',
+                  { params: { ip: selectedIp.ip, active: 'true', pageSize: 1 } },
+                );
+                if (res.data) {
+                  const json = res.data;
                   if (json.data.length > 0) {
                     await handleLiftBanById(json.data[0].id, selectedIp.ip);
                     return;
