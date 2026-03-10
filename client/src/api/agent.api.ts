@@ -49,6 +49,7 @@ export const agentApi = {
       overrideGroupSettings?: boolean;
       displayConfig?: AgentDisplayConfig | null;
       notificationTypes?: NotificationTypeConfig | null;
+      wanMatchingEnabled?: boolean;
     },
   ): Promise<AgentDevice> {
     const res = await apiClient.patch<ApiResponse<AgentDevice>>(`/agent/devices/${id}`, data);

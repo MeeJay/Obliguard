@@ -72,10 +72,26 @@ interface LiveEvent {
   failures?: number;
 }
 
+/**
+ * Directed edge between two agent nodes.
+ * Created when ip_events.source_agent_id is set (peer IP matched another agent).
+ */
+interface AgentPeerLink {
+  key: string;       // "sourceId->targetId"
+  sourceId: number;
+  targetId: number;
+  type: 'lan' | 'wan';
+  services: string[];
+  count: number;
+  lastSeen: number;
+  glowUntil: number;
+}
+
 // ── Constants ──────────────────────────────────────────────────────────────────
 
-const IP_TTL      = 90 * 1000;  // 90 s — IPs fade then disappear if no fresh event
-const IP_FADE_AGE = 45 * 1000;  // fade starts at 45 s
+const IP_TTL        = 90 * 1000;   // 90 s — IPs fade then disappear if no fresh event
+const IP_FADE_AGE   = 45 * 1000;   // fade starts at 45 s
+const PEER_LINK_TTL = 120 * 1000;  // 120 s — peer links linger after last event
 
 /** Ring layout constants — shared by distributeIpsAroundAgents() and animate(). */
 const RING_INNER_R = 42;              // first ring distance from agent centre (px)
@@ -97,6 +113,9 @@ const SVC_COLORS: Record<string, string> = {
 };
 
 const DANGEROUS_SVCS = new Set(['ssh', 'rdp', 'ftp', 'mysql', 'telnet', 'smb', 'vnc']);
+
+/** Colors used for peer link edges: LAN = subdued blue, WAN = amber/orange */
+const PEER_LINK_COLOR: Record<'lan' | 'wan', string> = { lan: '#3b82f6', wan: '#f97316' };
 
 // ── Pure helpers ───────────────────────────────────────────────────────────────
 
@@ -427,6 +446,8 @@ export function NetMapPage() {
   const ipsRef       = useRef<Map<string, IpNode>>(new Map());
   const particlesRef = useRef<Particle[]>([]);
   const ripplesRef   = useRef<Ripple[]>([]);
+  /** Directed peer links between agent nodes (sourceId → targetId). */
+  const agentLinksRef = useRef<Map<string, AgentPeerLink>>(new Map());
 
   const transformRef = useRef({ x: 0, y: 0, k: 1 });
   const dragRef      = useRef<{ x: number; y: number; startX: number; startY: number } | null>(null);
@@ -557,6 +578,43 @@ export function NetMapPage() {
       tx: ag.x, ty: ag.y,
       t: 0, speed: 0.4 + Math.random() * 0.35, color,
     }];
+  }, []);
+
+  // ── Peer particle (agent → agent) ─────────────────────────────────────────
+
+  const spawnPeerParticle = useCallback((sourceId: number, targetId: number, color: string) => {
+    const src = agentsRef.current.find(a => a.id === sourceId);
+    const tgt = agentsRef.current.find(a => a.id === targetId);
+    if (!src || !tgt) return;
+    particlesRef.current = [...particlesRef.current.slice(-79), {
+      id: Math.random().toString(36).slice(2),
+      sx: src.x, sy: src.y,
+      tx: tgt.x, ty: tgt.y,
+      t: 0, speed: 0.5 + Math.random() * 0.35, color,
+    }];
+  }, []);
+
+  // ── Upsert peer link ───────────────────────────────────────────────────────
+
+  const upsertPeerLink = useCallback((
+    sourceId: number, targetId: number, type: 'lan' | 'wan', service: string,
+  ) => {
+    const key = `${sourceId}->${targetId}`;
+    const now = Date.now();
+    const map = agentLinksRef.current;
+    if (map.has(key)) {
+      const link = map.get(key)!;
+      link.count++;
+      link.lastSeen  = now;
+      link.glowUntil = now + 2500;
+      if (service && !link.services.includes(service)) link.services = [...link.services, service];
+    } else {
+      map.set(key, {
+        key, sourceId, targetId, type,
+        services: service ? [service] : [],
+        count: 1, lastSeen: now, glowUntil: now + 2500,
+      });
+    }
   }, []);
 
   // ── Quick ban ─────────────────────────────────────────────────────────────
@@ -724,9 +782,10 @@ export function NetMapPage() {
 
   const init = useCallback(async () => {
     setLoading(true);
-    ipsRef.current      = new Map();
+    ipsRef.current       = new Map();
+    agentLinksRef.current = new Map();
     particlesRef.current = [];
-    ripplesRef.current  = [];
+    ripplesRef.current   = [];
     setIpCount(0);
 
     try {
@@ -754,6 +813,27 @@ export function NetMapPage() {
         const aid  = ev.deviceId ?? ev.device_id;
         const evIp = ev.ip;
         if (!aid || !evIp) continue;
+
+        // Agent-to-agent peer event: record as a directed link, not as an IP node
+        const srcAgentId = (ev.source_agent_id ?? ev.sourceAgentId) as number | null | undefined;
+        if (srcAgentId) {
+          const type = ((ev.source_ip_type ?? ev.sourceIpType) === 'wan' ? 'wan' : 'lan') as 'lan' | 'wan';
+          const pKey = `${srcAgentId}->${aid}`;
+          const existing = agentLinksRef.current.get(pKey);
+          const svc = (ev.service ?? '') as string;
+          if (existing) {
+            existing.count++;
+            if (svc && !existing.services.includes(svc)) existing.services = [...existing.services, svc];
+          } else {
+            agentLinksRef.current.set(pKey, {
+              key: pKey, sourceId: srcAgentId, targetId: aid, type,
+              services: svc ? [svc] : [],
+              count: 1, lastSeen: Date.now(), glowUntil: 0,
+            });
+          }
+          continue; // skip IP upsert for peer traffic
+        }
+
         agentEvtCount.set(aid, (agentEvtCount.get(aid) ?? 0) + 1);
         if (!ipToAgents.has(evIp)) ipToAgents.set(evIp, new Map());
         const m = ipToAgents.get(evIp)!;
@@ -946,13 +1026,17 @@ export function NetMapPage() {
 
     const now = Date.now(); // hoisted — used for age/fade throughout the frame
 
-    // IP expiry every ~5 s
+    // IP + peer link expiry every ~5 s
     if (frameRef.current === 0) {
       let changed = false;
       for (const [key, ip] of ipsRef.current) {
         if (now - ip.lastSeen > IP_TTL) { ipsRef.current.delete(key); changed = true; }
       }
       if (changed) setIpCount(ipsRef.current.size);
+      // Peer link expiry
+      for (const [key, link] of agentLinksRef.current) {
+        if (now - link.lastSeen > PEER_LINK_TTL) agentLinksRef.current.delete(key);
+      }
     }
 
     ctx.clearRect(0, 0, w, h);
@@ -1004,7 +1088,7 @@ export function NetMapPage() {
       }
     }
 
-    // ── Agent–agent edges ────────────────────────────────────────────────
+    // ── Agent–agent edges (shared IP — undirected) ───────────────────────
     for (const edge of agentEdges) {
       const [ai, bi] = edge.split('-').map(Number);
       const a = agMap.get(ai), b = agMap.get(bi);
@@ -1015,6 +1099,60 @@ export function NetMapPage() {
       ctx.setLineDash([4, 8]); ctx.lineDashOffset = -(ts / 80) % 12;
       ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
       ctx.stroke(); ctx.setLineDash([]); ctx.restore();
+    }
+
+    // ── Peer links (agent-to-agent real traffic — directed) ──────────────
+    for (const link of agentLinksRef.current.values()) {
+      const src = agMap.get(link.sourceId);
+      const tgt = agMap.get(link.targetId);
+      if (!src || !tgt) continue;
+      const ageSec  = (now - link.lastSeen) / 1000;
+      const fadeAge = PEER_LINK_TTL / 1000 - 15;
+      const ageFade = ageSec < 15 ? 1 : Math.max(0, 1 - (ageSec - 15) / fadeAge);
+      if (ageFade <= 0) continue;
+      const color    = PEER_LINK_COLOR[link.type];
+      const isRecent = ageSec < 8;
+      const glow     = now < link.glowUntil;
+
+      ctx.save();
+      ctx.globalAlpha = (selId !== null ? 0.30 : (isRecent ? 0.80 : 0.35)) * ageFade;
+      ctx.strokeStyle = color;
+      ctx.lineWidth   = (isRecent ? 2.0 : 1.1) / k;
+      if (isRecent) {
+        ctx.setLineDash([5, 8]);
+        ctx.lineDashOffset = -(ts / 40) % 13; // animated dash flows src → tgt
+        if (glow) { ctx.shadowBlur = 8; ctx.shadowColor = color; }
+      }
+      ctx.beginPath(); ctx.moveTo(src.x, src.y); ctx.lineTo(tgt.x, tgt.y);
+      ctx.stroke(); ctx.setLineDash([]); ctx.shadowBlur = 0;
+
+      // Arrowhead pointing at target
+      const dx  = tgt.x - src.x, dy = tgt.y - src.y;
+      const len = Math.sqrt(dx * dx + dy * dy) || 1;
+      const ux  = dx / len, uy = dy / len;
+      const tipX = tgt.x - ux * (tgt.r + 5), tipY = tgt.y - uy * (tgt.r + 5);
+      const bx   = tipX - ux * 9,             by   = tipY - uy * 9;
+      const px   = -uy * 4.5,                 py   = ux * 4.5;
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.moveTo(tipX, tipY);
+      ctx.lineTo(bx + px, by + py);
+      ctx.lineTo(bx - px, by - py);
+      ctx.closePath(); ctx.fill();
+
+      // "LAN" / "WAN" midpoint label
+      if (ageFade > 0.3 && len > 40) {
+        const mx   = (src.x + tgt.x) / 2;
+        const my   = (src.y + tgt.y) / 2;
+        const lfs  = Math.round(Math.max(7, 9 * Math.min(k, 1.2)));
+        ctx.font          = `600 ${lfs}px "Inter", "Segoe UI", ui-sans-serif, sans-serif`;
+        ctx.globalAlpha   = 0.9 * ageFade;
+        ctx.fillStyle     = color;
+        ctx.textAlign     = 'center'; ctx.textBaseline = 'middle';
+        ctx.shadowBlur    = 5; ctx.shadowColor = 'rgba(0,0,0,0.9)';
+        ctx.fillText(link.type.toUpperCase(), mx, my - 8);
+      }
+      ctx.restore();
     }
 
     // ── Orbital rings (faint circles at each ring radius) ────────────────
@@ -1324,11 +1462,31 @@ export function NetMapPage() {
     if (!socket) return;
     const ccs = ['US', 'CN', 'RU', 'DE', 'FR', 'BR', 'IN', 'KR', 'IR', 'UA', 'TR', 'PL'];
 
-    const onIpFlow = (data: { ip: string; service: string; eventType: 'auth_success' | 'auth_failure'; deviceId: number }) => {
+    const onIpFlow = (data: {
+      ip: string; service: string; eventType: 'auth_success' | 'auth_failure'; deviceId: number;
+      sourceAgentId?: number | null; sourceIpType?: 'lan' | 'wan' | null;
+    }) => {
       const agents = agentsRef.current;
       const agent  = agents.find(a => a.id === data.deviceId) ?? agents[0];
       if (!agent) return;
       if (!filtersRef.current.has(data.eventType)) return;
+
+      // Agent-to-agent peer traffic: draw a directed link, don't show as IP node
+      if (data.sourceAgentId) {
+        const type    = (data.sourceIpType ?? 'lan') as 'lan' | 'wan';
+        const col     = PEER_LINK_COLOR[type];
+        upsertPeerLink(data.sourceAgentId, data.deviceId, type, data.service ?? '');
+        spawnPeerParticle(data.sourceAgentId, data.deviceId, col);
+        const srcAgent = agents.find(a => a.id === data.sourceAgentId);
+        setLiveEvents(prev => [{
+          id: Math.random().toString(36).slice(2),
+          ip: data.ip, service: data.service, country: type.toUpperCase(),
+          agentName: `${srcAgent?.label ?? '?'} → ${agent.label}`,
+          time: new Date(), color: col, eventType: data.eventType,
+        }, ...prev].slice(0, 100));
+        return;
+      }
+
       const svcKey = (data.service ?? '').toLowerCase().split('/')[0];
       const col = DANGEROUS_SVCS.has(svcKey)
         ? '#ef4444' // red for dangerous services (SSH, RDP, MySQL…) regardless of success/failure
@@ -1403,6 +1561,15 @@ export function NetMapPage() {
           for (const ev of events) {
             const evIp = ev.ip as string | undefined;
             if (!evIp) continue;
+
+            // Agent-to-agent peer event: update peer link, skip IP upsert
+            const srcAgentId = (ev.source_agent_id ?? ev.sourceAgentId) as number | null | undefined;
+            if (srcAgentId) {
+              const type = ((ev.source_ip_type ?? ev.sourceIpType) === 'wan' ? 'wan' : 'lan') as 'lan' | 'wan';
+              upsertPeerLink(srcAgentId, data.deviceId, type, (ev.service ?? '') as string);
+              continue;
+            }
+
             const node = ipsRef.current.get(evIp);
             if (node) {
               node.lastSeen = tsNow;
@@ -1478,7 +1645,7 @@ export function NetMapPage() {
       agentRefreshTimersRef.current.clear();
       if (relayoutTimerRef.current) clearTimeout(relayoutTimerRef.current);
     };
-  }, [upsertIp, spawnParticle, scheduleRelayout]);
+  }, [upsertIp, spawnParticle, spawnPeerParticle, upsertPeerLink, scheduleRelayout]);
 
   // ── Socket connection status ───────────────────────────────────────────────
 

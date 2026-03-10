@@ -32,6 +32,8 @@ export async function listEvents(req: Request, res: Response, next: NextFunction
         'e.track_only',
         'e.tenant_id',
         'e.created_at',
+        'e.source_agent_id',
+        'e.source_ip_type',
         'd.hostname',
       )
       .where('e.tenant_id', req.tenantId);
@@ -106,6 +108,8 @@ export async function getEventsByIp(req: Request, res: Response, next: NextFunct
         'e.track_only',
         'e.tenant_id',
         'e.created_at',
+        'e.source_agent_id',
+        'e.source_ip_type',
         'd.hostname',
       )
       .where('e.tenant_id', req.tenantId)

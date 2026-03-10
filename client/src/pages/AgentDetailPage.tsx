@@ -525,11 +525,13 @@ function AgentSettingsPanel({
     String(device.resolvedSettings?.checkIntervalSeconds ?? device.checkIntervalSeconds ?? 60),
   );
   const [overrideGroup,  setOverrideGroup]  = useState(device.overrideGroupSettings ?? false);
+  const [wanMatching,    setWanMatching]    = useState(device.wanMatchingEnabled ?? false);
   const [saving,         setSaving]         = useState(false);
 
   useEffect(() => {
     setCheckInterval(String(device.resolvedSettings?.checkIntervalSeconds ?? device.checkIntervalSeconds ?? 60));
     setOverrideGroup(device.overrideGroupSettings ?? false);
+    setWanMatching(device.wanMatchingEnabled ?? false);
   }, [device]);
 
   async function save(updates: Parameters<typeof agentApi.updateDevice>[1]) {
@@ -586,6 +588,23 @@ function AgentSettingsPanel({
           onChange={() => { const v = !overrideGroup; setOverrideGroup(v); void save({ overrideGroupSettings: v }); }}
         />
         Override group settings
+      </label>
+
+      {/* WAN Matching — opt-in for dedicated/static public IPs */}
+      <label
+        className="flex items-center gap-2 text-xs text-text-secondary cursor-pointer select-none"
+        title="Enable only if this agent has a dedicated/static public IP. Allows the NetMap to draw peer links for WAN traffic. Do not enable if behind a shared NAT."
+      >
+        <Toggle
+          value={wanMatching}
+          onChange={() => { const v = !wanMatching; setWanMatching(v); void save({ wanMatchingEnabled: v }); }}
+        />
+        <span>
+          WAN matching
+          {wanMatching && (
+            <span className="ml-1 text-[10px] text-amber-400">(dedicated IP only)</span>
+          )}
+        </span>
       </label>
 
       {saving && <span className="text-[11px] text-text-muted animate-pulse">Saving…</span>}

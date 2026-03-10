@@ -35,6 +35,8 @@ type pushBody struct {
 	FirewallBanned []string               `json:"firewallBanned,omitempty"`
 	FirewallName   string                 `json:"firewallName,omitempty"`
 	LogSamples     map[string][]string    `json:"logSamples,omitempty"`
+	// RFC-1918 LAN IPs for agent-to-agent peer link detection on the NetMap.
+	LanIPs         []string               `json:"lanIPs,omitempty"`
 }
 
 // ── Obliguard push response types ─────────────────────────────────────────────
@@ -90,6 +92,7 @@ func push(cfg *Config, lw *LogWatcher, fw FirewallManager) {
 		FirewallBanned: banned,
 		FirewallName:   fw.Name(),
 		LogSamples:     logSamples,
+		LanIPs:         getLanIPs(),
 	}
 
 	data, err := json.Marshal(body)

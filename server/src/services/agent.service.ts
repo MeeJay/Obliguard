@@ -22,6 +22,17 @@ import { banService } from './ban.service';
 import { ipReputationService } from './ipReputation.service';
 import { serviceTemplateService } from './serviceTemplate.service';
 
+// ── RFC-1918 helper ─────────────────────────────────────────
+function isRfc1918(ip: string): boolean {
+  const parts = ip.split('.').map(Number);
+  if (parts.length !== 4 || parts.some(isNaN)) return false;
+  const [a, b] = parts;
+  if (a === 10) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  return false;
+}
+
 // ── Socket.io instance (set from index.ts) ──────────────────
 let _io: SocketIOServer | null = null;
 export function setAgentServiceIO(io: SocketIOServer): void {
@@ -78,6 +89,8 @@ interface AgentDeviceRow {
   // migration 004 (Obliguard)
   last_threat_at: Date | null;
   last_attack_at: Date | null;
+  // migration 005 (Obliguard)
+  wan_matching_enabled: boolean;
 }
 
 function rowToApiKey(row: AgentApiKeyRow): AgentApiKey {
@@ -147,6 +160,7 @@ function rowToDevice(row: AgentDeviceRow, groupConfig?: AgentGroupConfig | null,
       : null,
     lastThreatAt: row.last_threat_at ? row.last_threat_at.toISOString() : null,
     lastAttackAt: row.last_attack_at ? row.last_attack_at.toISOString() : null,
+    wanMatchingEnabled: row.wan_matching_enabled ?? false,
   };
 }
 
@@ -270,6 +284,7 @@ export const agentService = {
     overrideGroupSettings?: boolean;
     displayConfig?: AgentDisplayConfig | null;
     notificationTypes?: NotificationTypeConfig | null;
+    wanMatchingEnabled?: boolean;
   }): Promise<AgentDevice | null> {
     const update: Record<string, unknown> = { updated_at: new Date() };
     if (data.status !== undefined) update.status = data.status;
@@ -285,6 +300,7 @@ export const agentService = {
     if ('notificationTypes' in data) update.notification_types = data.notificationTypes
       ? JSON.stringify(data.notificationTypes)
       : null;
+    if (data.wanMatchingEnabled !== undefined) update.wan_matching_enabled = data.wanMatchingEnabled;
 
     const [row] = await db('agent_devices')
       .where({ id })
@@ -510,6 +526,20 @@ export const agentService = {
 
     const deviceId = device.id;
 
+    // ── e0. Rebuild LAN IP registry for this device ───────
+    // agent_ips is a fast-lookup table: ip_address → agent_id (within tenant).
+    // We delete + reinsert on every push so stale IPs (e.g. after NIC changes) are removed.
+    if (body.lanIPs && body.lanIPs.length > 0) {
+      try {
+        await db('agent_ips').where({ agent_id: deviceId }).del();
+        await db('agent_ips').insert(
+          body.lanIPs.map((ip: string) => ({ agent_id: deviceId, ip_address: ip })),
+        );
+      } catch (err) {
+        logger.warn({ err, deviceId }, 'handlePush: failed to upsert agent_ips');
+      }
+    }
+
     // ── e. Process services ───────────────────────────────
     if (body.services && body.services.length > 0) {
       try {
@@ -564,11 +594,77 @@ export const agentService = {
       }
     }
 
+    // ── f3. Build peer link lookup maps (LAN + WAN) ───────
+    // Used to enrich ip_events with source_agent_id so the NetMap can draw
+    // directed edges between agents instead of showing unknown IP nodes.
+    //
+    // LAN  — all agent_ips entries for this tenant (excluding self)
+    // WAN  — all agent_devices with wan_matching_enabled=true + known WAN IP (excluding self)
+    //
+    // Ambiguity: if two agents share the same IP in the same tenant we store -1
+    // (sentinel) and skip the link — this prevents false edges from NAT collisions.
+    const lanIpToAgentId = new Map<string, number>(); // ip → agentId, -1 = ambiguous
+    const wanIpToAgentId = new Map<string, number>();
+
+    if (body.events && body.events.length > 0) {
+      try {
+        // LAN: join agent_ips with agent_devices to scope by tenant
+        const lanRows = await db('agent_ips as ai')
+          .join('agent_devices as ad', 'ad.id', 'ai.agent_id')
+          .where({ 'ad.tenant_id': agentTenantId })
+          .whereNot({ 'ai.agent_id': deviceId })
+          .select('ai.ip_address', 'ai.agent_id') as { ip_address: string; agent_id: number }[];
+
+        for (const row of lanRows) {
+          if (lanIpToAgentId.has(row.ip_address)) {
+            lanIpToAgentId.set(row.ip_address, -1); // ambiguous
+          } else {
+            lanIpToAgentId.set(row.ip_address, row.agent_id);
+          }
+        }
+
+        // WAN: only devices with opt-in flag and a known public IP
+        const wanRows = await db('agent_devices')
+          .where({ tenant_id: agentTenantId, wan_matching_enabled: true })
+          .whereNot({ id: deviceId })
+          .whereNotNull('ip')
+          .select('id', 'ip') as { id: number; ip: string }[];
+
+        for (const row of wanRows) {
+          if (wanIpToAgentId.has(row.ip)) {
+            wanIpToAgentId.set(row.ip, -1); // ambiguous
+          } else {
+            wanIpToAgentId.set(row.ip, row.id);
+          }
+        }
+      } catch (err) {
+        logger.warn({ err, deviceId }, 'handlePush: failed to build peer link maps');
+      }
+    }
+
     // ── g. Process events ─────────────────────────────────
     if (body.events && body.events.length > 0) {
       try {
-        await db('ip_events').insert(
-          body.events.map((ev: AgentIpEvent) => ({
+        // Enrich each event with source_agent_id / source_ip_type
+        const enrichedEvents = body.events.map((ev: AgentIpEvent) => {
+          let sourceAgentId: number | null = null;
+          let sourceIpType: 'lan' | 'wan' | null = null;
+
+          if (isRfc1918(ev.ip)) {
+            const matchId = lanIpToAgentId.get(ev.ip);
+            if (matchId !== undefined && matchId !== -1) {
+              sourceAgentId = matchId;
+              sourceIpType = 'lan';
+            }
+          } else {
+            const matchId = wanIpToAgentId.get(ev.ip);
+            if (matchId !== undefined && matchId !== -1) {
+              sourceAgentId = matchId;
+              sourceIpType = 'wan';
+            }
+          }
+
+          return {
             device_id: deviceId,
             ip: ev.ip,
             username: ev.username ?? null,
@@ -578,8 +674,12 @@ export const agentService = {
             raw_log: ev.rawLog ?? null,
             track_only: trackOnlyServices.has(ev.service),
             tenant_id: agentTenantId,
-          })),
-        );
+            source_agent_id: sourceAgentId,
+            source_ip_type: sourceIpType,
+          };
+        });
+
+        await db('ip_events').insert(enrichedEvents);
 
         // Update IP reputation from the new events
         await ipReputationService.upsertFromEvents(
@@ -623,16 +723,19 @@ export const agentService = {
         // One event per unique IP (deduplicated per push cycle)
         if (_io) {
           const seen = new Set<string>();
-          for (const ev of body.events as AgentIpEvent[]) {
-            const key = `${ev.ip}:${ev.eventType}`;
+          for (const enriched of enrichedEvents) {
+            const key = `${enriched.ip}:${enriched.event_type}`;
             if (seen.has(key)) continue;
             seen.add(key);
             _io.emit('ip:flow', {
-              ip: ev.ip,
-              service: ev.service,
-              eventType: ev.eventType,  // 'auth_failure' | 'auth_success'
+              ip: enriched.ip,
+              service: enriched.service,
+              eventType: enriched.event_type,  // 'auth_failure' | 'auth_success'
               deviceId,
               tenantId: agentTenantId,
+              // Peer link enrichment
+              sourceAgentId: enriched.source_agent_id,
+              sourceIpType: enriched.source_ip_type,
             });
           }
         }

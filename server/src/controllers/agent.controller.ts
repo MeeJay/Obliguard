@@ -260,7 +260,7 @@ export async function updateDevice(req: Request, res: Response): Promise<void> {
   const {
     status, groupId, checkIntervalSeconds, agentThresholds, name,
     heartbeatMonitoring, sensorDisplayNames, overrideGroupSettings, displayConfig,
-    notificationTypes,
+    notificationTypes, wanMatchingEnabled,
   } = req.body as {
     status?: 'approved' | 'refused' | 'pending' | 'suspended';
     groupId?: number | null;
@@ -272,6 +272,7 @@ export async function updateDevice(req: Request, res: Response): Promise<void> {
     overrideGroupSettings?: boolean;
     displayConfig?: import('@obliview/shared').AgentDisplayConfig | null;
     notificationTypes?: import('@obliview/shared').NotificationTypeConfig | null;
+    wanMatchingEnabled?: boolean;
   };
 
   // Special handling for approval
@@ -325,6 +326,7 @@ export async function updateDevice(req: Request, res: Response): Promise<void> {
     overrideGroupSettings,
     displayConfig,
     ...('notificationTypes' in req.body ? { notificationTypes } : {}),
+    ...('wanMatchingEnabled' in req.body ? { wanMatchingEnabled } : {}),
   });
 
   if (!device) {

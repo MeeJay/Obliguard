@@ -527,6 +527,12 @@ export interface AgentDevice {
   lastThreatAt?: string | null;
   /** Set when an IP is banned from this agent's events. Clears after 10 min without new bans. */
   lastAttackAt?: string | null;
+  /**
+   * When true, this agent's WAN IP (agent_devices.ip) is used for peer link matching.
+   * Only enable when the WAN IP is dedicated/static (e.g. VPS with fixed public IP).
+   * Defaults to false — without it, WAN matching is ambiguous (many machines behind same NAT).
+   */
+  wanMatchingEnabled: boolean;
 }
 
 // ============================================
@@ -790,6 +796,14 @@ export interface IpEvent {
   trackOnly: boolean;
   tenantId: number | null;
   createdAt: string;
+  /**
+   * ID of the agent whose LAN/WAN IP matches the event source.
+   * null  = unknown source (external IP or unregistered agent)
+   * Set when source_agent_id is populated in the DB.
+   */
+  sourceAgentId?: number | null;
+  /** 'lan' | 'wan' — how the peer was identified. null when sourceAgentId is null. */
+  sourceIpType?: 'lan' | 'wan' | null;
 }
 
 // ============================================
@@ -924,6 +938,11 @@ export interface ObliguardPushBody {
   firewallBanned?: string[];
   /** Firewall implementation in use (ufw, firewalld, iptables, nftables, windows, macos_pf) */
   firewallName?: string;
+  /**
+   * RFC-1918 LAN IPs of all active non-loopback interfaces on this machine.
+   * Used by the server to build agent-to-agent peer links on the NetMap.
+   */
+  lanIPs?: string[];
   /**
    * Log samples requested by the server.
    * Key = log file path, value = last N lines.
