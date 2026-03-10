@@ -103,7 +103,7 @@ function TemplateFormModal({ template, onSave, onClose }: TemplateFormModalProps
   const [windowSeconds, setWindowSeconds] = useState(String(template?.windowSeconds ?? 300));
   const [defaultLogPath, setDefaultLogPath] = useState(template?.defaultLogPath ?? '');
   const [customRegex, setCustomRegex] = useState(template?.customRegex ?? '');
-  const [enabled, setEnabled] = useState(template?.enabled ?? true);
+  const [enabled, setEnabled] = useState(template?.enabled ?? false);
   const [mode, setMode] = useState<ServiceTemplateMode>(template?.mode ?? 'ban');
   const [saving, setSaving] = useState(false);
   const isEdit = !!template;
@@ -232,7 +232,10 @@ function TemplateFormModal({ template, onSave, onClose }: TemplateFormModalProps
                 <path d="M2.5 8L6 11.5L13.5 4.5" />
               </svg>
             </div>
-            <span className="text-sm text-text-secondary">Enabled</span>
+            <span className="text-sm text-text-secondary">
+              Enabled globally
+              <span className="ml-1 text-xs text-text-muted">(activate per group / agent otherwise)</span>
+            </span>
           </label>
           <div className="flex gap-2 pt-2">
             <Button type="submit" loading={saving} className="flex-1">{isEdit ? 'Save Changes' : 'Create Template'}</Button>

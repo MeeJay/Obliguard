@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
-import { RefreshCw, Shield, EyeOff, RotateCcw, Plus, ChevronDown, ChevronUp, Layers } from 'lucide-react';
+import { RefreshCw, Shield, EyeOff, RotateCcw, Plus, ChevronDown, ChevronUp, Layers, Sliders, Check, X } from 'lucide-react';
 import { cn } from '@/utils/cn';
 import { serviceTemplatesApi } from '@/api/serviceTemplates.api';
 import type { ResolvedServiceConfig } from '@obliview/shared';
+import toast from 'react-hot-toast';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -49,6 +50,137 @@ interface ServiceTemplatesPanelProps {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ThresholdEditor — inline editor shown when a row is expanded
+// ─────────────────────────────────────────────────────────────────────────────
+
+function ThresholdEditor({
+  cfg,
+  apiScope,
+  scopeId,
+  onSaved,
+}: {
+  cfg: ResolvedServiceConfig;
+  apiScope: 'group' | 'agent';
+  scopeId: number;
+  onSaved: () => void;
+}) {
+  const [threshold,    setThreshold]    = useState(String(cfg.thresholdOverride ?? cfg.threshold));
+  const [windowSecs,   setWindowSecs]   = useState(String(cfg.windowSecondsOverride ?? cfg.windowSeconds));
+  const [saving,       setSaving]       = useState(false);
+
+  // Reset local state when cfg changes (e.g. after load())
+  useEffect(() => {
+    setThreshold(String(cfg.thresholdOverride ?? cfg.threshold));
+    setWindowSecs(String(cfg.windowSecondsOverride ?? cfg.windowSeconds));
+  }, [cfg.thresholdOverride, cfg.windowSecondsOverride, cfg.threshold, cfg.windowSeconds]);
+
+  async function save() {
+    setSaving(true);
+    try {
+      const t = Math.max(1, Number(threshold) || cfg.threshold);
+      const w = Math.max(10, Number(windowSecs) || cfg.windowSeconds);
+      await serviceTemplatesApi.upsertAssignment(
+        cfg.templateId, apiScope, scopeId,
+        { thresholdOverride: t, windowSecondsOverride: w },
+      );
+      onSaved();
+      toast.success('Threshold saved');
+    } catch {
+      toast.error('Failed to save threshold');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function resetThreshold() {
+    setSaving(true);
+    try {
+      await serviceTemplatesApi.upsertAssignment(
+        cfg.templateId, apiScope, scopeId,
+        { thresholdOverride: null, windowSecondsOverride: null },
+      );
+      onSaved();
+      toast.success('Threshold reset to template default');
+    } catch {
+      toast.error('Failed to reset threshold');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const hasOverride = cfg.thresholdOverrideScope !== null;
+
+  return (
+    <div className="px-4 pb-3 pt-1 flex flex-wrap items-center gap-3 border-t border-border/50 bg-bg-tertiary/30">
+      <span className="text-[10px] font-semibold uppercase tracking-wide text-text-muted flex-shrink-0">
+        Threshold override
+      </span>
+
+      {/* Failures input */}
+      <label className="flex items-center gap-1.5 text-[11px] text-text-secondary">
+        Failures
+        <input
+          type="number"
+          min={1}
+          value={threshold}
+          onChange={e => setThreshold(e.target.value)}
+          className="w-14 rounded border border-border bg-bg-secondary px-2 py-1 text-xs text-text-primary focus:outline-none focus:border-accent"
+        />
+      </label>
+
+      {/* Window input */}
+      <label className="flex items-center gap-1.5 text-[11px] text-text-secondary">
+        Window
+        <input
+          type="number"
+          min={10}
+          value={windowSecs}
+          onChange={e => setWindowSecs(e.target.value)}
+          className="w-18 rounded border border-border bg-bg-secondary px-2 py-1 text-xs text-text-primary focus:outline-none focus:border-accent"
+        />
+        <span className="text-text-muted">s</span>
+      </label>
+
+      {/* Template default hint */}
+      <span className="text-[10px] text-text-muted">
+        (template default: {cfg.threshold}f / {cfg.windowSeconds}s)
+      </span>
+
+      {/* Override scope badge */}
+      {hasOverride && (
+        <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-400">
+          {cfg.thresholdOverrideScope} override
+        </span>
+      )}
+
+      <div className="flex items-center gap-1 ml-auto">
+        {/* Reset to template default */}
+        {hasOverride && (
+          <button
+            onClick={() => void resetThreshold()}
+            disabled={saving}
+            title="Reset to template default"
+            className="flex items-center gap-1 rounded px-2 py-1 text-[11px] text-amber-500 hover:bg-amber-500/10 disabled:opacity-50 transition-colors"
+          >
+            <RotateCcw size={10} />
+            Reset
+          </button>
+        )}
+        {/* Save */}
+        <button
+          onClick={() => void save()}
+          disabled={saving}
+          className="flex items-center gap-1 rounded px-2 py-1 text-[11px] text-accent hover:bg-accent/10 disabled:opacity-50 transition-colors"
+        >
+          <Check size={10} />
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Component
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -62,6 +194,8 @@ export function ServiceTemplatesPanel({
   const [loading, setLoading]   = useState(true);
   const [expanded, setExpanded] = useState(true);
   const [busy, setBusy]         = useState<Record<number, boolean>>({});
+  /** templateId that has its threshold editor open */
+  const [editingThreshold, setEditingThreshold] = useState<number | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -155,7 +289,7 @@ export function ServiceTemplatesPanel({
           </h2>
           {!loading && (
             <span className="text-xs text-text-muted">
-              {boundCount} bound{unboundCount > 0 ? `, ${unboundCount} unbound` : ''}
+              {boundCount} active{unboundCount > 0 ? `, ${unboundCount} inactive` : ''}
             </span>
           )}
         </div>
@@ -195,135 +329,171 @@ export function ServiceTemplatesPanel({
                 const isBusy         = busy[cfg.templateId] ?? false;
                 const overrideScope  = cfg.enabledOverrideScope;
                 const isGroupTpl     = cfg.templateOwnerScope === 'group';
+                const isEditingThis  = editingThreshold === cfg.templateId;
 
                 // Whether THIS scope has set an explicit enabled_override
                 const hasScopeOverride =
                   scope === 'device' ? overrideScope === 'agent' : overrideScope === 'group';
 
                 return (
-                  <div
-                    key={cfg.templateId}
-                    className={cn(
-                      'flex items-center gap-3 px-4 py-3',
-                      !cfg.enabled && 'opacity-60',
+                  <div key={cfg.templateId} className={cn(!cfg.enabled && 'opacity-60')}>
+                    {/* Main row */}
+                    <div className="flex items-center gap-3 px-4 py-3">
+                      {/* Status dot */}
+                      <div className={cn(
+                        'w-2 h-2 rounded-full flex-shrink-0',
+                        cfg.enabled ? 'bg-status-up' : 'bg-bg-tertiary border border-border',
+                      )} />
+
+                      {/* Labels */}
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-sm font-medium text-text-primary">{cfg.name}</span>
+                          <ServiceTypeBadge type={cfg.serviceType} />
+                          <ModeBadge mode={cfg.mode} />
+
+                          {/* Group-owned template badge */}
+                          {isGroupTpl && (
+                            <span className="inline-flex items-center gap-1 rounded-full bg-purple-500/10 px-2 py-0.5 text-[10px] font-medium text-purple-400">
+                              <Layers size={8} />
+                              Group template
+                            </span>
+                          )}
+
+                          {/* ── State badges ── */}
+
+                          {/* No override at all and template is off by default */}
+                          {!cfg.enabled && overrideScope === null && (
+                            <span className="text-[10px] text-text-muted">Inactive by default</span>
+                          )}
+
+                          {/* Device scope: agent-level explicit override */}
+                          {scope === 'device' && overrideScope === 'agent' && (
+                            <span className={cn(
+                              'inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium',
+                              cfg.enabled
+                                ? 'bg-green-500/10 text-green-400'
+                                : 'bg-amber-500/10 text-amber-400',
+                            )}>
+                              {cfg.enabled ? 'Active (agent)' : 'Disabled (agent)'}
+                            </span>
+                          )}
+
+                          {/* Device scope: disabled by a group-level override (no agent override on top) */}
+                          {scope === 'device' && overrideScope === 'group' && !cfg.enabled && (
+                            <span className="inline-flex items-center rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-500">
+                              Disabled (group)
+                            </span>
+                          )}
+
+                          {/* Group scope: this group has an explicit override */}
+                          {scope === 'group' && overrideScope === 'group' && (
+                            <span className={cn(
+                              'inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium',
+                              cfg.enabled
+                                ? 'bg-green-500/10 text-green-400'
+                                : 'bg-amber-500/10 text-amber-400',
+                            )}>
+                              {cfg.enabled ? 'Active (group)' : 'Disabled (group)'}
+                            </span>
+                          )}
+                        </div>
+
+                        {/* Details line */}
+                        <div className="mt-0.5 flex flex-wrap gap-x-3 text-[11px] text-text-muted">
+                          <span>
+                            {cfg.threshold}f / {cfg.windowSeconds}s
+                            {cfg.thresholdOverrideScope && (
+                              <span className="text-amber-400 ml-1">
+                                ({cfg.thresholdOverrideScope} override)
+                              </span>
+                            )}
+                          </span>
+                          {cfg.logPath && (
+                            <span className="font-mono truncate max-w-[220px]" title={cfg.logPath}>
+                              {cfg.logPath}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Action buttons */}
+                      <div className="flex items-center gap-1 flex-shrink-0">
+
+                        {/* Threshold editor toggle — only when active at this scope */}
+                        {cfg.enabled && (
+                          <button
+                            onClick={() => setEditingThreshold(isEditingThis ? null : cfg.templateId)}
+                            title="Edit threshold override"
+                            className={cn(
+                              'shrink-0 rounded-md p-1.5 text-xs transition-colors',
+                              isEditingThis
+                                ? 'bg-accent/10 text-accent'
+                                : 'text-text-muted hover:text-text-primary hover:bg-bg-hover',
+                            )}
+                          >
+                            {isEditingThis ? <X size={12} /> : <Sliders size={12} />}
+                          </button>
+                        )}
+
+                        {/* Reset: only shown when this scope has an explicit override */}
+                        {hasScopeOverride && (
+                          <button
+                            onClick={() => void reset(cfg)}
+                            disabled={isBusy}
+                            title={
+                              scope === 'device'
+                                ? 'Remove agent override — inherit from group / template default'
+                                : 'Remove group override — inherit from template default'
+                            }
+                            className="shrink-0 rounded-md px-2 py-1 text-xs font-medium text-amber-500 hover:bg-amber-500/10 disabled:opacity-50 transition-colors flex items-center gap-1"
+                          >
+                            <RotateCcw size={11} />
+                            Reset
+                          </button>
+                        )}
+
+                        {/* Bind / Unbind — always shown based on current effective state */}
+                        {cfg.enabled ? (
+                          <button
+                            onClick={() => void unbind(cfg)}
+                            disabled={isBusy}
+                            title={scope === 'group' ? 'Disable for all agents in this group' : undefined}
+                            className="shrink-0 rounded-md px-2 py-1 text-xs font-medium text-text-muted hover:bg-bg-hover hover:text-text-primary disabled:opacity-50 transition-colors"
+                          >
+                            Disable
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => void bind(cfg)}
+                            disabled={isBusy}
+                            title={
+                              scope === 'device' && overrideScope === 'group'
+                                ? 'Override group: activate for this agent only'
+                                : scope === 'group'
+                                ? 'Activate for all agents in this group'
+                                : 'Activate for this agent'
+                            }
+                            className="shrink-0 rounded-md px-2 py-1 text-xs font-medium text-accent hover:bg-accent/10 disabled:opacity-50 transition-colors"
+                          >
+                            Activate
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Threshold editor (expanded row) */}
+                    {isEditingThis && (
+                      <ThresholdEditor
+                        cfg={cfg}
+                        apiScope={apiScope}
+                        scopeId={scopeId}
+                        onSaved={() => {
+                          void load();
+                          setEditingThreshold(null);
+                        }}
+                      />
                     )}
-                  >
-                    {/* Status dot */}
-                    <div className={cn(
-                      'w-2 h-2 rounded-full flex-shrink-0',
-                      cfg.enabled ? 'bg-status-up' : 'bg-bg-tertiary border border-border',
-                    )} />
-
-                    {/* Labels */}
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="text-sm font-medium text-text-primary">{cfg.name}</span>
-                        <ServiceTypeBadge type={cfg.serviceType} />
-                        <ModeBadge mode={cfg.mode} />
-
-                        {/* Group-owned template badge */}
-                        {isGroupTpl && (
-                          <span className="inline-flex items-center gap-1 rounded-full bg-purple-500/10 px-2 py-0.5 text-[10px] font-medium text-purple-400">
-                            <Layers size={8} />
-                            Group template
-                          </span>
-                        )}
-
-                        {/* ── State badges ── */}
-
-                        {/* No override at all and template is off by default */}
-                        {!cfg.enabled && overrideScope === null && (
-                          <span className="text-[10px] text-text-muted">Template default: off</span>
-                        )}
-
-                        {/* Device scope: agent-level explicit override */}
-                        {scope === 'device' && overrideScope === 'agent' && (
-                          <span className={cn(
-                            'inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium',
-                            cfg.enabled
-                              ? 'bg-green-500/10 text-green-400'
-                              : 'bg-amber-500/10 text-amber-400',
-                          )}>
-                            {cfg.enabled ? 'Bound (agent)' : 'Unbound (agent)'}
-                          </span>
-                        )}
-
-                        {/* Device scope: disabled by a group-level override (no agent override on top) */}
-                        {scope === 'device' && overrideScope === 'group' && !cfg.enabled && (
-                          <span className="inline-flex items-center rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-500">
-                            Unbound (group)
-                          </span>
-                        )}
-
-                        {/* Group scope: this group has an explicit override */}
-                        {scope === 'group' && overrideScope === 'group' && (
-                          <span className={cn(
-                            'inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium',
-                            cfg.enabled
-                              ? 'bg-green-500/10 text-green-400'
-                              : 'bg-amber-500/10 text-amber-400',
-                          )}>
-                            {cfg.enabled ? 'Bound (group)' : 'Unbound (group)'}
-                          </span>
-                        )}
-                      </div>
-
-                      {/* Details line */}
-                      <div className="mt-0.5 flex flex-wrap gap-x-3 text-[11px] text-text-muted">
-                        <span>Threshold: {cfg.threshold} / {cfg.windowSeconds}s</span>
-                        {cfg.logPath && (
-                          <span className="font-mono truncate max-w-[220px]" title={cfg.logPath}>
-                            {cfg.logPath}
-                          </span>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Action buttons */}
-                    <div className="flex items-center gap-1 flex-shrink-0">
-
-                      {/* Reset: only shown when this scope has an explicit override */}
-                      {hasScopeOverride && (
-                        <button
-                          onClick={() => void reset(cfg)}
-                          disabled={isBusy}
-                          title={
-                            scope === 'device'
-                              ? 'Remove agent override — inherit from group / template default'
-                              : 'Remove group override — inherit from template default'
-                          }
-                          className="shrink-0 rounded-md px-2 py-1 text-xs font-medium text-amber-500 hover:bg-amber-500/10 disabled:opacity-50 transition-colors flex items-center gap-1"
-                        >
-                          <RotateCcw size={11} />
-                          Reset
-                        </button>
-                      )}
-
-                      {/* Bind / Unbind — always shown based on current effective state */}
-                      {cfg.enabled ? (
-                        <button
-                          onClick={() => void unbind(cfg)}
-                          disabled={isBusy}
-                          title={scope === 'group' ? 'Unbind for all agents in this group' : undefined}
-                          className="shrink-0 rounded-md px-2 py-1 text-xs font-medium text-text-muted hover:bg-bg-hover hover:text-text-primary disabled:opacity-50 transition-colors"
-                        >
-                          Unbind
-                        </button>
-                      ) : (
-                        <button
-                          onClick={() => void bind(cfg)}
-                          disabled={isBusy}
-                          title={
-                            scope === 'device' && overrideScope === 'group'
-                              ? 'Override group: bind for this agent only'
-                              : undefined
-                          }
-                          className="shrink-0 rounded-md px-2 py-1 text-xs font-medium text-accent hover:bg-accent/10 disabled:opacity-50 transition-colors"
-                        >
-                          Bind
-                        </button>
-                      )}
-                    </div>
                   </div>
                 );
               })}

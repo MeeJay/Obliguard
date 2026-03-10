@@ -174,7 +174,7 @@ class ServiceTemplateService {
         custom_regex: data.customRegex ?? null,
         threshold: data.threshold ?? 5,
         window_seconds: data.windowSeconds ?? 300,
-        enabled: data.enabled ?? true,
+        enabled: data.enabled ?? false,
         mode: data.mode ?? 'ban',
         tenant_id: tenantId,
         owner_scope: data.ownerScope ?? null,
@@ -437,6 +437,23 @@ class ServiceTemplateService {
         groupAssignment?.enabled_override ??
         tpl.enabled;
 
+      const thresholdOverrideScope: ResolvedServiceConfig['thresholdOverrideScope'] =
+        agentAssignment?.threshold_override !== null && agentAssignment?.threshold_override !== undefined
+          ? 'agent'
+          : groupAssignment?.threshold_override !== null && groupAssignment?.threshold_override !== undefined
+            ? 'group'
+            : null;
+
+      const thresholdOverride =
+        agentAssignment?.threshold_override !== undefined ? agentAssignment.threshold_override :
+        groupAssignment?.threshold_override !== undefined ? groupAssignment.threshold_override :
+        null;
+
+      const windowSecondsOverride =
+        agentAssignment?.window_seconds_override !== undefined ? agentAssignment.window_seconds_override :
+        groupAssignment?.window_seconds_override !== undefined ? groupAssignment.window_seconds_override :
+        null;
+
       return {
         templateId: tpl.id,
         name: tpl.name,
@@ -451,6 +468,9 @@ class ServiceTemplateService {
         sampleRequested: agentAssignment?.sample_requested ?? false,
         enabledOverrideScope,
         templateOwnerScope,
+        thresholdOverrideScope,
+        thresholdOverride,
+        windowSecondsOverride,
       };
     }
 
@@ -555,6 +575,9 @@ class ServiceTemplateService {
 
       const enabled = groupAssignment?.enabled_override ?? tpl.enabled;
 
+      const groupThresholdOverride = groupAssignment?.threshold_override ?? null;
+      const groupWindowOverride    = groupAssignment?.window_seconds_override ?? null;
+
       resolved.push({
         templateId: tpl.id,
         name: tpl.name,
@@ -562,13 +585,16 @@ class ServiceTemplateService {
         isBuiltin: tpl.is_builtin,
         logPath: groupAssignment?.log_path_override ?? tpl.default_log_path,
         customRegex: tpl.custom_regex,
-        threshold: groupAssignment?.threshold_override ?? tpl.threshold,
-        windowSeconds: groupAssignment?.window_seconds_override ?? tpl.window_seconds,
+        threshold: groupThresholdOverride ?? tpl.threshold,
+        windowSeconds: groupWindowOverride ?? tpl.window_seconds,
         enabled,
         mode: (tpl.mode ?? 'ban') as ServiceTemplateMode,
         sampleRequested: false,
         enabledOverrideScope,
         templateOwnerScope: null,
+        thresholdOverrideScope: groupThresholdOverride !== null ? 'group' : null,
+        thresholdOverride: groupThresholdOverride,
+        windowSecondsOverride: groupWindowOverride,
       });
     }
 

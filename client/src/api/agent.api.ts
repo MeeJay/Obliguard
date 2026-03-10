@@ -42,6 +42,7 @@ export const agentApi = {
       status?: AgentDevice['status'];
       groupId?: number | null;
       checkIntervalSeconds?: number;
+      maxMissedPushes?: number | null;
       agentThresholds?: AgentThresholds;
       name?: string | null;
       heartbeatMonitoring?: boolean;

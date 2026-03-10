@@ -742,6 +742,17 @@ export interface ResolvedServiceConfig {
    * 'group' = owned by a specific group; auto-applies to agents in that group
    */
   templateOwnerScope: 'group' | null;
+  /**
+   * Scope at which the threshold was overridden.
+   * 'agent'  = an agent-level assignment has threshold_override set
+   * 'group'  = a group-level assignment has threshold_override set (closest ancestor wins)
+   * null     = no override — using template default
+   */
+  thresholdOverrideScope: 'agent' | 'group' | null;
+  /** Raw threshold override value. null when no scope-level override is set. */
+  thresholdOverride: number | null;
+  /** Raw window_seconds override value. null when no scope-level override is set. */
+  windowSecondsOverride: number | null;
 }
 
 export interface CreateServiceTemplateRequest {

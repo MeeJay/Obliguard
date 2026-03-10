@@ -276,6 +276,7 @@ export const agentService = {
     status?: AgentDevice['status'];
     groupId?: number | null;
     checkIntervalSeconds?: number;
+    maxMissedPushes?: number | null;
     approvedBy?: number;
     approvedAt?: Date;
     name?: string | null;
@@ -290,6 +291,7 @@ export const agentService = {
     if (data.status !== undefined) update.status = data.status;
     if (data.groupId !== undefined) update.group_id = data.groupId;
     if (data.checkIntervalSeconds !== undefined) update.check_interval_seconds = data.checkIntervalSeconds;
+    if (data.maxMissedPushes !== undefined) update.agent_max_missed_pushes = data.maxMissedPushes;
     if (data.approvedBy !== undefined) update.approved_by = data.approvedBy;
     if (data.approvedAt !== undefined) update.approved_at = data.approvedAt;
     if (data.name !== undefined) update.name = data.name;

@@ -521,8 +521,11 @@ function AgentSettingsPanel({
   device: AgentDevice;
   onUpdate: (d: AgentDevice) => void;
 }) {
-  const [checkInterval, setCheckInterval] = useState(
+  const [checkInterval,    setCheckInterval]    = useState(
     String(device.resolvedSettings?.checkIntervalSeconds ?? device.checkIntervalSeconds ?? 60),
+  );
+  const [maxMissedPushes,  setMaxMissedPushes]  = useState(
+    String(device.resolvedSettings?.maxMissedPushes ?? 2),
   );
   const [overrideGroup,  setOverrideGroup]  = useState(device.overrideGroupSettings ?? false);
   const [wanMatching,    setWanMatching]    = useState(device.wanMatchingEnabled ?? false);
@@ -530,6 +533,7 @@ function AgentSettingsPanel({
 
   useEffect(() => {
     setCheckInterval(String(device.resolvedSettings?.checkIntervalSeconds ?? device.checkIntervalSeconds ?? 60));
+    setMaxMissedPushes(String(device.resolvedSettings?.maxMissedPushes ?? 2));
     setOverrideGroup(device.overrideGroupSettings ?? false);
     setWanMatching(device.wanMatchingEnabled ?? false);
   }, [device]);
@@ -579,6 +583,23 @@ function AgentSettingsPanel({
           className="w-14 rounded border border-border bg-bg-tertiary px-2 py-1 text-xs text-text-primary focus:outline-none focus:border-accent"
         />
         <span className="text-text-muted">s</span>
+      </label>
+
+      {/* Max missed pushes */}
+      <label
+        className="flex items-center gap-2 text-xs text-text-secondary"
+        title="Agent is marked offline after this many consecutive missed pushes"
+      >
+        Max missed pushes
+        <input
+          type="number"
+          min={1}
+          max={20}
+          value={maxMissedPushes}
+          onChange={e => setMaxMissedPushes(e.target.value)}
+          onBlur={() => void save({ maxMissedPushes: Math.max(1, Number(maxMissedPushes) || 2) })}
+          className="w-12 rounded border border-border bg-bg-tertiary px-2 py-1 text-xs text-text-primary focus:outline-none focus:border-accent"
+        />
       </label>
 
       {/* Override group settings */}

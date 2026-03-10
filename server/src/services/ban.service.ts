@@ -2,6 +2,7 @@ import type { Server as SocketIOServer } from 'socket.io';
 import { db } from '../db';
 import type { IpBan, CreateBanRequest, BanScope } from '@obliview/shared';
 import { logger } from '../utils/logger';
+import { serviceTemplateService } from './serviceTemplate.service';
 
 // ── Socket.io instance (injected from index.ts) ─────────────────────────────
 let _io: SocketIOServer | null = null;
@@ -274,47 +275,68 @@ class BanEngine {
   }
 
   /**
-   * For each (ip, service, device), count auth_failure events in the
-   * configured window. If count > threshold AND ip is not whitelisted,
-   * create a global ban (or update existing).
+   * For each approved agent, resolve its active service templates (opt-in model),
+   * then count auth_failure events in each configured window.
+   * If count >= threshold AND ip is not whitelisted, create a global ban.
    *
-   * Threshold and window are resolved per-service from service_template_assignments
-   * and service_templates (with inheritance).
+   * Templates are opt-in: they must be explicitly enabled at group or agent level
+   * (enabled_override = true) to count toward auto-bans.
    */
   private async evaluateThresholds(): Promise<void> {
-    // Get all service templates + their global defaults
-    const templates = await db('service_templates').where('enabled', true).select('*') as Array<{
-      id: number;
-      service_type: string;
-      threshold: number;
-      window_seconds: number;
-      tenant_id: number | null;
-    }>;
+    // Fetch all approved agents
+    const devices = await db('agent_devices')
+      .where({ status: 'approved' })
+      .select('id', 'group_id', 'tenant_id') as Array<{ id: number; group_id: number | null; tenant_id: number }>;
 
-    if (templates.length === 0) return;
+    if (devices.length === 0) return;
 
-    // For each template, find IPs exceeding threshold in window
-    for (const tpl of templates) {
-      const windowStart = new Date(Date.now() - tpl.window_seconds * 1000);
+    // Pre-fetch group ancestries for all devices in one query
+    const devicesWithGroups = await Promise.all(
+      devices.map(async (dev) => {
+        if (!dev.group_id) return { dev, groupIds: [] as number[] };
+        const rows = await db('group_closure')
+          .where('descendant_id', dev.group_id)
+          .select('ancestor_id')
+          .orderBy('depth', 'asc') as { ancestor_id: number }[];
+        return { dev, groupIds: rows.map(r => r.ancestor_id) };
+      }),
+    );
 
-      // Count failures per IP for this service type (exclude track-only events)
-      const results = await db('ip_events')
-        .select('ip', 'device_id', 'tenant_id')
-        .count('id as failure_count')
-        .where('service', tpl.service_type)
-        .where('event_type', 'auth_failure')
-        .where('track_only', false)
-        .where('timestamp', '>=', windowStart)
-        .groupBy('ip', 'device_id', 'tenant_id')
-        .havingRaw('count(id) >= ?', [tpl.threshold]) as Array<{
-          ip: string;
-          device_id: number;
-          tenant_id: number;
-          failure_count: string;
-        }>;
+    // Evaluate per-device
+    for (const { dev, groupIds } of devicesWithGroups) {
+      let resolved;
+      try {
+        resolved = await serviceTemplateService.resolveForAgent(dev.id, groupIds);
+      } catch (err) {
+        logger.warn({ err, deviceId: dev.id }, 'BanEngine: failed to resolve templates for device');
+        continue;
+      }
 
-      for (const r of results) {
-        await this.createAutoBan(r.ip, r.tenant_id, tpl.service_type, Number(r.failure_count));
+      // Only process enabled ban-mode templates
+      const activeTemplates = resolved.filter(cfg => cfg.enabled && cfg.mode === 'ban');
+      if (activeTemplates.length === 0) continue;
+
+      for (const cfg of activeTemplates) {
+        const windowStart = new Date(Date.now() - cfg.windowSeconds * 1000);
+
+        const results = await db('ip_events')
+          .select('ip', 'tenant_id')
+          .count('id as failure_count')
+          .where('device_id', dev.id)
+          .where('service', cfg.serviceType)
+          .where('event_type', 'auth_failure')
+          .where('track_only', false)
+          .where('timestamp', '>=', windowStart)
+          .groupBy('ip', 'tenant_id')
+          .havingRaw('count(id) >= ?', [cfg.threshold]) as Array<{
+            ip: string;
+            tenant_id: number;
+            failure_count: string;
+          }>;
+
+        for (const r of results) {
+          await this.createAutoBan(r.ip, r.tenant_id, cfg.serviceType, Number(r.failure_count));
+        }
       }
     }
   }
