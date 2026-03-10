@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
   Pencil, Trash2, ArrowLeft, FolderOpen,
   Server, Bell, Globe, RotateCcw,
+  Plus, X, ChevronDown, ChevronUp, Shield, EyeOff,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { cn } from '@/utils/cn';
@@ -10,9 +11,10 @@ import { useGroupStore } from '@/store/groupStore';
 import { useAuthStore } from '@/store/authStore';
 import { groupsApi } from '@/api/groups.api';
 import { agentApi } from '@/api/agent.api';
+import { serviceTemplatesApi } from '@/api/serviceTemplates.api';
 import type {
   MonitorGroup, AgentDevice, AgentGroupConfig,
-  NotificationTypeConfig,
+  NotificationTypeConfig, ServiceTemplate, ServiceType, ServiceTemplateMode,
 } from '@obliview/shared';
 import { Button } from '@/components/common/Button';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
@@ -214,6 +216,275 @@ function AgentGroupSettingsPanel({ group, onUpdate }: { group: MonitorGroup; onU
         </div>
 
       </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Group Templates Panel
+// ─────────────────────────────────────────────────────────────────────────────
+
+const BUILTIN_TYPES: ServiceType[] = ['ssh', 'rdp', 'nginx', 'apache', 'iis', 'ftp', 'mail', 'mysql'];
+
+interface CreateGroupTemplateForm {
+  name: string;
+  serviceType: ServiceType;
+  mode: ServiceTemplateMode;
+  defaultLogPath: string;
+  threshold: number;
+  windowSeconds: number;
+}
+
+const FORM_DEFAULTS: CreateGroupTemplateForm = {
+  name: '',
+  serviceType: 'custom',
+  mode: 'ban',
+  defaultLogPath: '',
+  threshold: 5,
+  windowSeconds: 300,
+};
+
+function GroupTemplatesPanel({ groupId }: { groupId: number }) {
+  const [templates, setTemplates] = useState<ServiceTemplate[]>([]);
+  const [loading, setLoading]     = useState(true);
+  const [expanded, setExpanded]   = useState(true);
+  const [showForm, setShowForm]   = useState(false);
+  const [form, setForm]           = useState<CreateGroupTemplateForm>(FORM_DEFAULTS);
+  const [saving, setSaving]       = useState(false);
+  const [deleting, setDeleting]   = useState<Record<number, boolean>>({});
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await serviceTemplatesApi.listLocal('group', groupId);
+      setTemplates(data);
+    } finally {
+      setLoading(false);
+    }
+  }, [groupId]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  async function handleCreate(e: React.FormEvent) {
+    e.preventDefault();
+    setSaving(true);
+    try {
+      await serviceTemplatesApi.create({
+        name: form.name.trim(),
+        serviceType: form.serviceType,
+        mode: form.mode,
+        defaultLogPath: form.defaultLogPath.trim() || null,
+        threshold: form.threshold,
+        windowSeconds: form.windowSeconds,
+        ownerScope: 'group',
+        ownerScopeId: groupId,
+      });
+      setForm(FORM_DEFAULTS);
+      setShowForm(false);
+      await load();
+      toast.success('Group template created');
+    } catch {
+      toast.error('Failed to create group template');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleDelete(id: number) {
+    if (!confirm('Delete this group template? This cannot be undone.')) return;
+    setDeleting(d => ({ ...d, [id]: true }));
+    try {
+      await serviceTemplatesApi.delete(id);
+      await load();
+      toast.success('Group template deleted');
+    } catch {
+      toast.error('Failed to delete group template');
+    } finally {
+      setDeleting(d => ({ ...d, [id]: false }));
+    }
+  }
+
+  return (
+    <div className="rounded-lg border border-border bg-bg-secondary">
+
+      {/* Header */}
+      <div
+        className="px-4 py-3 border-b border-border flex items-center justify-between cursor-pointer select-none"
+        onClick={() => setExpanded(v => !v)}
+      >
+        <div className="flex items-center gap-2">
+          {expanded
+            ? <ChevronUp size={14} className="text-text-muted" />
+            : <ChevronDown size={14} className="text-text-muted" />}
+          <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide">
+            Group Templates
+          </h2>
+          {!loading && (
+            <span className="text-xs text-text-muted">
+              {templates.length} template{templates.length !== 1 ? 's' : ''} — visible to all agents in this group
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
+          <button
+            onClick={() => setShowForm(v => !v)}
+            className="inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] text-accent hover:bg-accent/10 transition-colors"
+          >
+            <Plus size={11} /> New template
+          </button>
+        </div>
+      </div>
+
+      {/* Create form */}
+      {expanded && showForm && (
+        <form onSubmit={e => void handleCreate(e)} className="border-b border-border px-4 py-4 bg-bg-tertiary/40">
+          <div className="grid gap-3 sm:grid-cols-2">
+
+            {/* Name */}
+            <div className="sm:col-span-2">
+              <label className="block text-xs font-medium text-text-muted mb-1">Template name</label>
+              <input
+                required
+                value={form.name}
+                onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
+                placeholder="e.g. Custom App Auth"
+                className="w-full rounded-md border border-border bg-bg-secondary px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:ring-1 focus:ring-accent"
+              />
+            </div>
+
+            {/* Service type */}
+            <div>
+              <label className="block text-xs font-medium text-text-muted mb-1">Service type</label>
+              <select
+                value={form.serviceType}
+                onChange={e => setForm(f => ({ ...f, serviceType: e.target.value as ServiceType }))}
+                className="w-full rounded-md border border-border bg-bg-secondary px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:ring-1 focus:ring-accent"
+              >
+                {BUILTIN_TYPES.map(t => (
+                  <option key={t} value={t}>{t}</option>
+                ))}
+                <option value="custom">custom</option>
+              </select>
+            </div>
+
+            {/* Mode */}
+            <div>
+              <label className="block text-xs font-medium text-text-muted mb-1">Mode</label>
+              <select
+                value={form.mode}
+                onChange={e => setForm(f => ({ ...f, mode: e.target.value as ServiceTemplateMode }))}
+                className="w-full rounded-md border border-border bg-bg-secondary px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:ring-1 focus:ring-accent"
+              >
+                <option value="ban">Ban</option>
+                <option value="track">Track only</option>
+              </select>
+            </div>
+
+            {/* Log path */}
+            <div className="sm:col-span-2">
+              <label className="block text-xs font-medium text-text-muted mb-1">Default log path (optional)</label>
+              <input
+                value={form.defaultLogPath}
+                onChange={e => setForm(f => ({ ...f, defaultLogPath: e.target.value }))}
+                placeholder="/var/log/myapp/auth.log"
+                className="w-full rounded-md border border-border bg-bg-secondary px-3 py-1.5 text-sm font-mono text-text-primary focus:outline-none focus:ring-1 focus:ring-accent"
+              />
+            </div>
+
+            {/* Threshold */}
+            <div>
+              <label className="block text-xs font-medium text-text-muted mb-1">Threshold (events)</label>
+              <input
+                type="number"
+                min={1}
+                value={form.threshold}
+                onChange={e => setForm(f => ({ ...f, threshold: Number(e.target.value) }))}
+                className="w-full rounded-md border border-border bg-bg-secondary px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:ring-1 focus:ring-accent"
+              />
+            </div>
+
+            {/* Window */}
+            <div>
+              <label className="block text-xs font-medium text-text-muted mb-1">Window (seconds)</label>
+              <input
+                type="number"
+                min={1}
+                value={form.windowSeconds}
+                onChange={e => setForm(f => ({ ...f, windowSeconds: Number(e.target.value) }))}
+                className="w-full rounded-md border border-border bg-bg-secondary px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:ring-1 focus:ring-accent"
+              />
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 mt-4">
+            <button
+              type="submit"
+              disabled={saving || !form.name.trim()}
+              className="rounded-md px-3 py-1.5 text-sm font-medium bg-accent text-white hover:bg-accent/90 disabled:opacity-50 transition-colors"
+            >
+              {saving ? 'Creating…' : 'Create'}
+            </button>
+            <button
+              type="button"
+              onClick={() => { setShowForm(false); setForm(FORM_DEFAULTS); }}
+              className="rounded-md px-3 py-1.5 text-sm font-medium text-text-muted hover:bg-bg-hover transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
+        </form>
+      )}
+
+      {/* List */}
+      {expanded && (
+        <div>
+          {loading ? (
+            <div className="py-6 text-center text-sm text-text-muted">Loading…</div>
+          ) : templates.length === 0 && !showForm ? (
+            <div className="py-6 text-center text-sm text-text-muted">
+              No group-level templates yet. Click "New template" to create one.
+            </div>
+          ) : (
+            <div className="divide-y divide-border">
+              {templates.map(tpl => (
+                <div key={tpl.id} className="flex items-center gap-3 px-4 py-3">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-sm font-medium text-text-primary">{tpl.name}</span>
+                      <span className="inline-flex items-center rounded bg-bg-tertiary px-1.5 py-0.5 text-[10px] font-mono text-text-muted border border-border">
+                        {tpl.serviceType}
+                      </span>
+                      <span className={cn(
+                        'inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold',
+                        tpl.mode === 'ban' ? 'bg-red-500/10 text-red-400' : 'bg-amber-500/10 text-amber-400',
+                      )}>
+                        {tpl.mode === 'ban' ? <Shield size={8} /> : <EyeOff size={8} />}
+                        {tpl.mode === 'ban' ? 'Ban' : 'Track'}
+                      </span>
+                    </div>
+                    <div className="mt-0.5 text-[11px] text-text-muted">
+                      Threshold: {tpl.threshold} / {tpl.windowSeconds}s
+                      {tpl.defaultLogPath && (
+                        <span className="ml-3 font-mono truncate" title={tpl.defaultLogPath}>
+                          {tpl.defaultLogPath}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => void handleDelete(tpl.id)}
+                    disabled={deleting[tpl.id]}
+                    title="Delete this group template"
+                    className="shrink-0 p-1.5 rounded-md text-text-muted hover:text-red-400 hover:bg-red-500/10 disabled:opacity-50 transition-colors"
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -432,10 +703,17 @@ export function GroupDetailPage() {
         </div>
       )}
 
-      {/* ── Service Templates — bind/unbind at group level ── */}
+      {/* ── Service Templates — bind/unbind global templates at group level ── */}
       {isAdmin() && isAgentGroup && (
         <div className="mt-6">
           <ServiceTemplatesPanel scope="group" scopeId={groupId} />
+        </div>
+      )}
+
+      {/* ── Group Templates — templates owned by this group, auto-apply to its agents ── */}
+      {isAdmin() && isAgentGroup && (
+        <div className="mt-6">
+          <GroupTemplatesPanel groupId={groupId} />
         </div>
       )}
 

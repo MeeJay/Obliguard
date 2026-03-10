@@ -23,8 +23,23 @@ func defaultLogPath(serviceType string) string {
 func defaultLogPathLinux(serviceType string) string {
 	switch serviceType {
 	case "ssh":
-		// Ubuntu/Debian use auth.log, RHEL/CentOS use secure
-		return firstExisting("/var/log/auth.log", "/var/log/secure")
+		// Prefer file-based logs (systems with rsyslog installed).
+		for _, p := range []string{"/var/log/auth.log", "/var/log/secure"} {
+			if _, err := os.Stat(p); err == nil {
+				return p
+			}
+		}
+		// Pure journald system (Debian 9+, Ubuntu 20.04+ without rsyslog, etc.).
+		// Detect which SSH service unit name systemd uses on this distro.
+		for _, p := range []string{
+			"/lib/systemd/system/ssh.service",
+			"/usr/lib/systemd/system/ssh.service",
+		} {
+			if _, err := os.Stat(p); err == nil {
+				return "journald:ssh.service" // Debian / Ubuntu
+			}
+		}
+		return "journald:sshd.service" // RHEL / CentOS / Arch
 	case "nginx":
 		return firstExisting("/var/log/nginx/error.log", "/var/log/nginx/access.log")
 	case "apache":

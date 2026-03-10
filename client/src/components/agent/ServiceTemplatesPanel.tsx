@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { RefreshCw, Shield, EyeOff, RotateCcw, Plus, ChevronDown, ChevronUp } from 'lucide-react';
+import { RefreshCw, Shield, EyeOff, RotateCcw, Plus, ChevronDown, ChevronUp, Layers } from 'lucide-react';
 import { cn } from '@/utils/cn';
 import { serviceTemplatesApi } from '@/api/serviceTemplates.api';
 import type { ResolvedServiceConfig } from '@obliview/shared';
@@ -36,18 +36,14 @@ function ModeBadge({ mode }: { mode: string }) {
 
 interface ServiceTemplatesPanelProps {
   /**
-   * 'group'  — shows group-level overrides; "Disable for group" / "Re-enable" buttons.
-   * 'device' — shows per-agent overrides; can override/reset independently of group.
+   * 'group'  — shows group-level bind/unbind for GLOBAL templates only.
+   *            Group-owned templates are managed in their own section.
+   * 'device' — shows per-agent bind/unbind; includes both global and group-owned templates.
+   *            An agent can bind/unbind independently of the group.
    */
   scope: 'group' | 'device';
   scopeId: number;
-
-  /**
-   * For 'group' scope: the group ID.
-   * For 'device' scope: the device ID.
-   */
   className?: string;
-
   /** Allow creating local templates (device scope only). */
   onCreateLocal?: () => void;
 }
@@ -81,15 +77,40 @@ export function ServiceTemplatesPanel({
 
   useEffect(() => { void load(); }, [load]);
 
+  // ── API scope ─────────────────────────────────────────────────────────────
+  // 'group' panel writes group-scope assignments; 'device' panel writes agent-scope.
+  const apiScope = scope === 'device' ? 'agent' : 'group';
+
   // ── Actions ──────────────────────────────────────────────────────────────
 
-  async function disable(cfg: ResolvedServiceConfig) {
+  /**
+   * Bind: explicitly enable this template at the current scope (enabledOverride = true).
+   * For device scope this overrides a group unbind — setting true at agent level
+   * takes precedence over any group-level false.
+   */
+  async function bind(cfg: ResolvedServiceConfig) {
     setBusy(b => ({ ...b, [cfg.templateId]: true }));
     try {
       await serviceTemplatesApi.upsertAssignment(
-        cfg.templateId,
-        scope === 'device' ? 'agent' : 'group',
-        scopeId,
+        cfg.templateId, apiScope, scopeId,
+        { enabledOverride: true },
+      );
+      await load();
+    } finally {
+      setBusy(b => ({ ...b, [cfg.templateId]: false }));
+    }
+  }
+
+  /**
+   * Unbind: explicitly disable this template at the current scope (enabledOverride = false).
+   * At group scope: all agents in this group will inherit disabled unless they Bind individually.
+   * At device scope: only this agent is affected.
+   */
+  async function unbind(cfg: ResolvedServiceConfig) {
+    setBusy(b => ({ ...b, [cfg.templateId]: true }));
+    try {
+      await serviceTemplatesApi.upsertAssignment(
+        cfg.templateId, apiScope, scopeId,
         { enabledOverride: false },
       );
       await load();
@@ -99,32 +120,13 @@ export function ServiceTemplatesPanel({
   }
 
   /**
-   * Re-enable: set enabledOverride = null (inherit from parent / template default).
-   * If the row has no other overrides, delete the assignment entirely to keep DB clean.
-   */
-  async function reenable(cfg: ResolvedServiceConfig) {
-    setBusy(b => ({ ...b, [cfg.templateId]: true }));
-    try {
-      await serviceTemplatesApi.upsertAssignment(
-        cfg.templateId,
-        scope === 'device' ? 'agent' : 'group',
-        scopeId,
-        { enabledOverride: null },
-      );
-      await load();
-    } finally {
-      setBusy(b => ({ ...b, [cfg.templateId]: false }));
-    }
-  }
-
-  /**
-   * Device-only: reset agent-level override entirely (delete agent assignment).
-   * Falls back to group / template default.
+   * Reset: remove the explicit override at the current scope.
+   * Falls back to the parent level (group assignment → template default).
    */
   async function reset(cfg: ResolvedServiceConfig) {
     setBusy(b => ({ ...b, [cfg.templateId]: true }));
     try {
-      await serviceTemplatesApi.deleteAssignment(cfg.templateId, 'agent', scopeId);
+      await serviceTemplatesApi.deleteAssignment(cfg.templateId, apiScope, scopeId);
       await load();
     } finally {
       setBusy(b => ({ ...b, [cfg.templateId]: false }));
@@ -133,8 +135,8 @@ export function ServiceTemplatesPanel({
 
   // ── Render ───────────────────────────────────────────────────────────────
 
-  const enabledCount   = configs.filter(c => c.enabled).length;
-  const disabledCount  = configs.filter(c => !c.enabled).length;
+  const boundCount   = configs.filter(c => c.enabled).length;
+  const unboundCount = configs.filter(c => !c.enabled).length;
 
   return (
     <div className={cn('rounded-lg border border-border bg-bg-secondary', className)}>
@@ -153,7 +155,7 @@ export function ServiceTemplatesPanel({
           </h2>
           {!loading && (
             <span className="text-xs text-text-muted">
-              {enabledCount} active{disabledCount > 0 ? `, ${disabledCount} disabled` : ''}
+              {boundCount} bound{unboundCount > 0 ? `, ${unboundCount} unbound` : ''}
             </span>
           )}
         </div>
@@ -185,17 +187,18 @@ export function ServiceTemplatesPanel({
             <div className="py-8 text-center text-sm text-text-muted">Loading…</div>
           ) : configs.length === 0 ? (
             <div className="py-8 text-center text-sm text-text-muted">
-              No global service templates configured.
+              No service templates configured.
             </div>
           ) : (
             <div className="divide-y divide-border">
               {configs.map(cfg => {
-                const isBusy           = busy[cfg.templateId] ?? false;
-                const overrideScope    = cfg.enabledOverrideScope;
-                // For device scope: is there an agent-level enabled override?
-                const hasAgentOverride = scope === 'device' && overrideScope === 'agent';
-                // Is disabled by group (and not re-enabled at agent level)?
-                const disabledByGroup  = scope === 'device' && !cfg.enabled && overrideScope === 'group';
+                const isBusy         = busy[cfg.templateId] ?? false;
+                const overrideScope  = cfg.enabledOverrideScope;
+                const isGroupTpl     = cfg.templateOwnerScope === 'group';
+
+                // Whether THIS scope has set an explicit enabled_override
+                const hasScopeOverride =
+                  scope === 'device' ? overrideScope === 'agent' : overrideScope === 'group';
 
                 return (
                   <div
@@ -218,28 +221,49 @@ export function ServiceTemplatesPanel({
                         <ServiceTypeBadge type={cfg.serviceType} />
                         <ModeBadge mode={cfg.mode} />
 
-                        {/* State badges */}
+                        {/* Group-owned template badge */}
+                        {isGroupTpl && (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-purple-500/10 px-2 py-0.5 text-[10px] font-medium text-purple-400">
+                            <Layers size={8} />
+                            Group template
+                          </span>
+                        )}
+
+                        {/* ── State badges ── */}
+
+                        {/* No override at all and template is off by default */}
                         {!cfg.enabled && overrideScope === null && (
                           <span className="text-[10px] text-text-muted">Template default: off</span>
                         )}
-                        {hasAgentOverride && (
+
+                        {/* Device scope: agent-level explicit override */}
+                        {scope === 'device' && overrideScope === 'agent' && (
                           <span className={cn(
                             'inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium',
                             cfg.enabled
                               ? 'bg-green-500/10 text-green-400'
                               : 'bg-amber-500/10 text-amber-400',
                           )}>
-                            {cfg.enabled ? 'Re-enabled (Agent)' : 'Disabled (Agent)'}
+                            {cfg.enabled ? 'Bound (agent)' : 'Unbound (agent)'}
                           </span>
                         )}
-                        {scope === 'group' && overrideScope === 'group' && !cfg.enabled && (
+
+                        {/* Device scope: disabled by a group-level override (no agent override on top) */}
+                        {scope === 'device' && overrideScope === 'group' && !cfg.enabled && (
                           <span className="inline-flex items-center rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-500">
-                            Disabled (Group)
+                            Unbound (group)
                           </span>
                         )}
-                        {disabledByGroup && (
-                          <span className="inline-flex items-center rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-500">
-                            Disabled (Group)
+
+                        {/* Group scope: this group has an explicit override */}
+                        {scope === 'group' && overrideScope === 'group' && (
+                          <span className={cn(
+                            'inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium',
+                            cfg.enabled
+                              ? 'bg-green-500/10 text-green-400'
+                              : 'bg-amber-500/10 text-amber-400',
+                          )}>
+                            {cfg.enabled ? 'Bound (group)' : 'Unbound (group)'}
                           </span>
                         )}
                       </div>
@@ -257,65 +281,47 @@ export function ServiceTemplatesPanel({
 
                     {/* Action buttons */}
                     <div className="flex items-center gap-1 flex-shrink-0">
-                      {scope === 'group' && (
-                        <>
-                          {cfg.enabled ? (
-                            // Active → offer "Disable for group"
-                            <button
-                              onClick={() => void disable(cfg)}
-                              disabled={isBusy}
-                              className="shrink-0 rounded-md px-2 py-1 text-xs font-medium text-text-muted hover:bg-bg-hover hover:text-text-primary disabled:opacity-50 transition-colors"
-                            >
-                              Disable
-                            </button>
-                          ) : overrideScope === 'group' ? (
-                            // Group-disabled → offer "Re-enable"
-                            <button
-                              onClick={() => void reenable(cfg)}
-                              disabled={isBusy}
-                              className="shrink-0 rounded-md px-2 py-1 text-xs font-medium text-amber-500 hover:bg-amber-500/10 disabled:opacity-50 transition-colors flex items-center gap-1"
-                            >
-                              <RotateCcw size={11} />
-                              Re-enable
-                            </button>
-                          ) : null}
-                        </>
+
+                      {/* Reset: only shown when this scope has an explicit override */}
+                      {hasScopeOverride && (
+                        <button
+                          onClick={() => void reset(cfg)}
+                          disabled={isBusy}
+                          title={
+                            scope === 'device'
+                              ? 'Remove agent override — inherit from group / template default'
+                              : 'Remove group override — inherit from template default'
+                          }
+                          className="shrink-0 rounded-md px-2 py-1 text-xs font-medium text-amber-500 hover:bg-amber-500/10 disabled:opacity-50 transition-colors flex items-center gap-1"
+                        >
+                          <RotateCcw size={11} />
+                          Reset
+                        </button>
                       )}
 
-                      {scope === 'device' && (
-                        <>
-                          {hasAgentOverride ? (
-                            // Agent has an override → offer Reset (remove agent override, inherit group/template)
-                            <button
-                              onClick={() => void reset(cfg)}
-                              disabled={isBusy}
-                              title="Remove agent override — inherit from group / template"
-                              className="shrink-0 rounded-md px-2 py-1 text-xs font-medium text-amber-500 hover:bg-amber-500/10 disabled:opacity-50 transition-colors flex items-center gap-1"
-                            >
-                              <RotateCcw size={11} />
-                              Reset
-                            </button>
-                          ) : cfg.enabled ? (
-                            // Active (no agent override) → offer "Disable for this agent"
-                            <button
-                              onClick={() => void disable(cfg)}
-                              disabled={isBusy}
-                              className="shrink-0 rounded-md px-2 py-1 text-xs font-medium text-text-muted hover:bg-bg-hover hover:text-text-primary disabled:opacity-50 transition-colors"
-                            >
-                              Disable
-                            </button>
-                          ) : disabledByGroup ? (
-                            // Disabled by group → offer "Enable for this agent" (override the group)
-                            <button
-                              onClick={() => void reenable(cfg)}
-                              disabled={isBusy}
-                              title="Override group: re-enable for this agent only"
-                              className="shrink-0 rounded-md px-2 py-1 text-xs font-medium text-text-muted hover:bg-bg-hover hover:text-text-primary disabled:opacity-50 transition-colors"
-                            >
-                              Enable (override)
-                            </button>
-                          ) : null}
-                        </>
+                      {/* Bind / Unbind — always shown based on current effective state */}
+                      {cfg.enabled ? (
+                        <button
+                          onClick={() => void unbind(cfg)}
+                          disabled={isBusy}
+                          title={scope === 'group' ? 'Unbind for all agents in this group' : undefined}
+                          className="shrink-0 rounded-md px-2 py-1 text-xs font-medium text-text-muted hover:bg-bg-hover hover:text-text-primary disabled:opacity-50 transition-colors"
+                        >
+                          Unbind
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => void bind(cfg)}
+                          disabled={isBusy}
+                          title={
+                            scope === 'device' && overrideScope === 'group'
+                              ? 'Override group: bind for this agent only'
+                              : undefined
+                          }
+                          className="shrink-0 rounded-md px-2 py-1 text-xs font-medium text-accent hover:bg-accent/10 disabled:opacity-50 transition-colors"
+                        >
+                          Bind
+                        </button>
                       )}
                     </div>
                   </div>

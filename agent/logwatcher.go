@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 	"sync"
@@ -145,12 +146,22 @@ func (lw *LogWatcher) startWatchers() {
 		lw.mu.Unlock()
 
 		if !alreadyWatching {
-			go lw.tailFile(logPath, svcKey, cfg)
+			if strings.HasPrefix(logPath, "journald:") {
+				unit := strings.TrimPrefix(logPath, "journald:")
+				go lw.tailJournald(logPath, unit, svcKey, cfg)
+			} else {
+				go lw.tailFile(logPath, svcKey, cfg)
+			}
 		}
 
 		// Handle sample request
 		if cfg.SampleRequested {
-			go lw.collectSample(logPath)
+			if strings.HasPrefix(logPath, "journald:") {
+				unit := strings.TrimPrefix(logPath, "journald:")
+				go lw.collectJournaldSample(logPath, unit)
+			} else {
+				go lw.collectSample(logPath)
+			}
 		}
 	}
 }
@@ -278,6 +289,125 @@ func (lw *LogWatcher) collectSample(path string) {
 
 	lw.mu.Lock()
 	lw.samples[path] = lines
+	lw.mu.Unlock()
+}
+
+// tailJournald follows a systemd journal unit in real-time using
+// "journalctl -fu UNIT --output=short-traditional -n 0".
+// The short-traditional format produces lines identical to classic syslog:
+//
+//	Mar 10 12:34:56 hostname sshd[1234]: Failed password for ...
+//
+// which the existing parsers (SSHParser etc.) already handle correctly.
+// watchKey is the "journald:UNIT" string used as the watchedFiles map key.
+func (lw *LogWatcher) tailJournald(watchKey, unit, svcKey string, cfg AgentServiceConfig) {
+	log.Printf("LogWatcher: tailing journald unit %s for %s", unit, svcKey)
+
+	parser := lw.getParser(svcKey, cfg.CustomRegex)
+	if parser == nil {
+		log.Printf("LogWatcher: no parser for %s", svcKey)
+		lw.mu.Lock()
+		delete(lw.watchedFiles, watchKey)
+		lw.mu.Unlock()
+		return
+	}
+
+	for {
+		select {
+		case <-lw.stopCh:
+			return
+		default:
+		}
+
+		// -n 0: start from the current tail (no historical backlog)
+		cmd := exec.Command("journalctl", "-fu", unit, "--output=short-traditional", "-n", "0")
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			log.Printf("LogWatcher: journalctl pipe error (%s): %v — retrying in 30s", unit, err)
+			time.Sleep(30 * time.Second)
+			continue
+		}
+		if err := cmd.Start(); err != nil {
+			log.Printf("LogWatcher: journalctl start error (%s): %v — retrying in 30s", unit, err)
+			time.Sleep(30 * time.Second)
+			continue
+		}
+
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			// Check for shutdown between lines.
+			select {
+			case <-lw.stopCh:
+				_ = cmd.Process.Kill()
+				_ = cmd.Wait()
+				lw.mu.Lock()
+				delete(lw.watchedFiles, watchKey)
+				lw.mu.Unlock()
+				return
+			default:
+			}
+
+			line := scanner.Text()
+			if line == "" {
+				continue
+			}
+
+			lw.mu.Lock()
+			cur, exists := lw.configs[svcKey]
+			lw.mu.Unlock()
+
+			if !exists || !cur.Enabled {
+				_ = cmd.Process.Kill()
+				_ = cmd.Wait()
+				lw.mu.Lock()
+				delete(lw.watchedFiles, watchKey)
+				lw.mu.Unlock()
+				return
+			}
+
+			for _, e := range parser.Parse(line, svcKey) {
+				lw.addEvent(e)
+			}
+		}
+
+		_ = cmd.Wait()
+
+		select {
+		case <-lw.stopCh:
+			lw.mu.Lock()
+			delete(lw.watchedFiles, watchKey)
+			lw.mu.Unlock()
+			return
+		default:
+		}
+
+		log.Printf("LogWatcher: journalctl (%s) exited — restarting in 5s", unit)
+		// Remove from watchedFiles so startWatchers() can restart the goroutine cleanly.
+		lw.mu.Lock()
+		delete(lw.watchedFiles, watchKey)
+		lw.mu.Unlock()
+		time.Sleep(5 * time.Second)
+	}
+}
+
+// collectJournaldSample reads the last 50 lines from a journald unit.
+func (lw *LogWatcher) collectJournaldSample(watchKey, unit string) {
+	cmd := exec.Command("journalctl", "-u", unit, "-n", "50",
+		"--output=short-traditional", "--no-pager")
+	out, err := cmd.Output()
+	if err != nil {
+		log.Printf("LogWatcher: journalctl sample error (%s): %v", unit, err)
+		return
+	}
+
+	raw := strings.TrimRight(string(out), "\n")
+	if raw == "" {
+		return
+	}
+	lines := strings.Split(raw, "\n")
+
+	lw.mu.Lock()
+	lw.samples[watchKey] = lines
 	lw.mu.Unlock()
 }
 
