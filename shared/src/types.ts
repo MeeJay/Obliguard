@@ -731,6 +731,11 @@ export interface ResolvedServiceConfig {
    * null     = no override — using template default
    */
   enabledOverrideScope: 'agent' | 'group' | null;
+  /**
+   * null    = global template (no owner — applies system-wide)
+   * 'group' = owned by a specific group; auto-applies to agents in that group
+   */
+  templateOwnerScope: 'group' | null;
 }
 
 export interface CreateServiceTemplateRequest {

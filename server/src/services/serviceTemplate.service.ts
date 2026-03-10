@@ -358,37 +358,42 @@ class ServiceTemplateService {
     deviceId: number,
     groupIds: number[],
   ): Promise<ResolvedServiceConfig[]> {
-    // 1. Fetch ALL global templates (opt-out model — every global template applies by default)
+    // 1. Fetch ALL global templates (opt-out — every global template applies by default)
     const globalTemplates = await db<ServiceTemplateRow>('service_templates')
-      .whereNull('owner_scope');  // global = no owner
+      .whereNull('owner_scope');
 
-    if (globalTemplates.length === 0) return [];
+    // 2. Fetch group-owned templates for the device's direct group (groupIds[0] = depth-0 = self)
+    const directGroupId = groupIds.length > 0 ? groupIds[0] : null;
+    const groupOwnedTemplates: ServiceTemplateRow[] = directGroupId !== null
+      ? await db<ServiceTemplateRow>('service_templates')
+          .where('owner_scope', 'group')
+          .where('owner_scope_id', directGroupId)
+      : [];
 
-    const templateIds = globalTemplates.map(t => t.id);
-    const templateById = new Map<number, ServiceTemplateRow>();
-    for (const tpl of globalTemplates) {
-      templateById.set(tpl.id, tpl);
-    }
+    const allTemplates = [...globalTemplates, ...groupOwnedTemplates];
+    if (allTemplates.length === 0) return [];
 
-    // 2. Fetch agent-level assignments for these templates
+    const allTemplateIds  = allTemplates.map(t => t.id);
+    const globalTemplateIds = globalTemplates.map(t => t.id);
+
+    // 3. Fetch ALL agent-level assignments in one query
     const agentAssignments = await db<ServiceTemplateAssignmentRow>('service_template_assignments')
       .where({ scope: 'agent', scope_id: deviceId })
-      .whereIn('template_id', templateIds);
+      .whereIn('template_id', allTemplateIds);
 
     const agentAssignmentByTemplate = new Map<number, ServiceTemplateAssignmentRow>();
     for (const asgn of agentAssignments) {
       agentAssignmentByTemplate.set(asgn.template_id, asgn);
     }
 
-    // 3. Fetch group-level assignments, walking from closest ancestor to farthest
+    // 4. Fetch group-level assignments for GLOBAL templates only (walk closest → farthest)
     const groupAssignmentByTemplate = new Map<number, ServiceTemplateAssignmentRow>();
-    if (groupIds.length > 0) {
+    if (groupIds.length > 0 && globalTemplateIds.length > 0) {
       const allGroupAssignments = await db<ServiceTemplateAssignmentRow>('service_template_assignments')
         .where('scope', 'group')
         .whereIn('scope_id', groupIds)
-        .whereIn('template_id', templateIds);
+        .whereIn('template_id', globalTemplateIds);
 
-      // groupIds is ordered closest → farthest; first encountered wins
       for (const groupId of groupIds) {
         for (const asgn of allGroupAssignments.filter(a => a.scope_id === groupId)) {
           if (!groupAssignmentByTemplate.has(asgn.template_id)) {
@@ -398,14 +403,13 @@ class ServiceTemplateService {
       }
     }
 
-    // 4. Build resolved configs for ALL global templates
-    const resolved: ResolvedServiceConfig[] = [];
-
-    for (const tpl of globalTemplates) {
-      const agentAssignment = agentAssignmentByTemplate.get(tpl.id) ?? null;
-      const groupAssignment = groupAssignmentByTemplate.get(tpl.id) ?? null;
-
-      // Priority: agent override > nearest group override > template default
+    // ── Helper to build one resolved entry ───────────────────────────────────
+    function buildEntry(
+      tpl: ServiceTemplateRow,
+      agentAssignment: ServiceTemplateAssignmentRow | null,
+      groupAssignment: ServiceTemplateAssignmentRow | null,
+      templateOwnerScope: 'group' | null,
+    ): ResolvedServiceConfig {
       const logPath =
         agentAssignment?.log_path_override ??
         groupAssignment?.log_path_override ??
@@ -433,9 +437,7 @@ class ServiceTemplateService {
         groupAssignment?.enabled_override ??
         tpl.enabled;
 
-      const sampleRequested = agentAssignment?.sample_requested ?? false;
-
-      resolved.push({
+      return {
         templateId: tpl.id,
         name: tpl.name,
         serviceType: tpl.service_type as ResolvedServiceConfig['serviceType'],
@@ -446,9 +448,32 @@ class ServiceTemplateService {
         windowSeconds,
         enabled,
         mode: (tpl.mode ?? 'ban') as ServiceTemplateMode,
-        sampleRequested,
+        sampleRequested: agentAssignment?.sample_requested ?? false,
         enabledOverrideScope,
-      });
+        templateOwnerScope,
+      };
+    }
+
+    const resolved: ResolvedServiceConfig[] = [];
+
+    // 5. Global templates — agent + group overrides
+    for (const tpl of globalTemplates) {
+      resolved.push(buildEntry(
+        tpl,
+        agentAssignmentByTemplate.get(tpl.id) ?? null,
+        groupAssignmentByTemplate.get(tpl.id) ?? null,
+        null,
+      ));
+    }
+
+    // 6. Group-owned templates — agent override only (they belong TO the group)
+    for (const tpl of groupOwnedTemplates) {
+      resolved.push(buildEntry(
+        tpl,
+        agentAssignmentByTemplate.get(tpl.id) ?? null,
+        null, // no group-level bind/unbind for group-owned templates
+        'group',
+      ));
     }
 
     // Sort: enabled first, then by name
@@ -543,6 +568,7 @@ class ServiceTemplateService {
         mode: (tpl.mode ?? 'ban') as ServiceTemplateMode,
         sampleRequested: false,
         enabledOverrideScope,
+        templateOwnerScope: null,
       });
     }
 
