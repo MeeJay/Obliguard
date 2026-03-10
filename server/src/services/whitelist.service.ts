@@ -55,16 +55,33 @@ class WhitelistService {
         query.where({ scope: 'tenant' });
       }
     } else if (scope === 'group') {
-      if (scopeId === null) throw new Error('scopeId is required for group scope');
-      query.where({ scope: 'group', scope_id: scopeId });
+      if (scopeId !== null) query.where({ scope: 'group', scope_id: scopeId });
+      else query.where({ scope: 'group' });
     } else if (scope === 'agent') {
-      if (scopeId === null) throw new Error('scopeId is required for agent scope');
-      query.where({ scope: 'agent', scope_id: scopeId });
+      if (scopeId !== null) query.where({ scope: 'agent', scope_id: scopeId });
+      else query.where({ scope: 'agent' });
     } else {
       throw new Error(`Unknown whitelist scope: ${scope as string}`);
     }
 
     const rows = await query.orderBy('created_at', 'asc');
+    return rows.map(rowToWhitelist);
+  }
+
+  /**
+   * Returns all whitelist entries visible to a user across all scopes.
+   * Admins see everything; others see global + their tenant + group/agent entries.
+   */
+  async listAll(tenantId: number, isAdmin: boolean): Promise<IpWhitelist[]> {
+    const query = db<IpWhitelistRow>('ip_whitelist');
+    if (!isAdmin) {
+      query.where((b) =>
+        b.where({ scope: 'global' })
+          .orWhere({ scope: 'tenant', tenant_id: tenantId })
+          .orWhereIn('scope', ['group', 'agent']),
+      );
+    }
+    const rows = await query.orderBy('scope').orderBy('created_at', 'asc');
     return rows.map(rowToWhitelist);
   }
 

@@ -44,6 +44,7 @@ interface IpNode {
   eventCount: number;
   lastSeen: number;
   glowUntil: number;
+  whitelistLabel?: string | null;
 }
 
 interface Particle {
@@ -74,7 +75,7 @@ const IP_TTL = 20 * 60 * 1000; // 20 minutes
 
 /** Ring layout constants — shared by distributeIpsAroundAgents() and animate(). */
 const RING_INNER_R = 42;              // first ring distance from agent centre (px)
-const RING_GAP     = 14;              // gap between successive rings (px) — ~1 empty dot between rings
+const RING_GAP     = 7;               // gap between successive rings (px) — ~0.2 dot gap
 const PER_RING     = 30;              // max IPs per ring
 const ARC_START    = -Math.PI / 6;   // 330° — first arc position (bottom-right)
 const ARC_SPAN     = (4 * Math.PI) / 3; // 240° arc, skipping top 120° (label zone)
@@ -227,7 +228,7 @@ function distributeIpsAroundAgents(
       const baseAngle   = ARC_START + posInRing * angleStep;
       // Tiny deterministic jitter — keeps it organic, avoids perfect grid
       const jA = (ipRand(ip.ip, 97) - 0.5) * Math.min(angleStep * 0.30, 0.10);
-      const jR = (ipRand(ip.ip, 83) - 0.5) * 4;
+      const jR = (ipRand(ip.ip, 83) - 0.5) * 2;
       const r  = RING_INNER_R + ring * RING_GAP + jR;
       ip.x = ag.x + Math.cos(baseAngle + jA) * r;
       ip.y = ag.y + Math.sin(baseAngle + jA) * r;
@@ -287,7 +288,7 @@ function layoutAgents(agents: AgentNode[], w: number, h: number) {
 
 /** Only show a badge for notable IPs. */
 function shouldLabel(ip: IpNode): boolean {
-  return ip.status === 'banned' || ip.failures > 2 || ip.eventCount >= 8 || ip.agentIds.length > 1;
+  return ip.status === 'banned' || ip.status === 'whitelisted' || ip.failures > 2 || ip.eventCount >= 8 || ip.agentIds.length > 1;
 }
 
 // ── Badge helpers ─────────────────────────────────────────────────────────────
@@ -353,6 +354,7 @@ export function NetMapPage() {
   const [filters,       setFilters]       = useState<Set<FlowType>>(new Set(['auth_success', 'auth_failure', 'ban']));
   const [selectedAgent, setSelectedAgent] = useState<AgentNode | null>(null);
   const [banningIp,     setBanningIp]     = useState<string | null>(null);
+  const [socketOk,      setSocketOk]      = useState(false);
   const [tooltip, setTooltip] = useState<{
     x: number; y: number;
     ip: string; flag: string; country: string;
@@ -576,10 +578,15 @@ export function NetMapPage() {
       layoutAgents(agentsRef.current, w, h);
       const agentMap = new Map(agentsRef.current.map(a => [a.id, a]));
 
-      // IP reputation
-      const repRes = await apiClient.get<{
-        data: { ip: string; geoCountryCode?: string | null; totalFailures: number; status: string; affectedServices?: string[] }[]
-      }>('/ip-reputation?limit=200').catch(() => ({ data: { data: [] } }));
+      // IP reputation + whitelist labels (parallel)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const [repRes, wlRes] = await Promise.all([
+        apiClient.get<{
+          data: { ip: string; geoCountryCode?: string | null; totalFailures: number; status: string; affectedServices?: string[] }[]
+        }>('/ip-reputation?limit=200').catch(() => ({ data: { data: [] } })),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        apiClient.get<{ data: any[] }>('/whitelist').catch(() => ({ data: { data: [] } })),
+      ]);
       const repMap = new Map<string, { country: string; status: string; failures: number; services: string[] }>();
       for (const r of repRes.data?.data ?? []) {
         repMap.set(r.ip, {
@@ -588,6 +595,14 @@ export function NetMapPage() {
           failures: r.totalFailures,
           services: r.affectedServices ?? [],
         });
+      }
+      // Build IP → whitelist label map (exact matches only; CIDR ranges excluded)
+      const wlLabelMap = new Map<string, string | null>();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      for (const wl of (wlRes.data as any)?.data ?? []) {
+        if (typeof wl.ip === 'string' && !wl.ip.includes('/')) {
+          wlLabelMap.set(wl.ip, wl.label ?? null);
+        }
       }
 
       // Build IP nodes
@@ -617,6 +632,7 @@ export function NetMapPage() {
           status, failures: rep?.failures ?? allFailures,
           services: allServices, eventCount: totalCount,
           lastSeen: Date.now(), glowUntil: 0,
+          whitelistLabel: wlLabelMap.has(evIp) ? wlLabelMap.get(evIp) : undefined,
         };
         ipsRef.current.set(evIp, node);
         cnt++;
@@ -641,6 +657,7 @@ export function NetMapPage() {
           color:    statusColor(rep.status),
           status:   rep.status, failures: rep.failures, services: rep.services,
           eventCount: 0, lastSeen: Date.now(), glowUntil: 0,
+          whitelistLabel: wlLabelMap.has(repIp) ? wlLabelMap.get(repIp) : undefined,
         };
         ipsRef.current.set(repIp, node);
         cnt++;
@@ -766,10 +783,11 @@ export function NetMapPage() {
       const dimmed    = selId !== null && !ip.agentIds.includes(selId);
       const alpha     = dimmed ? 0.04 : selId !== null ? 0.55 : 0.24;
       const isInbound = ip.failures > 0 || ip.status === 'banned' || ip.status === 'suspicious';
-      const edgeColor = ip.status === 'banned'     ? '#ef4444'
-                      : ip.status === 'suspicious' ? '#f97316'
-                      : ip.failures > 0            ? '#fbbf24'
-                      :                              '#38bdf8'; // clean / outbound → cool blue
+      const edgeColor = ip.status === 'banned'      ? '#ef4444'
+                      : ip.status === 'suspicious'  ? '#f97316'
+                      : ip.status === 'whitelisted' ? '#22c55e' // whitelisted → green
+                      : ip.failures > 0             ? '#fbbf24'
+                      :                               '#38bdf8'; // clean → cool blue
       const thickness  = (1.5 + Math.min(ip.eventCount / 25, 2.0)) / k;
       const dashOffset = isInbound ? -(ts / 50) % 10 : (ts / 50) % 10;
       for (const aid of ip.agentIds) {
@@ -787,7 +805,7 @@ export function NetMapPage() {
     }
 
     // ── IP dots ──────────────────────────────────────────────────────────
-    const badges: { flag: string; ip: string; sx: number; sy: number; r: number; color: string; alpha: number }[] = [];
+    const badges: { txt: string; sx: number; sy: number; r: number; color: string; alpha: number }[] = [];
 
     for (const ip of ipNodes) {
       const dimmed = selId !== null && !ip.agentIds.includes(selId);
@@ -807,12 +825,20 @@ export function NetMapPage() {
       ctx.save();
       ctx.globalAlpha = alpha;
       ctx.shadowBlur  = ip.dotR * 1.8; ctx.shadowColor = ip.color;
-      ctx.fillStyle   = '#c2cedd';
+      ctx.fillStyle   = ip.status === 'whitelisted' ? '#22c55e'
+                      : ip.status === 'banned'       ? '#ef4444'
+                      : ip.status === 'suspicious'   ? '#f97316'
+                      : '#c2cedd';
       ctx.beginPath(); ctx.arc(ip.x, ip.y, ip.dotR, 0, Math.PI * 2); ctx.fill();
       ctx.restore();
 
       if (!dimmed && shouldLabel(ip)) {
-        badges.push({ flag: ip.country, ip: ip.ip, sx: ip.x, sy: ip.y, r: ip.dotR, color: ip.color, alpha: Math.min(0.95, alpha + 0.1) });
+        const badgeTxt = ip.status === 'whitelisted' && ip.whitelistLabel
+          ? `✓ ${ip.whitelistLabel}`
+          : ip.status === 'whitelisted'
+          ? `✓ ${ip.ip}`
+          : badgeText(ip.country, ip.ip);
+        badges.push({ txt: badgeTxt, sx: ip.x, sy: ip.y, r: ip.dotR, color: ip.color, alpha: Math.min(0.95, alpha + 0.1) });
       }
     }
 
@@ -871,7 +897,7 @@ export function NetMapPage() {
 
     ctx.font = BADGE_FONT;
     for (const b of badges) {
-      const txt = badgeText(b.flag, b.ip);
+      const txt = b.txt;
       const bw  = ctx.measureText(txt).width + 9;
       const gap = b.r + 4;
       const candidates: [number, number][] = [
@@ -1012,6 +1038,19 @@ export function NetMapPage() {
     socket.on('ban:auto', onBanAuto);
     return () => { socket.off('ip:flow', onIpFlow); socket.off('ban:auto', onBanAuto); };
   }, [upsertIp, spawnParticle]);
+
+  // ── Socket connection status ───────────────────────────────────────────────
+
+  useEffect(() => {
+    const socket = getSocket();
+    if (!socket) return;
+    const onConnect    = () => setSocketOk(true);
+    const onDisconnect = () => setSocketOk(false);
+    setSocketOk(socket.connected);
+    socket.on('connect',    onConnect);
+    socket.on('disconnect', onDisconnect);
+    return () => { socket.off('connect', onConnect); socket.off('disconnect', onDisconnect); };
+  }, []);
 
   // ── Wheel zoom ────────────────────────────────────────────────────────────
 
@@ -1233,8 +1272,15 @@ export function NetMapPage() {
         {/* ── Tooltip ─────────────────────────────────────────────────────── */}
         {tooltip && (
           <div
-            className="absolute z-20 pointer-events-none bg-[#050514]/96 border border-slate-800/60 rounded p-2.5 backdrop-blur-sm"
-            style={{ left: tooltip.x + 14, top: tooltip.y - 8, transform: tooltip.x > canvasSize.w * 0.70 ? 'translateX(-110%)' : undefined }}
+            className="absolute z-20 pointer-events-none rounded p-2.5 max-w-[200px]"
+            style={{
+              left: tooltip.x + 14,
+              top: tooltip.y - 8,
+              backgroundColor: 'rgba(5,5,20,0.97)',
+              border: '1px solid rgba(51,65,85,0.7)',
+              boxShadow: '0 4px 24px rgba(0,0,0,0.8)',
+              transform: tooltip.x > canvasSize.w * 0.70 ? 'translateX(-110%)' : undefined,
+            }}
           >
             <div className="font-mono text-[11px] mb-1.5 font-bold" style={{ color: tooltip.color }}>
               {tooltip.flag} {tooltip.ip}
@@ -1250,9 +1296,11 @@ export function NetMapPage() {
               </div>
             ))}
             {tooltip.services.length > 0 && (
-              <div className="flex items-center gap-2">
-                <span className="font-mono text-[8px] text-slate-600 uppercase tracking-wider w-14 shrink-0">Services</span>
-                <span className="font-mono text-[10px] text-slate-500">{tooltip.services.slice(0, 4).join(', ')}</span>
+              <div className="flex items-start gap-2">
+                <span className="font-mono text-[8px] text-slate-600 uppercase tracking-wider w-14 shrink-0 mt-px">Services</span>
+                <span className="font-mono text-[10px] text-slate-400 leading-relaxed">
+                  {tooltip.services.join(', ')}
+                </span>
               </div>
             )}
           </div>
@@ -1267,7 +1315,13 @@ export function NetMapPage() {
             <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-red-500" />
           </span>
           <span className="font-mono text-[8px] text-slate-600 tracking-widest uppercase">Live Events</span>
-          <span className="ml-auto font-mono text-[8px] text-slate-700">{liveEvents.length} captured</span>
+          <span className="ml-auto flex items-center gap-2">
+            <span className="font-mono text-[8px] text-slate-700">{liveEvents.length} captured</span>
+            <span
+              className={`w-1.5 h-1.5 rounded-full ${socketOk ? 'bg-cyan-500' : 'bg-red-600'}`}
+              title={socketOk ? 'Socket connected' : 'Socket disconnected'}
+            />
+          </span>
         </div>
         <div className="h-[7rem] overflow-hidden px-3 py-1.5">
           {liveEvents.length === 0 ? (

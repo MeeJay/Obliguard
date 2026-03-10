@@ -1,7 +1,7 @@
 import type { Request, Response, NextFunction } from 'express';
 import { whitelistService } from '../services/whitelist.service';
 import { AppError } from '../middleware/errorHandler';
-import type { WhitelistScope } from '@obliview/shared';
+import type { IpWhitelist, WhitelistScope } from '@obliview/shared';
 
 export interface CreateWhitelistRequest {
   ip: string;
@@ -12,13 +12,19 @@ export interface CreateWhitelistRequest {
 
 export async function listWhitelist(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const scope = ((req.query.scope as string | undefined) ?? 'tenant') as WhitelistScope;
+    const scopeParam = req.query.scope as string | undefined;
     const scopeId = req.query.scopeId !== undefined && req.query.scopeId !== ''
       ? parseInt(req.query.scopeId as string, 10)
       : null;
     const isAdmin = req.session?.role === 'admin';
 
-    const entries = await whitelistService.listByScope(scope, scopeId, req.tenantId, isAdmin);
+    let entries: IpWhitelist[];
+    if (!scopeParam || scopeParam === 'all') {
+      entries = await whitelistService.listAll(req.tenantId, isAdmin);
+    } else {
+      entries = await whitelistService.listByScope(scopeParam as WhitelistScope, scopeId, req.tenantId, isAdmin);
+    }
+
     res.json({ success: true, data: entries });
   } catch (err) {
     next(err);
