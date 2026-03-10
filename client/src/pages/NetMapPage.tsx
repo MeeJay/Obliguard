@@ -647,7 +647,8 @@ export function NetMapPage() {
       const { w, h } = sizeRef.current;
       const placed = devs.length > 0
         ? devs.slice(0, 20)
-        : [{ id: -1, hostname: 'Server', name: null, status: 'approved' }];
+        : [{ id: -1, hostname: 'Server', name: null, status: 'approved',
+             updatedAt: '', resolvedSettings: { checkIntervalSeconds: 60 } }];
 
       agentsRef.current = placed.map(d => {
         const lastPushAt      = d.updatedAt ? new Date(d.updatedAt).getTime() : 0;
