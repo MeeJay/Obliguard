@@ -3,12 +3,18 @@ import { useParams, useNavigate } from 'react-router-dom';
 import {
   ArrowLeft, RefreshCw, ShieldOff, ShieldCheck, ExternalLink,
   ChevronLeft, ChevronRight, Wifi, Cpu, Server, X, Eye,
+  Shield, EyeOff, Pencil, Trash2, AlertTriangle,
+  ChevronDown, ChevronUp,
 } from 'lucide-react';
 import apiClient from '@/api/client';
 import { agentApi } from '@/api/agent.api';
 import { bansApi } from '@/api/bans.api';
 import { whitelistApi } from '@/api/whitelist.api';
-import type { AgentDevice, ApiResponse } from '@obliview/shared';
+import { serviceTemplatesApi } from '@/api/serviceTemplates.api';
+import type {
+  AgentDevice, ApiResponse,
+  ResolvedServiceConfig, ServiceTemplate, UpsertServiceAssignmentRequest,
+} from '@obliview/shared';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -260,6 +266,306 @@ function IpDrawer({
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+// ── Templates Section ─────────────────────────────────────────────────────────
+
+function ModeBadge({ mode }: { mode: string }) {
+  return (
+    <span className={
+      mode === 'ban'
+        ? 'inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-red-500/15 text-red-400'
+        : 'inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-amber-500/15 text-amber-400'
+    }>
+      {mode === 'ban' ? <Shield size={9} /> : <EyeOff size={9} />}
+      {mode === 'ban' ? 'Ban' : 'Track only'}
+    </span>
+  );
+}
+
+interface AssignmentOverrideModalProps {
+  deviceId: number;
+  config: ResolvedServiceConfig;
+  /** Full template (for name/type info) */
+  template: ServiceTemplate | null;
+  onSave: () => void;
+  onClose: () => void;
+}
+
+function AssignmentOverrideModal({ deviceId, config, onSave, onClose }: AssignmentOverrideModalProps) {
+  const [logPath, setLogPath] = useState(config.logPath ?? '');
+  const [threshold, setThreshold] = useState(String(config.threshold));
+  const [windowSeconds, setWindowSeconds] = useState(String(config.windowSeconds));
+  const [enabled, setEnabled] = useState<'' | 'true' | 'false'>(
+    config.enabled != null ? (config.enabled ? 'true' : 'false') : '',
+  );
+  const [saving, setSaving] = useState(false);
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setSaving(true);
+    try {
+      const data: UpsertServiceAssignmentRequest = {
+        logPathOverride: logPath.trim() || null,
+        thresholdOverride: Number(threshold) || null,
+        windowSecondsOverride: Number(windowSeconds) || null,
+        enabledOverride: enabled === '' ? null : enabled === 'true',
+      };
+      await serviceTemplatesApi.upsertAssignment(config.templateId, 'agent', deviceId, data);
+      onSave();
+    } catch {
+      // ignored
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+      <div className="w-full max-w-md rounded-xl border border-border bg-bg-primary shadow-2xl p-6">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-base font-semibold text-text-primary">
+            Override: {config.name}
+          </h2>
+          <button onClick={onClose} className="p-1.5 rounded text-text-muted hover:text-text-primary hover:bg-bg-hover">
+            <X size={16} />
+          </button>
+        </div>
+        <p className="text-xs text-text-muted mb-4">
+          Per-agent overrides for this template on this device. Leave blank to inherit from the template or group assignment.
+        </p>
+        <form onSubmit={handleSubmit} className="space-y-3">
+          <div className="space-y-1">
+            <label className="block text-sm font-medium text-text-secondary">Log Path</label>
+            <input
+              value={logPath}
+              onChange={e => setLogPath(e.target.value)}
+              placeholder={config.logPath ?? '/var/log/...'}
+              className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary font-mono placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-accent"
+            />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1">
+              <label className="block text-sm font-medium text-text-secondary">Threshold</label>
+              <input
+                type="number"
+                min={1}
+                value={threshold}
+                onChange={e => setThreshold(e.target.value)}
+                className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
+              />
+            </div>
+            <div className="space-y-1">
+              <label className="block text-sm font-medium text-text-secondary">Window (s)</label>
+              <input
+                type="number"
+                min={60}
+                value={windowSeconds}
+                onChange={e => setWindowSeconds(e.target.value)}
+                className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
+              />
+            </div>
+          </div>
+          <div className="space-y-1">
+            <label className="block text-sm font-medium text-text-secondary">Enabled Override</label>
+            <select
+              value={enabled}
+              onChange={e => setEnabled(e.target.value as '' | 'true' | 'false')}
+              className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
+            >
+              <option value="">Inherit</option>
+              <option value="true">Enabled</option>
+              <option value="false">Disabled</option>
+            </select>
+          </div>
+          <div className="flex gap-2 pt-2">
+            <button
+              type="submit"
+              disabled={saving}
+              className="flex-1 rounded-md bg-accent px-3 py-2 text-sm font-medium text-white hover:bg-accent/90 transition-colors disabled:opacity-50"
+            >
+              {saving ? 'Saving…' : 'Save overrides'}
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="flex-1 rounded-md border border-border px-3 py-2 text-sm font-medium text-text-secondary hover:bg-bg-hover transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+interface TemplatesSectionProps {
+  deviceId: number;
+}
+
+function TemplatesSection({ deviceId }: TemplatesSectionProps) {
+  const [configs, setConfigs] = useState<ResolvedServiceConfig[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [expanded, setExpanded] = useState(true);
+  const [overriding, setOverriding] = useState<ResolvedServiceConfig | null>(null);
+  const [unbinding, setUnbinding] = useState<ResolvedServiceConfig | null>(null);
+  const [unbindLoading, setUnbindLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await serviceTemplatesApi.getResolvedForDevice(deviceId);
+      setConfigs(data);
+    } finally {
+      setLoading(false);
+    }
+  }, [deviceId]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  async function handleUnbind() {
+    if (!unbinding) return;
+    setUnbindLoading(true);
+    try {
+      await serviceTemplatesApi.deleteAssignment(unbinding.templateId, 'agent', deviceId);
+      setUnbinding(null);
+      void load();
+    } catch {
+      // If no agent-level assignment exists, silently ignore
+      setUnbinding(null);
+    } finally {
+      setUnbindLoading(false);
+    }
+  }
+
+  return (
+    <div className="rounded-lg border border-border bg-bg-secondary">
+      {/* Header */}
+      <div
+        className="px-4 py-3 border-b border-border flex items-center justify-between cursor-pointer select-none"
+        onClick={() => setExpanded(v => !v)}
+      >
+        <div className="flex items-center gap-2">
+          {expanded ? <ChevronUp size={14} className="text-text-muted" /> : <ChevronDown size={14} className="text-text-muted" />}
+          <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide">
+            Applied Templates
+          </h2>
+          {!loading && (
+            <span className="text-xs text-text-muted">
+              ({configs.length})
+            </span>
+          )}
+        </div>
+        <button
+          onClick={e => { e.stopPropagation(); void load(); }}
+          className="p-1 rounded text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors"
+          title="Refresh"
+        >
+          <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
+        </button>
+      </div>
+
+      {expanded && (
+        <div className="divide-y divide-border">
+          {loading ? (
+            <div className="py-8 text-center text-sm text-text-muted">Loading…</div>
+          ) : configs.length === 0 ? (
+            <div className="py-8 text-center text-sm text-text-muted">
+              <p>No templates assigned to this agent or its groups.</p>
+              <p className="text-xs mt-1">Assign templates from the Service Templates page.</p>
+            </div>
+          ) : (
+            configs.map(cfg => (
+              <div key={cfg.templateId} className="px-4 py-3 flex items-start gap-3">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-sm font-medium text-text-primary">{cfg.name}</span>
+                    <span className="text-xs text-text-muted bg-bg-tertiary px-1.5 py-0.5 rounded font-mono">
+                      {cfg.serviceType}
+                    </span>
+                    <ModeBadge mode={cfg.mode} />
+                    {!cfg.enabled && (
+                      <span className="text-[11px] text-text-muted bg-bg-tertiary px-1.5 py-0.5 rounded">disabled</span>
+                    )}
+                  </div>
+                  <div className="mt-1 flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-text-muted">
+                    <span>Threshold: <span className="text-text-secondary">{cfg.threshold} failures / {cfg.windowSeconds}s</span></span>
+                    {cfg.logPath && (
+                      <span className="font-mono truncate max-w-[260px]" title={cfg.logPath}>
+                        Path: <span className="text-text-secondary">{cfg.logPath}</span>
+                      </span>
+                    )}
+                    {cfg.sampleRequested && (
+                      <span className="text-amber-400">⏳ sample requested</span>
+                    )}
+                  </div>
+                </div>
+                <div className="flex gap-1 flex-shrink-0">
+                  <button
+                    onClick={() => setOverriding(cfg)}
+                    title="Override settings for this agent"
+                    className="p-1.5 rounded text-text-muted hover:text-accent hover:bg-accent/10 transition-colors"
+                  >
+                    <Pencil size={13} />
+                  </button>
+                  <button
+                    onClick={() => setUnbinding(cfg)}
+                    title="Remove agent-level override / unbind from this agent"
+                    className="p-1.5 rounded text-text-muted hover:text-red-400 hover:bg-red-500/10 transition-colors"
+                  >
+                    <Trash2 size={13} />
+                  </button>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      )}
+
+      {overriding && (
+        <AssignmentOverrideModal
+          deviceId={deviceId}
+          config={overriding}
+          template={null}
+          onSave={() => { setOverriding(null); void load(); }}
+          onClose={() => setOverriding(null)}
+        />
+      )}
+
+      {unbinding && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+          <div className="w-full max-w-sm rounded-xl border border-border bg-bg-primary shadow-2xl p-6">
+            <div className="flex items-start gap-3 mb-4">
+              <AlertTriangle size={18} className="text-status-down shrink-0 mt-0.5" />
+              <div>
+                <h2 className="text-base font-semibold text-text-primary">Remove agent override</h2>
+                <p className="text-sm text-text-muted mt-1">
+                  Remove the agent-level assignment/override for <strong className="text-text-primary">{unbinding.name}</strong>?
+                  The template may still apply via group inheritance.
+                </p>
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <button
+                disabled={unbindLoading}
+                onClick={handleUnbind}
+                className="flex-1 rounded-md bg-red-600 px-3 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50 transition-colors"
+              >
+                {unbindLoading ? 'Removing…' : 'Remove override'}
+              </button>
+              <button
+                onClick={() => setUnbinding(null)}
+                className="flex-1 rounded-md border border-border px-3 py-2 text-sm font-medium text-text-secondary hover:bg-bg-hover transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -783,6 +1089,9 @@ export function AgentDetailPage() {
           </div>
         </div>
       </div>
+
+      {/* ── Templates section ─────────────────────────────────────────────── */}
+      <TemplatesSection deviceId={devId!} />
 
       {/* ── IP Detail Drawer ──────────────────────────────────────────────── */}
       {selectedIp && (

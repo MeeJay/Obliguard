@@ -2,6 +2,7 @@ import type { Request, Response } from 'express';
 import path from 'path';
 import fs from 'fs';
 import { agentService } from '../services/agent.service';
+import { serviceTemplateService } from '../services/serviceTemplate.service';
 import type { AgentThresholds } from '@obliview/shared';
 
 // ── Push endpoint (called by agent) ──────────────────────────────────────────
@@ -406,4 +407,19 @@ export async function sendDeviceCommand(req: Request, res: Response): Promise<vo
     return;
   }
   res.json({ success: true });
+}
+
+/**
+ * GET /agent/devices/:id/templates
+ * Returns resolved service template configs for this agent
+ * (after walking group inheritance chain).
+ */
+export async function getDeviceTemplates(req: Request, res: Response): Promise<void> {
+  const id = Number(req.params.id);
+  if (isNaN(id)) {
+    res.status(400).json({ success: false, error: 'Invalid device ID' });
+    return;
+  }
+  const configs = await serviceTemplateService.getResolvedForDevice(id);
+  res.json({ success: true, data: configs });
 }

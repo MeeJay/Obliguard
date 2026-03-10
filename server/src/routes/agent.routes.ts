@@ -26,6 +26,7 @@ import {
   bulkDeleteDevices,
   bulkUpdateDevices,
   bulkDeviceCommand,
+  getDeviceTemplates,
 } from '../controllers/agent.controller';
 
 const router = Router();
@@ -69,6 +70,7 @@ router.post('/devices/bulk-command',  requireAuth, requireRole('admin'), require
 router.get('/devices', requireAuth, requireRole('admin'), requireTenant, listDevices);
 router.get('/devices/:id', requireAuth, requireRole('admin'), requireTenant, getDevice);
 router.get('/devices/:id/metrics', requireAuth, requireRole('admin'), requireTenant, getDeviceMetrics);
+router.get('/devices/:id/templates', requireAuth, requireRole('admin'), requireTenant, getDeviceTemplates);
 router.patch('/devices/:id', requireAuth, requireRole('admin'), requireTenant, updateDevice);
 router.delete('/devices/:id', requireAuth, requireRole('admin'), requireTenant, deleteDevice);
 router.post('/devices/:id/command', requireAuth, requireRole('admin'), requireTenant, sendDeviceCommand);

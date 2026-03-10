@@ -2,11 +2,22 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   ScanSearch, Plus, Pencil, Trash2, RefreshCw, X,
   AlertTriangle, ChevronDown, ChevronUp, Terminal,
-  Lock, Unlock, Eye,
+  Lock, Unlock, Eye, Shield, EyeOff, Users, Server,
 } from 'lucide-react';
 import toast from 'react-hot-toast';
-import type { ServiceTemplate, CreateServiceTemplateRequest, UpdateServiceTemplateRequest } from '@obliview/shared';
+import type {
+  ServiceTemplate,
+  ServiceTemplateAssignment,
+  ServiceTemplateMode,
+  CreateServiceTemplateRequest,
+  UpdateServiceTemplateRequest,
+  UpsertServiceAssignmentRequest,
+} from '@obliview/shared';
+import type { MonitorGroup } from '@obliview/shared';
+import type { AgentDevice } from '@obliview/shared';
 import { serviceTemplatesApi } from '@/api/serviceTemplates.api';
+import { groupsApi } from '@/api/groups.api';
+import { agentApi } from '@/api/agent.api';
 import { Button } from '@/components/common/Button';
 import { Input } from '@/components/common/Input';
 import { useAuthStore } from '@/store/authStore';
@@ -29,6 +40,22 @@ function ServiceTypeBadge({ type, isBuiltin }: { type: string; isBuiltin: boolea
     </span>
   );
 }
+
+function ModeBadge({ mode }: { mode: ServiceTemplateMode }) {
+  return (
+    <span className={cn(
+      'inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold',
+      mode === 'ban'
+        ? 'bg-red-500/15 text-red-400'
+        : 'bg-amber-500/15 text-amber-400',
+    )}>
+      {mode === 'ban' ? <Shield size={9} /> : <EyeOff size={9} />}
+      {mode === 'ban' ? 'Ban' : 'Track only'}
+    </span>
+  );
+}
+
+// ── Confirm dialog ────────────────────────────────────────────────────────────
 
 interface ConfirmDialogProps {
   title: string;
@@ -61,6 +88,8 @@ function ConfirmDialog({ title, message, confirmLabel = 'Confirm', onConfirm, on
   );
 }
 
+// ── Template form modal ───────────────────────────────────────────────────────
+
 interface TemplateFormModalProps {
   template?: ServiceTemplate;
   onSave: (data: CreateServiceTemplateRequest | UpdateServiceTemplateRequest) => Promise<void>;
@@ -75,6 +104,7 @@ function TemplateFormModal({ template, onSave, onClose }: TemplateFormModalProps
   const [defaultLogPath, setDefaultLogPath] = useState(template?.defaultLogPath ?? '');
   const [customRegex, setCustomRegex] = useState(template?.customRegex ?? '');
   const [enabled, setEnabled] = useState(template?.enabled ?? true);
+  const [mode, setMode] = useState<ServiceTemplateMode>(template?.mode ?? 'ban');
   const [saving, setSaving] = useState(false);
   const isEdit = !!template;
 
@@ -91,6 +121,7 @@ function TemplateFormModal({ template, onSave, onClose }: TemplateFormModalProps
         threshold: Number(threshold),
         windowSeconds: Number(windowSeconds),
         enabled,
+        mode,
       };
       await onSave(data);
     } finally {
@@ -131,11 +162,55 @@ function TemplateFormModal({ template, onSave, onClose }: TemplateFormModalProps
               </select>
             </div>
           )}
+
+          {/* Mode toggle */}
+          <div className="space-y-1.5">
+            <label className="block text-sm font-medium text-text-secondary">Mode</label>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setMode('ban')}
+                className={cn(
+                  'flex-1 flex items-center justify-center gap-2 rounded-md border px-3 py-2 text-sm font-medium transition-colors',
+                  mode === 'ban'
+                    ? 'border-red-500 bg-red-500/10 text-red-400'
+                    : 'border-border bg-bg-tertiary text-text-muted hover:text-text-primary',
+                )}
+              >
+                <Shield size={14} />
+                Ban
+              </button>
+              <button
+                type="button"
+                onClick={() => setMode('track')}
+                className={cn(
+                  'flex-1 flex items-center justify-center gap-2 rounded-md border px-3 py-2 text-sm font-medium transition-colors',
+                  mode === 'track'
+                    ? 'border-amber-500 bg-amber-500/10 text-amber-400'
+                    : 'border-border bg-bg-tertiary text-text-muted hover:text-text-primary',
+                )}
+              >
+                <EyeOff size={14} />
+                Track only
+              </button>
+            </div>
+            <p className="text-xs text-text-muted">
+              {mode === 'ban'
+                ? 'Events count toward BanEngine thresholds and trigger automatic bans.'
+                : 'Events are stored for visibility and reputation, but never trigger automatic bans.'}
+            </p>
+          </div>
+
           <div className="grid grid-cols-2 gap-3">
             <Input label="Failure Threshold" type="number" min={1} value={threshold} onChange={e => setThreshold(e.target.value)} placeholder="5" />
             <Input label="Window (seconds)" type="number" min={60} value={windowSeconds} onChange={e => setWindowSeconds(e.target.value)} placeholder="300" />
           </div>
-          <Input label="Default Log Path (optional)" value={defaultLogPath} onChange={e => setDefaultLogPath(e.target.value)} placeholder="/var/log/app/access.log" />
+          <Input
+            label="Default Log Path (optional)"
+            value={defaultLogPath}
+            onChange={e => setDefaultLogPath(e.target.value)}
+            placeholder="/var/log/app/access.log  or use $logpath as placeholder"
+          />
           <div className="space-y-1">
             <label className="block text-sm font-medium text-text-secondary">Custom Regex (optional)</label>
             <textarea
@@ -169,22 +244,245 @@ function TemplateFormModal({ template, onSave, onClose }: TemplateFormModalProps
   );
 }
 
+// ── Assignment modal ──────────────────────────────────────────────────────────
+
+interface AssignmentModalProps {
+  templateId: number;
+  existing?: ServiceTemplateAssignment;
+  groups: MonitorGroup[];
+  agents: AgentDevice[];
+  onSave: () => void;
+  onClose: () => void;
+}
+
+function AssignmentModal({ templateId, existing, groups, agents, onSave, onClose }: AssignmentModalProps) {
+  const [scope, setScope] = useState<'group' | 'agent'>(existing?.scope ?? 'agent');
+  const [scopeId, setScopeId] = useState<string>(existing ? String(existing.scopeId) : '');
+  const [logPathOverride, setLogPathOverride] = useState(existing?.logPathOverride ?? '');
+  const [thresholdOverride, setThresholdOverride] = useState(
+    existing?.thresholdOverride != null ? String(existing.thresholdOverride) : '',
+  );
+  const [windowOverride, setWindowOverride] = useState(
+    existing?.windowSecondsOverride != null ? String(existing.windowSecondsOverride) : '',
+  );
+  const [enabledOverride, setEnabledOverride] = useState<'' | 'true' | 'false'>(
+    existing?.enabledOverride != null ? (existing.enabledOverride ? 'true' : 'false') : '',
+  );
+  const [saving, setSaving] = useState(false);
+
+  const isEdit = !!existing;
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!scopeId) return;
+    setSaving(true);
+    try {
+      const data: UpsertServiceAssignmentRequest = {
+        logPathOverride: logPathOverride.trim() || null,
+        thresholdOverride: thresholdOverride ? Number(thresholdOverride) : null,
+        windowSecondsOverride: windowOverride ? Number(windowOverride) : null,
+        enabledOverride: enabledOverride === '' ? null : enabledOverride === 'true',
+      };
+      await serviceTemplatesApi.upsertAssignment(templateId, scope, Number(scopeId), data);
+      toast.success(isEdit ? 'Assignment updated' : 'Assignment created');
+      onSave();
+    } catch {
+      toast.error('Failed to save assignment');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const items = scope === 'group' ? groups : agents;
+  const itemLabel = (item: MonitorGroup | AgentDevice) =>
+    scope === 'group'
+      ? (item as MonitorGroup).name
+      : (item as AgentDevice).name ?? (item as AgentDevice).hostname;
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+      <div className="w-full max-w-md rounded-xl border border-border bg-bg-primary shadow-2xl p-6">
+        <div className="flex items-center justify-between mb-5">
+          <h2 className="text-base font-semibold text-text-primary">
+            {isEdit ? 'Edit Assignment' : 'Assign Template'}
+          </h2>
+          <button onClick={onClose} className="p-1.5 rounded-lg text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors">
+            <X size={16} />
+          </button>
+        </div>
+        <form onSubmit={handleSubmit} className="space-y-4">
+          {!isEdit && (
+            <div className="space-y-1">
+              <label className="block text-sm font-medium text-text-secondary">Scope</label>
+              <div className="flex gap-2">
+                <button type="button" onClick={() => { setScope('agent'); setScopeId(''); }}
+                  className={cn('flex-1 flex items-center justify-center gap-2 rounded-md border px-3 py-2 text-sm font-medium transition-colors',
+                    scope === 'agent' ? 'border-accent bg-accent/10 text-accent' : 'border-border bg-bg-tertiary text-text-muted hover:text-text-primary')}>
+                  <Server size={14} />Agent
+                </button>
+                <button type="button" onClick={() => { setScope('group'); setScopeId(''); }}
+                  className={cn('flex-1 flex items-center justify-center gap-2 rounded-md border px-3 py-2 text-sm font-medium transition-colors',
+                    scope === 'group' ? 'border-accent bg-accent/10 text-accent' : 'border-border bg-bg-tertiary text-text-muted hover:text-text-primary')}>
+                  <Users size={14} />Group
+                </button>
+              </div>
+            </div>
+          )}
+          {isEdit ? (
+            <div className="rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-muted">
+              {scope === 'agent' ? 'Agent' : 'Group'} #{existing?.scopeId}
+              {scope === 'agent' && agents.find(a => a.id === existing?.scopeId)
+                ? ` — ${agents.find(a => a.id === existing?.scopeId)?.name ?? agents.find(a => a.id === existing?.scopeId)?.hostname}`
+                : scope === 'group' && groups.find(g => g.id === existing?.scopeId)
+                ? ` — ${groups.find(g => g.id === existing?.scopeId)?.name}`
+                : ''}
+            </div>
+          ) : (
+            <div className="space-y-1">
+              <label className="block text-sm font-medium text-text-secondary">
+                {scope === 'agent' ? 'Agent' : 'Group'}
+              </label>
+              <select
+                value={scopeId}
+                onChange={e => setScopeId(e.target.value)}
+                required
+                className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
+              >
+                <option value="">Select {scope === 'agent' ? 'an agent' : 'a group'}…</option>
+                {items.map(item => (
+                  <option key={item.id} value={item.id}>{itemLabel(item)}</option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          <div className="border-t border-border pt-3 space-y-3">
+            <p className="text-xs text-text-muted font-medium uppercase tracking-wide">Overrides (leave blank to inherit from template)</p>
+            <Input
+              label="Log Path Override"
+              value={logPathOverride}
+              onChange={e => setLogPathOverride(e.target.value)}
+              placeholder="/var/log/myapp/access.log"
+            />
+            <div className="grid grid-cols-2 gap-3">
+              <Input
+                label="Threshold Override"
+                type="number"
+                min={1}
+                value={thresholdOverride}
+                onChange={e => setThresholdOverride(e.target.value)}
+                placeholder="Inherit"
+              />
+              <Input
+                label="Window Override (s)"
+                type="number"
+                min={60}
+                value={windowOverride}
+                onChange={e => setWindowOverride(e.target.value)}
+                placeholder="Inherit"
+              />
+            </div>
+            <div className="space-y-1">
+              <label className="block text-sm font-medium text-text-secondary">Enabled Override</label>
+              <select
+                value={enabledOverride}
+                onChange={e => setEnabledOverride(e.target.value as '' | 'true' | 'false')}
+                className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
+              >
+                <option value="">Inherit from template</option>
+                <option value="true">Enabled</option>
+                <option value="false">Disabled</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="flex gap-2 pt-1">
+            <Button type="submit" loading={saving} className="flex-1">{isEdit ? 'Save Changes' : 'Assign'}</Button>
+            <Button type="button" variant="secondary" onClick={onClose} className="flex-1">Cancel</Button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// ── Template row ──────────────────────────────────────────────────────────────
+
 interface TemplateRowProps {
   template: ServiceTemplate;
   isAdmin: boolean;
+  groups: MonitorGroup[];
+  agents: AgentDevice[];
   onEdit: () => void;
   onDelete: () => void;
   onToggle: () => void;
+  onReload: () => void;
 }
 
-function TemplateRow({ template, isAdmin, onEdit, onDelete, onToggle }: TemplateRowProps) {
+function TemplateRow({ template, isAdmin, groups, agents, onEdit, onDelete, onToggle, onReload }: TemplateRowProps) {
   const [expanded, setExpanded] = useState(false);
+  const [fullTemplate, setFullTemplate] = useState<ServiceTemplate | null>(null);
+  const [assignmentsLoading, setAssignmentsLoading] = useState(false);
+  const [addingAssignment, setAddingAssignment] = useState(false);
+  const [editingAssignment, setEditingAssignment] = useState<ServiceTemplateAssignment | null>(null);
+  const [deletingAssignment, setDeletingAssignment] = useState<ServiceTemplateAssignment | null>(null);
+  const [deleteAssignmentLoading, setDeleteAssignmentLoading] = useState(false);
+
+  const loadFull = useCallback(async () => {
+    setAssignmentsLoading(true);
+    try {
+      const data = await serviceTemplatesApi.get(template.id);
+      setFullTemplate(data);
+    } finally {
+      setAssignmentsLoading(false);
+    }
+  }, [template.id]);
+
+  function handleExpand() {
+    const newExpanded = !expanded;
+    setExpanded(newExpanded);
+    if (newExpanded && !fullTemplate) {
+      void loadFull();
+    }
+  }
+
+  async function handleDeleteAssignment() {
+    if (!deletingAssignment) return;
+    setDeleteAssignmentLoading(true);
+    try {
+      await serviceTemplatesApi.deleteAssignment(
+        template.id,
+        deletingAssignment.scope,
+        deletingAssignment.scopeId,
+      );
+      toast.success('Assignment removed');
+      setDeletingAssignment(null);
+      void loadFull();
+      onReload();
+    } catch {
+      toast.error('Failed to remove assignment');
+    } finally {
+      setDeleteAssignmentLoading(false);
+    }
+  }
+
+  const assignments = fullTemplate?.assignments ?? [];
+
+  function scopeLabel(a: ServiceTemplateAssignment) {
+    if (a.scope === 'agent') {
+      const ag = agents.find(x => x.id === a.scopeId);
+      return ag ? (ag.name ?? ag.hostname) : `Agent #${a.scopeId}`;
+    }
+    const gr = groups.find(x => x.id === a.scopeId);
+    return gr ? gr.name : `Group #${a.scopeId}`;
+  }
+
   return (
     <>
       <tr className={cn('hover:bg-bg-hover transition-colors', !template.enabled && 'opacity-60')}>
         <td className="px-4 py-3">
           <div className="flex items-center gap-2">
-            <button onClick={() => setExpanded(v => !v)} className="p-0.5 text-text-muted hover:text-text-primary">
+            <button onClick={handleExpand} className="p-0.5 text-text-muted hover:text-text-primary">
               {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
             </button>
             <span className="font-medium text-text-primary text-sm">{template.name}</span>
@@ -193,8 +491,11 @@ function TemplateRow({ template, isAdmin, onEdit, onDelete, onToggle }: Template
         <td className="px-4 py-3">
           <ServiceTypeBadge type={template.serviceType} isBuiltin={template.isBuiltin} />
         </td>
+        <td className="px-4 py-3">
+          <ModeBadge mode={template.mode ?? 'ban'} />
+        </td>
         <td className="px-4 py-3 text-sm text-text-secondary">
-          {template.threshold} failures / {template.windowSeconds}s
+          {template.threshold} fail / {template.windowSeconds}s
         </td>
         <td className="px-4 py-3">
           <span className={cn(
@@ -202,13 +503,13 @@ function TemplateRow({ template, isAdmin, onEdit, onDelete, onToggle }: Template
             template.enabled ? 'bg-status-up/10 text-status-up' : 'bg-text-muted/15 text-text-muted',
           )}>
             {template.enabled ? <Unlock size={9} /> : <Lock size={9} />}
-            {template.enabled ? 'Enabled' : 'Disabled'}
+            {template.enabled ? 'On' : 'Off'}
           </span>
         </td>
         <td className="px-4 py-3 text-xs text-text-muted">
           {template.customRegex ? (
             <code className="font-mono text-[10px]" title={template.customRegex}>
-              {template.customRegex.length > 40 ? template.customRegex.slice(0, 40) + '…' : template.customRegex}
+              {template.customRegex.length > 36 ? template.customRegex.slice(0, 36) + '…' : template.customRegex}
             </code>
           ) : (
             <span className="italic">Built-in parser</span>
@@ -217,7 +518,7 @@ function TemplateRow({ template, isAdmin, onEdit, onDelete, onToggle }: Template
         {isAdmin && (
           <td className="px-4 py-3">
             <div className="flex items-center justify-end gap-1">
-              <button onClick={() => setExpanded(v => !v)} title="View details" className="p-1.5 rounded text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors">
+              <button onClick={handleExpand} title="View details / assignments" className="p-1.5 rounded text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors">
                 <Eye size={14} />
               </button>
               <button onClick={onToggle} title={template.enabled ? 'Disable' : 'Enable'} className="p-1.5 rounded text-text-muted hover:text-accent hover:bg-accent/10 transition-colors">
@@ -237,10 +538,12 @@ function TemplateRow({ template, isAdmin, onEdit, onDelete, onToggle }: Template
           </td>
         )}
       </tr>
+
+      {/* Expanded detail + assignments */}
       {expanded && (
         <tr className="bg-bg-tertiary/50">
-          <td colSpan={isAdmin ? 6 : 5} className="px-6 pb-4 pt-2">
-            <div className="grid grid-cols-2 gap-4 text-xs">
+          <td colSpan={isAdmin ? 7 : 6} className="px-6 pb-5 pt-3">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs mb-4">
               {template.defaultLogPath && (
                 <div>
                   <p className="text-text-muted font-medium mb-1 uppercase tracking-wide text-[10px]">Default Log Path</p>
@@ -248,7 +551,7 @@ function TemplateRow({ template, isAdmin, onEdit, onDelete, onToggle }: Template
                 </div>
               )}
               {template.customRegex && (
-                <div className="col-span-2">
+                <div className="md:col-span-2">
                   <p className="text-text-muted font-medium mb-1 uppercase tracking-wide text-[10px]">Regex Pattern</p>
                   <pre className="font-mono text-text-secondary bg-bg-secondary border border-border rounded p-2 overflow-x-auto whitespace-pre-wrap break-all text-[11px]">
                     {template.customRegex}
@@ -264,12 +567,120 @@ function TemplateRow({ template, isAdmin, onEdit, onDelete, onToggle }: Template
                 <p className="text-text-secondary">{new Date(template.createdAt).toLocaleDateString()}</p>
               </div>
             </div>
+
+            {/* Assignments section */}
+            <div className="border-t border-border pt-3">
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-[10px] font-medium text-text-muted uppercase tracking-wide">
+                  Assignments {!assignmentsLoading && `(${assignments.length})`}
+                </p>
+                {isAdmin && (
+                  <button
+                    onClick={() => setAddingAssignment(true)}
+                    className="flex items-center gap-1 text-xs text-accent hover:underline"
+                  >
+                    <Plus size={11} />Assign to agent/group
+                  </button>
+                )}
+              </div>
+
+              {assignmentsLoading ? (
+                <p className="text-xs text-text-muted">Loading…</p>
+              ) : assignments.length === 0 ? (
+                <p className="text-xs text-text-muted italic">No assignments — template is not active on any agent or group.</p>
+              ) : (
+                <div className="space-y-1.5">
+                  {assignments.map(a => (
+                    <div key={a.id} className="flex items-start gap-3 rounded-md border border-border bg-bg-secondary px-3 py-2 text-xs">
+                      <span className={cn(
+                        'mt-0.5 flex-shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium',
+                        a.scope === 'agent' ? 'bg-accent/15 text-accent' : 'bg-purple-500/15 text-purple-400',
+                      )}>
+                        {a.scope === 'agent' ? <Server size={9} className="inline mr-0.5" /> : <Users size={9} className="inline mr-0.5" />}
+                        {a.scope}
+                      </span>
+                      <div className="flex-1 min-w-0">
+                        <span className="font-medium text-text-primary">{scopeLabel(a)}</span>
+                        <div className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 text-text-muted">
+                          {a.logPathOverride && (
+                            <span className="font-mono truncate max-w-[200px]" title={a.logPathOverride}>
+                              path: {a.logPathOverride}
+                            </span>
+                          )}
+                          {a.thresholdOverride != null && <span>threshold: {a.thresholdOverride}</span>}
+                          {a.windowSecondsOverride != null && <span>window: {a.windowSecondsOverride}s</span>}
+                          {a.enabledOverride != null && (
+                            <span className={a.enabledOverride ? 'text-status-up' : 'text-text-muted'}>
+                              {a.enabledOverride ? 'enabled' : 'disabled'}
+                            </span>
+                          )}
+                          {!a.logPathOverride && a.thresholdOverride == null && a.windowSecondsOverride == null && a.enabledOverride == null && (
+                            <span className="italic">all inherited</span>
+                          )}
+                        </div>
+                      </div>
+                      {isAdmin && (
+                        <div className="flex gap-1 flex-shrink-0">
+                          <button
+                            onClick={() => setEditingAssignment(a)}
+                            title="Edit override"
+                            className="p-1 rounded text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors"
+                          >
+                            <Pencil size={12} />
+                          </button>
+                          <button
+                            onClick={() => setDeletingAssignment(a)}
+                            title="Remove assignment"
+                            className="p-1 rounded text-text-muted hover:text-status-down hover:bg-status-down/10 transition-colors"
+                          >
+                            <Trash2 size={12} />
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </td>
         </tr>
+      )}
+
+      {/* Modals */}
+      {addingAssignment && (
+        <AssignmentModal
+          templateId={template.id}
+          groups={groups}
+          agents={agents}
+          onSave={() => { setAddingAssignment(false); void loadFull(); onReload(); }}
+          onClose={() => setAddingAssignment(false)}
+        />
+      )}
+      {editingAssignment && (
+        <AssignmentModal
+          templateId={template.id}
+          existing={editingAssignment}
+          groups={groups}
+          agents={agents}
+          onSave={() => { setEditingAssignment(null); void loadFull(); onReload(); }}
+          onClose={() => setEditingAssignment(null)}
+        />
+      )}
+      {deletingAssignment && (
+        <ConfirmDialog
+          title="Remove assignment"
+          message={`Remove this template assignment from ${scopeLabel(deletingAssignment)}?`}
+          confirmLabel="Remove"
+          loading={deleteAssignmentLoading}
+          onConfirm={handleDeleteAssignment}
+          onCancel={() => setDeletingAssignment(null)}
+        />
       )}
     </>
   );
 }
+
+// ── Main page ─────────────────────────────────────────────────────────────────
 
 export function ServiceTemplatesPage() {
   const { user } = useAuthStore();
@@ -277,6 +688,8 @@ export function ServiceTemplatesPage() {
 
   const [templates, setTemplates] = useState<ServiceTemplate[]>([]);
   const [loading, setLoading] = useState(true);
+  const [groups, setGroups] = useState<MonitorGroup[]>([]);
+  const [agents, setAgents] = useState<AgentDevice[]>([]);
   const [showCreate, setShowCreate] = useState(false);
   const [editingTemplate, setEditingTemplate] = useState<ServiceTemplate | null>(null);
   const [deletingTemplate, setDeletingTemplate] = useState<ServiceTemplate | null>(null);
@@ -294,6 +707,13 @@ export function ServiceTemplatesPage() {
       setLoading(false);
     }
   }, []);
+
+  // Load groups and agents once for assignment dropdowns
+  useEffect(() => {
+    if (!isAdmin) return;
+    void groupsApi.list().then(setGroups).catch(() => {});
+    void agentApi.listDevices().then(setAgents).catch(() => {});
+  }, [isAdmin]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -412,6 +832,7 @@ export function ServiceTemplatesPage() {
               <tr className="border-b border-border bg-bg-tertiary">
                 <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">Name</th>
                 <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">Service</th>
+                <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">Mode</th>
                 <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">Threshold</th>
                 <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">Status</th>
                 <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">Regex</th>
@@ -424,9 +845,12 @@ export function ServiceTemplatesPage() {
                   key={t.id}
                   template={t}
                   isAdmin={isAdmin}
+                  groups={groups}
+                  agents={agents}
                   onEdit={() => setEditingTemplate(t)}
                   onDelete={() => setDeletingTemplate(t)}
                   onToggle={() => void handleToggle(t)}
+                  onReload={() => void load()}
                 />
               ))}
             </tbody>
@@ -439,7 +863,12 @@ export function ServiceTemplatesPage() {
           <ScanSearch size={16} className="text-text-muted shrink-0 mt-0.5" />
           <div className="text-xs text-text-muted">
             <p className="font-medium text-text-secondary mb-0.5">How templates work</p>
-            <p>Built-in templates use hardcoded parsers. Custom templates use named-group regex patterns. Templates can be assigned to groups or individual agents to override thresholds and log paths.</p>
+            <p>
+              Built-in templates use hardcoded parsers. Custom templates use named-group regex patterns.
+              Expand a template to manage assignments — assign to groups or specific agents with per-agent log path, threshold, and window overrides.
+              <strong className="text-text-secondary"> Ban</strong> mode triggers auto-bans;
+              <strong className="text-amber-400"> Track only</strong> mode stores events for visibility without banning.
+            </p>
           </div>
         </div>
       </div>

@@ -249,12 +249,13 @@ class BanEngine {
     for (const tpl of templates) {
       const windowStart = new Date(Date.now() - tpl.window_seconds * 1000);
 
-      // Count failures per IP for this service type
+      // Count failures per IP for this service type (exclude track-only events)
       const results = await db('ip_events')
         .select('ip', 'device_id', 'tenant_id')
         .count('id as failure_count')
         .where('service', tpl.service_type)
         .where('event_type', 'auth_failure')
+        .where('track_only', false)
         .where('timestamp', '>=', windowStart)
         .groupBy('ip', 'device_id', 'tenant_id')
         .havingRaw('count(id) >= ?', [tpl.threshold]) as Array<{

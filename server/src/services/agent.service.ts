@@ -20,6 +20,7 @@ import { logger } from '../utils/logger';
 import { whitelistService } from './whitelist.service';
 import { banService } from './ban.service';
 import { ipReputationService } from './ipReputation.service';
+import { serviceTemplateService } from './serviceTemplate.service';
 
 // ── Socket.io instance (set from index.ts) ──────────────────
 let _io: SocketIOServer | null = null;
@@ -527,7 +528,38 @@ export const agentService = {
       }
     }
 
-    // ── f. Process events ─────────────────────────────────
+    // ── f. Resolve group ancestry (needed for templates + ban delta) ──────
+    let groupIds: number[] = [];
+    if (device.groupId) {
+      try {
+        const groupRows = await db('group_closure')
+          .where('descendant_id', device.groupId)
+          .select('ancestor_id')
+          .orderBy('depth', 'asc') as { ancestor_id: number }[];
+        groupIds = groupRows.map(r => r.ancestor_id);
+      } catch (err) {
+        logger.warn({ err, deviceId }, 'handlePush: failed to resolve group ancestry');
+      }
+    }
+
+    // ── f2. Build track-only service type set ─────────────
+    // Templates with mode='track' produce events stored for visibility but NOT
+    // counted by BanEngine. We resolve once per push so we can tag each event.
+    const trackOnlyServices = new Set<string>();
+    if (body.events && body.events.length > 0) {
+      try {
+        const resolved = await serviceTemplateService.resolveForAgent(deviceId, groupIds);
+        for (const cfg of resolved) {
+          if (cfg.mode === 'track') {
+            trackOnlyServices.add(cfg.serviceType);
+          }
+        }
+      } catch (err) {
+        logger.warn({ err, deviceId }, 'handlePush: failed to resolve service templates for track_only tagging');
+      }
+    }
+
+    // ── g. Process events ─────────────────────────────────
     if (body.events && body.events.length > 0) {
       try {
         await db('ip_events').insert(
@@ -539,6 +571,7 @@ export const agentService = {
             event_type: ev.eventType,
             timestamp: new Date(ev.timestamp),
             raw_log: ev.rawLog ?? null,
+            track_only: trackOnlyServices.has(ev.service),
             tenant_id: agentTenantId,
           })),
         );
@@ -589,20 +622,7 @@ export const agentService = {
       }
     }
 
-    // ── g. Compute ban delta ──────────────────────────────
-    // Walk group_closure to get ancestor group IDs (closest first)
-    let groupIds: number[] = [];
-    if (device.groupId) {
-      try {
-        const groupRows = await db('group_closure')
-          .where('descendant_id', device.groupId)
-          .select('ancestor_id')
-          .orderBy('depth', 'asc') as { ancestor_id: number }[];
-        groupIds = groupRows.map(r => r.ancestor_id);
-      } catch (err) {
-        logger.warn({ err, deviceId }, 'handlePush: failed to resolve group ancestry');
-      }
-    }
+    // ── h. Compute ban delta ──────────────────────────────
 
     let resolvedWhitelist: string[] = [];
     let banDelta: { add: string[]; remove: string[] } = { add: [], remove: [] };

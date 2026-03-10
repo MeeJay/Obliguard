@@ -2,6 +2,7 @@ import apiClient from './client';
 import type {
   ApiResponse,
   ServiceTemplate,
+  ResolvedServiceConfig,
   CreateServiceTemplateRequest,
   UpdateServiceTemplateRequest,
   UpsertServiceAssignmentRequest,
@@ -47,5 +48,13 @@ export const serviceTemplatesApi = {
 
   async requestSample(templateId: number, deviceId: number): Promise<void> {
     await apiClient.post(`/service-templates/${templateId}/sample/${deviceId}`);
+  },
+
+  /** Returns resolved (inherited) service configs for a specific agent device. */
+  async getResolvedForDevice(deviceId: number): Promise<ResolvedServiceConfig[]> {
+    const res = await apiClient.get<ApiResponse<ResolvedServiceConfig[]>>(
+      `/agent/devices/${deviceId}/templates`,
+    );
+    return res.data.data ?? [];
   },
 };

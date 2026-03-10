@@ -2,6 +2,7 @@ import { db } from '../db';
 import type {
   ServiceTemplate,
   ServiceTemplateAssignment,
+  ServiceTemplateMode,
   ResolvedServiceConfig,
   CreateServiceTemplateRequest,
   UpdateServiceTemplateRequest,
@@ -20,6 +21,7 @@ interface ServiceTemplateRow {
   threshold: number;
   window_seconds: number;
   enabled: boolean;
+  mode: string;
   tenant_id: number | null;
   created_by: number | null;
   created_at: Date;
@@ -55,6 +57,7 @@ function rowToTemplate(
     threshold: row.threshold,
     windowSeconds: row.window_seconds,
     enabled: row.enabled,
+    mode: (row.mode ?? 'ban') as ServiceTemplateMode,
     tenantId: row.tenant_id,
     createdBy: row.created_by,
     createdAt: row.created_at.toISOString(),
@@ -153,6 +156,7 @@ class ServiceTemplateService {
         threshold: data.threshold ?? 5,
         window_seconds: data.windowSeconds ?? 300,
         enabled: data.enabled ?? true,
+        mode: data.mode ?? 'ban',
         tenant_id: tenantId,
         created_by: userId,
         created_at: now,
@@ -191,6 +195,7 @@ class ServiceTemplateService {
     if (data.threshold !== undefined) updates.threshold = data.threshold;
     if (data.windowSeconds !== undefined) updates.window_seconds = data.windowSeconds;
     if (data.enabled !== undefined) updates.enabled = data.enabled;
+    if (data.mode !== undefined) updates.mode = data.mode;
 
     // customRegex only allowed on non-builtin templates
     if (data.customRegex !== undefined) {
@@ -431,11 +436,28 @@ class ServiceTemplateService {
         threshold,
         windowSeconds,
         enabled,
+        mode: (tpl.mode ?? 'ban') as ServiceTemplateMode,
         sampleRequested,
       });
     }
 
     return resolved;
+  }
+
+  /**
+   * Public API: resolves templates for a device by ID.
+   * Loads the device's group ancestry from the DB, then delegates to resolveForAgent.
+   */
+  async getResolvedForDevice(deviceId: number): Promise<ResolvedServiceConfig[]> {
+    // Walk group_closure to get ancestor group IDs (closest first)
+    const groupRows = await db('group_closure as gc')
+      .join('agent_devices as d', 'd.group_id', 'gc.descendant_id')
+      .where('d.id', deviceId)
+      .select('gc.ancestor_id')
+      .orderBy('gc.depth', 'asc') as { ancestor_id: number }[];
+
+    const groupIds = groupRows.map(r => r.ancestor_id);
+    return this.resolveForAgent(deviceId, groupIds);
   }
 
   /**

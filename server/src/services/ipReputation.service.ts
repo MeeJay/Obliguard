@@ -29,6 +29,7 @@ interface IpEventRow {
   event_type: string;
   timestamp: Date;
   raw_log: string | null;
+  track_only: boolean;
   tenant_id: number | null;
   created_at: Date;
 }
@@ -79,6 +80,7 @@ function rowToEvent(row: IpEventRow): IpEvent {
     eventType: row.event_type as IpEvent['eventType'],
     timestamp: row.timestamp instanceof Date ? row.timestamp.toISOString() : String(row.timestamp),
     rawLog: row.raw_log,
+    trackOnly: row.track_only ?? false,
     tenantId: row.tenant_id,
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
   };

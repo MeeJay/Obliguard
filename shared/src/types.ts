@@ -660,6 +660,8 @@ export interface UserTenantAssignment {
 export type BuiltinServiceType = 'ssh' | 'rdp' | 'nginx' | 'apache' | 'iis' | 'ftp' | 'mail' | 'mysql';
 export type ServiceType = BuiltinServiceType | 'custom';
 
+export type ServiceTemplateMode = 'ban' | 'track';
+
 export interface ServiceTemplate {
   id: number;
   name: string;
@@ -671,6 +673,11 @@ export interface ServiceTemplate {
   threshold: number;
   windowSeconds: number;
   enabled: boolean;
+  /**
+   * 'ban'   = events from this template trigger BanEngine (default)
+   * 'track' = events stored for visibility but NOT counted toward auto-bans
+   */
+  mode: ServiceTemplateMode;
   /** NULL = platform-wide; non-null = tenant-scoped custom template */
   tenantId: number | null;
   createdBy: number | null;
@@ -706,6 +713,7 @@ export interface ResolvedServiceConfig {
   threshold: number;
   windowSeconds: number;
   enabled: boolean;
+  mode: ServiceTemplateMode;
   sampleRequested: boolean;
 }
 
@@ -717,6 +725,7 @@ export interface CreateServiceTemplateRequest {
   threshold?: number;
   windowSeconds?: number;
   enabled?: boolean;
+  mode?: ServiceTemplateMode;
 }
 
 export interface UpdateServiceTemplateRequest {
@@ -726,6 +735,7 @@ export interface UpdateServiceTemplateRequest {
   threshold?: number;
   windowSeconds?: number;
   enabled?: boolean;
+  mode?: ServiceTemplateMode;
 }
 
 export interface UpsertServiceAssignmentRequest {
@@ -752,6 +762,8 @@ export interface IpEvent {
   eventType: IpEventType;
   timestamp: string;
   rawLog: string | null;
+  /** When true, event was matched by a 'track' mode template and is excluded from ban counting */
+  trackOnly: boolean;
   tenantId: number | null;
   createdAt: string;
 }

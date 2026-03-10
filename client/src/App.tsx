@@ -19,6 +19,7 @@ import { NotificationsPage } from '@/pages/NotificationsPage';
 import { AdminUsersPage } from '@/pages/AdminUsersPage';
 import { AdminAgentPage } from '@/pages/AdminAgentPage';
 import { AgentDetailPage } from '@/pages/AgentDetailPage';
+import { LiveEventsPage } from '@/pages/LiveEventsPage';
 import { ProfilePage } from '@/pages/ProfilePage';
 import { GroupDetailPage } from '@/pages/GroupDetailPage';
 import { GroupEditPage } from '@/pages/GroupEditPage';
@@ -69,6 +70,7 @@ export default function App() {
               <Route path="/admin/tenants" element={<AdminTenantsPage />} />
               <Route path="/admin/service-templates" element={<ServiceTemplatesPage />} />
               <Route path="/agents/:deviceId" element={<AgentDetailPage />} />
+              <Route path="/live-events" element={<LiveEventsPage />} />
               <Route path="/settings" element={<SettingsPage />} />
             </Route>
           </Route>

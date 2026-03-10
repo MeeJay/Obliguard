@@ -12,7 +12,8 @@
  */
 
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { Shield, Ban, Activity, RefreshCw, Zap, X } from 'lucide-react';
+import { Shield, Ban, Activity, RefreshCw, Zap, X, ExternalLink } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import { getSocket } from '../socket/socketClient';
 import apiClient from '../api/client';
 
@@ -438,7 +439,11 @@ export function NetMapPage() {
   /** Debounce handle for IP relayout after dynamic additions. */
   const relayoutTimerRef      = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** Event IDs already added to live feed — deduplicates socket vs heartbeat. */
-  const processedEventIdsRef  = useRef(new Set<number>());
+  const processedEventIdsRef      = useRef(new Set<number>());
+  /** Timestamp of the oldest event in liveEvents — used as `to` cursor for scroll-load. */
+  const oldestLiveTimestampRef    = useRef<string | undefined>(undefined);
+  const liveEventsHasMoreRef      = useRef(true);
+  const liveEventsLoadingMoreRef  = useRef(false);
 
   type FlowType = 'auth_success' | 'auth_failure' | 'ban';
   const [canvasSize,    setCanvasSize]    = useState({ w: 800, h: 600 });
@@ -451,6 +456,7 @@ export function NetMapPage() {
   const [selectedAgent, setSelectedAgent] = useState<AgentNode | null>(null);
   const [banningIp,     setBanningIp]     = useState<string | null>(null);
   const [socketOk,      setSocketOk]      = useState(false);
+  const [liveLoadingMore, setLiveLoadingMore] = useState(false);
   const [tooltip, setTooltip] = useState<{
     x: number; y: number;
     ip: string; flag: string; country: string;
@@ -579,6 +585,53 @@ export function NetMapPage() {
       relayoutTimerRef.current = null;
       relayoutIps(agentsRef.current, [...ipsRef.current.values()]);
     }, 400);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Live events scroll-load ───────────────────────────────────────────────
+
+  const fetchOlderEvents = useCallback(async () => {
+    if (liveEventsLoadingMoreRef.current || !liveEventsHasMoreRef.current) return;
+    liveEventsLoadingMoreRef.current = true;
+    setLiveLoadingMore(true);
+    const to = oldestLiveTimestampRef.current;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const res = await apiClient.get<{ data: any[] }>(
+        '/ip-events',
+        { params: { pageSize: 100, ...(to ? { to } : {}) } },
+      ).catch(() => null);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const events = ((res?.data as any)?.data ?? []) as any[];
+      if (events.length < 100) liveEventsHasMoreRef.current = false;
+
+      const mapped: LiveEvent[] = events.map(ev => {
+        const evType = (ev.event_type ?? ev.eventType ?? 'auth_success') as string;
+        const svcKey = (ev.service ?? '').toLowerCase().split('/')[0];
+        const col = DANGEROUS_SVCS.has(svcKey) ? '#ef4444'
+          : evType === 'auth_success' ? EVENT_COLORS.auth_success : EVENT_COLORS.auth_failure;
+        return {
+          id: String(ev.id ?? Math.random()),
+          ip: ev.ip as string,
+          service: (ev.service ?? '') as string,
+          country: '??',
+          agentName: (ev.hostname ?? 'Agent') as string,
+          time: new Date(ev.timestamp ?? ev.created_at),
+          color: col,
+          eventType: (evType === 'auth_success' ? 'auth_success' : 'auth_failure') as 'auth_success' | 'auth_failure',
+        };
+      });
+
+      if (mapped.length > 0) {
+        oldestLiveTimestampRef.current = mapped[mapped.length - 1].time.toISOString();
+        setLiveEvents(prev => {
+          const existingIds = new Set(prev.map(e => e.id));
+          return [...prev, ...mapped.filter(e => !existingIds.has(e.id))];
+        });
+      }
+    } finally {
+      liveEventsLoadingMoreRef.current = false;
+      setLiveLoadingMore(false);
+    }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Geo lookup ────────────────────────────────────────────────────────────
@@ -1227,6 +1280,43 @@ export function NetMapPage() {
     return () => { obs.disconnect(); clearTimeout(timer); };
   }, [drawBg]);
 
+  // ── Initial live events load ───────────────────────────────────────────────
+
+  useEffect(() => {
+    let cancelled = false;
+    apiClient.get('/ip-events', { params: { pageSize: 100 } })
+      .then(res => {
+        if (cancelled) return;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const events = ((res.data as any).data ?? []) as any[];
+        const mapped: LiveEvent[] = events.map(ev => {
+          const evId   = ev.id as number | undefined;
+          if (evId) processedEventIdsRef.current.add(evId);
+          const evType = (ev.event_type ?? ev.eventType ?? 'auth_success') as string;
+          const svcKey = (ev.service ?? '').toLowerCase().split('/')[0];
+          const col = DANGEROUS_SVCS.has(svcKey) ? '#ef4444'
+            : evType === 'auth_success' ? EVENT_COLORS.auth_success : EVENT_COLORS.auth_failure;
+          return {
+            id: String(evId ?? Math.random()),
+            ip: ev.ip as string,
+            service: (ev.service ?? '') as string,
+            country: '??',
+            agentName: (ev.hostname ?? 'Agent') as string,
+            time: new Date(ev.timestamp ?? ev.created_at),
+            color: col,
+            eventType: (evType === 'auth_success' ? 'auth_success' : 'auth_failure') as 'auth_success' | 'auth_failure',
+          };
+        });
+        setLiveEvents(mapped);
+        if (mapped.length > 0) {
+          oldestLiveTimestampRef.current = mapped[mapped.length - 1].time.toISOString();
+        }
+        if (events.length < 100) liveEventsHasMoreRef.current = false;
+      })
+      .catch(() => {}); // silently ignore — live events stay empty until socket fires
+    return () => { cancelled = true; };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   // ── Socket events ─────────────────────────────────────────────────────────
 
   useEffect(() => {
@@ -1256,7 +1346,7 @@ export function NetMapPage() {
         ip: data.ip, service: data.service, country: cc,
         agentName: agent.label,
         time: new Date(), color: col, eventType: data.eventType,
-      }, ...prev].slice(0, 40));
+      }, ...prev].slice(0, 100));
     };
 
     const onBanAuto = (data: { ip: string; service: string; failureCount: number; deviceId?: number }) => {
@@ -1280,7 +1370,7 @@ export function NetMapPage() {
         agentName: agent?.label ?? 'Server',
         time: new Date(), color: EVENT_COLORS.ban, eventType: 'ban' as const,
         failures: data.failureCount,
-      }, ...prev].slice(0, 40));
+      }, ...prev].slice(0, 100));
       setStats(s => ({ ...s, today: s.today + 1, banned: s.banned + 1 }));
     };
 
@@ -1359,7 +1449,7 @@ export function NetMapPage() {
           }
 
           if (newLive.length > 0) {
-            setLiveEvents(prev => [...newLive.slice(0, 10), ...prev].slice(0, 40));
+            setLiveEvents(prev => [...newLive, ...prev].slice(0, 100));
           }
           if (hasNew) scheduleRelayout();
 
@@ -1623,7 +1713,7 @@ export function NetMapPage() {
         {/* ── Tooltip ─────────────────────────────────────────────────────── */}
         {tooltip && (
           <div
-            className="absolute z-20 pointer-events-none rounded p-2.5 max-w-[200px]"
+            className="absolute z-20 pointer-events-none rounded p-3 max-w-[280px]"
             style={{
               left: tooltip.x + 14,
               top: tooltip.y - 8,
@@ -1633,7 +1723,7 @@ export function NetMapPage() {
               transform: tooltip.x > canvasSize.w * 0.70 ? 'translateX(-110%)' : undefined,
             }}
           >
-            <div className="font-mono text-[11px] mb-1.5 font-bold" style={{ color: tooltip.color }}>
+            <div className="font-mono text-[15px] mb-2 font-bold" style={{ color: tooltip.color }}>
               {tooltip.flag} {tooltip.ip}
             </div>
             {[
@@ -1641,15 +1731,15 @@ export function NetMapPage() {
               { label: 'Status',   value: tooltip.status.toUpperCase(), color: tooltip.color },
               { label: 'Failures', value: tooltip.failures.toLocaleString(), color: '#fb923c' },
             ].map(({ label, value, color }) => (
-              <div key={label} className="flex items-center gap-2 mb-1">
-                <span className="font-mono text-[8px] text-slate-600 uppercase tracking-wider w-14 shrink-0">{label}</span>
-                <span className="font-mono text-[10px]" style={{ color: color ?? '#94a3b8' }}>{value}</span>
+              <div key={label} className="flex items-center gap-2 mb-1.5">
+                <span className="font-mono text-[11px] text-slate-500 uppercase tracking-wider w-16 shrink-0">{label}</span>
+                <span className="font-mono text-[13px]" style={{ color: color ?? '#94a3b8' }}>{value}</span>
               </div>
             ))}
             {tooltip.services.length > 0 && (
               <div className="flex items-start gap-2">
-                <span className="font-mono text-[8px] text-slate-600 uppercase tracking-wider w-14 shrink-0 mt-px">Services</span>
-                <span className="font-mono text-[10px] text-slate-400 leading-relaxed">
+                <span className="font-mono text-[11px] text-slate-500 uppercase tracking-wider w-16 shrink-0 mt-px">Services</span>
+                <span className="font-mono text-[12px] text-slate-400 leading-relaxed">
                   {tooltip.services.join(', ')}
                 </span>
               </div>
@@ -1660,52 +1750,93 @@ export function NetMapPage() {
 
       {/* ── Bottom live feed ────────────────────────────────────────────────── */}
       <div className="shrink-0 border-t border-[#0a0a28] bg-[#050514]">
-        <div className="flex items-center gap-2 px-4 py-1 border-b border-[#080820]">
-          <span className="relative flex h-1.5 w-1.5">
+        {/* Header */}
+        <div className="flex items-center gap-2.5 px-4 py-1.5 border-b border-[#080820]">
+          <span className="relative flex h-2 w-2">
             <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-500 opacity-75" />
-            <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-red-500" />
+            <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500" />
           </span>
-          <span className="font-mono text-[8px] text-slate-600 tracking-widest uppercase">Live Events</span>
-          <span className="ml-auto flex items-center gap-2">
-            <span className="font-mono text-[8px] text-slate-700">{liveEvents.length} captured</span>
+          <span className="font-mono text-[11px] text-slate-500 tracking-widest uppercase">Live Events</span>
+          <span className="ml-auto flex items-center gap-3">
+            <span className="font-mono text-[10px] text-slate-600">{liveEvents.length} captured</span>
+            <Link
+              to="/live-events"
+              className="flex items-center gap-1 font-mono text-[10px] text-slate-600 hover:text-slate-400 transition-colors"
+              title="Open full live events page"
+            >
+              <ExternalLink size={11} />
+              <span>View all</span>
+            </Link>
             <span
-              className={`w-1.5 h-1.5 rounded-full ${socketOk ? 'bg-cyan-500' : 'bg-red-600'}`}
+              className={`w-2 h-2 rounded-full ${socketOk ? 'bg-cyan-500' : 'bg-red-600'}`}
               title={socketOk ? 'Socket connected' : 'Socket disconnected'}
             />
           </span>
         </div>
-        <div className="h-[7rem] overflow-hidden px-3 py-1.5">
+
+        {/* Scrollable event list */}
+        <div
+          className="h-[13rem] overflow-y-auto px-3 py-1.5"
+          onScroll={e => {
+            const el = e.currentTarget;
+            if (el.scrollTop + el.clientHeight >= el.scrollHeight - 120) {
+              void fetchOlderEvents();
+            }
+          }}
+        >
           {liveEvents.length === 0 ? (
-            <span className="font-mono text-[10px] text-slate-700 pl-1">Monitoring for events…</span>
+            <span className="font-mono text-[11px] text-slate-700 pl-1">Monitoring for events…</span>
           ) : (
-            <div className="flex flex-col gap-[3px]">
-              {liveEvents.slice(0, 6).map(ev => {
+            <div className="flex flex-col gap-0.5">
+              {liveEvents.map(ev => {
                 const isBan     = ev.eventType === 'ban';
                 const isFailure = ev.eventType === 'auth_failure';
                 const dangerSvc = isDangerousSvc(ev.service);
                 return (
-                  <div key={ev.id} className={`flex items-center gap-2 font-mono text-[10px] rounded px-1.5 py-[1px] ${isBan ? 'bg-red-950/35' : isFailure ? 'bg-orange-950/25' : ''}`}>
-                    <span className="text-slate-700 w-[4.5rem] shrink-0 text-[9px]">{ev.time.toLocaleTimeString()}</span>
-                    <div className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: ev.color, boxShadow: `0 0 4px ${ev.color}` }} />
-                    <span className="uppercase text-[8px] w-12 shrink-0 tracking-wide font-bold" style={{ color: ev.color }}>
+                  <div
+                    key={ev.id}
+                    className={`flex items-center gap-2 font-mono rounded px-1.5 py-[3px] ${
+                      isBan ? 'bg-red-950/35' : isFailure ? 'bg-orange-950/25' : ''
+                    }`}
+                  >
+                    <span className="text-slate-600 w-[5.5rem] shrink-0 text-[11px]">
+                      {ev.time.toLocaleTimeString()}
+                    </span>
+                    <div
+                      className="w-2 h-2 rounded-full shrink-0"
+                      style={{ backgroundColor: ev.color, boxShadow: `0 0 4px ${ev.color}` }}
+                    />
+                    <span
+                      className="uppercase text-[11px] w-12 shrink-0 tracking-wide font-bold"
+                      style={{ color: ev.color }}
+                    >
                       {isBan ? '🔒 BAN' : isFailure ? 'FAIL' : 'OK'}
                     </span>
-                    <span className={`uppercase text-[9px] w-10 shrink-0 font-semibold ${dangerSvc ? 'text-red-400' : ''}`} style={dangerSvc ? {} : { color: svcColor(ev.service) }}>
+                    <span
+                      className={`uppercase text-[11px] w-12 shrink-0 font-semibold ${dangerSvc ? 'text-red-400' : ''}`}
+                      style={dangerSvc ? {} : { color: svcColor(ev.service) }}
+                    >
                       {(ev.service || '?').slice(0, 8).toUpperCase()}
                     </span>
-                    <span className={`text-[10px] w-[6.5rem] shrink-0 truncate ${isBan ? 'line-through text-red-400/55' : isFailure ? 'text-orange-300/75' : 'text-slate-400'}`}>
+                    <span
+                      className={`text-[12px] w-[7.5rem] shrink-0 truncate ${
+                        isBan ? 'line-through text-red-400/55' : isFailure ? 'text-orange-300/75' : 'text-slate-400'
+                      }`}
+                    >
                       {ev.ip}
                     </span>
-                    <span className="text-slate-800 shrink-0 text-[9px]">▸</span>
-                    <span className="text-slate-500 text-[9px] shrink-0 max-w-[5rem] truncate">{ev.agentName || 'Server'}</span>
+                    <span className="text-slate-700 shrink-0 text-[10px]">▸</span>
+                    <span className="text-slate-500 text-[11px] shrink-0 max-w-[6rem] truncate">
+                      {ev.agentName || 'Server'}
+                    </span>
                     {ev.failures != null && ev.failures > 0 && (
-                      <span className="text-orange-700/60 text-[9px] shrink-0">{ev.failures}×</span>
+                      <span className="text-orange-700/60 text-[11px] shrink-0">{ev.failures}×</span>
                     )}
                     {!isBan && (
                       <button
                         onClick={() => void quickBan(ev.ip)}
                         disabled={banningIp === ev.ip}
-                        className="ml-auto shrink-0 px-1.5 py-0.5 rounded text-[8px] font-mono border border-red-900/40 text-red-700/60 hover:text-red-400 hover:border-red-500/50 transition-colors disabled:opacity-40 leading-none"
+                        className="ml-auto shrink-0 px-1.5 py-0.5 rounded text-[10px] font-mono border border-red-900/40 text-red-700/60 hover:text-red-400 hover:border-red-500/50 transition-colors disabled:opacity-40 leading-none"
                         title={`Ban ${ev.ip}`}
                       >
                         {banningIp === ev.ip ? '…' : '⛔'}
@@ -1714,6 +1845,18 @@ export function NetMapPage() {
                   </div>
                 );
               })}
+
+              {/* Scroll-load status */}
+              {liveLoadingMore && (
+                <div className="py-1.5 text-center">
+                  <span className="font-mono text-[10px] text-slate-700">Loading older events…</span>
+                </div>
+              )}
+              {!liveEventsHasMoreRef.current && liveEvents.length >= 100 && (
+                <div className="py-1.5 text-center">
+                  <span className="font-mono text-[10px] text-slate-800">— end of records —</span>
+                </div>
+              )}
             </div>
           )}
         </div>
