@@ -16,17 +16,25 @@ export interface CreateBanRequest {
 export async function getBanStats(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const isAdmin = req.session?.role === 'admin';
-    const tenantFilter = isAdmin ? {} : { tenant_id: req.tenantId };
+
+    // Apply scope filter: admins see all bans; tenant users see global bans + their own
+    function applyTenantScope(q: ReturnType<typeof db>) {
+      if (isAdmin) return q;
+      return q.where(function (this: ReturnType<typeof db>) {
+        this.where('scope', 'global').orWhere('tenant_id', req.tenantId);
+      });
+    }
 
     const [[activeRow], [todayRow]] = await Promise.all([
-      db('ip_bans')
-        .where({ is_active: true, ...tenantFilter })
-        .whereRaw('(expires_at IS NULL OR expires_at > NOW())')
-        .count<Array<{ count: string }>>({ count: '*' }),
-      db('ip_bans')
-        .where(tenantFilter)
-        .whereRaw('banned_at >= CURRENT_DATE')
-        .count<Array<{ count: string }>>({ count: '*' }),
+      applyTenantScope(
+        db('ip_bans')
+          .where('is_active', true)
+          .whereRaw('(expires_at IS NULL OR expires_at > NOW())'),
+      ).count<Array<{ count: string }>>({ count: '*' }),
+      applyTenantScope(
+        db('ip_bans')
+          .whereRaw('banned_at >= CURRENT_DATE'),
+      ).count<Array<{ count: string }>>({ count: '*' }),
     ]);
 
     res.json({
@@ -105,6 +113,38 @@ export async function promoteBan(req: Request, res: Response, next: NextFunction
     }
 
     res.json({ success: true, data: ban });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * POST /api/bans/:id/exclude
+ * Create a per-tenant exclusion so this tenant's agents don't enforce the global ban.
+ */
+export async function excludeBan(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (isNaN(id)) throw new AppError(400, 'Invalid ban ID');
+
+    await banService.excludeForTenant(id, req.tenantId, req.session?.userId ?? 0);
+    res.json({ success: true });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * DELETE /api/bans/:id/exclude
+ * Remove the per-tenant exclusion (this tenant's agents will enforce the ban again).
+ */
+export async function removeExclusion(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (isNaN(id)) throw new AppError(400, 'Invalid ban ID');
+
+    await banService.removeExclusion(id, req.tenantId);
+    res.json({ success: true });
   } catch (err) {
     next(err);
   }

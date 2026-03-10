@@ -10,6 +10,8 @@ import {
   Globe,
   X,
   AlertTriangle,
+  EyeOff,
+  Eye,
 } from 'lucide-react';
 import type { IpBan, BanScope, CreateBanRequest } from '@obliview/shared';
 import { Button } from '@/components/common/Button';
@@ -75,6 +77,16 @@ function BanStatusBadge({ ban }: { ban: IpBan }) {
   return (
     <span className="inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium bg-status-down/10 text-status-down">
       Active
+    </span>
+  );
+}
+
+// ── ExcludedBadge ──────────────────────────────────────────────────────────────
+
+function ExcludedBadge() {
+  return (
+    <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium bg-yellow-500/10 text-yellow-400">
+      <EyeOff size={10} />Excluded
     </span>
   );
 }
@@ -269,6 +281,7 @@ export function BansPage() {
   const [liftingBan, setLiftingBan] = useState<IpBan | null>(null);
   const [confirmLiftLoading, setConfirmLiftLoading] = useState(false);
   const [promotingBanId, setPromotingBanId] = useState<number | null>(null);
+  const [excludingBanId, setExcludingBanId] = useState<number | null>(null);
 
   // Debounce search
   useEffect(() => {
@@ -337,6 +350,34 @@ export function BansPage() {
       toast.error('Failed to lift ban');
     } finally {
       setConfirmLiftLoading(false);
+    }
+  };
+
+  const handleExclude = async (ban: IpBan) => {
+    setExcludingBanId(ban.id);
+    try {
+      const res = await fetch(`/api/bans/${ban.id}/exclude`, { method: 'POST' });
+      if (!res.ok) throw new Error('Failed to exclude ban');
+      toast.success(`${ban.ip} excluded from your network`);
+      load();
+    } catch {
+      toast.error('Failed to exclude ban');
+    } finally {
+      setExcludingBanId(null);
+    }
+  };
+
+  const handleRemoveExclusion = async (ban: IpBan) => {
+    setExcludingBanId(ban.id);
+    try {
+      const res = await fetch(`/api/bans/${ban.id}/exclude`, { method: 'DELETE' });
+      if (!res.ok) throw new Error('Failed to remove exclusion');
+      toast.success(`Exclusion on ${ban.ip} removed`);
+      load();
+    } catch {
+      toast.error('Failed to remove exclusion');
+    } finally {
+      setExcludingBanId(null);
     }
   };
 
@@ -479,11 +520,16 @@ export function BansPage() {
                         : <span className="italic">Never</span>}
                     </td>
                     <td className="px-4 py-3">
-                      <BanStatusBadge ban={ban} />
+                      <div className="flex flex-col gap-1">
+                        <BanStatusBadge ban={ban} />
+                        {ban.isExcludedByTenant && <ExcludedBadge />}
+                      </div>
                     </td>
                     <td className="px-4 py-3 text-right">
-                      <div className="flex items-center justify-end gap-1">
-                        {ban.isActive && !isExpired(ban.expiresAt) && (
+                      <div className="flex items-center justify-end gap-1 flex-wrap">
+                        {/* Lift ban: admin always; non-admin only for own tenant-scoped bans */}
+                        {ban.isActive && !isExpired(ban.expiresAt) &&
+                          (isAdmin || ban.scope === 'tenant') && (
                           <Button
                             size="sm"
                             variant="secondary"
@@ -492,6 +538,7 @@ export function BansPage() {
                             <Shield size={11} className="mr-1" />Lift ban
                           </Button>
                         )}
+                        {/* Promote: admin only, non-global bans */}
                         {isAdmin && ban.scope !== 'global' && ban.isActive && !isExpired(ban.expiresAt) && (
                           <Button
                             size="sm"
@@ -501,6 +548,30 @@ export function BansPage() {
                           >
                             <Globe size={11} className="mr-1" />Promote global
                           </Button>
+                        )}
+                        {/* Exclude / Remove exclusion: non-admin on global bans */}
+                        {!isAdmin && ban.scope === 'global' && ban.isActive && !isExpired(ban.expiresAt) && (
+                          ban.isExcludedByTenant ? (
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              loading={excludingBanId === ban.id}
+                              onClick={() => handleRemoveExclusion(ban)}
+                              title="Re-enable enforcement of this ban on your network"
+                            >
+                              <Eye size={11} className="mr-1" />Re-enable
+                            </Button>
+                          ) : (
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              loading={excludingBanId === ban.id}
+                              onClick={() => handleExclude(ban)}
+                              title="Exclude this ban from your network without lifting it globally"
+                            >
+                              <EyeOff size={11} className="mr-1" />Exclude
+                            </Button>
+                          )
                         )}
                       </div>
                     </td>

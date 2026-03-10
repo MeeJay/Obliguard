@@ -825,6 +825,8 @@ export interface IpReputation {
   updatedAt: string;
   /** Computed: 'banned' | 'whitelisted' | 'suspicious' | 'clean' */
   status?: IpStatus;
+  /** ID of the currently active ban (only set when status='banned') */
+  activeBanId?: number | null;
 }
 
 export type IpStatus = 'banned' | 'whitelisted' | 'suspicious' | 'clean';
@@ -856,6 +858,12 @@ export interface IpBan {
   bannedAt: string;
   expiresAt: string | null;
   isActive: boolean;
+  /**
+   * True when the calling tenant has created a per-tenant exclusion for this global ban.
+   * The ban stays globally active; agents of this tenant won't enforce it.
+   * Only meaningful for scope='global' bans viewed by non-admin users.
+   */
+  isExcludedByTenant?: boolean;
 }
 
 export interface CreateBanRequest {

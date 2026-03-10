@@ -559,7 +559,8 @@ export function IPReputationPage() {
 
   const handleRowClick = (row: IpReputation) => {
     setSelectedIp(row);
-    setSelectedBanId(null);
+    // Populate the ban ID directly from the reputation row when available
+    setSelectedBanId(row.activeBanId ?? null);
   };
 
   const totalPages = Math.ceil(total / PAGE_SIZE);
@@ -764,7 +765,7 @@ export function IPReputationPage() {
               try {
                 const res = await apiClient.get<{ data: Array<{ id: number }> }>(
                   '/bans',
-                  { params: { ip: selectedIp.ip, active: 'true', pageSize: 1 } },
+                  { params: { search: selectedIp.ip, active: 'true', pageSize: 1 } },
                 );
                 if (res.data) {
                   const json = res.data;

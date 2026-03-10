@@ -63,9 +63,18 @@ class BanService {
   }): Promise<{ data: IpBan[]; total: number }> {
     const { tenantId, isAdmin, onlyActive = true, search, limit = 50, offset = 0 } = opts;
 
+    // Join with exclusions for the calling tenant so we can expose isExcludedByTenant
     let q = db('ip_bans')
       .leftJoin('tenants as origin_tenant', 'ip_bans.origin_tenant_id', 'origin_tenant.id')
-      .select('ip_bans.*', 'origin_tenant.name as origin_tenant_name');
+      .leftJoin('ip_ban_exclusions as ex', function () {
+        this.on('ex.ban_id', '=', 'ip_bans.id')
+          .andOnVal('ex.tenant_id', '=', tenantId);
+      })
+      .select(
+        'ip_bans.*',
+        'origin_tenant.name as origin_tenant_name',
+        db.raw('ex.id IS NOT NULL AS is_excluded_by_tenant'),
+      );
 
     if (isAdmin) {
       // Admin sees all bans (global + all tenants)
@@ -82,9 +91,9 @@ class BanService {
     const countQ = q.clone().clearSelect().count('ip_bans.id as count');
     const [{ count }] = await countQ as unknown as [{ count: string }];
 
-    const rows = await q.orderBy('ip_bans.banned_at', 'desc').limit(limit).offset(offset) as BanRow[];
+    const rows = await q.orderBy('ip_bans.banned_at', 'desc').limit(limit).offset(offset) as (BanRow & { is_excluded_by_tenant: boolean })[];
     return {
-      data: rows.map((r) => rowToBan(r, isAdmin)),
+      data: rows.map((r) => ({ ...rowToBan(r, isAdmin), isExcludedByTenant: r.is_excluded_by_tenant ?? false })),
       total: Number(count),
     };
   }
@@ -135,18 +144,49 @@ class BanService {
     return rowToBan(row, true);
   }
 
-  /** Lift (deactivate) a ban */
+  /** Lift (deactivate) a ban — platform admins only for global-scope bans */
   async lift(banId: number, tenantId: number, isAdmin: boolean): Promise<void> {
     const ban = await db('ip_bans').where('id', banId).first() as BanRow | undefined;
     if (!ban) throw new Error('Ban not found');
 
-    // Tenant admins can only lift their own tenant-scoped bans
+    // Tenant admins can only lift their own tenant-scoped bans.
+    // To opt out of a global ban without revoking it for everyone, use excludeForTenant().
     if (!isAdmin && (ban.scope !== 'tenant' || ban.tenant_id !== tenantId)) {
       throw new Error('Insufficient permissions to lift this ban');
     }
 
     await db('ip_bans').where('id', banId).update({ is_active: false });
     _io?.emit('ban:lifted', { id: banId });
+  }
+
+  /**
+   * Create a per-tenant exclusion for a global ban.
+   * The ban stays active globally; agents of this tenant will not enforce it.
+   */
+  async excludeForTenant(banId: number, tenantId: number, userId: number): Promise<void> {
+    const ban = await db('ip_bans').where('id', banId).first() as BanRow | undefined;
+    if (!ban) throw new Error('Ban not found');
+    if (ban.scope !== 'global') throw new Error('Only global bans can be excluded per-tenant');
+    if (!ban.is_active) throw new Error('Ban is no longer active');
+
+    // Insert — ignore duplicate (already excluded)
+    await db('ip_ban_exclusions')
+      .insert({ ban_id: banId, tenant_id: tenantId, created_by: userId })
+      .onConflict(['ban_id', 'tenant_id'])
+      .ignore();
+
+    _io?.emit('ban:excluded', { banId, tenantId });
+  }
+
+  /**
+   * Remove a per-tenant exclusion (re-enable enforcement for this tenant).
+   */
+  async removeExclusion(banId: number, tenantId: number): Promise<void> {
+    const deleted = await db('ip_ban_exclusions')
+      .where({ ban_id: banId, tenant_id: tenantId })
+      .delete();
+    if (!deleted) throw new Error('No exclusion found for this ban and tenant');
+    _io?.emit('ban:exclusionRemoved', { banId, tenantId });
   }
 
   /**
@@ -170,12 +210,20 @@ class BanService {
           .orWhere((c) => c.where('scope', 'group').whereIn('scope_id', groupIds))
           .orWhere((c) => c.where('scope', 'agent').where('scope_id', deviceId));
       })
-      .select('ip') as Array<{ ip: string }>;
+      .select('ip_bans.id', 'ip_bans.ip') as Array<{ id: number; ip: string }>;
 
-    // Filter out whitelisted IPs using PostgreSQL inet << cidr check in JS
-    // (simple approach: resolve whitelist separately in whitelist.service, passed here)
+    // Fetch IPs of global bans that this tenant has excluded
+    const excludedBanIds = new Set<number>(
+      (await db('ip_ban_exclusions')
+        .where({ tenant_id: tenantId })
+        .pluck('ban_id') as number[]),
+    );
+
+    // Filter out whitelisted and tenant-excluded IPs
     const shouldBeBanned = new Set<string>();
     for (const ban of bans) {
+      if (excludedBanIds.has(ban.id)) continue; // tenant opted out of this global ban
+
       const banIp = ban.ip;
       const isWhitelisted = resolvedWhitelist.some((cidr) => {
         // Simple check — the full CIDR containment is done in whitelistService.isWhitelisted

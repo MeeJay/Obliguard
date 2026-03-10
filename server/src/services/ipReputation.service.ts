@@ -144,10 +144,10 @@ class IpReputationService {
     const now = new Date();
 
     for (const entry of byIp.values()) {
-      const servicesJson = JSON.stringify([...entry.services]);
-      const usernamesJson = JSON.stringify([...entry.usernames]);
-
-      // Use a raw upsert so we can do array-merging and counter increments atomically
+      // ip_reputation.affected_services / attempted_usernames are text[] columns.
+      // Pass JS arrays directly — the pg driver serialises them to PostgreSQL
+      // array literals ({ssh,rdp}) automatically.
+      // Use text[] array operations (unnest + array_agg) instead of jsonb.
       await db.raw(
         `
         INSERT INTO ip_reputation (
@@ -169,8 +169,8 @@ class IpReputationService {
           ?,
           ?,
           1,
-          ?::jsonb,
-          ?::jsonb,
+          ?,
+          ?,
           ?,
           ?,
           ?,
@@ -188,20 +188,20 @@ class IpReputationService {
             WHERE ip_events.ip = ip_reputation.ip
           ),
           affected_services     = (
-            SELECT jsonb_agg(DISTINCT val)
-            FROM (
-              SELECT jsonb_array_elements_text(COALESCE(ip_reputation.affected_services, '[]'::jsonb)) AS val
-              UNION
-              SELECT jsonb_array_elements_text(EXCLUDED.affected_services)
-            ) combined
+            SELECT array_agg(DISTINCT val)
+            FROM unnest(
+              COALESCE(ip_reputation.affected_services, ARRAY[]::text[]) ||
+              COALESCE(EXCLUDED.affected_services, ARRAY[]::text[])
+            ) AS val
+            WHERE val IS NOT NULL
           ),
           attempted_usernames   = (
-            SELECT jsonb_agg(DISTINCT val)
-            FROM (
-              SELECT jsonb_array_elements_text(COALESCE(ip_reputation.attempted_usernames, '[]'::jsonb)) AS val
-              UNION
-              SELECT jsonb_array_elements_text(EXCLUDED.attempted_usernames)
-            ) combined
+            SELECT array_agg(DISTINCT val)
+            FROM unnest(
+              COALESCE(ip_reputation.attempted_usernames, ARRAY[]::text[]) ||
+              COALESCE(EXCLUDED.attempted_usernames, ARRAY[]::text[])
+            ) AS val
+            WHERE val IS NOT NULL
           ),
           first_seen            = LEAST(ip_reputation.first_seen, EXCLUDED.first_seen),
           last_seen             = GREATEST(ip_reputation.last_seen, EXCLUDED.last_seen),
@@ -212,8 +212,8 @@ class IpReputationService {
           entry.ip,
           entry.failures,
           entry.successes,
-          servicesJson,
-          usernamesJson,
+          [...entry.services],   // text[] — pg serialises JS array to {ssh,rdp,...}
+          [...entry.usernames],  // text[] — same
           now,
           now,
           entry.deviceId,
@@ -248,6 +248,7 @@ class IpReputationService {
       .leftJoin('ip_whitelist as w', db.raw("r.ip <<= w.ip"))
       .select(
         'r.*',
+        'b.id as active_ban_id',
         db.raw(`
           CASE
             WHEN b.id IS NOT NULL THEN 'banned'
@@ -303,9 +304,10 @@ class IpReputationService {
       .limit(limit)
       .offset(offset);
 
-    const data = (rows as Array<IpReputationRow & { computed_status: string }>).map((row) =>
-      rowToReputation(row, row.computed_status as IpStatus),
-    );
+    const data = (rows as Array<IpReputationRow & { computed_status: string; active_ban_id: number | null }>).map((row) => ({
+      ...rowToReputation(row, row.computed_status as IpStatus),
+      activeBanId: row.active_ban_id ?? null,
+    }));
 
     return { data, total };
   }

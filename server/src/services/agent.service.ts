@@ -701,9 +701,11 @@ export const agentService = {
         )];
         if (failureIps.length > 0) {
           try {
-            const suspiciousRows = await db('ip_reputation')
+            // ip_reputation has no 'status' column — status is computed on the fly.
+          // Use total_failures > 0 as a proxy for "suspicious / worse".
+          const suspiciousRows = await db('ip_reputation')
               .whereIn('ip', failureIps)
-              .where({ status: 'suspicious' })
+              .where('total_failures', '>', 0)
               .select('ip')
               .limit(1);
             if (suspiciousRows.length > 0) {
