@@ -444,11 +444,6 @@ function IPDetailDrawer({ ip, onClose, onBan, onWhitelist, onLiftBan }: IPDetail
 
 // ── IPReputationPage ───────────────────────────────────────────────────────────
 
-interface IpReputationListResponse {
-  data: IpReputation[];
-  total: number;
-}
-
 const STATUS_FILTERS: { key: StatusFilter; label: string }[] = [
   { key: 'all', label: 'All' },
   { key: 'banned', label: 'Banned' },
