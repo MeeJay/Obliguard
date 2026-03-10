@@ -25,6 +25,8 @@ interface AgentNode {
   r: number;
   eventCount: number;
   phase: number;
+  lastPushAt: number;    // epoch ms of last heartbeat/push
+  checkIntervalMs: number; // offline threshold = checkIntervalMs * 2
 }
 
 interface IpNode {
@@ -291,6 +293,39 @@ function shouldLabel(ip: IpNode): boolean {
   return ip.status === 'banned' || ip.status === 'whitelisted' || ip.failures > 2 || ip.eventCount >= 8 || ip.agentIds.length > 1;
 }
 
+// ── CIDR helpers ──────────────────────────────────────────────────────────────
+
+/** Convert IPv4 dotted-decimal to unsigned 32-bit int. Returns -1 on failure. */
+function ipToInt(ip: string): number {
+  const parts = ip.split('.');
+  if (parts.length !== 4) return -1;
+  let n = 0;
+  for (const p of parts) {
+    const b = parseInt(p, 10);
+    if (isNaN(b) || b < 0 || b > 255) return -1;
+    n = (n << 8) | b;
+  }
+  return n >>> 0;
+}
+
+interface WlEntry {
+  networkInt: number;
+  mask: number;
+  label: string | null;
+  /** The plain IP string for single-host (/32 or no prefix) entries, null for broader CIDRs. */
+  plainIp: string | null;
+}
+
+/** Returns the first whitelist entry whose CIDR contains the given IPv4 address, or null. */
+function matchWhitelist(ip: string, entries: WlEntry[]): WlEntry | null {
+  const ipInt = ipToInt(ip);
+  if (ipInt < 0) return null;
+  for (const e of entries) {
+    if ((ipInt & e.mask) === (e.networkInt & e.mask)) return e;
+  }
+  return null;
+}
+
 // ── Badge helpers ─────────────────────────────────────────────────────────────
 
 const BADGE_H    = 13;
@@ -343,6 +378,9 @@ export function NetMapPage() {
   const selectedRef  = useRef<number | null>(null);
   const filtersRef   = useRef<Set<string>>(new Set(['auth_success', 'auth_failure', 'ban']));
   const sizeRef      = useRef({ w: 800, h: 600 });
+
+  /** Debounce handles for per-agent mini-refresh triggered on pushHeartbeat. */
+  const agentRefreshTimersRef = useRef(new Map<number, ReturnType<typeof setTimeout>>());
 
   type FlowType = 'auth_success' | 'auth_failure' | 'ban';
   const [canvasSize,    setCanvasSize]    = useState({ w: 800, h: 600 });
@@ -500,22 +538,66 @@ export function NetMapPage() {
 
   useEffect(() => {
     const interval = setInterval(async () => {
-      if (!agentsRef.current.length || !ipsRef.current.size) return;
+      const agArr = agentsRef.current;
+      if (!agArr.length) return;
       try {
+        const now = Date.now();
+
+        // 1. Events — refresh TTLs, merge services, upsert new IPs (no glow)
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const res = await apiClient.get<{ data: any[] }>('/ip-events', { params: { pageSize: 300 } });
+        const evRes = await apiClient.get<{ data: any[] }>('/ip-events', { params: { pageSize: 300 } }).catch(() => null);
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const evts = (res.data as any)?.data ?? [];
-        const now  = Date.now();
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        for (const ev of evts as any[]) {
-          const node = ipsRef.current.get(ev.ip);
-          if (node) node.lastSeen = now; // refresh TTL
+        for (const ev of ((evRes?.data as any)?.data ?? []) as any[]) {
+          const evIp = ev.ip as string | undefined;
+          const aid  = (ev.deviceId ?? ev.device_id) as number | undefined;
+          if (!evIp) continue;
+          const node = ipsRef.current.get(evIp);
+          if (node) {
+            node.lastSeen = now;
+            const svc = (ev.service ?? '') as string;
+            if (svc && !node.services.includes(svc)) node.services = [...node.services, svc];
+          } else if (aid && agArr.some(a => a.id === aid)) {
+            const evType = (ev.eventType ?? ev.event_type) as string;
+            const status = evType === 'auth_failure' ? 'suspicious' : 'clean';
+            upsertIp(evIp, '??', aid, status, status === 'suspicious' ? 1 : 0,
+              ev.service ? [ev.service as string] : [], 1, false);
+          }
         }
+
+        // 2. Reputation — update statuses + merge services
+        const repRes = await apiClient.get<{
+          data: { ip: string; status: string; totalFailures: number; affectedServices?: string[] }[]
+        }>('/ip-reputation?limit=200').catch(() => null);
+        for (const r of repRes?.data?.data ?? []) {
+          const node = ipsRef.current.get(r.ip);
+          if (!node) continue;
+          if (node.status !== 'whitelisted') { node.status = r.status; node.color = statusColor(r.status); }
+          node.failures = r.totalFailures;
+          node.lastSeen = now;
+          if (r.affectedServices?.length) node.services = [...new Set([...node.services, ...r.affectedServices])];
+        }
+
+        // 3. Ban stats
+        const banRes = await apiClient.get<{ data: { active: number; today: number } }>('/bans/stats').catch(() => null);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const bs = (banRes?.data as any)?.data;
+        if (bs) setStats(s => ({ ...s, banned: bs.active, today: bs.today }));
+
+        // 4. Agent online status — sync lastPushAt from updatedAt
+        const devRes = await apiClient.get<{ data: { id: number; updatedAt: string }[] }>('/agent/devices').catch(() => null);
+        for (const d of devRes?.data?.data ?? []) {
+          const ag = agArr.find(a => a.id === d.id);
+          if (ag && d.updatedAt) {
+            const ts = new Date(d.updatedAt).getTime();
+            if (ts > ag.lastPushAt) ag.lastPushAt = ts;
+          }
+        }
+
+        setIpCount(ipsRef.current.size);
       } catch { /* ignore */ }
-    }, 10 * 1000); // every 10 seconds
+    }, 90_000); // every 90 s — full soft refresh (reputation, status); real-time updates via pushHeartbeat
     return () => clearInterval(interval);
-  }, []);
+  }, [upsertIp]);
 
   // ── Init ──────────────────────────────────────────────────────────────────
 
@@ -528,7 +610,7 @@ export function NetMapPage() {
 
     try {
       const [devRes, evRes, banRes] = await Promise.all([
-        apiClient.get<{ data: { id: number; hostname: string; name: string | null; status: string }[] }>('/agent/devices'),
+        apiClient.get<{ data: { id: number; hostname: string; name: string | null; status: string; updatedAt: string; resolvedSettings: { checkIntervalSeconds: number } }[] }>('/agent/devices'),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         apiClient.get<{ data: any[] }>('/ip-events', { params: { pageSize: 500 } })
           .catch(() => ({ data: { data: [] } })),
@@ -567,14 +649,20 @@ export function NetMapPage() {
         ? devs.slice(0, 20)
         : [{ id: -1, hostname: 'Server', name: null, status: 'approved' }];
 
-      agentsRef.current = placed.map(d => ({
-        id:         d.id,
-        label:      (d.name ?? d.hostname).slice(0, 22),
-        x: w / 2, y: h / 2,
-        r:          10 + Math.min((agentEvtCount.get(d.id) ?? 0) / 15, 22),
-        eventCount: agentEvtCount.get(d.id) ?? 0,
-        phase:      ((d.id * 7919) % 100) / 100 * Math.PI * 2,
-      }));
+      agentsRef.current = placed.map(d => {
+        const lastPushAt      = d.updatedAt ? new Date(d.updatedAt).getTime() : 0;
+        const checkIntervalMs = (d.resolvedSettings?.checkIntervalSeconds ?? 60) * 1000;
+        return {
+          id:              d.id,
+          label:           (d.name ?? d.hostname).slice(0, 22),
+          x: w / 2, y: h / 2,
+          r:               10 + Math.min((agentEvtCount.get(d.id) ?? 0) / 15, 22),
+          eventCount:      agentEvtCount.get(d.id) ?? 0,
+          phase:           ((d.id * 7919) % 100) / 100 * Math.PI * 2,
+          lastPushAt,
+          checkIntervalMs,
+        };
+      });
       layoutAgents(agentsRef.current, w, h);
       const agentMap = new Map(agentsRef.current.map(a => [a.id, a]));
 
@@ -596,12 +684,24 @@ export function NetMapPage() {
           services: r.affectedServices ?? [],
         });
       }
-      // Build IP → whitelist label map (exact matches only; CIDR ranges excluded)
-      const wlLabelMap = new Map<string, string | null>();
+      // Build whitelist CIDR entries for matching.
+      // Supports exact IPs, /32 single-host, and broader CIDRs like /24.
+      const wlEntries: WlEntry[] = [];
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       for (const wl of (wlRes.data as any)?.data ?? []) {
-        if (typeof wl.ip === 'string' && !wl.ip.includes('/')) {
-          wlLabelMap.set(wl.ip, wl.label ?? null);
+        if (typeof wl.ip !== 'string') continue;
+        const label = wl.label ?? null;
+        if (!wl.ip.includes('/')) {
+          const n = ipToInt(wl.ip);
+          if (n >= 0) wlEntries.push({ networkInt: n, mask: 0xFFFFFFFF, label, plainIp: wl.ip });
+        } else {
+          const [net, pfxStr] = wl.ip.split('/');
+          const pfx = parseInt(pfxStr, 10);
+          if (isNaN(pfx) || pfx < 0 || pfx > 32) continue;
+          const n = ipToInt(net);
+          if (n < 0) continue;
+          const mask = pfx === 0 ? 0 : (0xFFFFFFFF << (32 - pfx)) >>> 0;
+          wlEntries.push({ networkInt: n, mask, label, plainIp: pfx === 32 ? net : null });
         }
       }
 
@@ -632,7 +732,7 @@ export function NetMapPage() {
           status, failures: rep?.failures ?? allFailures,
           services: allServices, eventCount: totalCount,
           lastSeen: Date.now(), glowUntil: 0,
-          whitelistLabel: wlLabelMap.has(evIp) ? wlLabelMap.get(evIp) : undefined,
+          whitelistLabel: matchWhitelist(evIp, wlEntries)?.label,
         };
         ipsRef.current.set(evIp, node);
         cnt++;
@@ -657,10 +757,46 @@ export function NetMapPage() {
           color:    statusColor(rep.status),
           status:   rep.status, failures: rep.failures, services: rep.services,
           eventCount: 0, lastSeen: Date.now(), glowUntil: 0,
-          whitelistLabel: wlLabelMap.has(repIp) ? wlLabelMap.get(repIp) : undefined,
+          whitelistLabel: matchWhitelist(repIp, wlEntries)?.label,
         };
         ipsRef.current.set(repIp, node);
         cnt++;
+      }
+
+      // Add single-host whitelist entries (/32 or exact IP) not yet on the map
+      for (const wle of wlEntries) {
+        if (!wle.plainIp || wle.mask !== 0xFFFFFFFF) continue; // skip broader CIDRs
+        if (cnt >= 250) break;
+        if (ipsRef.current.has(wle.plainIp)) continue; // handled by post-process pass below
+        let targetId = agArr[0]?.id ?? -1, minCnt = Infinity;
+        for (const ag of agArr) {
+          const c = [...ipsRef.current.values()].filter(n => n.agentIds[0] === ag.id).length;
+          if (c < minCnt) { minCnt = c; targetId = ag.id; }
+        }
+        if (!agentMap.has(targetId)) continue;
+        const node: IpNode = {
+          key: wle.plainIp, ip: wle.plainIp,
+          country: '??', flag: flagEmoji('??'),
+          agentIds: [targetId], agentWeights: { [targetId]: 0 },
+          x: agentMap.get(targetId)!.x, y: agentMap.get(targetId)!.y,
+          dotR: 3, color: '#22c55e',
+          status: 'whitelisted', failures: 0, services: [],
+          eventCount: 0, lastSeen: Date.now(), glowUntil: 0,
+          whitelistLabel: wle.label,
+        };
+        ipsRef.current.set(wle.plainIp, node);
+        cnt++;
+      }
+
+      // Post-process: apply whitelist status to ALL nodes (handles CIDR ranges like /24).
+      // An IP that falls inside a whitelisted CIDR is marked green regardless of prior status.
+      for (const node of ipsRef.current.values()) {
+        const wlMatch = matchWhitelist(node.ip, wlEntries);
+        if (wlMatch) {
+          if (!node.whitelistLabel) node.whitelistLabel = wlMatch.label;
+          node.status = 'whitelisted';
+          node.color  = '#22c55e';
+        }
       }
 
       // Batch layout with repulsion
@@ -760,15 +896,17 @@ export function NetMapPage() {
 
     // ── Orbital rings (faint circles at each ring radius) ────────────────
     for (const ag of agents) {
-      const ipCount = ipsByAgent.get(ag.id) ?? 0;
+      const ipCount  = ipsByAgent.get(ag.id) ?? 0;
       if (ipCount === 0) continue;
-      const rings = Math.ceil(ipCount / PER_RING);
-      const dimmed = selId !== null && selId !== ag.id;
+      const rings    = Math.ceil(ipCount / PER_RING);
+      const dimmed   = selId !== null && selId !== ag.id;
+      const agOnline = Date.now() - ag.lastPushAt < ag.checkIntervalMs * 2;
       for (let ring = 0; ring < rings; ring++) {
         const r = RING_INNER_R + ring * RING_GAP;
         ctx.save();
-        ctx.globalAlpha = dimmed ? 0.012 : 0.042 - ring * 0.008;
-        ctx.strokeStyle = '#4a8aaa';
+        const baseAlpha = dimmed ? 0.012 : 0.042 - ring * 0.008;
+        ctx.globalAlpha = agOnline ? baseAlpha : baseAlpha * 0.35;
+        ctx.strokeStyle = agOnline ? '#4a8aaa' : '#4a5568';
         ctx.lineWidth   = 0.6 / k;
         ctx.beginPath(); ctx.arc(ag.x, ag.y, r, 0, Math.PI * 2);
         ctx.stroke(); ctx.restore();
@@ -844,38 +982,65 @@ export function NetMapPage() {
 
     // ── Agent nodes ──────────────────────────────────────────────────────
     for (const agent of agents) {
-      const isSel  = selId === agent.id;
-      const dimmed = selId !== null && !isSel;
-      const pulse  = (Math.sin(ts / 1100 + agent.phase) + 1) / 2;
-      const alpha  = dimmed ? 0.22 : 1.0;
-      const nr     = agent.r;
+      const isSel    = selId === agent.id;
+      const dimmed   = selId !== null && !isSel;
+      const isOnline = Date.now() - agent.lastPushAt < agent.checkIntervalMs * 2;
+      const pulse    = (Math.sin(ts / 1100 + agent.phase) + 1) / 2;
+      const alpha    = dimmed ? 0.22 : 1.0;
+      const nr       = agent.r;
 
+      // Pulse ring
       ctx.save();
-      ctx.globalAlpha = alpha * (0.04 + pulse * 0.05);
-      ctx.strokeStyle = '#ddeeff'; ctx.shadowBlur = 16; ctx.shadowColor = '#ddeeff';
+      ctx.globalAlpha = alpha * (isOnline ? (0.04 + pulse * 0.05) : 0.018);
+      ctx.strokeStyle = isOnline ? '#ddeeff' : '#6b7280';
+      ctx.shadowBlur  = isOnline ? 16 : 4;
+      ctx.shadowColor = isOnline ? '#ddeeff' : '#6b7280';
       ctx.lineWidth   = 0.7 / k;
-      ctx.beginPath(); ctx.arc(agent.x, agent.y, nr + 20 + pulse * 5, 0, Math.PI * 2);
+      ctx.beginPath(); ctx.arc(agent.x, agent.y, nr + 20 + (isOnline ? pulse * 5 : 0), 0, Math.PI * 2);
       ctx.stroke(); ctx.restore();
 
+      // Body gradient
       ctx.save();
-      ctx.globalAlpha = alpha; ctx.shadowBlur = 18; ctx.shadowColor = '#ffffff';
+      ctx.globalAlpha = alpha * (isOnline ? 1.0 : 0.45);
+      ctx.shadowBlur  = isOnline ? 18 : 6;
+      ctx.shadowColor = isOnline ? '#ffffff' : '#475569';
       const g = ctx.createRadialGradient(agent.x, agent.y, 0, agent.x, agent.y, nr);
-      g.addColorStop(0, '#ffffff');
-      g.addColorStop(0.42, 'rgba(220,235,255,0.48)');
-      g.addColorStop(1, 'rgba(200,220,255,0)');
+      if (isOnline) {
+        g.addColorStop(0, '#ffffff');
+        g.addColorStop(0.42, 'rgba(220,235,255,0.48)');
+        g.addColorStop(1, 'rgba(200,220,255,0)');
+      } else {
+        g.addColorStop(0, '#94a3b8');
+        g.addColorStop(0.42, 'rgba(100,116,139,0.38)');
+        g.addColorStop(1, 'rgba(71,85,105,0)');
+      }
       ctx.fillStyle = g;
       ctx.beginPath(); ctx.arc(agent.x, agent.y, nr, 0, Math.PI * 2); ctx.fill();
       ctx.restore();
 
+      // Label
       const fs = Math.round(Math.max(9, 12 * Math.min(k, 1.2)));
       ctx.save();
-      ctx.globalAlpha  = alpha * 0.90;
+      ctx.globalAlpha  = alpha * (isOnline ? 0.90 : 0.48);
       ctx.font         = `600 ${fs}px "Inter", "Segoe UI", ui-sans-serif, sans-serif`;
-      ctx.fillStyle    = isSel ? '#f0f8ff' : '#ddeeff';
+      ctx.fillStyle    = isOnline ? (isSel ? '#f0f8ff' : '#ddeeff') : '#64748b';
       ctx.textAlign    = 'center'; ctx.textBaseline = 'bottom';
       ctx.shadowBlur   = 7; ctx.shadowColor = 'rgba(0,0,0,0.85)';
       ctx.fillText(agent.label, agent.x, agent.y - nr - 7);
       ctx.restore();
+
+      // Offline badge
+      if (!isOnline) {
+        const bfs = Math.round(Math.max(7, 9 * Math.min(k, 1.2)));
+        ctx.save();
+        ctx.globalAlpha = alpha * 0.55;
+        ctx.font        = `500 ${bfs}px "Inter", "Segoe UI", ui-sans-serif, sans-serif`;
+        ctx.fillStyle   = '#94a3b8';
+        ctx.textAlign   = 'center'; ctx.textBaseline = 'top';
+        ctx.shadowBlur  = 0;
+        ctx.fillText('offline', agent.x, agent.y + nr + 5);
+        ctx.restore();
+      }
     }
 
     // ── Smart badge placement ─────────────────────────────────────────────
@@ -993,7 +1158,10 @@ export function NetMapPage() {
       const agent  = agents.find(a => a.id === data.deviceId) ?? agents[0];
       if (!agent) return;
       if (!filtersRef.current.has(data.eventType)) return;
-      const col = data.eventType === 'auth_success' ? EVENT_COLORS.auth_success : EVENT_COLORS.auth_failure;
+      const svcKey = (data.service ?? '').toLowerCase().split('/')[0];
+      const col = DANGEROUS_SVCS.has(svcKey)
+        ? '#ef4444' // red for dangerous services (SSH, RDP, MySQL…) regardless of success/failure
+        : data.eventType === 'auth_success' ? EVENT_COLORS.auth_success : EVENT_COLORS.auth_failure;
       const cc  = ccs[Math.floor(Math.random() * ccs.length)];
       upsertIp(data.ip, cc, agent.id,
         data.eventType === 'auth_failure' ? 'suspicious' : 'clean',
@@ -1034,9 +1202,65 @@ export function NetMapPage() {
       setStats(s => ({ ...s, today: s.today + 1, banned: s.banned + 1 }));
     };
 
-    socket.on('ip:flow',  onIpFlow);
-    socket.on('ban:auto', onBanAuto);
-    return () => { socket.off('ip:flow', onIpFlow); socket.off('ban:auto', onBanAuto); };
+    const onPushHeartbeat = (data: { deviceId: number }) => {
+      // 1. Immediately update lastPushAt so online indicator is accurate
+      const agent = agentsRef.current.find(a => a.id === data.deviceId);
+      if (agent) agent.lastPushAt = Date.now();
+
+      // 2. Debounced mini-refresh per agent (1.5 s cooldown so a 2 s push cycle
+      //    results in one fetch per agent shortly after each push, not per-event).
+      const prev = agentRefreshTimersRef.current.get(data.deviceId);
+      if (prev) clearTimeout(prev);
+      const t = setTimeout(async () => {
+        agentRefreshTimersRef.current.delete(data.deviceId);
+        const now   = Date.now();
+        const since = new Date(now - 90_000).toISOString(); // look back 90 s
+        try {
+          // Fetch recent events for this agent only
+          const evRes = await apiClient.get<{ data: any[] }>(
+            '/ip-events',
+            { params: { deviceId: data.deviceId, pageSize: 60, from: since } },
+          ).catch(() => null);
+          for (const ev of ((evRes?.data as any)?.data ?? []) as any[]) {
+            const evIp = ev.ip as string | undefined;
+            if (!evIp) continue;
+            const node = ipsRef.current.get(evIp);
+            if (node) {
+              node.lastSeen = now;
+              const svc = (ev.service ?? '') as string;
+              if (svc && !node.services.includes(svc)) node.services = [...node.services, svc];
+            } else {
+              // New IP not yet on the map — upsert without glow (socket already spawned particle)
+              const evType  = (ev.event_type ?? ev.eventType ?? '') as string;
+              const status  = evType === 'auth_failure' ? 'suspicious' : 'clean';
+              upsertIp(evIp, '??', data.deviceId, status,
+                status === 'suspicious' ? 1 : 0,
+                ev.service ? [ev.service as string] : [], 1, false);
+            }
+          }
+          // Refresh ban stats so counters stay current
+          const banRes = await apiClient.get<{ data: { active: number; today: number } }>(
+            '/bans/stats',
+          ).catch(() => null);
+          const bs = (banRes?.data as any)?.data;
+          if (bs) setStats(s => ({ ...s, banned: bs.active, today: bs.today }));
+          setIpCount(ipsRef.current.size);
+        } catch { /* ignore */ }
+      }, 1_500);
+      agentRefreshTimersRef.current.set(data.deviceId, t);
+    };
+
+    socket.on('ip:flow',             onIpFlow);
+    socket.on('ban:auto',            onBanAuto);
+    socket.on('agent:pushHeartbeat', onPushHeartbeat);
+    return () => {
+      socket.off('ip:flow',             onIpFlow);
+      socket.off('ban:auto',            onBanAuto);
+      socket.off('agent:pushHeartbeat', onPushHeartbeat);
+      // Clear any pending per-agent refresh timers on cleanup
+      agentRefreshTimersRef.current.forEach(t => clearTimeout(t));
+      agentRefreshTimersRef.current.clear();
+    };
   }, [upsertIp, spawnParticle]);
 
   // ── Socket connection status ───────────────────────────────────────────────
@@ -1250,7 +1474,7 @@ export function NetMapPage() {
               })}
               <div className="mt-3 pt-2 border-t border-slate-800/50">
                 <div className="font-mono text-[8px] text-slate-500 tracking-widest mb-1.5 uppercase">IP Status</div>
-                {[{ label: 'Banned', color: '#ef4444' }, { label: 'Suspicious', color: '#f97316' }, { label: 'Clean', color: '#475569' }].map(({ label, color }) => (
+                {[{ label: 'Whitelisted', color: '#22c55e' }, { label: 'Banned', color: '#ef4444' }, { label: 'Suspicious', color: '#f97316' }, { label: 'Clean', color: '#475569' }].map(({ label, color }) => (
                   <div key={label} className="flex items-center gap-2 py-[2px]">
                     <div className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: color }} />
                     <span className="font-mono text-[8px] text-slate-500">{label}</span>
