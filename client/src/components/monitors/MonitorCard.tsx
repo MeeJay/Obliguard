@@ -71,13 +71,18 @@ export function MonitorCard({
       onClick={selectionMode && !selectionDisabled ? () => onSelect?.(monitor.id) : undefined}
     >
       {selectionMode && (
-        <input
-          type="checkbox"
-          checked={selected}
-          onChange={() => onSelect?.(monitor.id)}
-          onClick={(e) => e.stopPropagation()}
-          className="h-4 w-4 rounded border-border bg-bg-tertiary text-accent focus:ring-accent"
-        />
+        <div className="relative h-4 w-4 shrink-0">
+          <input
+            type="checkbox"
+            checked={selected}
+            onChange={() => onSelect?.(monitor.id)}
+            onClick={(e) => e.stopPropagation()}
+            className="peer appearance-none h-4 w-4 rounded border cursor-pointer transition-colors bg-bg-tertiary border-border checked:bg-accent checked:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30"
+          />
+          <svg className="pointer-events-none absolute top-0 left-0 hidden h-4 w-4 text-white peer-checked:block" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M2.5 8L6 11.5L13.5 4.5" />
+          </svg>
+        </div>
       )}
 
       <Link

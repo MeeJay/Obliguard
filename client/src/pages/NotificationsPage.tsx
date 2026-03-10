@@ -357,15 +357,20 @@ export function NotificationsPage() {
               if (field.type === 'boolean') {
                 return (
                   <div key={field.key} className="flex items-center gap-2">
-                    <input
-                      type="checkbox"
-                      id={`cfg-${field.key}`}
-                      checked={Boolean(formConfig[field.key])}
-                      onChange={(e) =>
-                        setFormConfig({ ...formConfig, [field.key]: e.target.checked })
-                      }
-                      className="h-4 w-4 rounded border-border bg-bg-tertiary text-accent focus:ring-accent"
-                    />
+                    <div className="relative h-4 w-4 shrink-0">
+                      <input
+                        type="checkbox"
+                        id={`cfg-${field.key}`}
+                        checked={Boolean(formConfig[field.key])}
+                        onChange={(e) =>
+                          setFormConfig({ ...formConfig, [field.key]: e.target.checked })
+                        }
+                        className="peer appearance-none h-4 w-4 rounded border cursor-pointer transition-colors bg-bg-tertiary border-border checked:bg-accent checked:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30"
+                      />
+                      <svg className="pointer-events-none absolute top-0 left-0 hidden h-4 w-4 text-white peer-checked:block" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M2.5 8L6 11.5L13.5 4.5" />
+                      </svg>
+                    </div>
                     <label htmlFor={`cfg-${field.key}`} className="text-sm text-text-secondary">
                       {field.label}
                     </label>

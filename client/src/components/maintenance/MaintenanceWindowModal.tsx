@@ -431,12 +431,17 @@ export function MaintenanceWindowModal({
               <div className="space-y-1.5 max-h-32 overflow-y-auto">
                 {channelOptions.map((ch) => (
                   <label key={ch.id} className="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={notifyChannelIds.includes(ch.id)}
-                      onChange={() => toggleChannel(ch.id)}
-                      className="h-3.5 w-3.5 rounded border-border bg-bg-tertiary text-accent focus:ring-accent"
-                    />
+                    <div className="relative h-3.5 w-3.5 shrink-0">
+                      <input
+                        type="checkbox"
+                        checked={notifyChannelIds.includes(ch.id)}
+                        onChange={() => toggleChannel(ch.id)}
+                        className="peer appearance-none h-3.5 w-3.5 rounded border cursor-pointer transition-colors bg-bg-tertiary border-border checked:bg-accent checked:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30"
+                      />
+                      <svg className="pointer-events-none absolute top-0 left-0 hidden h-3.5 w-3.5 text-white peer-checked:block" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M2.5 8L6 11.5L13.5 4.5" />
+                      </svg>
+                    </div>
                     <span className="text-sm text-text-primary">{ch.name}</span>
                     <span className="text-xs text-text-muted">({ch.type})</span>
                   </label>
@@ -447,12 +452,17 @@ export function MaintenanceWindowModal({
 
           {/* Active toggle */}
           <label className="flex items-center gap-2.5 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={active}
-              onChange={(e) => setActive(e.target.checked)}
-              className="h-4 w-4 rounded border-border bg-bg-tertiary text-accent focus:ring-accent"
-            />
+            <div className="relative h-4 w-4 shrink-0">
+              <input
+                type="checkbox"
+                checked={active}
+                onChange={(e) => setActive(e.target.checked)}
+                className="peer appearance-none h-4 w-4 rounded border cursor-pointer transition-colors bg-bg-tertiary border-border checked:bg-accent checked:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30"
+              />
+              <svg className="pointer-events-none absolute top-0 left-0 hidden h-4 w-4 text-white peer-checked:block" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M2.5 8L6 11.5L13.5 4.5" />
+              </svg>
+            </div>
             <span className="text-sm font-medium text-text-primary">{t('maintenance.fieldActive')}</span>
           </label>
 

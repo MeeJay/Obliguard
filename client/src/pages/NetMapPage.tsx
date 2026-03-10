@@ -74,7 +74,7 @@ const IP_TTL = 20 * 60 * 1000; // 20 minutes
 
 /** Ring layout constants — shared by distributeIpsAroundAgents() and animate(). */
 const RING_INNER_R = 42;              // first ring distance from agent centre (px)
-const RING_GAP     = 30;              // gap between successive rings (px)
+const RING_GAP     = 14;              // gap between successive rings (px) — ~1 empty dot between rings
 const PER_RING     = 30;              // max IPs per ring
 const ARC_START    = -Math.PI / 6;   // 330° — first arc position (bottom-right)
 const ARC_SPAN     = (4 * Math.PI) / 3; // 240° arc, skipping top 120° (label zone)
@@ -227,7 +227,7 @@ function distributeIpsAroundAgents(
       const baseAngle   = ARC_START + posInRing * angleStep;
       // Tiny deterministic jitter — keeps it organic, avoids perfect grid
       const jA = (ipRand(ip.ip, 97) - 0.5) * Math.min(angleStep * 0.30, 0.10);
-      const jR = (ipRand(ip.ip, 83) - 0.5) * 9;
+      const jR = (ipRand(ip.ip, 83) - 0.5) * 4;
       const r  = RING_INNER_R + ring * RING_GAP + jR;
       ip.x = ag.x + Math.cos(baseAngle + jA) * r;
       ip.y = ag.y + Math.sin(baseAngle + jA) * r;
@@ -758,17 +758,29 @@ export function NetMapPage() {
       }
     }
 
-    // ── IP–agent edges ───────────────────────────────────────────────────
+    // ── IP–agent edges (direction-coded) ────────────────────────────────
+    // Warm  = inbound threat (IP → agent): red=banned, orange=suspicious, amber=failure
+    // Cool  = clean / outbound  (agent → IP): sky-blue
+    // Dash animation: inbound dashes travel toward the agent; outbound away from it.
     for (const ip of ipNodes) {
-      const dimmed = selId !== null && !ip.agentIds.includes(selId);
-      const alpha  = dimmed ? 0.03 : selId !== null ? 0.22 : 0.08;
+      const dimmed    = selId !== null && !ip.agentIds.includes(selId);
+      const alpha     = dimmed ? 0.04 : selId !== null ? 0.55 : 0.24;
+      const isInbound = ip.failures > 0 || ip.status === 'banned' || ip.status === 'suspicious';
+      const edgeColor = ip.status === 'banned'     ? '#ef4444'
+                      : ip.status === 'suspicious' ? '#f97316'
+                      : ip.failures > 0            ? '#fbbf24'
+                      :                              '#38bdf8'; // clean / outbound → cool blue
+      const thickness  = (1.5 + Math.min(ip.eventCount / 25, 2.0)) / k;
+      const dashOffset = isInbound ? -(ts / 50) % 10 : (ts / 50) % 10;
       for (const aid of ip.agentIds) {
         const ag = agMap.get(aid);
         if (!ag) continue;
         ctx.save();
-        ctx.globalAlpha   = alpha;
-        ctx.strokeStyle   = ip.color; ctx.lineWidth = 0.5 / k;
-        ctx.setLineDash([2, 5]); ctx.lineDashOffset = -(ts / 60) % 7;
+        ctx.globalAlpha    = alpha;
+        ctx.strokeStyle    = edgeColor;
+        ctx.lineWidth      = thickness;
+        ctx.setLineDash([3, 7]);
+        ctx.lineDashOffset = dashOffset;
         ctx.beginPath(); ctx.moveTo(ip.x, ip.y); ctx.lineTo(ag.x, ag.y);
         ctx.stroke(); ctx.setLineDash([]); ctx.restore();
       }

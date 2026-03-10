@@ -59,12 +59,17 @@ function FieldRow({
   return (
     <div className="space-y-1.5">
       <label className="flex items-center gap-2 cursor-pointer select-none">
-        <input
-          type="checkbox"
-          checked={enabled}
-          onChange={onToggle}
-          className="h-4 w-4 rounded border-border bg-bg-tertiary text-accent focus:ring-accent"
-        />
+        <div className="relative h-4 w-4 shrink-0">
+          <input
+            type="checkbox"
+            checked={enabled}
+            onChange={onToggle}
+            className="peer appearance-none h-4 w-4 rounded border cursor-pointer transition-colors bg-bg-tertiary border-border checked:bg-accent checked:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30"
+          />
+          <svg className="pointer-events-none absolute top-0 left-0 hidden h-4 w-4 text-white peer-checked:block" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M2.5 8L6 11.5L13.5 4.5" />
+          </svg>
+        </div>
         <span className={cn('text-sm font-medium', enabled ? 'text-text-primary' : 'text-text-secondary')}>
           {label}
         </span>
@@ -283,13 +288,18 @@ export function BulkEditModal({ monitorIds, isAgentSelection, onClose }: BulkEdi
                 onToggle={() => setEnabled('upsideDown', !form.upsideDown.enabled)}
               >
                 <label className={cn('flex items-center gap-2 cursor-pointer', !form.upsideDown.enabled && 'pointer-events-none')}>
-                  <input
-                    type="checkbox"
-                    checked={form.upsideDown.value}
-                    onChange={(e) => setValue('upsideDown', e.target.checked)}
-                    disabled={!form.upsideDown.enabled}
-                    className="h-4 w-4 rounded border-border bg-bg-tertiary text-accent focus:ring-accent"
-                  />
+                  <div className="relative h-4 w-4 shrink-0">
+                    <input
+                      type="checkbox"
+                      checked={form.upsideDown.value}
+                      onChange={(e) => setValue('upsideDown', e.target.checked)}
+                      disabled={!form.upsideDown.enabled}
+                      className="peer appearance-none h-4 w-4 rounded border cursor-pointer transition-colors bg-bg-tertiary border-border checked:bg-accent checked:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30 disabled:opacity-40 disabled:cursor-not-allowed"
+                    />
+                    <svg className="pointer-events-none absolute top-0 left-0 hidden h-4 w-4 text-white peer-checked:block" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M2.5 8L6 11.5L13.5 4.5" />
+                    </svg>
+                  </div>
                   <span className="text-sm text-text-secondary">Invert UP/DOWN logic</span>
                 </label>
               </FieldRow>
