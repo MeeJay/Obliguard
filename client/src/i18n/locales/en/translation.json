@@ -463,6 +463,7 @@
       "agentList": "Agents ({{count}})",
       "monitorList": "Monitors ({{count}})",
       "agentSettings": "Agent Group Settings",
+      "agentSettingsDesc": "Override push interval and missed push threshold for agents in this group.",
       "pushInterval": "Default Push Interval",
       "pushIntervalDesc": "Applied to new agents in this group (empty = device default)",
       "seconds": "s",
@@ -743,10 +744,10 @@
       "downDesc": "Notify when the agent goes offline or down",
       "up": "Up",
       "upDesc": "Notify when the agent recovers",
-      "alert": "Alert",
-      "alertDesc": "Notify when a threshold is breached",
-      "update": "Update",
-      "updateDesc": "Notify when the agent starts a self-update"
+      "threat": "Threat",
+      "threatDesc": "Notify when an IP from this agent becomes suspicious (yellow)",
+      "attack": "Attack",
+      "attackDesc": "Notify when an IP is banned due to activity from this agent"
     }
   },
 

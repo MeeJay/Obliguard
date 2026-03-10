@@ -273,18 +273,15 @@ export interface AppConfig {
  */
 export interface AgentGlobalConfig {
   checkIntervalSeconds: number | null;
-  heartbeatMonitoring: boolean | null;
   maxMissedPushes: number | null;
   notificationTypes: NotificationTypeConfig | null;
 }
 
 export const DEFAULT_AGENT_GLOBAL_CONFIG: Required<{
   checkIntervalSeconds: number;
-  heartbeatMonitoring: boolean;
   maxMissedPushes: number;
 }> = {
   checkIntervalSeconds: 60,
-  heartbeatMonitoring: true,
   maxMissedPushes: 2,
 };
 
@@ -414,23 +411,24 @@ export const DEFAULT_AGENT_THRESHOLDS: AgentThresholds = {
 
 export interface NotificationTypeConfig {
   global: boolean | null;
-  down: boolean | null;
-  up: boolean | null;
-  alert: boolean | null;
-  update: boolean | null;
+  down:   boolean | null;
+  up:     boolean | null;
+  /** Notify when an IP from this agent becomes suspicious (yellow). */
+  threat: boolean | null;
+  /** Notify when an IP is banned due to activity from this agent. */
+  attack: boolean | null;
 }
 
 export const DEFAULT_NOTIFICATION_TYPES: Required<{ [K in keyof NotificationTypeConfig]: boolean }> = {
   global: true,
   down:   true,
   up:     true,
-  alert:  true,
-  update: false,
+  threat: true,
+  attack: true,
 };
 
 export interface AgentGroupConfig {
   pushIntervalSeconds: number | null;
-  heartbeatMonitoring: boolean | null;
   maxMissedPushes: number | null;
   notificationTypes: NotificationTypeConfig | null;
 }
@@ -522,9 +520,13 @@ export interface AgentDevice {
     global: boolean;
     down: boolean;
     up: boolean;
-    alert: boolean;
-    update: boolean;
+    threat: boolean;
+    attack: boolean;
   };
+  /** Set when an IP from this agent turns suspicious. Clears after 3 min without new failures. */
+  lastThreatAt?: string | null;
+  /** Set when an IP is banned from this agent's events. Clears after 10 min without new bans. */
+  lastAttackAt?: string | null;
 }
 
 // ============================================
@@ -680,6 +682,13 @@ export interface ServiceTemplate {
   mode: ServiceTemplateMode;
   /** NULL = platform-wide; non-null = tenant-scoped custom template */
   tenantId: number | null;
+  /**
+   * When set, this is a "local" template visible only on one agent or group.
+   * ownerScope = 'agent' | 'group', ownerScopeId = device or group id.
+   * Local templates are not shown in the global templates list.
+   */
+  ownerScope: 'agent' | 'group' | null;
+  ownerScopeId: number | null;
   createdBy: number | null;
   createdAt: string;
   updatedAt: string;
@@ -715,6 +724,13 @@ export interface ResolvedServiceConfig {
   enabled: boolean;
   mode: ServiceTemplateMode;
   sampleRequested: boolean;
+  /**
+   * Where the `enabled` value was overridden.
+   * 'agent'  = an agent-level assignment set enabled_override
+   * 'group'  = a group-level assignment set enabled_override (closest ancestor wins)
+   * null     = no override — using template default
+   */
+  enabledOverrideScope: 'agent' | 'group' | null;
 }
 
 export interface CreateServiceTemplateRequest {
@@ -726,6 +742,9 @@ export interface CreateServiceTemplateRequest {
   windowSeconds?: number;
   enabled?: boolean;
   mode?: ServiceTemplateMode;
+  /** When provided, creates a local template tied to this agent or group. */
+  ownerScope?: 'agent' | 'group' | null;
+  ownerScopeId?: number | null;
 }
 
 export interface UpdateServiceTemplateRequest {

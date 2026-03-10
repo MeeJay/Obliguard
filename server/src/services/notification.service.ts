@@ -637,22 +637,22 @@ export const notificationService = {
    * Each field uses the first non-null value found in the chain.
    */
   async resolveNotificationTypesForDevice(deviceId: number): Promise<{
-    global: boolean; down: boolean; up: boolean; alert: boolean; update: boolean;
+    global: boolean; down: boolean; up: boolean; threat: boolean; attack: boolean;
   }> {
     // Accumulated values — undefined means "not yet resolved"
     let global: boolean | undefined;
-    let down: boolean | undefined;
-    let up: boolean | undefined;
-    let alert: boolean | undefined;
-    let update: boolean | undefined;
+    let down:   boolean | undefined;
+    let up:     boolean | undefined;
+    let threat: boolean | undefined;
+    let attack: boolean | undefined;
 
     const applyConfig = (cfg: NotificationTypeConfig | null | undefined) => {
       if (!cfg) return;
       if (global === undefined && cfg.global !== null && cfg.global !== undefined) global = cfg.global;
       if (down   === undefined && cfg.down   !== null && cfg.down   !== undefined) down   = cfg.down;
       if (up     === undefined && cfg.up     !== null && cfg.up     !== undefined) up     = cfg.up;
-      if (alert  === undefined && cfg.alert  !== null && cfg.alert  !== undefined) alert  = cfg.alert;
-      if (update === undefined && cfg.update !== null && cfg.update !== undefined) update = cfg.update;
+      if (threat === undefined && cfg.threat !== null && cfg.threat !== undefined) threat = cfg.threat;
+      if (attack === undefined && cfg.attack !== null && cfg.attack !== undefined) attack = cfg.attack;
     };
 
     // 1. Device-level override
@@ -690,14 +690,14 @@ export const notificationService = {
     }
 
     // 3. Global agent defaults (from app_config agent_global_config)
-    if (global === undefined || down === undefined || up === undefined || alert === undefined || update === undefined) {
+    if (global === undefined || down === undefined || up === undefined || threat === undefined || attack === undefined) {
       const { appConfigService } = await import('./appConfig.service');
       const globalTypes = await appConfigService.getResolvedAgentNotificationTypes();
       if (global === undefined) global = globalTypes.global;
       if (down   === undefined) down   = globalTypes.down;
       if (up     === undefined) up     = globalTypes.up;
-      if (alert  === undefined) alert  = globalTypes.alert;
-      if (update === undefined) update = globalTypes.update;
+      if (threat === undefined) threat = globalTypes.threat;
+      if (attack === undefined) attack = globalTypes.attack;
     }
 
     // 4. Hardcoded system defaults for any still-unresolved fields
@@ -705,8 +705,8 @@ export const notificationService = {
       global: global ?? DEFAULT_NOTIFICATION_TYPES.global,
       down:   down   ?? DEFAULT_NOTIFICATION_TYPES.down,
       up:     up     ?? DEFAULT_NOTIFICATION_TYPES.up,
-      alert:  alert  ?? DEFAULT_NOTIFICATION_TYPES.alert,
-      update: update ?? DEFAULT_NOTIFICATION_TYPES.update,
+      threat: threat ?? DEFAULT_NOTIFICATION_TYPES.threat,
+      attack: attack ?? DEFAULT_NOTIFICATION_TYPES.attack,
     };
   },
 
@@ -720,7 +720,7 @@ export const notificationService = {
     newStatus: string,
     previousStatus: string,
     violations?: string[],
-    notifType?: 'alert' | 'up' | 'update',
+    notifType?: 'threat' | 'attack' | 'up' | 'down',
   ): Promise<void> {
     // Only notify on status transitions (up → alert or alert → up)
     if (newStatus === previousStatus) return;
@@ -731,17 +731,21 @@ export const notificationService = {
       logger.info(`Agent notification suppressed (global=off) for device ${deviceId}`);
       return;
     }
-    const effectiveType = notifType ?? (newStatus === 'alert' ? 'alert' : 'up');
-    if (effectiveType === 'alert' && !types.alert) {
-      logger.info(`Agent notification suppressed (alert type disabled) for device ${deviceId}`);
+    const effectiveType = notifType ?? (newStatus === 'threat' ? 'threat' : newStatus === 'attack' ? 'attack' : newStatus === 'down' ? 'down' : 'up');
+    if (effectiveType === 'threat' && !types.threat) {
+      logger.info(`Agent notification suppressed (threat type disabled) for device ${deviceId}`);
+      return;
+    }
+    if (effectiveType === 'attack' && !types.attack) {
+      logger.info(`Agent notification suppressed (attack type disabled) for device ${deviceId}`);
       return;
     }
     if (effectiveType === 'up' && !types.up) {
       logger.info(`Agent notification suppressed (up type disabled) for device ${deviceId}`);
       return;
     }
-    if (effectiveType === 'update' && !types.update) {
-      logger.info(`Agent notification suppressed (update type disabled) for device ${deviceId}`);
+    if (effectiveType === 'down' && !types.down) {
+      logger.info(`Agent notification suppressed (down type disabled) for device ${deviceId}`);
       return;
     }
 

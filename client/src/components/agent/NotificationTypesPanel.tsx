@@ -43,8 +43,8 @@ const NOTIF_ROWS: NotifRow[] = [
   { key: 'global', labelKey: 'agents.notifType.global', descKey: 'agents.notifType.globalDesc' },
   { key: 'down',   labelKey: 'agents.notifType.down',   descKey: 'agents.notifType.downDesc' },
   { key: 'up',     labelKey: 'agents.notifType.up',     descKey: 'agents.notifType.upDesc' },
-  { key: 'alert',  labelKey: 'agents.notifType.alert',  descKey: 'agents.notifType.alertDesc' },
-  { key: 'update', labelKey: 'agents.notifType.update', descKey: 'agents.notifType.updateDesc' },
+  { key: 'threat', labelKey: 'agents.notifType.threat', descKey: 'agents.notifType.threatDesc' },
+  { key: 'attack', labelKey: 'agents.notifType.attack', descKey: 'agents.notifType.attackDesc' },
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -114,20 +114,18 @@ export function NotificationTypesPanel({
     }
   };
 
+  const EMPTY_CONFIG: NotificationTypeConfig = { global: null, down: null, up: null, threat: null, attack: null };
+
   /** Override: enable local override for this field, starting with the system default value */
   const handleOverride = async (key: keyof NotificationTypeConfig) => {
-    const base: NotificationTypeConfig = draft ?? {
-      global: null, down: null, up: null, alert: null, update: null,
-    };
+    const base: NotificationTypeConfig = draft ?? EMPTY_CONFIG;
     const newDraft: NotificationTypeConfig = { ...base, [key]: DEFAULT_NOTIFICATION_TYPES[key] };
     await doSave(newDraft, key);
   };
 
   /** Reset: remove local override for this field (set to null → inherit) */
   const handleReset = async (key: keyof NotificationTypeConfig) => {
-    const base: NotificationTypeConfig = draft ?? {
-      global: null, down: null, up: null, alert: null, update: null,
-    };
+    const base: NotificationTypeConfig = draft ?? EMPTY_CONFIG;
     const newDraft: NotificationTypeConfig = { ...base, [key]: null };
     // If all fields are null after reset, simplify to null (no overrides at all)
     const allNull = Object.values(newDraft).every(v => v === null);
@@ -142,10 +140,10 @@ export function NotificationTypesPanel({
       // At global scope, operate directly on config with all fields always set
       const base: NotificationTypeConfig = config ?? {
         global: DEFAULT_NOTIFICATION_TYPES.global,
-        down: DEFAULT_NOTIFICATION_TYPES.down,
-        up: DEFAULT_NOTIFICATION_TYPES.up,
-        alert: DEFAULT_NOTIFICATION_TYPES.alert,
-        update: DEFAULT_NOTIFICATION_TYPES.update,
+        down:   DEFAULT_NOTIFICATION_TYPES.down,
+        up:     DEFAULT_NOTIFICATION_TYPES.up,
+        threat: DEFAULT_NOTIFICATION_TYPES.threat,
+        attack: DEFAULT_NOTIFICATION_TYPES.attack,
       };
       const newDraft: NotificationTypeConfig = { ...base, [key]: value };
       await doSave(newDraft, key);

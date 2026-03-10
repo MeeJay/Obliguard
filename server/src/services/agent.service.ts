@@ -75,6 +75,9 @@ interface AgentDeviceRow {
   updating_since: Date | null;
   // migration 042
   notification_types: unknown;
+  // migration 004 (Obliguard)
+  last_threat_at: Date | null;
+  last_attack_at: Date | null;
 }
 
 function rowToApiKey(row: AgentApiKeyRow): AgentApiKey {
@@ -97,13 +100,13 @@ function rowToDevice(row: AgentDeviceRow, groupConfig?: AgentGroupConfig | null,
   if (!override && groupConfig) {
     resolvedSettings = {
       checkIntervalSeconds: groupConfig.pushIntervalSeconds ?? row.check_interval_seconds,
-      heartbeatMonitoring:  groupConfig.heartbeatMonitoring  ?? (row.heartbeat_monitoring ?? true),
-      maxMissedPushes:      groupConfig.maxMissedPushes      ?? (row.agent_max_missed_pushes ?? 2),
+      heartbeatMonitoring:  false,  // Obliguard: heartbeat monitoring removed
+      maxMissedPushes:      groupConfig.maxMissedPushes ?? (row.agent_max_missed_pushes ?? 2),
     };
   } else {
     resolvedSettings = {
       checkIntervalSeconds: row.check_interval_seconds,
-      heartbeatMonitoring:  row.heartbeat_monitoring ?? true,
+      heartbeatMonitoring:  false,  // Obliguard: heartbeat monitoring removed
       maxMissedPushes:      row.agent_max_missed_pushes ?? 2,
     };
   }
@@ -142,6 +145,8 @@ function rowToDevice(row: AgentDeviceRow, groupConfig?: AgentGroupConfig | null,
           ? JSON.parse(row.notification_types)
           : row.notification_types as NotificationTypeConfig)
       : null,
+    lastThreatAt: row.last_threat_at ? row.last_threat_at.toISOString() : null,
+    lastAttackAt: row.last_attack_at ? row.last_attack_at.toISOString() : null,
   };
 }
 
@@ -587,6 +592,33 @@ export const agentService = {
           })),
         );
 
+        // ── Threat detection: check if any IPs from this push are now suspicious ──
+        // If so, mark this device as "under threat" for the next 3 min.
+        const failureIps = [...new Set(
+          (body.events as AgentIpEvent[])
+            .filter(ev => ev.eventType === 'auth_failure')
+            .map(ev => ev.ip),
+        )];
+        if (failureIps.length > 0) {
+          try {
+            const suspiciousRows = await db('ip_reputation')
+              .whereIn('ip', failureIps)
+              .where({ status: 'suspicious' })
+              .select('ip')
+              .limit(1);
+            if (suspiciousRows.length > 0) {
+              await db('agent_devices').where({ id: deviceId }).update({ last_threat_at: new Date() });
+              const deviceLabel = (await db('agent_devices').where({ id: deviceId }).select('name', 'hostname').first() as { name: string | null; hostname: string } | undefined);
+              const label = deviceLabel?.name ?? deviceLabel?.hostname ?? String(deviceId);
+              notificationService.sendForAgent(deviceId, label, 'threat', 'ok', [], 'threat').catch(
+                (err) => logger.warn({ err, deviceId }, 'Failed to send threat notification'),
+              );
+            }
+          } catch (err) {
+            logger.warn({ err, deviceId }, 'handlePush: failed to check threat status');
+          }
+        }
+
         // Emit real-time connection events to the live threat map
         // One event per unique IP (deduplicated per push cycle)
         if (_io) {
@@ -776,10 +808,7 @@ export const agentService = {
       _io.to('role:admin').emit(SOCKET_EVENTS.AGENT_STATUS_CHANGED, payload);
     }
 
-    // Send "update" notification if the update type is enabled for this device
-    notificationService.sendForAgent(deviceId, label, 'updating', 'up', [], 'update').catch(
-      (err) => logger.error(err, `Failed to send update notification for device ${deviceId}`),
-    );
+    // (update notifications removed — Obliguard does not track self-updates)
   },
 
   /**

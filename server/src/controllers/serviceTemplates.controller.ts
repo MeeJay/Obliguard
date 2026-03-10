@@ -160,3 +160,42 @@ export async function requestSample(req: Request, res: Response, next: NextFunct
     next(err);
   }
 }
+
+/**
+ * GET /service-templates/resolved/group/:groupId
+ * Returns all global templates with their effective enabled status for a specific group,
+ * considering group-level assignments from this group and its ancestors.
+ */
+export async function getResolvedForGroup(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const groupId = parseInt(req.params.groupId, 10);
+    if (isNaN(groupId)) {
+      throw new AppError(400, 'Invalid groupId');
+    }
+    const configs = await serviceTemplateService.getResolvedForGroup(groupId);
+    res.json({ success: true, data: configs });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /service-templates/local/:scope/:scopeId
+ * Lists local templates that belong to a specific agent or group.
+ */
+export async function listLocalTemplates(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { scope, scopeId: scopeIdParam } = req.params;
+    if (scope !== 'agent' && scope !== 'group') {
+      throw new AppError(400, 'scope must be "agent" or "group"');
+    }
+    const scopeId = parseInt(scopeIdParam, 10);
+    if (isNaN(scopeId)) {
+      throw new AppError(400, 'Invalid scopeId');
+    }
+    const templates = await serviceTemplateService.listLocal(scope, scopeId);
+    res.json({ success: true, data: templates });
+  } catch (err) {
+    next(err);
+  }
+}

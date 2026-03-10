@@ -3,6 +3,8 @@ import { requireAuth } from '../middleware/auth';
 import { requireRole } from '../middleware/rbac';
 import {
   listTemplates,
+  listLocalTemplates,
+  getResolvedForGroup,
   getTemplate,
   createTemplate,
   updateTemplate,
@@ -13,6 +15,10 @@ import {
 } from '../controllers/serviceTemplates.controller';
 
 const router = Router();
+
+// ⚠️ Static routes before /:id to avoid Express shadowing
+router.get('/local/:scope/:scopeId', requireAuth, listLocalTemplates);
+router.get('/resolved/group/:groupId', requireAuth, getResolvedForGroup);
 
 router.get('/', requireAuth, listTemplates);
 router.get('/:id', requireAuth, getTemplate);

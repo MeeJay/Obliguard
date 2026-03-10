@@ -171,7 +171,6 @@ export function SettingsPage() {
     try {
       const updated = await appConfigApi.patchAgentGlobal({
         checkIntervalSeconds: agentInterval.trim() ? Number(agentInterval) : null,
-        heartbeatMonitoring: agentGlobal.heartbeatMonitoring,
         maxMissedPushes: agentMaxMissed.trim() ? Number(agentMaxMissed) : null,
       });
       setAgentGlobal(updated);
@@ -225,33 +224,6 @@ export function SettingsPage() {
                 </div>
               </div>
 
-              {/* Heartbeat Monitoring */}
-              <div className="flex items-center justify-between">
-                <div>
-                  <div className="text-sm font-medium text-text-primary">{t('settings.agent.heartbeatMonitoring')}</div>
-                  <div className="text-xs text-text-muted">{t('settings.agent.heartbeatMonitoringDesc')}</div>
-                </div>
-                <button
-                  role="switch"
-                  aria-checked={agentGlobal?.heartbeatMonitoring ?? DEFAULT_AGENT_GLOBAL_CONFIG.heartbeatMonitoring}
-                  disabled={!agentGlobal}
-                  onClick={async () => {
-                    if (!agentGlobal) return;
-                    const updated = await appConfigApi.patchAgentGlobal({
-                      heartbeatMonitoring: !(agentGlobal.heartbeatMonitoring ?? DEFAULT_AGENT_GLOBAL_CONFIG.heartbeatMonitoring),
-                    });
-                    setAgentGlobal(updated);
-                  }}
-                  className={cn(
-                    'relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus-visible:outline-none disabled:opacity-50',
-                    (agentGlobal?.heartbeatMonitoring ?? DEFAULT_AGENT_GLOBAL_CONFIG.heartbeatMonitoring) ? 'bg-accent' : 'bg-bg-tertiary',
-                  )}
-                >
-                  <span className={cn('pointer-events-none inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform',
-                    (agentGlobal?.heartbeatMonitoring ?? DEFAULT_AGENT_GLOBAL_CONFIG.heartbeatMonitoring) ? 'translate-x-4' : 'translate-x-0.5')} />
-                </button>
-              </div>
-
               {/* Max Missed Pushes */}
               <div className="flex items-center justify-between gap-4">
                 <div>
@@ -283,7 +255,7 @@ export function SettingsPage() {
             <div className="mt-4">
               <NotificationTypesPanel
                 config={agentGlobal?.notificationTypes ?? {
-                  global: null, down: null, up: null, alert: null, update: null,
+                  global: null, down: null, up: null, threat: null, attack: null,
                 }}
                 scope="global"
                 onSave={saveAgentNotifTypes}

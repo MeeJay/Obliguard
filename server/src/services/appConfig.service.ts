@@ -34,7 +34,6 @@ export const appConfigService = {
     if (!raw) {
       return {
         checkIntervalSeconds: null,
-        heartbeatMonitoring: null,
         maxMissedPushes: null,
         notificationTypes: null,
       };
@@ -44,7 +43,6 @@ export const appConfigService = {
     } catch {
       return {
         checkIntervalSeconds: null,
-        heartbeatMonitoring: null,
         maxMissedPushes: null,
         notificationTypes: null,
       };
@@ -64,7 +62,7 @@ export const appConfigService = {
    * DEFAULT_NOTIFICATION_TYPES when null).
    */
   async getResolvedAgentNotificationTypes(): Promise<{
-    global: boolean; down: boolean; up: boolean; alert: boolean; update: boolean;
+    global: boolean; down: boolean; up: boolean; threat: boolean; attack: boolean;
   }> {
     const cfg = await this.getAgentGlobal();
     const nt: NotificationTypeConfig | null = cfg.notificationTypes ?? null;
@@ -72,8 +70,8 @@ export const appConfigService = {
       global: nt?.global ?? DEFAULT_NOTIFICATION_TYPES.global,
       down:   nt?.down   ?? DEFAULT_NOTIFICATION_TYPES.down,
       up:     nt?.up     ?? DEFAULT_NOTIFICATION_TYPES.up,
-      alert:  nt?.alert  ?? DEFAULT_NOTIFICATION_TYPES.alert,
-      update: nt?.update ?? DEFAULT_NOTIFICATION_TYPES.update,
+      threat: nt?.threat ?? DEFAULT_NOTIFICATION_TYPES.threat,
+      attack: nt?.attack ?? DEFAULT_NOTIFICATION_TYPES.attack,
     };
   },
 };

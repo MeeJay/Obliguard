@@ -57,4 +57,20 @@ export const serviceTemplatesApi = {
     );
     return res.data.data ?? [];
   },
+
+  /** Returns all global templates with their effective status for a specific group. */
+  async getResolvedForGroup(groupId: number): Promise<ResolvedServiceConfig[]> {
+    const res = await apiClient.get<ApiResponse<ResolvedServiceConfig[]>>(
+      `/service-templates/resolved/group/${groupId}`,
+    );
+    return res.data.data ?? [];
+  },
+
+  /** Returns local templates owned by a specific agent or group. */
+  async listLocal(scope: 'agent' | 'group', scopeId: number): Promise<ServiceTemplate[]> {
+    const res = await apiClient.get<ApiResponse<ServiceTemplate[]>>(
+      `/service-templates/local/${scope}/${scopeId}`,
+    );
+    return res.data.data ?? [];
+  },
 };

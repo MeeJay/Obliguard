@@ -1,20 +1,24 @@
-import { useEffect, useState, useCallback, useMemo } from 'react';
+import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   ArrowLeft, RefreshCw, ShieldOff, ShieldCheck, ExternalLink,
   ChevronLeft, ChevronRight, Wifi, Cpu, Server, X, Eye,
-  Shield, EyeOff, Pencil, Trash2, AlertTriangle,
-  ChevronDown, ChevronUp,
+  Trash2, AlertTriangle,
+  ChevronDown, ChevronUp, LayoutGrid, Network,
 } from 'lucide-react';
 import apiClient from '@/api/client';
 import { agentApi } from '@/api/agent.api';
 import { bansApi } from '@/api/bans.api';
 import { whitelistApi } from '@/api/whitelist.api';
 import { serviceTemplatesApi } from '@/api/serviceTemplates.api';
+import { getSocket } from '@/socket/socketClient';
 import type {
   AgentDevice, ApiResponse,
-  ResolvedServiceConfig, ServiceTemplate, UpsertServiceAssignmentRequest,
+  ServiceTemplate,
+  CreateServiceTemplateRequest, NotificationTypeConfig, ServiceType,
 } from '@obliview/shared';
+import { NotificationTypesPanel } from '@/components/agent/NotificationTypesPanel';
+import { ServiceTemplatesPanel } from '@/components/agent/ServiceTemplatesPanel';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -39,6 +43,28 @@ interface IpSummaryItem {
   lastSeen: string;
 }
 
+interface MiniIpNode {
+  ip: string;
+  x: number; y: number;
+  failures: number;
+  totalEvents: number;
+}
+
+interface MiniParticle {
+  sx: number; sy: number;
+  tx: number; ty: number;
+  t: number;
+  color: string;
+}
+
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+const MINI_EVENT_COLORS: Record<string, string> = {
+  auth_success: '#22d3ee',
+  auth_failure: '#f97316',
+  ban:          '#ef4444',
+};
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function relativeTime(ts: string): string {
@@ -51,11 +77,8 @@ function relativeTime(ts: string): string {
 
 function formatTs(ts: string): string {
   return new Date(ts).toLocaleString(undefined, {
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
+    month: 'short', day: 'numeric',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
   });
 }
 
@@ -104,11 +127,9 @@ function EventTypeBadge({ type }: { type: string }) {
     port_scan:    'SCAN',
   };
   return (
-    <span
-      className={`inline-flex items-center rounded border px-1.5 py-0.5 text-[10px] font-bold ${
-        styles[type] ?? 'bg-bg-tertiary text-text-muted border-border'
-      }`}
-    >
+    <span className={`inline-flex items-center rounded border px-1.5 py-0.5 text-[10px] font-bold ${
+      styles[type] ?? 'bg-bg-tertiary text-text-muted border-border'
+    }`}>
       {labels[type] ?? type.toUpperCase()}
     </span>
   );
@@ -117,14 +138,8 @@ function EventTypeBadge({ type }: { type: string }) {
 // ── MiniStat ──────────────────────────────────────────────────────────────────
 
 function MiniStat({
-  label,
-  value,
-  colorClass,
-}: {
-  label: string;
-  value: string | number;
-  colorClass?: string;
-}) {
+  label, value, colorClass,
+}: { label: string; value: string | number; colorClass?: string }) {
   return (
     <div className="rounded-lg border border-border bg-bg-secondary px-4 py-3">
       <div className="text-[10px] uppercase text-text-muted tracking-wide mb-1">{label}</div>
@@ -144,20 +159,276 @@ function Spinner({ size = 24 }: { size?: number }) {
   );
 }
 
+// ── AgentMiniMap ──────────────────────────────────────────────────────────────
+
+interface AgentMiniMapProps {
+  deviceId: number;
+  summaryEvents: IpEventRow[];
+  onSelectIp: (ip: string) => void;
+}
+
+function AgentMiniMap({ deviceId, summaryEvents, onSelectIp }: AgentMiniMapProps) {
+  const canvasRef      = useRef<HTMLCanvasElement>(null);
+  const animRef        = useRef<number>(0);
+  const particlesRef   = useRef<MiniParticle[]>([]);
+  const layoutRef      = useRef<MiniIpNode[]>([]);
+  const sizeRef        = useRef({ cx: 200, cy: 200 });
+  const summaryRef     = useRef(summaryEvents);
+  const [tooltip, setTooltip] = useState<{ ip: string; x: number; y: number } | null>(null);
+
+  // Always keep summaryRef current so ResizeObserver can use it
+  summaryRef.current = summaryEvents;
+
+  // ── Build layout (pure fn, all writes to refs) ────────────────────────────
+  function buildLayout(canvas: HTMLCanvasElement, events: IpEventRow[]) {
+    const DPR = window.devicePixelRatio || 1;
+    const w = canvas.width / DPR;
+    const h = canvas.height / DPR;
+    const cx = w / 2;
+    const cy = h / 2;
+    sizeRef.current = { cx, cy };
+
+    // Group events by IP
+    const map = new Map<string, { failures: number; total: number }>();
+    for (const ev of events) {
+      const d = map.get(ev.ip) ?? { failures: 0, total: 0 };
+      d.total++;
+      if (ev.event_type === 'auth_failure') d.failures++;
+      map.set(ev.ip, d);
+    }
+    const sorted = Array.from(map.entries()).sort((a, b) => b[1].total - a[1].total);
+
+    const PER_RING = 18;
+    const BASE_R   = Math.min(cx, cy) * 0.50;
+    const RING_GAP = 30;
+
+    layoutRef.current = sorted.map(([ip, d], i) => {
+      const ring      = Math.floor(i / PER_RING);
+      const pos       = i % PER_RING;
+      const count     = Math.min(PER_RING, sorted.length - ring * PER_RING);
+      const r         = BASE_R + ring * RING_GAP;
+      const angle     = (pos / count) * Math.PI * 2 - Math.PI / 2;
+      return { ip, x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle), failures: d.failures, totalEvents: d.total };
+    });
+  }
+
+  // Rebuild layout when summary events change
+  useEffect(() => {
+    if (canvasRef.current) buildLayout(canvasRef.current, summaryEvents);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [summaryEvents]);
+
+  // ── Canvas setup + animation loop (mount only) ────────────────────────────
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const DPR = window.devicePixelRatio || 1;
+
+    function resize() {
+      const parent = canvas!.parentElement;
+      if (!parent) return;
+      const w = parent.clientWidth;
+      const h = parent.clientHeight;
+      canvas!.width  = w * DPR;
+      canvas!.height = h * DPR;
+      canvas!.style.width  = `${w}px`;
+      canvas!.style.height = `${h}px`;
+      ctx!.setTransform(DPR, 0, 0, DPR, 0, 0);
+      buildLayout(canvas!, summaryRef.current);
+    }
+    resize();
+
+    const ro = new ResizeObserver(resize);
+    if (canvas.parentElement) ro.observe(canvas.parentElement);
+
+    function draw() {
+      if (!ctx) return;
+      const { cx, cy } = sizeRef.current;
+      const nodes = layoutRef.current;
+      ctx.clearRect(0, 0, cx * 2, cy * 2);
+
+      if (cx === 0) { animRef.current = requestAnimationFrame(draw); return; }
+
+      // Orbital rings
+      const rings   = Math.max(1, Math.ceil(nodes.length / 18));
+      const BASE_R  = Math.min(cx, cy) * 0.50;
+      for (let ring = 0; ring < rings; ring++) {
+        ctx.beginPath();
+        ctx.arc(cx, cy, BASE_R + ring * 30, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(99,102,241,0.10)';
+        ctx.lineWidth   = 1;
+        ctx.stroke();
+      }
+
+      // Lines from IP nodes to agent centre
+      for (const n of nodes) {
+        ctx.beginPath();
+        ctx.moveTo(n.x, n.y);
+        ctx.lineTo(cx, cy);
+        ctx.strokeStyle = n.failures > 0 ? 'rgba(249,115,22,0.08)' : 'rgba(99,102,241,0.07)';
+        ctx.lineWidth   = 0.8;
+        ctx.stroke();
+      }
+
+      // Particles (IP → agent centre)
+      const alive: MiniParticle[] = [];
+      for (const p of particlesRef.current) {
+        p.t = Math.min(1, p.t + 0.013);
+        const px = p.sx + (p.tx - p.sx) * p.t;
+        const py = p.sy + (p.ty - p.sy) * p.t;
+        ctx.beginPath();
+        ctx.arc(px, py, 2.5, 0, Math.PI * 2);
+        ctx.fillStyle   = p.color;
+        ctx.globalAlpha = (1 - p.t) * 0.85;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        if (p.t < 1) alive.push(p);
+      }
+      particlesRef.current = alive;
+
+      // IP dots
+      for (const n of nodes) {
+        const r   = 3.5 + Math.min(3, Math.log1p(n.totalEvents));
+        const col = n.failures > 5 ? '#ef4444' : n.failures > 0 ? '#f97316' : '#64748b';
+        ctx.beginPath();
+        ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
+        ctx.fillStyle   = col + '30';
+        ctx.fill();
+        ctx.strokeStyle = col;
+        ctx.lineWidth   = 1;
+        ctx.stroke();
+      }
+
+      // Agent centre node
+      const agR  = 20;
+      const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, agR * 2.5);
+      grad.addColorStop(0, 'rgba(99,102,241,0.30)');
+      grad.addColorStop(1, 'rgba(99,102,241,0)');
+      ctx.beginPath(); ctx.arc(cx, cy, agR * 2.5, 0, Math.PI * 2);
+      ctx.fillStyle = grad; ctx.fill();
+
+      ctx.beginPath(); ctx.arc(cx, cy, agR, 0, Math.PI * 2);
+      ctx.fillStyle   = 'rgba(99,102,241,0.18)'; ctx.fill();
+      ctx.strokeStyle = '#6366f1'; ctx.lineWidth = 2; ctx.stroke();
+
+      ctx.fillStyle   = '#c7d2fe';
+      ctx.font        = 'bold 10px ui-monospace, monospace';
+      ctx.textAlign   = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('AGENT', cx, cy);
+
+      animRef.current = requestAnimationFrame(draw);
+    }
+
+    animRef.current = requestAnimationFrame(draw);
+
+    return () => {
+      cancelAnimationFrame(animRef.current);
+      ro.disconnect();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── Socket listener ───────────────────────────────────────────────────────
+  useEffect(() => {
+    const socket = getSocket();
+    if (!socket) return;
+
+    function handleFlow(ev: { ip: string; eventType: string; deviceId: number }) {
+      if (ev.deviceId !== deviceId) return;
+      const { cx, cy } = sizeRef.current;
+      const node  = layoutRef.current.find(n => n.ip === ev.ip);
+      const sx    = node ? node.x : cx + (Math.random() - 0.5) * 250;
+      const sy    = node ? node.y : cy + (Math.random() - 0.5) * 250;
+      const color = MINI_EVENT_COLORS[ev.eventType] ?? '#64748b';
+      particlesRef.current.push({ sx, sy, tx: cx, ty: cy, t: 0, color });
+      if (particlesRef.current.length > 60) particlesRef.current.shift();
+    }
+
+    socket.on('ip:flow', handleFlow);
+    return () => { socket.off('ip:flow', handleFlow); };
+  }, [deviceId]);
+
+  // ── Mouse interactions ────────────────────────────────────────────────────
+  function handleMouseMove(e: React.MouseEvent<HTMLCanvasElement>) {
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    for (const n of layoutRef.current) {
+      const dx = n.x - mx; const dy = n.y - my;
+      const r  = 3.5 + Math.min(3, Math.log1p(n.totalEvents));
+      if (dx * dx + dy * dy <= (r + 6) * (r + 6)) {
+        setTooltip({ ip: n.ip, x: mx + 12, y: my - 8 });
+        return;
+      }
+    }
+    setTooltip(null);
+  }
+
+  function handleClick(e: React.MouseEvent<HTMLCanvasElement>) {
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    for (const n of layoutRef.current) {
+      const dx = n.x - mx; const dy = n.y - my;
+      const r  = 3.5 + Math.min(3, Math.log1p(n.totalEvents));
+      if (dx * dx + dy * dy <= (r + 6) * (r + 6)) {
+        onSelectIp(n.ip);
+        return;
+      }
+    }
+  }
+
+  return (
+    <div className="relative w-full h-full">
+      <canvas
+        ref={canvasRef}
+        onMouseMove={handleMouseMove}
+        onMouseLeave={() => setTooltip(null)}
+        onClick={handleClick}
+        className="w-full h-full cursor-crosshair"
+      />
+      {tooltip && (
+        <div
+          className="pointer-events-none absolute z-10 rounded-lg border border-border bg-bg-secondary px-3 py-2 text-xs shadow-xl"
+          style={{ left: tooltip.x, top: tooltip.y }}
+        >
+          <p className="font-mono font-semibold text-text-primary">{tooltip.ip}</p>
+          {(() => {
+            const n = layoutRef.current.find(x => x.ip === tooltip.ip);
+            if (!n) return null;
+            return (
+              <p className="text-text-muted mt-0.5">
+                {n.totalEvents} events · <span className="text-red-400">{n.failures} fails</span>
+              </p>
+            );
+          })()}
+        </div>
+      )}
+      {summaryEvents.length === 0 && (
+        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+          <p className="text-sm text-text-muted">No IP activity in the last 7 days</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── IP Detail Drawer ──────────────────────────────────────────────────────────
 
 function IpDrawer({
-  ip,
-  onClose,
-  onBan,
-  onWhitelist,
+  ip, onClose, onBan, onWhitelist,
 }: {
   ip: string;
   onClose: () => void;
   onBan: (ip: string) => void;
   onWhitelist: (ip: string) => void;
 }) {
-  const [events, setEvents] = useState<IpEventRow[]>([]);
+  const [events, setEvents]   = useState<IpEventRow[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -170,18 +441,13 @@ function IpDrawer({
   }, [ip]);
 
   const failures = events.filter(e => e.event_type === 'auth_failure').length;
-  const agents = [...new Set(events.map(e => e.hostname).filter(Boolean))];
+  const agents   = [...new Set(events.map(e => e.hostname).filter(Boolean))];
   const services = [...new Set(events.map(e => e.service))];
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end">
-      {/* Backdrop */}
       <div className="fixed inset-0 bg-black/60" onClick={onClose} />
-
-      {/* Panel */}
       <div className="relative z-10 w-full max-w-2xl bg-bg-secondary border-l border-border flex flex-col overflow-hidden shadow-2xl">
-
-        {/* Header */}
         <div className="flex items-start justify-between px-5 py-4 border-b border-border flex-shrink-0">
           <div className="min-w-0">
             <h2 className="font-mono text-lg font-semibold text-text-primary">{ip}</h2>
@@ -191,49 +457,29 @@ function IpDrawer({
               <span className="text-red-400">{failures} failures</span>
               <span>·</span>
               <span>{agents.length} agent{agents.length !== 1 ? 's' : ''}</span>
-              {services.length > 0 && (
-                <>
-                  <span>·</span>
-                  <span>{services.join(', ')}</span>
-                </>
-              )}
+              {services.length > 0 && <><span>·</span><span>{services.join(', ')}</span></>}
             </p>
           </div>
-          <button
-            onClick={onClose}
-            className="ml-4 rounded p-1.5 text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors flex-shrink-0"
-          >
+          <button onClick={onClose} className="ml-4 rounded p-1.5 text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors flex-shrink-0">
             <X size={18} />
           </button>
         </div>
 
-        {/* Actions */}
         <div className="px-5 py-3 border-b border-border flex-shrink-0 space-y-2">
           <LookupButtons ip={ip} />
           <div className="flex gap-2 pt-1">
-            <button
-              onClick={() => onBan(ip)}
-              className="inline-flex items-center gap-1.5 rounded bg-red-500/10 border border-red-500/20 px-3 py-1.5 text-sm text-red-400 hover:bg-red-500/20 transition-colors"
-            >
-              <ShieldOff size={13} />
-              Quick Ban
+            <button onClick={() => onBan(ip)} className="inline-flex items-center gap-1.5 rounded bg-red-500/10 border border-red-500/20 px-3 py-1.5 text-sm text-red-400 hover:bg-red-500/20 transition-colors">
+              <ShieldOff size={13} />Quick Ban
             </button>
-            <button
-              onClick={() => onWhitelist(ip)}
-              className="inline-flex items-center gap-1.5 rounded bg-green-500/10 border border-green-500/20 px-3 py-1.5 text-sm text-green-400 hover:bg-green-500/20 transition-colors"
-            >
-              <ShieldCheck size={13} />
-              Whitelist
+            <button onClick={() => onWhitelist(ip)} className="inline-flex items-center gap-1.5 rounded bg-green-500/10 border border-green-500/20 px-3 py-1.5 text-sm text-green-400 hover:bg-green-500/20 transition-colors">
+              <ShieldCheck size={13} />Whitelist
             </button>
           </div>
         </div>
 
-        {/* Events list */}
         <div className="flex-1 overflow-y-auto">
           {loading ? (
-            <div className="flex items-center justify-center py-16">
-              <Spinner />
-            </div>
+            <div className="flex items-center justify-center py-16"><Spinner /></div>
           ) : events.length === 0 ? (
             <p className="text-center text-sm text-text-muted py-16">No events found for this IP</p>
           ) : (
@@ -251,14 +497,10 @@ function IpDrawer({
                 {events.map(ev => (
                   <tr key={ev.id} className="hover:bg-bg-hover transition-colors">
                     <td className="px-4 py-2 text-text-muted whitespace-nowrap">{formatTs(ev.timestamp)}</td>
-                    <td className="px-4 py-2 text-text-secondary">
-                      {ev.hostname ?? <span className="text-text-muted">—</span>}
-                    </td>
+                    <td className="px-4 py-2 text-text-secondary">{ev.hostname ?? <span className="text-text-muted">—</span>}</td>
                     <td className="px-4 py-2 text-text-primary">{ev.service}</td>
                     <td className="px-4 py-2"><EventTypeBadge type={ev.event_type} /></td>
-                    <td className="px-4 py-2 font-mono text-text-secondary">
-                      {ev.username ?? <span className="text-text-muted">—</span>}
-                    </td>
+                    <td className="px-4 py-2 font-mono text-text-secondary">{ev.username ?? <span className="text-text-muted">—</span>}</td>
                   </tr>
                 ))}
               </tbody>
@@ -270,53 +512,127 @@ function IpDrawer({
   );
 }
 
-// ── Templates Section ─────────────────────────────────────────────────────────
+// ── AgentSettingsPanel ────────────────────────────────────────────────────────
 
-function ModeBadge({ mode }: { mode: string }) {
+function AgentSettingsPanel({
+  device,
+  onUpdate,
+}: {
+  device: AgentDevice;
+  onUpdate: (d: AgentDevice) => void;
+}) {
+  const [checkInterval, setCheckInterval] = useState(
+    String(device.resolvedSettings?.checkIntervalSeconds ?? device.checkIntervalSeconds ?? 60),
+  );
+  const [overrideGroup,  setOverrideGroup]  = useState(device.overrideGroupSettings ?? false);
+  const [saving,         setSaving]         = useState(false);
+
+  useEffect(() => {
+    setCheckInterval(String(device.resolvedSettings?.checkIntervalSeconds ?? device.checkIntervalSeconds ?? 60));
+    setOverrideGroup(device.overrideGroupSettings ?? false);
+  }, [device]);
+
+  async function save(updates: Parameters<typeof agentApi.updateDevice>[1]) {
+    setSaving(true);
+    try {
+      const updated = await agentApi.updateDevice(device.id, updates);
+      onUpdate(updated);
+    } catch { /* ignore */ } finally {
+      setSaving(false);
+    }
+  }
+
+  function Toggle({ value, onChange }: { value: boolean; onChange: () => void }) {
+    return (
+      <button
+        type="button"
+        onClick={onChange}
+        disabled={saving}
+        className={`relative inline-flex h-5 w-9 flex-shrink-0 rounded-full transition-colors focus:outline-none disabled:opacity-50 ${
+          value ? 'bg-accent' : 'bg-bg-tertiary border border-border'
+        }`}
+      >
+        <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform mt-0.5 ${
+          value ? 'translate-x-4' : 'translate-x-0.5'
+        }`} />
+      </button>
+    );
+  }
+
   return (
-    <span className={
-      mode === 'ban'
-        ? 'inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-red-500/15 text-red-400'
-        : 'inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-amber-500/15 text-amber-400'
-    }>
-      {mode === 'ban' ? <Shield size={9} /> : <EyeOff size={9} />}
-      {mode === 'ban' ? 'Ban' : 'Track only'}
-    </span>
+    <div className="px-5 py-3 flex flex-wrap items-center gap-5">
+      <span className="text-[10px] font-semibold uppercase tracking-wider text-text-muted flex-shrink-0">
+        Agent Settings
+      </span>
+
+      {/* Check interval */}
+      <label className="flex items-center gap-2 text-xs text-text-secondary">
+        Check every
+        <input
+          type="number"
+          min={10}
+          value={checkInterval}
+          onChange={e => setCheckInterval(e.target.value)}
+          onBlur={() => void save({ checkIntervalSeconds: Math.max(10, Number(checkInterval) || 60) })}
+          className="w-14 rounded border border-border bg-bg-tertiary px-2 py-1 text-xs text-text-primary focus:outline-none focus:border-accent"
+        />
+        <span className="text-text-muted">s</span>
+      </label>
+
+      {/* Override group settings */}
+      <label className="flex items-center gap-2 text-xs text-text-secondary cursor-pointer select-none">
+        <Toggle
+          value={overrideGroup}
+          onChange={() => { const v = !overrideGroup; setOverrideGroup(v); void save({ overrideGroupSettings: v }); }}
+        />
+        Override group settings
+      </label>
+
+      {saving && <span className="text-[11px] text-text-muted animate-pulse">Saving…</span>}
+    </div>
   );
 }
 
-interface AssignmentOverrideModalProps {
+// ── LocalTemplateModal ────────────────────────────────────────────────────────
+
+function LocalTemplateModal({
+  deviceId,
+  onSave,
+  onClose,
+}: {
   deviceId: number;
-  config: ResolvedServiceConfig;
-  /** Full template (for name/type info) */
-  template: ServiceTemplate | null;
   onSave: () => void;
   onClose: () => void;
-}
-
-function AssignmentOverrideModal({ deviceId, config, onSave, onClose }: AssignmentOverrideModalProps) {
-  const [logPath, setLogPath] = useState(config.logPath ?? '');
-  const [threshold, setThreshold] = useState(String(config.threshold));
-  const [windowSeconds, setWindowSeconds] = useState(String(config.windowSeconds));
-  const [enabled, setEnabled] = useState<'' | 'true' | 'false'>(
-    config.enabled != null ? (config.enabled ? 'true' : 'false') : '',
-  );
-  const [saving, setSaving] = useState(false);
+}) {
+  const [name,          setName]          = useState('');
+  const [serviceType,   setServiceType]   = useState('');
+  const [logPath,       setLogPath]       = useState('');
+  const [threshold,     setThreshold]     = useState('5');
+  const [windowSeconds, setWindowSeconds] = useState('600');
+  const [mode,          setMode]          = useState<'ban' | 'track'>('ban');
+  const [saving,        setSaving]        = useState(false);
+  const [error,         setError]         = useState('');
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    if (!name.trim() || !serviceType.trim()) { setError('Name and Service Type are required.'); return; }
     setSaving(true);
+    setError('');
     try {
-      const data: UpsertServiceAssignmentRequest = {
-        logPathOverride: logPath.trim() || null,
-        thresholdOverride: Number(threshold) || null,
-        windowSecondsOverride: Number(windowSeconds) || null,
-        enabledOverride: enabled === '' ? null : enabled === 'true',
+      const data: CreateServiceTemplateRequest = {
+        name:          name.trim(),
+        serviceType:   serviceType.trim() as ServiceType,
+        defaultLogPath: logPath.trim() || null,
+        threshold:     Number(threshold) || 5,
+        windowSeconds: Number(windowSeconds) || 600,
+        mode,
+        ownerScope:    'agent',
+        ownerScopeId:  deviceId,
       };
-      await serviceTemplatesApi.upsertAssignment(config.templateId, 'agent', deviceId, data);
+      await serviceTemplatesApi.create(data);
       onSave();
-    } catch {
-      // ignored
+    } catch (err: unknown) {
+      setError((err as Error).message ?? 'Failed to create template');
     } finally {
       setSaving(false);
     }
@@ -325,72 +641,78 @@ function AssignmentOverrideModal({ deviceId, config, onSave, onClose }: Assignme
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
       <div className="w-full max-w-md rounded-xl border border-border bg-bg-primary shadow-2xl p-6">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-base font-semibold text-text-primary">
-            Override: {config.name}
-          </h2>
+        <div className="flex items-center justify-between mb-1">
+          <h2 className="text-base font-semibold text-text-primary">Create Local Template</h2>
           <button onClick={onClose} className="p-1.5 rounded text-text-muted hover:text-text-primary hover:bg-bg-hover">
             <X size={16} />
           </button>
         </div>
         <p className="text-xs text-text-muted mb-4">
-          Per-agent overrides for this template on this device. Leave blank to inherit from the template or group assignment.
+          This template is private to this agent and auto-assigned to it.
         </p>
+        {error && <p className="text-xs text-red-400 mb-3">{error}</p>}
         <form onSubmit={handleSubmit} className="space-y-3">
           <div className="space-y-1">
+            <label className="block text-sm font-medium text-text-secondary">Name</label>
+            <input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. SSH brute-force"
+              className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-accent"
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="block text-sm font-medium text-text-secondary">Service Type</label>
+            <input value={serviceType} onChange={e => setServiceType(e.target.value)} placeholder="e.g. ssh, rdp, ftp"
+              className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary font-mono placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-accent"
+            />
+          </div>
+          <div className="space-y-1">
             <label className="block text-sm font-medium text-text-secondary">Log Path</label>
-            <input
-              value={logPath}
-              onChange={e => setLogPath(e.target.value)}
-              placeholder={config.logPath ?? '/var/log/...'}
+            <input value={logPath} onChange={e => setLogPath(e.target.value)} placeholder="/var/log/auth.log"
               className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary font-mono placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-accent"
             />
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1">
-              <label className="block text-sm font-medium text-text-secondary">Threshold</label>
-              <input
-                type="number"
-                min={1}
-                value={threshold}
-                onChange={e => setThreshold(e.target.value)}
+              <label className="block text-sm font-medium text-text-secondary">Threshold (failures)</label>
+              <input type="number" min={1} value={threshold} onChange={e => setThreshold(e.target.value)}
                 className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
               />
             </div>
             <div className="space-y-1">
               <label className="block text-sm font-medium text-text-secondary">Window (s)</label>
-              <input
-                type="number"
-                min={60}
-                value={windowSeconds}
-                onChange={e => setWindowSeconds(e.target.value)}
+              <input type="number" min={60} value={windowSeconds} onChange={e => setWindowSeconds(e.target.value)}
                 className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
               />
             </div>
           </div>
           <div className="space-y-1">
-            <label className="block text-sm font-medium text-text-secondary">Enabled Override</label>
-            <select
-              value={enabled}
-              onChange={e => setEnabled(e.target.value as '' | 'true' | 'false')}
-              className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
-            >
-              <option value="">Inherit</option>
-              <option value="true">Enabled</option>
-              <option value="false">Disabled</option>
-            </select>
+            <label className="block text-sm font-medium text-text-secondary">Mode</label>
+            <div className="flex gap-1 rounded-md border border-border bg-bg-tertiary p-1">
+              {(['ban', 'track'] as const).map(m => (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => setMode(m)}
+                  className={`flex-1 rounded px-3 py-1.5 text-xs font-medium transition-colors ${
+                    mode === m
+                      ? m === 'ban' ? 'bg-red-500/20 text-red-400' : 'bg-amber-500/20 text-amber-400'
+                      : 'text-text-muted hover:text-text-secondary'
+                  }`}
+                >
+                  {m === 'ban' ? '🔴 Ban' : '👁 Track only'}
+                </button>
+              ))}
+            </div>
+            <p className="text-[11px] text-text-muted">
+              {mode === 'ban' ? 'Triggers auto-bans when threshold is exceeded.' : 'Logs events but never triggers bans.'}
+            </p>
           </div>
           <div className="flex gap-2 pt-2">
-            <button
-              type="submit"
-              disabled={saving}
+            <button type="submit" disabled={saving}
               className="flex-1 rounded-md bg-accent px-3 py-2 text-sm font-medium text-white hover:bg-accent/90 transition-colors disabled:opacity-50"
             >
-              {saving ? 'Saving…' : 'Save overrides'}
+              {saving ? 'Creating…' : 'Create template'}
             </button>
-            <button
-              type="button"
-              onClick={onClose}
+            <button type="button" onClick={onClose}
               className="flex-1 rounded-md border border-border px-3 py-2 text-sm font-medium text-text-secondary hover:bg-bg-hover transition-colors"
             >
               Cancel
@@ -402,162 +724,149 @@ function AssignmentOverrideModal({ deviceId, config, onSave, onClose }: Assignme
   );
 }
 
-interface TemplatesSectionProps {
-  deviceId: number;
-}
+// ── TemplatesSection ──────────────────────────────────────────────────────────
 
-function TemplatesSection({ deviceId }: TemplatesSectionProps) {
-  const [configs, setConfigs] = useState<ResolvedServiceConfig[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [expanded, setExpanded] = useState(true);
-  const [overriding, setOverriding] = useState<ResolvedServiceConfig | null>(null);
-  const [unbinding, setUnbinding] = useState<ResolvedServiceConfig | null>(null);
-  const [unbindLoading, setUnbindLoading] = useState(false);
+function TemplatesSection({ deviceId }: { deviceId: number }) {
+  const [localTemplates, setLocalTemplates] = useState<ServiceTemplate[]>([]);
+  const [localLoading,   setLocalLoading]   = useState(true);
+  const [localExpanded,  setLocalExpanded]  = useState(true);
+  const [showCreate,     setShowCreate]     = useState(false);
+  const [deletingLocal,  setDeletingLocal]  = useState<ServiceTemplate | null>(null);
+  const [deleteLoading,  setDeleteLoading]  = useState(false);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const loadLocal = useCallback(async () => {
+    setLocalLoading(true);
     try {
-      const data = await serviceTemplatesApi.getResolvedForDevice(deviceId);
-      setConfigs(data);
+      const local = await serviceTemplatesApi.listLocal('agent', deviceId);
+      setLocalTemplates(local);
     } finally {
-      setLoading(false);
+      setLocalLoading(false);
     }
   }, [deviceId]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { void loadLocal(); }, [loadLocal]);
 
-  async function handleUnbind() {
-    if (!unbinding) return;
-    setUnbindLoading(true);
+  async function handleDeleteLocal() {
+    if (!deletingLocal) return;
+    setDeleteLoading(true);
     try {
-      await serviceTemplatesApi.deleteAssignment(unbinding.templateId, 'agent', deviceId);
-      setUnbinding(null);
-      void load();
+      await serviceTemplatesApi.delete(deletingLocal.id);
+      setDeletingLocal(null);
+      void loadLocal();
     } catch {
-      // If no agent-level assignment exists, silently ignore
-      setUnbinding(null);
+      setDeletingLocal(null);
     } finally {
-      setUnbindLoading(false);
+      setDeleteLoading(false);
     }
   }
 
   return (
-    <div className="rounded-lg border border-border bg-bg-secondary">
-      {/* Header */}
-      <div
-        className="px-4 py-3 border-b border-border flex items-center justify-between cursor-pointer select-none"
-        onClick={() => setExpanded(v => !v)}
-      >
-        <div className="flex items-center gap-2">
-          {expanded ? <ChevronUp size={14} className="text-text-muted" /> : <ChevronDown size={14} className="text-text-muted" />}
-          <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide">
-            Applied Templates
-          </h2>
-          {!loading && (
-            <span className="text-xs text-text-muted">
-              ({configs.length})
-            </span>
-          )}
-        </div>
-        <button
-          onClick={e => { e.stopPropagation(); void load(); }}
-          className="p-1 rounded text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors"
-          title="Refresh"
-        >
-          <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
-        </button>
-      </div>
+    <>
+      {/* Global service templates — opt-out model */}
+      <ServiceTemplatesPanel
+        scope="device"
+        scopeId={deviceId}
+        onCreateLocal={() => setShowCreate(true)}
+      />
 
-      {expanded && (
-        <div className="divide-y divide-border">
-          {loading ? (
-            <div className="py-8 text-center text-sm text-text-muted">Loading…</div>
-          ) : configs.length === 0 ? (
-            <div className="py-8 text-center text-sm text-text-muted">
-              <p>No templates assigned to this agent or its groups.</p>
-              <p className="text-xs mt-1">Assign templates from the Service Templates page.</p>
+      {/* Local templates owned by this agent */}
+      {(localTemplates.length > 0 || localLoading) && (
+        <div className="mt-4 rounded-lg border border-border bg-bg-secondary">
+          <div
+            className="px-4 py-3 border-b border-border flex items-center justify-between cursor-pointer select-none"
+            onClick={() => setLocalExpanded(v => !v)}
+          >
+            <div className="flex items-center gap-2">
+              {localExpanded
+                ? <ChevronUp size={14} className="text-text-muted" />
+                : <ChevronDown size={14} className="text-text-muted" />}
+              <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide">
+                Local Templates
+              </h2>
+              {!localLoading && (
+                <span className="text-xs text-text-muted">{localTemplates.length} local</span>
+              )}
             </div>
-          ) : (
-            configs.map(cfg => (
-              <div key={cfg.templateId} className="px-4 py-3 flex items-start gap-3">
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-sm font-medium text-text-primary">{cfg.name}</span>
-                    <span className="text-xs text-text-muted bg-bg-tertiary px-1.5 py-0.5 rounded font-mono">
-                      {cfg.serviceType}
-                    </span>
-                    <ModeBadge mode={cfg.mode} />
-                    {!cfg.enabled && (
-                      <span className="text-[11px] text-text-muted bg-bg-tertiary px-1.5 py-0.5 rounded">disabled</span>
-                    )}
+            <button
+              onClick={e => { e.stopPropagation(); void loadLocal(); }}
+              className="p-1 rounded text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors"
+              title="Refresh"
+            >
+              <RefreshCw size={12} className={localLoading ? 'animate-spin' : ''} />
+            </button>
+          </div>
+
+          {localExpanded && (
+            <div className="divide-y divide-border">
+              {localLoading ? (
+                <div className="py-6 text-center text-sm text-text-muted">Loading…</div>
+              ) : (
+                localTemplates.map(tpl => (
+                  <div key={tpl.id} className="flex items-center gap-3 px-4 py-3">
+                    <div className="w-2 h-2 rounded-full flex-shrink-0 bg-indigo-400" />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-sm font-medium text-text-primary">{tpl.name}</span>
+                        <span className="inline-flex items-center rounded bg-bg-tertiary px-1.5 py-0.5 text-[10px] font-mono text-text-muted border border-border">
+                          {tpl.serviceType}
+                        </span>
+                        <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-indigo-500/15 text-indigo-400">
+                          local
+                        </span>
+                      </div>
+                      <div className="mt-0.5 text-[11px] text-text-muted">
+                        Threshold: {tpl.threshold} / {tpl.windowSeconds}s
+                        {tpl.defaultLogPath && (
+                          <span className="ml-3 font-mono truncate max-w-[220px]" title={tpl.defaultLogPath}>
+                            {tpl.defaultLogPath}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setDeletingLocal(tpl)}
+                      title="Delete this local template"
+                      className="p-1.5 rounded text-text-muted hover:text-red-400 hover:bg-red-500/10 transition-colors flex-shrink-0"
+                    >
+                      <Trash2 size={13} />
+                    </button>
                   </div>
-                  <div className="mt-1 flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-text-muted">
-                    <span>Threshold: <span className="text-text-secondary">{cfg.threshold} failures / {cfg.windowSeconds}s</span></span>
-                    {cfg.logPath && (
-                      <span className="font-mono truncate max-w-[260px]" title={cfg.logPath}>
-                        Path: <span className="text-text-secondary">{cfg.logPath}</span>
-                      </span>
-                    )}
-                    {cfg.sampleRequested && (
-                      <span className="text-amber-400">⏳ sample requested</span>
-                    )}
-                  </div>
-                </div>
-                <div className="flex gap-1 flex-shrink-0">
-                  <button
-                    onClick={() => setOverriding(cfg)}
-                    title="Override settings for this agent"
-                    className="p-1.5 rounded text-text-muted hover:text-accent hover:bg-accent/10 transition-colors"
-                  >
-                    <Pencil size={13} />
-                  </button>
-                  <button
-                    onClick={() => setUnbinding(cfg)}
-                    title="Remove agent-level override / unbind from this agent"
-                    className="p-1.5 rounded text-text-muted hover:text-red-400 hover:bg-red-500/10 transition-colors"
-                  >
-                    <Trash2 size={13} />
-                  </button>
-                </div>
-              </div>
-            ))
+                ))
+              )}
+            </div>
           )}
         </div>
       )}
 
-      {overriding && (
-        <AssignmentOverrideModal
+      {/* Modals */}
+      {showCreate && (
+        <LocalTemplateModal
           deviceId={deviceId}
-          config={overriding}
-          template={null}
-          onSave={() => { setOverriding(null); void load(); }}
-          onClose={() => setOverriding(null)}
+          onSave={() => { setShowCreate(false); void loadLocal(); }}
+          onClose={() => setShowCreate(false)}
         />
       )}
 
-      {unbinding && (
+      {deletingLocal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
           <div className="w-full max-w-sm rounded-xl border border-border bg-bg-primary shadow-2xl p-6">
             <div className="flex items-start gap-3 mb-4">
               <AlertTriangle size={18} className="text-status-down shrink-0 mt-0.5" />
               <div>
-                <h2 className="text-base font-semibold text-text-primary">Remove agent override</h2>
+                <h2 className="text-base font-semibold text-text-primary">Delete local template</h2>
                 <p className="text-sm text-text-muted mt-1">
-                  Remove the agent-level assignment/override for <strong className="text-text-primary">{unbinding.name}</strong>?
-                  The template may still apply via group inheritance.
+                  Permanently delete <strong className="text-text-primary">{deletingLocal.name}</strong>?
+                  This template belongs to this agent only and will be removed completely.
                 </p>
               </div>
             </div>
             <div className="flex gap-2">
-              <button
-                disabled={unbindLoading}
-                onClick={handleUnbind}
+              <button disabled={deleteLoading} onClick={() => void handleDeleteLocal()}
                 className="flex-1 rounded-md bg-red-600 px-3 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50 transition-colors"
               >
-                {unbindLoading ? 'Removing…' : 'Remove override'}
+                {deleteLoading ? 'Deleting…' : 'Delete template'}
               </button>
-              <button
-                onClick={() => setUnbinding(null)}
+              <button onClick={() => setDeletingLocal(null)}
                 className="flex-1 rounded-md border border-border px-3 py-2 text-sm font-medium text-text-secondary hover:bg-bg-hover transition-colors"
               >
                 Cancel
@@ -566,13 +875,14 @@ function TemplatesSection({ deviceId }: TemplatesSectionProps) {
           </div>
         </div>
       )}
-    </div>
+    </>
   );
 }
 
 // ── Main Page ─────────────────────────────────────────────────────────────────
 
 const PAGE_SIZE = 50;
+type TabId = 'overview' | 'starmap';
 
 export function AgentDetailPage() {
   const { deviceId } = useParams<{ deviceId: string }>();
@@ -580,35 +890,37 @@ export function AgentDetailPage() {
   const devId = deviceId ? parseInt(deviceId, 10) : null;
 
   // Device info
-  const [device, setDevice] = useState<AgentDevice | null>(null);
+  const [device,        setDevice]        = useState<AgentDevice | null>(null);
   const [deviceLoading, setDeviceLoading] = useState(true);
 
-  // Paginated events (for the table)
-  const [events, setEvents] = useState<IpEventRow[]>([]);
-  const [total, setTotal] = useState(0);
-  const [page, setPage] = useState(1);
+  // Active tab
+  const [activeTab, setActiveTab] = useState<TabId>('overview');
+
+  // Paginated events
+  const [events,        setEvents]        = useState<IpEventRow[]>([]);
+  const [total,         setTotal]         = useState(0);
+  const [page,          setPage]          = useState(1);
   const [eventsLoading, setEventsLoading] = useState(false);
 
   // Filters
   const [serviceFilter, setServiceFilter] = useState('');
-  const [typeFilter, setTypeFilter] = useState('');
+  const [typeFilter,    setTypeFilter]    = useState('');
 
-  // Summary events (7-day window, for IP summary panel + stats)
-  const [summaryEvents, setSummaryEvents] = useState<IpEventRow[]>([]);
+  // Summary events (7-day window)
+  const [summaryEvents,  setSummaryEvents]  = useState<IpEventRow[]>([]);
   const [summaryLoading, setSummaryLoading] = useState(true);
 
   // IP drawer
   const [selectedIp, setSelectedIp] = useState<string | null>(null);
 
-  // In-flight ban / whitelist
-  const [banningIps, setBanningIps] = useState(new Set<string>());
+  // In-flight bans / whitelists
+  const [banningIps,      setBanningIps]      = useState(new Set<string>());
   const [whitelistingIps, setWhitelistingIps] = useState(new Set<string>());
 
   // ── Load device ─────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!devId) return;
-    agentApi
-      .getDeviceById(devId)
+    agentApi.getDeviceById(devId)
       .then(d => setDevice(d))
       .finally(() => setDeviceLoading(false));
   }, [devId]);
@@ -620,7 +932,7 @@ export function AgentDetailPage() {
     try {
       const params: Record<string, unknown> = { deviceId: devId, page, pageSize: PAGE_SIZE };
       if (serviceFilter) params.service = serviceFilter;
-      if (typeFilter) params.eventType = typeFilter;
+      if (typeFilter)    params.eventType = typeFilter;
       const res = await apiClient.get('/ip-events', { params });
       setEvents((res.data.data ?? []) as IpEventRow[]);
       setTotal(res.data.total ?? 0);
@@ -630,8 +942,6 @@ export function AgentDetailPage() {
   }, [devId, page, serviceFilter, typeFilter]);
 
   useEffect(() => { void loadEvents(); }, [loadEvents]);
-
-  // Reset page when filters change
   useEffect(() => { setPage(1); }, [serviceFilter, typeFilter]);
 
   // ── Load summary events (7-day, up to 500) ─────────────────────────────────
@@ -661,51 +971,33 @@ export function AgentDetailPage() {
         item.totalEvents++;
         if (ev.event_type === 'auth_failure') item.failures++;
         if (!item.services.includes(ev.service)) item.services.push(ev.service);
-        if (ev.timestamp > item.lastSeen) item.lastSeen = ev.timestamp;
+        if (ev.timestamp > item.lastSeen)  item.lastSeen  = ev.timestamp;
         if (ev.timestamp < item.firstSeen) item.firstSeen = ev.timestamp;
       } else {
         map.set(ev.ip, {
-          ip: ev.ip,
-          totalEvents: 1,
-          failures: ev.event_type === 'auth_failure' ? 1 : 0,
-          services: [ev.service],
-          firstSeen: ev.timestamp,
-          lastSeen: ev.timestamp,
+          ip: ev.ip, totalEvents: 1,
+          failures:  ev.event_type === 'auth_failure' ? 1 : 0,
+          services:  [ev.service],
+          firstSeen: ev.timestamp, lastSeen: ev.timestamp,
         });
       }
     }
     return Array.from(map.values()).sort((a, b) => b.totalEvents - a.totalEvents);
   }, [summaryEvents]);
 
-  // ── Today's stats (derived from summary events) ─────────────────────────────
+  // ── Today's stats ───────────────────────────────────────────────────────────
   const todayStart = useMemo(() => {
-    const d = new Date();
-    d.setHours(0, 0, 0, 0);
-    return d.toISOString();
+    const d = new Date(); d.setHours(0, 0, 0, 0); return d.toISOString();
   }, []);
 
-  const todayEvents = useMemo(
-    () => summaryEvents.filter(e => e.timestamp >= todayStart),
-    [summaryEvents, todayStart],
-  );
-  const todayFailures = useMemo(
-    () => todayEvents.filter(e => e.event_type === 'auth_failure').length,
-    [todayEvents],
-  );
-  const uniqueIpCount = useMemo(
-    () => new Set(summaryEvents.map(e => e.ip)).size,
-    [summaryEvents],
-  );
-  const topService = useMemo(() => {
+  const todayEvents    = useMemo(() => summaryEvents.filter(e => e.timestamp >= todayStart),  [summaryEvents, todayStart]);
+  const todayFailures  = useMemo(() => todayEvents.filter(e => e.event_type === 'auth_failure').length, [todayEvents]);
+  const uniqueIpCount  = useMemo(() => new Set(summaryEvents.map(e => e.ip)).size, [summaryEvents]);
+  const topService     = useMemo(() => {
     const counts = new Map<string, number>();
-    for (const ev of summaryEvents) {
-      counts.set(ev.service, (counts.get(ev.service) ?? 0) + 1);
-    }
-    let top = '—';
-    let max = 0;
-    for (const [svc, cnt] of counts) {
-      if (cnt > max) { max = cnt; top = svc; }
-    }
+    for (const ev of summaryEvents) counts.set(ev.service, (counts.get(ev.service) ?? 0) + 1);
+    let top = '—'; let max = 0;
+    for (const [svc, cnt] of counts) { if (cnt > max) { max = cnt; top = svc; } }
     return top;
   }, [summaryEvents]);
 
@@ -721,9 +1013,7 @@ export function AgentDetailPage() {
     setBanningIps(prev => new Set(prev).add(ip));
     try {
       await bansApi.create({ ip, reason: 'Manual ban from agent detail' });
-    } catch {
-      alert(`Failed to ban ${ip}`);
-    } finally {
+    } catch { alert(`Failed to ban ${ip}`); } finally {
       setBanningIps(prev => { const s = new Set(prev); s.delete(ip); return s; });
     }
   }, []);
@@ -734,9 +1024,7 @@ export function AgentDetailPage() {
     setWhitelistingIps(prev => new Set(prev).add(ip));
     try {
       await whitelistApi.create({ ip });
-    } catch {
-      alert(`Failed to whitelist ${ip}`);
-    } finally {
+    } catch { alert(`Failed to whitelist ${ip}`); } finally {
       setWhitelistingIps(prev => { const s = new Set(prev); s.delete(ip); return s; });
     }
   }, []);
@@ -745,37 +1033,28 @@ export function AgentDetailPage() {
 
   // ── Loading / not found ─────────────────────────────────────────────────────
   if (deviceLoading) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <Spinner size={32} />
-      </div>
-    );
+    return <div className="flex items-center justify-center h-64"><Spinner size={32} /></div>;
   }
-
   if (!device) {
     return (
       <div className="p-6 text-center text-text-muted">
         <p>Agent not found.</p>
-        <button onClick={() => navigate(-1)} className="mt-3 text-accent hover:underline text-sm">
-          Go back
-        </button>
+        <button onClick={() => navigate(-1)} className="mt-3 text-accent hover:underline text-sm">Go back</button>
       </div>
     );
   }
 
   const displayName = device.name ?? device.hostname;
-  const osLabel = device.osInfo
-    ? [device.osInfo.distro ?? device.osInfo.platform, device.osInfo.release]
-        .filter(Boolean)
-        .join(' ')
+  const osLabel     = device.osInfo
+    ? [device.osInfo.distro ?? device.osInfo.platform, device.osInfo.release].filter(Boolean).join(' ')
     : null;
 
   // ── Render ──────────────────────────────────────────────────────────────────
   return (
-    <div className="p-6 space-y-6">
+    <div className="flex flex-col">
 
       {/* ── Page header ──────────────────────────────────────────────────── */}
-      <div className="flex items-start gap-3">
+      <div className="px-6 pt-6 flex items-start gap-3 flex-shrink-0">
         <button
           onClick={() => navigate(-1)}
           className="mt-0.5 rounded p-1.5 text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors flex-shrink-0"
@@ -785,19 +1064,11 @@ export function AgentDetailPage() {
 
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2.5 flex-wrap">
-            <div
-              className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${
-                isOnline ? 'bg-status-up' : 'bg-status-down'
-              }`}
-            />
+            <div className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${isOnline ? 'bg-status-up' : 'bg-status-down'}`} />
             <h1 className="text-xl font-semibold text-text-primary">{displayName}</h1>
-            <span
-              className={`rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${
-                isOnline
-                  ? 'bg-green-500/10 text-green-400'
-                  : 'bg-red-500/10 text-red-400'
-              }`}
-            >
+            <span className={`rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${
+              isOnline ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'
+            }`}>
               {isOnline ? 'ONLINE' : 'OFFLINE'}
             </span>
             {device.agentVersion && (
@@ -806,10 +1077,7 @@ export function AgentDetailPage() {
           </div>
           <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-text-secondary">
             {device.hostname !== displayName && (
-              <span className="flex items-center gap-1">
-                <Server size={11} className="text-text-muted" />
-                {device.hostname}
-              </span>
+              <span className="flex items-center gap-1"><Server size={11} className="text-text-muted" />{device.hostname}</span>
             )}
             {osLabel && (
               <span className="flex items-center gap-1">
@@ -819,13 +1087,10 @@ export function AgentDetailPage() {
             )}
             {device.ip && (
               <span className="flex items-center gap-1 font-mono">
-                <Wifi size={11} className="text-text-muted" />
-                {device.ip}
+                <Wifi size={11} className="text-text-muted" />{device.ip}
               </span>
             )}
-            <span className="text-text-muted">
-              Last seen: {new Date(device.updatedAt).toLocaleString()}
-            </span>
+            <span className="text-text-muted">Last seen: {new Date(device.updatedAt).toLocaleString()}</span>
           </div>
         </div>
 
@@ -834,264 +1099,267 @@ export function AgentDetailPage() {
           className="flex-shrink-0 rounded p-1.5 text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors"
           title="Refresh"
         >
-          <RefreshCw
-            size={16}
-            className={eventsLoading || summaryLoading ? 'animate-spin' : ''}
-          />
+          <RefreshCw size={16} className={eventsLoading || summaryLoading ? 'animate-spin' : ''} />
         </button>
       </div>
 
       {/* ── Stats strip ──────────────────────────────────────────────────── */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        <MiniStat
-          label="Events Today"
-          value={summaryLoading ? '…' : todayEvents.length}
-          colorClass="text-accent"
-        />
-        <MiniStat
-          label="Failures Today"
-          value={summaryLoading ? '…' : todayFailures}
-          colorClass={todayFailures > 0 ? 'text-status-down' : 'text-status-up'}
-        />
-        <MiniStat
-          label="Unique IPs (7d)"
-          value={summaryLoading ? '…' : uniqueIpCount}
-          colorClass="text-orange-400"
-        />
-        <MiniStat
-          label="Top Service"
-          value={summaryLoading ? '…' : topService}
-          colorClass="text-text-primary"
-        />
+      <div className="px-6 pt-4 grid grid-cols-2 lg:grid-cols-4 gap-3 flex-shrink-0">
+        <MiniStat label="Events Today"   value={summaryLoading ? '…' : todayEvents.length}  colorClass="text-accent" />
+        <MiniStat label="Failures Today" value={summaryLoading ? '…' : todayFailures}        colorClass={todayFailures > 0 ? 'text-status-down' : 'text-status-up'} />
+        <MiniStat label="Unique IPs (7d)" value={summaryLoading ? '…' : uniqueIpCount}       colorClass="text-orange-400" />
+        <MiniStat label="Top Service"    value={summaryLoading ? '…' : topService}            colorClass="text-text-primary" />
       </div>
 
-      {/* ── Main content ─────────────────────────────────────────────────── */}
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+      {/* ── Body: tab content + right icon sidebar ────────────────────────── */}
+      <div className="flex mt-6 border-t border-border">
 
-        {/* ── Events table (2 cols) ──────────────────────────────────────── */}
-        <div className="xl:col-span-2 rounded-lg border border-border bg-bg-secondary flex flex-col">
+        {/* ── Tab content ─────────────────────────────────────────────────── */}
+        <div className="flex-1 min-w-0">
+          {activeTab === 'overview' ? (
+            <div className="p-6 space-y-6">
 
-          {/* Table toolbar */}
-          <div className="px-4 py-3 border-b border-border flex items-center gap-3 flex-wrap">
-            <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide flex-shrink-0">
-              Connection Events
-            </h2>
-            <span className="text-xs text-text-muted ml-auto">
-              {total.toLocaleString()} total
-            </span>
-          </div>
-          <div className="px-4 py-2 border-b border-border flex items-center gap-2 flex-wrap">
-            <input
-              type="text"
-              placeholder="Filter by service…"
-              value={serviceFilter}
-              onChange={e => setServiceFilter(e.target.value)}
-              className="rounded border border-border bg-bg-tertiary px-2.5 py-1.5 text-xs text-text-primary placeholder-text-muted focus:outline-none focus:border-accent w-40"
-            />
-            <select
-              value={typeFilter}
-              onChange={e => setTypeFilter(e.target.value)}
-              className="rounded border border-border bg-bg-tertiary px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent"
-            >
-              <option value="">All types</option>
-              <option value="auth_failure">Auth Failure</option>
-              <option value="auth_success">Auth Success</option>
-              <option value="port_scan">Port Scan</option>
-            </select>
-          </div>
+              {/* Events table + IP Summary */}
+              <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
 
-          {/* Table body */}
-          <div className="overflow-x-auto flex-1 min-h-[200px]">
-            {eventsLoading ? (
-              <div className="flex items-center justify-center py-16">
-                <Spinner />
-              </div>
-            ) : events.length === 0 ? (
-              <div className="py-12 text-center text-sm text-text-muted">
-                No events found
-              </div>
-            ) : (
-              <table className="w-full text-xs">
-                <thead>
-                  <tr className="text-[10px] uppercase text-text-muted border-b border-border">
-                    <th className="text-left px-4 py-2 font-medium whitespace-nowrap">Time</th>
-                    <th className="text-left px-4 py-2 font-medium">IP</th>
-                    <th className="text-left px-4 py-2 font-medium">Service</th>
-                    <th className="text-left px-4 py-2 font-medium">Type</th>
-                    <th className="text-left px-4 py-2 font-medium">User</th>
-                    <th className="text-left px-4 py-2 font-medium">Raw Log</th>
-                    <th className="w-8 px-2 py-2" />
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-border">
-                  {events.map(ev => (
-                    <tr key={ev.id} className="hover:bg-bg-hover transition-colors group">
-                      <td className="px-4 py-2.5 text-text-muted whitespace-nowrap">
-                        {relativeTime(ev.timestamp)}
-                      </td>
-                      <td className="px-4 py-2.5">
-                        <button
-                          onClick={() => setSelectedIp(ev.ip)}
-                          className="font-mono text-accent hover:underline"
+                {/* Events table (2 cols) */}
+                <div className="xl:col-span-2 rounded-lg border border-border bg-bg-secondary flex flex-col">
+                  <div className="px-4 py-3 border-b border-border flex items-center gap-3 flex-wrap">
+                    <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide flex-shrink-0">
+                      Connection Events
+                    </h2>
+                    <span className="text-xs text-text-muted ml-auto">{total.toLocaleString()} total</span>
+                  </div>
+                  <div className="px-4 py-2 border-b border-border flex items-center gap-2 flex-wrap">
+                    <input
+                      type="text"
+                      placeholder="Filter by service…"
+                      value={serviceFilter}
+                      onChange={e => setServiceFilter(e.target.value)}
+                      className="rounded border border-border bg-bg-tertiary px-2.5 py-1.5 text-xs text-text-primary placeholder-text-muted focus:outline-none focus:border-accent w-40"
+                    />
+                    <select
+                      value={typeFilter}
+                      onChange={e => setTypeFilter(e.target.value)}
+                      className="rounded border border-border bg-bg-tertiary px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent"
+                    >
+                      <option value="">All types</option>
+                      <option value="auth_failure">Auth Failure</option>
+                      <option value="auth_success">Auth Success</option>
+                      <option value="port_scan">Port Scan</option>
+                    </select>
+                  </div>
+
+                  <div className="overflow-x-auto flex-1 min-h-[200px]">
+                    {eventsLoading ? (
+                      <div className="flex items-center justify-center py-16"><Spinner /></div>
+                    ) : events.length === 0 ? (
+                      <div className="py-12 text-center text-sm text-text-muted">No events found</div>
+                    ) : (
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="text-[10px] uppercase text-text-muted border-b border-border">
+                            <th className="text-left px-4 py-2 font-medium whitespace-nowrap">Time</th>
+                            <th className="text-left px-4 py-2 font-medium">IP</th>
+                            <th className="text-left px-4 py-2 font-medium">Service</th>
+                            <th className="text-left px-4 py-2 font-medium">Type</th>
+                            <th className="text-left px-4 py-2 font-medium">User</th>
+                            <th className="text-left px-4 py-2 font-medium">Raw Log</th>
+                            <th className="w-8 px-2 py-2" />
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-border">
+                          {events.map(ev => (
+                            <tr key={ev.id} className="hover:bg-bg-hover transition-colors group">
+                              <td className="px-4 py-2.5 text-text-muted whitespace-nowrap">{relativeTime(ev.timestamp)}</td>
+                              <td className="px-4 py-2.5">
+                                <button onClick={() => setSelectedIp(ev.ip)} className="font-mono text-accent hover:underline">
+                                  {ev.ip}
+                                </button>
+                              </td>
+                              <td className="px-4 py-2.5 text-text-secondary">{ev.service}</td>
+                              <td className="px-4 py-2.5"><EventTypeBadge type={ev.event_type} /></td>
+                              <td className="px-4 py-2.5 font-mono text-text-secondary">
+                                {ev.username ?? <span className="text-text-muted">—</span>}
+                              </td>
+                              <td className="px-4 py-2.5 max-w-[160px]">
+                                {ev.raw_log ? (
+                                  <span title={ev.raw_log} className="truncate block text-text-muted cursor-help">
+                                    {ev.raw_log.length > 48 ? `${ev.raw_log.slice(0, 48)}…` : ev.raw_log}
+                                  </span>
+                                ) : <span className="text-text-muted">—</span>}
+                              </td>
+                              <td className="px-2 py-2.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                                <button
+                                  onClick={() => void handleBan(ev.ip)}
+                                  disabled={banningIps.has(ev.ip)}
+                                  title="Quick ban this IP"
+                                  className="rounded p-1 text-text-muted hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-40"
+                                >
+                                  <ShieldOff size={12} />
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                  </div>
+
+                  {totalPages > 1 && (
+                    <div className="px-4 py-2.5 border-t border-border flex items-center justify-between text-xs text-text-muted">
+                      <span>Page {page} of {totalPages} ({total.toLocaleString()} events)</span>
+                      <div className="flex items-center gap-1">
+                        <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1}
+                          className="rounded p-1.5 hover:bg-bg-hover disabled:opacity-30 transition-colors"
                         >
-                          {ev.ip}
+                          <ChevronLeft size={14} />
                         </button>
-                      </td>
-                      <td className="px-4 py-2.5 text-text-secondary">{ev.service}</td>
-                      <td className="px-4 py-2.5">
-                        <EventTypeBadge type={ev.event_type} />
-                      </td>
-                      <td className="px-4 py-2.5 font-mono text-text-secondary">
-                        {ev.username ?? <span className="text-text-muted">—</span>}
-                      </td>
-                      <td className="px-4 py-2.5 max-w-[160px]">
-                        {ev.raw_log ? (
-                          <span
-                            title={ev.raw_log}
-                            className="truncate block text-text-muted cursor-help"
-                          >
-                            {ev.raw_log.length > 48
-                              ? `${ev.raw_log.slice(0, 48)}…`
-                              : ev.raw_log}
-                          </span>
-                        ) : (
-                          <span className="text-text-muted">—</span>
-                        )}
-                      </td>
-                      <td className="px-2 py-2.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                        <button
-                          onClick={() => void handleBan(ev.ip)}
-                          disabled={banningIps.has(ev.ip)}
-                          title="Quick ban this IP"
-                          className="rounded p-1 text-text-muted hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-40"
+                        <button onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page === totalPages}
+                          className="rounded p-1.5 hover:bg-bg-hover disabled:opacity-30 transition-colors"
                         >
-                          <ShieldOff size={12} />
+                          <ChevronRight size={14} />
                         </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
 
-          {/* Pagination */}
-          {totalPages > 1 && (
-            <div className="px-4 py-2.5 border-t border-border flex items-center justify-between text-xs text-text-muted">
-              <span>Page {page} of {totalPages} ({total.toLocaleString()} events)</span>
-              <div className="flex items-center gap-1">
-                <button
-                  onClick={() => setPage(p => Math.max(1, p - 1))}
-                  disabled={page === 1}
-                  className="rounded p-1.5 hover:bg-bg-hover disabled:opacity-30 transition-colors"
-                >
-                  <ChevronLeft size={14} />
-                </button>
-                <button
-                  onClick={() => setPage(p => Math.min(totalPages, p + 1))}
-                  disabled={page === totalPages}
-                  className="rounded p-1.5 hover:bg-bg-hover disabled:opacity-30 transition-colors"
-                >
-                  <ChevronRight size={14} />
-                </button>
+                {/* IP Summary panel (1 col) */}
+                <div className="rounded-lg border border-border bg-bg-secondary flex flex-col">
+                  <div className="px-4 py-3 border-b border-border flex-shrink-0 flex items-center justify-between">
+                    <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide">Top IPs (7 days)</h2>
+                    {!summaryLoading && <span className="text-xs text-text-muted">{ipSummary.length} unique</span>}
+                  </div>
+                  <div className="flex-1 overflow-y-auto">
+                    {summaryLoading ? (
+                      <div className="flex items-center justify-center py-12"><Spinner size={20} /></div>
+                    ) : ipSummary.length === 0 ? (
+                      <div className="py-10 text-center text-sm text-text-muted">No activity in the last 7 days</div>
+                    ) : (
+                      <div className="divide-y divide-border">
+                        {ipSummary.slice(0, 25).map(item => (
+                          <div key={item.ip} className="px-4 py-3 hover:bg-bg-hover transition-colors">
+                            <div className="flex items-start justify-between gap-2">
+                              <button
+                                onClick={() => setSelectedIp(item.ip)}
+                                className="font-mono text-sm text-accent hover:underline text-left min-w-0 truncate"
+                              >
+                                {item.ip}
+                              </button>
+                              <div className="flex gap-0.5 flex-shrink-0">
+                                <button onClick={() => void handleBan(item.ip)} disabled={banningIps.has(item.ip)} title="Quick ban"
+                                  className="rounded p-1 text-text-muted hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-40"
+                                >
+                                  <ShieldOff size={12} />
+                                </button>
+                                <button onClick={() => void handleWhitelist(item.ip)} disabled={whitelistingIps.has(item.ip)} title="Whitelist"
+                                  className="rounded p-1 text-text-muted hover:text-green-400 hover:bg-green-500/10 transition-colors disabled:opacity-40"
+                                >
+                                  <ShieldCheck size={12} />
+                                </button>
+                                <button onClick={() => setSelectedIp(item.ip)} title="View all events"
+                                  className="rounded p-1 text-text-muted hover:text-accent hover:bg-accent/10 transition-colors"
+                                >
+                                  <Eye size={12} />
+                                </button>
+                              </div>
+                            </div>
+                            <div className="mt-1 flex flex-wrap gap-x-3 text-[11px] text-text-muted">
+                              <span>
+                                <span className={item.failures > 0 ? 'text-red-400 font-semibold' : 'text-text-secondary'}>
+                                  {item.failures}
+                                </span>
+                                {' '}fail / {item.totalEvents} events
+                              </span>
+                              {item.services.length > 0 && (
+                                <span className="truncate max-w-[100px]" title={item.services.join(', ')}>
+                                  {item.services.join(', ')}
+                                </span>
+                              )}
+                              <span title={`First: ${item.firstSeen}`}>{relativeTime(item.lastSeen)}</span>
+                            </div>
+                            <div className="mt-1.5">
+                              <LookupButtons ip={item.ip} compact />
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Templates section */}
+              <TemplatesSection deviceId={devId!} />
+
+              {/* Notification Types — per-agent overrides */}
+              <NotificationTypesPanel
+                config={device.notificationTypes ?? null}
+                scope="device"
+                onSave={async (notifTypes: NotificationTypeConfig | null) => {
+                  const updated = await agentApi.updateDevice(device.id, { notificationTypes: notifTypes });
+                  setDevice(updated);
+                }}
+              />
+            </div>
+
+          ) : (
+            /* ── Star Map tab ─────────────────────────────────────────────── */
+            <div className="p-6" style={{ height: 'max(480px, calc(100vh - 340px))' }}>
+              <div className="h-full rounded-lg border border-border bg-bg-secondary overflow-hidden">
+                <div className="px-4 py-3 border-b border-border flex items-center gap-2">
+                  <Network size={14} className="text-accent" />
+                  <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide">
+                    Star Map — {displayName}
+                  </h2>
+                  <span className="text-xs text-text-muted ml-auto">
+                    {summaryLoading ? '…' : `${uniqueIpCount} IPs (7d)`}
+                  </span>
+                </div>
+                <div className="h-[calc(100%-45px)]">
+                  <AgentMiniMap
+                    deviceId={devId!}
+                    summaryEvents={summaryEvents}
+                    onSelectIp={setSelectedIp}
+                  />
+                </div>
               </div>
             </div>
           )}
         </div>
 
-        {/* ── IP Summary panel (1 col) ───────────────────────────────────── */}
-        <div className="rounded-lg border border-border bg-bg-secondary flex flex-col">
-          <div className="px-4 py-3 border-b border-border flex-shrink-0 flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide">
-              Top IPs (7 days)
-            </h2>
-            {!summaryLoading && (
-              <span className="text-xs text-text-muted">{ipSummary.length} unique</span>
-            )}
-          </div>
-
-          <div className="flex-1 overflow-y-auto">
-            {summaryLoading ? (
-              <div className="flex items-center justify-center py-12">
-                <Spinner size={20} />
-              </div>
-            ) : ipSummary.length === 0 ? (
-              <div className="py-10 text-center text-sm text-text-muted">
-                No activity in the last 7 days
-              </div>
-            ) : (
-              <div className="divide-y divide-border">
-                {ipSummary.slice(0, 25).map(item => (
-                  <div key={item.ip} className="px-4 py-3 hover:bg-bg-hover transition-colors">
-                    {/* IP row */}
-                    <div className="flex items-start justify-between gap-2">
-                      <button
-                        onClick={() => setSelectedIp(item.ip)}
-                        className="font-mono text-sm text-accent hover:underline text-left min-w-0 truncate"
-                      >
-                        {item.ip}
-                      </button>
-                      <div className="flex gap-0.5 flex-shrink-0">
-                        <button
-                          onClick={() => void handleBan(item.ip)}
-                          disabled={banningIps.has(item.ip)}
-                          title="Quick ban"
-                          className="rounded p-1 text-text-muted hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-40"
-                        >
-                          <ShieldOff size={12} />
-                        </button>
-                        <button
-                          onClick={() => void handleWhitelist(item.ip)}
-                          disabled={whitelistingIps.has(item.ip)}
-                          title="Whitelist"
-                          className="rounded p-1 text-text-muted hover:text-green-400 hover:bg-green-500/10 transition-colors disabled:opacity-40"
-                        >
-                          <ShieldCheck size={12} />
-                        </button>
-                        <button
-                          onClick={() => setSelectedIp(item.ip)}
-                          title="View all events for this IP"
-                          className="rounded p-1 text-text-muted hover:text-accent hover:bg-accent/10 transition-colors"
-                        >
-                          <Eye size={12} />
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Stats row */}
-                    <div className="mt-1 flex flex-wrap gap-x-3 text-[11px] text-text-muted">
-                      <span>
-                        <span
-                          className={item.failures > 0 ? 'text-red-400 font-semibold' : 'text-text-secondary'}
-                        >
-                          {item.failures}
-                        </span>
-                        {' '}fail / {item.totalEvents} events
-                      </span>
-                      {item.services.length > 0 && (
-                        <span className="truncate max-w-[100px]" title={item.services.join(', ')}>
-                          {item.services.join(', ')}
-                        </span>
-                      )}
-                      <span title={`First: ${item.firstSeen}`}>
-                        {relativeTime(item.lastSeen)}
-                      </span>
-                    </div>
-
-                    {/* Compact lookup links */}
-                    <div className="mt-1.5">
-                      <LookupButtons ip={item.ip} compact />
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
+        {/* ── Right icon sidebar ────────────────────────────────────────────── */}
+        <div className="w-14 flex-shrink-0 border-l border-border bg-bg-secondary flex flex-col items-center py-4 gap-1">
+          <button
+            onClick={() => setActiveTab('overview')}
+            title="Overview"
+            className={`w-10 h-10 rounded-lg flex items-center justify-center transition-colors ${
+              activeTab === 'overview'
+                ? 'bg-accent/15 text-accent'
+                : 'text-text-muted hover:text-text-primary hover:bg-bg-hover'
+            }`}
+          >
+            <LayoutGrid size={18} />
+          </button>
+          <button
+            onClick={() => setActiveTab('starmap')}
+            title="Star Map"
+            className={`w-10 h-10 rounded-lg flex items-center justify-center transition-colors ${
+              activeTab === 'starmap'
+                ? 'bg-accent/15 text-accent'
+                : 'text-text-muted hover:text-text-primary hover:bg-bg-hover'
+            }`}
+          >
+            <Network size={18} />
+          </button>
         </div>
       </div>
 
-      {/* ── Templates section ─────────────────────────────────────────────── */}
-      <TemplatesSection deviceId={devId!} />
+      {/* ── Settings panel — always visible at bottom ─────────────────────── */}
+      <div className="border-t border-border bg-bg-secondary flex-shrink-0">
+        <AgentSettingsPanel device={device} onUpdate={d => setDevice(d)} />
+      </div>
 
       {/* ── IP Detail Drawer ──────────────────────────────────────────────── */}
       {selectedIp && (

@@ -305,6 +305,36 @@ class BanEngine {
 
     logger.info({ ip, service, failureCount }, 'BanEngine: auto-banned IP');
     _io?.emit('ban:auto', { ip, service, failureCount, originTenantId });
+
+    // ── Mark origin agents as "under attack" ──────────────────────────────────
+    // Find agent devices that had recent auth_failure events from this IP (last 10 min)
+    try {
+      const cutoff = new Date(Date.now() - 10 * 60 * 1000);
+      const affectedDevices = await db('ip_events')
+        .where({ ip, event_type: 'auth_failure', tenant_id: originTenantId })
+        .where('timestamp', '>=', cutoff)
+        .whereNotNull('device_id')
+        .distinct('device_id')
+        .pluck('device_id') as number[];
+
+      if (affectedDevices.length > 0) {
+        await db('agent_devices')
+          .whereIn('id', affectedDevices)
+          .update({ last_attack_at: new Date() });
+
+        // Fire "attack" notifications for each affected device
+        const { notificationService } = await import('./notification.service');
+        for (const devId of affectedDevices) {
+          const devRow = await db('agent_devices').where({ id: devId }).select('name', 'hostname').first() as { name: string | null; hostname: string } | undefined;
+          const label = devRow?.name ?? devRow?.hostname ?? String(devId);
+          notificationService.sendForAgent(devId, label, 'attack', 'ok', [`${ip} banned (${failureCount} ${service} failures)`], 'attack').catch(
+            (err) => logger.warn({ err, devId, ip }, 'Failed to send attack notification'),
+          );
+        }
+      }
+    } catch (err) {
+      logger.warn({ err, ip }, 'BanEngine: failed to update last_attack_at for affected devices');
+    }
   }
 }
 
