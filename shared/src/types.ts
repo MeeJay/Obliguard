@@ -266,6 +266,8 @@ export interface AppConfig {
   otp_smtp_server_id: number | null;
   /** URL of the companion Obliview instance. When set, a "Switch to Obliview" button appears in the header. */
   obliview_url: string | null;
+  /** When true, users can log in via a one-time SSO token issued by the connected Obliview instance. */
+  enable_foreign_sso: boolean;
 }
 
 /**

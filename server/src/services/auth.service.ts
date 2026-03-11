@@ -6,7 +6,7 @@ import { logger } from '../utils/logger';
 interface UserRow {
   id: number;
   username: string;
-  password_hash: string;
+  password_hash: string | null;
   display_name: string | null;
   role: string;
   is_active: boolean;
@@ -18,6 +18,9 @@ interface UserRow {
   enrollment_version?: number;
   totp_enabled?: boolean;
   email_otp_enabled?: boolean;
+  foreign_source?: string | null;
+  foreign_id?: number | null;
+  foreign_source_url?: string | null;
 }
 
 function rowToUser(row: UserRow): User {
@@ -38,6 +41,14 @@ function rowToUser(row: UserRow): User {
   };
 }
 
+/** Returned when a user exists but has no local password (SSO-only account). */
+export class SsoOnlyError extends Error {
+  constructor(public readonly foreignSource: string) {
+    super('SSO_ONLY');
+    this.name = 'SsoOnlyError';
+  }
+}
+
 export const authService = {
   async authenticate(username: string, password: string): Promise<User | null> {
     const row = await db<UserRow>('users')
@@ -45,6 +56,11 @@ export const authService = {
       .first();
 
     if (!row) return null;
+
+    // Foreign (SSO-only) users have no local password — reject with specific error
+    if (!row.password_hash) {
+      throw new SsoOnlyError(row.foreign_source ?? 'obliview');
+    }
 
     const valid = await comparePassword(password, row.password_hash);
     if (!valid) return null;

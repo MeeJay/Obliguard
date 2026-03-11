@@ -1,8 +1,10 @@
 import { useState, useEffect, type FormEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+import { ArrowLeftRight } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useAuthStore } from '@/store/authStore';
 import { twoFactorApi } from '@/api/twoFactor.api';
+import { appConfigApi } from '@/api/appConfig.api';
 import { Button } from '@/components/common/Button';
 import { Input } from '@/components/common/Input';
 
@@ -17,6 +19,9 @@ export function LoginPage() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [serverVersion, setServerVersion] = useState<string | null>(null);
+  /** When an account is SSO-only, we show a redirect hint instead of a password error */
+  const [ssoOnlySource, setSsoOnlySource] = useState<string | null>(null);
+  const [obliviewUrl, setObliviewUrl] = useState<string | null>(null);
 
   const [step, setStep] = useState<Step>('credentials');
   const [mfaMethods, setMfaMethods] = useState<{ totp: boolean; email: boolean }>({ totp: false, email: false });
@@ -29,6 +34,9 @@ export function LoginPage() {
       .then((r) => r.json())
       .then((data: { version?: string }) => setServerVersion(data.version ?? null))
       .catch(() => { /* ignore */ });
+    appConfigApi.getConfig()
+      .then((cfg) => setObliviewUrl(cfg.obliview_url ?? null))
+      .catch(() => { /* non-critical */ });
   }, []);
 
   const handleSubmit = async (e: FormEvent) => {
@@ -44,8 +52,17 @@ export function LoginPage() {
       } else {
         navigate('/', { replace: true });
       }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t('login.loginFailed'));
+    } catch (err: unknown) {
+      const axiosErr = err as { response?: { data?: { error?: string; code?: string; foreignSource?: string }; status?: number }; message?: string };
+      const code = axiosErr?.response?.data?.code;
+      if (code === 'SSO_ONLY') {
+        // Account has no local password — must use SSO
+        setSsoOnlySource(axiosErr?.response?.data?.foreignSource ?? 'obliview');
+        setError('');
+      } else {
+        setSsoOnlySource(null);
+        setError(err instanceof Error ? err.message : t('login.loginFailed'));
+      }
     }
   };
 
@@ -114,6 +131,26 @@ export function LoginPage() {
             {error && (
               <div className="rounded-md bg-status-down-bg border border-status-down/30 p-3">
                 <p className="text-sm text-status-down">{error}</p>
+              </div>
+            )}
+            {ssoOnlySource && (
+              <div className="rounded-md bg-accent/10 border border-accent/30 p-3 space-y-2">
+                <p className="text-sm text-text-primary">
+                  Ce compte est lié à <span className="font-semibold capitalize">{ssoOnlySource}</span>. Connecte-toi via SSO.
+                </p>
+                {obliviewUrl ? (
+                  <a
+                    href={obliviewUrl}
+                    className="inline-flex items-center gap-1.5 text-xs font-medium text-accent hover:underline"
+                  >
+                    <ArrowLeftRight size={12} />
+                    Aller sur {ssoOnlySource}
+                  </a>
+                ) : (
+                  <p className="text-xs text-text-muted">
+                    Accède à la plateforme source pour initier la connexion.
+                  </p>
+                )}
               </div>
             )}
             <Button type="submit" className="w-full" loading={isLoading}>

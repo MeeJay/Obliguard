@@ -459,6 +459,39 @@ export function SettingsPage() {
                   </a>
                 )}
               </div>
+
+              {/* SSO toggle — only shown once URL + secret are configured */}
+              {obliviewCfg?.url && obliviewCfg.apiKeySet && (
+                <div className="pt-4 border-t border-border mt-4">
+                  <div className="flex items-center justify-between gap-4">
+                    <div>
+                      <p className="text-sm font-medium text-text-primary">SSO — Connexion croisée</p>
+                      <p className="text-xs text-text-muted mt-0.5">
+                        Permet aux utilisateurs de passer d'Obliguard à Obliview (et vice-versa) sans se
+                        reconnecter — via un jeton à usage unique valable 60 secondes.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={appConfig?.enable_foreign_sso ?? false}
+                      onClick={() => void setConfigKey('enable_foreign_sso', !(appConfig?.enable_foreign_sso ?? false))}
+                      disabled={configSaving}
+                      className={cn(
+                        'relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none',
+                        (appConfig?.enable_foreign_sso ?? false) ? 'bg-primary' : 'bg-bg-hover',
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          'inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform',
+                          (appConfig?.enable_foreign_sso ?? false) ? 'translate-x-6' : 'translate-x-1',
+                        )}
+                      />
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 

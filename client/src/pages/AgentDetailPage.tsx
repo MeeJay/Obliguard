@@ -1015,6 +1015,8 @@ export function AgentDetailPage() {
 
   // Obliview companion link (resolved once after device loads)
   const [obliviewAgentUrl, setObliviewAgentUrl] = useState<string | null>(null);
+  const [obliviewSsoEnabled, setObliviewSsoEnabled] = useState(false);
+  const [ssoSwitching, setSsoSwitching] = useState(false);
 
   // In-flight bans / whitelists
   const [banningIps,      setBanningIps]      = useState(new Set<string>());
@@ -1034,7 +1036,39 @@ export function AgentDetailPage() {
     appConfigApi.getObliviewAgentLink(device.uuid)
       .then(url => setObliviewAgentUrl(url))
       .catch(() => {});
+    appConfigApi.getConfig()
+      .then(cfg => setObliviewSsoEnabled(cfg.enable_foreign_sso ?? false))
+      .catch(() => {});
   }, [device?.uuid]);
+
+  /** SSO redirect to the Obliview agent page, with optional switch-token */
+  const handleObliviewAgentClick = useCallback(async () => {
+    if (!obliviewAgentUrl) return;
+    if (!obliviewSsoEnabled) {
+      window.open(obliviewAgentUrl, '_blank', 'noopener,noreferrer');
+      return;
+    }
+    setSsoSwitching(true);
+    try {
+      const res = await fetch('/api/sso/generate-token', { method: 'POST', credentials: 'include' });
+      const body = await res.json() as { success: boolean; data?: { token: string } };
+      if (body.success && body.data?.token) {
+        // Extract the base URL from the agent link (same origin as obliviewAgentUrl)
+        const agentUrl = new URL(obliviewAgentUrl);
+        const obliviewBase = agentUrl.origin;
+        const from = encodeURIComponent(window.location.origin);
+        const token = encodeURIComponent(body.data.token);
+        const redirect = encodeURIComponent(agentUrl.pathname + agentUrl.search);
+        window.location.href = `${obliviewBase}/auth/foreign?token=${token}&from=${from}&source=obliguard&redirect=${redirect}`;
+      } else {
+        window.open(obliviewAgentUrl, '_blank', 'noopener,noreferrer');
+      }
+    } catch {
+      window.open(obliviewAgentUrl, '_blank', 'noopener,noreferrer');
+    } finally {
+      setSsoSwitching(false);
+    }
+  }, [obliviewAgentUrl, obliviewSsoEnabled]);
 
   // ── Load paginated events ───────────────────────────────────────────────────
   const loadEvents = useCallback(async () => {
@@ -1240,16 +1274,16 @@ export function AgentDetailPage() {
 
         <div className="flex items-center gap-1.5 flex-shrink-0">
           {obliviewAgentUrl && (
-            <a
-              href={obliviewAgentUrl}
-              target="_blank"
-              rel="noopener noreferrer"
+            <button
+              type="button"
+              onClick={() => { void handleObliviewAgentClick(); }}
+              disabled={ssoSwitching}
               title="Open this agent in Obliview"
-              className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium text-accent border border-accent/30 bg-accent/5 hover:bg-accent/15 transition-colors"
+              className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium text-accent border border-accent/30 bg-accent/5 hover:bg-accent/15 transition-colors disabled:opacity-60"
             >
-              <ArrowLeftRight size={12} />
+              <ArrowLeftRight size={12} className={ssoSwitching ? 'animate-pulse' : ''} />
               Obliview
-            </a>
+            </button>
           )}
           <button
             onClick={() => { void loadEvents(); void loadSummary(); }}

@@ -313,11 +313,41 @@ export function Sidebar() {
 
   // Obliview companion URL — shown as a global switch button when configured
   const [obliviewUrl, setObliviewUrl] = useState<string | null>(null);
+  const [obliviewSsoEnabled, setObliviewSsoEnabled] = useState(false);
+  const [ssoSwitching, setSsoSwitching] = useState(false);
   useEffect(() => {
     appConfigApi.getConfig()
-      .then(cfg => setObliviewUrl(cfg.obliview_url ?? null))
+      .then(cfg => {
+        setObliviewUrl(cfg.obliview_url ?? null);
+        setObliviewSsoEnabled(cfg.enable_foreign_sso ?? false);
+      })
       .catch(() => {});
   }, []);
+
+  /** SSO redirect: generate a switch token then navigate to Obliview */
+  const handleObliviewClick = useCallback(async () => {
+    if (!obliviewUrl) return;
+    if (!obliviewSsoEnabled) {
+      window.open(obliviewUrl, '_blank', 'noopener,noreferrer');
+      return;
+    }
+    setSsoSwitching(true);
+    try {
+      const res = await fetch('/api/sso/generate-token', { method: 'POST', credentials: 'include' });
+      const body = await res.json() as { success: boolean; data?: { token: string } };
+      if (body.success && body.data?.token) {
+        const from = encodeURIComponent(window.location.origin);
+        const token = encodeURIComponent(body.data.token);
+        window.location.href = `${obliviewUrl.replace(/\/$/, '')}/auth/foreign?token=${token}&from=${from}&source=obliguard`;
+      } else {
+        window.open(obliviewUrl, '_blank', 'noopener,noreferrer');
+      }
+    } catch {
+      window.open(obliviewUrl, '_blank', 'noopener,noreferrer');
+    } finally {
+      setSsoSwitching(false);
+    }
+  }, [obliviewUrl, obliviewSsoEnabled]);
 
   const [approvedDevices, setApprovedDevices] = useState<AgentDevice[]>([]);
   // Real-time UP/ALERT/DOWN/INACTIVE status received via AGENT_STATUS_CHANGED events.
@@ -513,16 +543,16 @@ export function Sidebar() {
         </Link>
         <div className="flex items-center gap-1 flex-shrink-0 ml-2">
           {obliviewUrl && (
-            <a
-              href={obliviewUrl}
-              target="_blank"
-              rel="noopener noreferrer"
+            <button
+              type="button"
+              onClick={() => { void handleObliviewClick(); }}
+              disabled={ssoSwitching}
               title="Switch to Obliview"
-              className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium text-accent border border-accent/30 bg-accent/5 hover:bg-accent/15 transition-colors"
+              className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium text-accent border border-accent/30 bg-accent/5 hover:bg-accent/15 transition-colors disabled:opacity-60"
             >
-              <ArrowLeftRight size={12} />
+              <ArrowLeftRight size={12} className={ssoSwitching ? 'animate-pulse' : ''} />
               Obliview
-            </a>
+            </button>
           )}
           <button
             onClick={toggleSidebarFloating}

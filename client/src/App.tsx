@@ -27,6 +27,8 @@ import { DownloadPage } from '@/pages/DownloadPage';
 import { ImportExportPage } from '@/pages/ImportExportPage';
 import { AdminTenantsPage } from '@/pages/AdminTenantsPage';
 import { ServiceTemplatesPage } from '@/pages/ServiceTemplatesPage';
+import { ForeignLoginPage } from '@/pages/ForeignLoginPage';
+import { SsoEnrollPage } from '@/pages/SsoEnrollPage';
 import { NotFoundPage } from '@/pages/NotFoundPage';
 import '@/i18n';
 
@@ -44,11 +46,15 @@ export default function App() {
         <Route path="/login" element={<LoginPage />} />
         <Route path="/forgot-password" element={<ForgotPasswordPage />} />
         <Route path="/reset-password" element={<ResetPasswordPage />} />
+        {/* Foreign SSO entry — public, handles token validation server-side */}
+        <Route path="/auth/foreign" element={<ForeignLoginPage />} />
 
         {/* Protected routes */}
         <Route element={<ProtectedRoute />}>
           {/* Enrollment — full-screen, outside AppLayout */}
           <Route path="/enroll" element={<EnrollmentPage />} />
+          {/* SSO new-user enrollment — full-screen, outside AppLayout */}
+          <Route path="/sso-enroll" element={<SsoEnrollPage />} />
           <Route element={<AppLayout />}>
             <Route path="/" element={<DashboardPage />} />
             <Route path="/netmap" element={<NetMapPage />} />

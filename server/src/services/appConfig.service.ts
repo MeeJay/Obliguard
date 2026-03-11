@@ -32,6 +32,7 @@ export const appConfigService = {
       force_2fa: map['force_2fa'] === 'true',
       otp_smtp_server_id: map['otp_smtp_server_id'] ? parseInt(map['otp_smtp_server_id'], 10) : null,
       obliview_url: map['obliview_url'] ?? null,
+      enable_foreign_sso: map['enable_foreign_sso'] === 'true',
     };
   },
 
