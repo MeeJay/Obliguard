@@ -43,7 +43,7 @@ export function SsoEnrollPage() {
     setError('');
     try {
       // Update display name
-      await apiClient.patch<ApiResponse<User>>('/profile', { displayName: displayName.trim() || null });
+      await apiClient.put<ApiResponse<User>>('/profile', { displayName: displayName.trim() || null });
       // Optionally set local password
       if (password) {
         await apiClient.post('/sso/set-password', { password });

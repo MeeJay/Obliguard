@@ -13,8 +13,9 @@ apiClient.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 401) {
-      // Redirect to login if session expired
-      if (window.location.pathname !== '/login') {
+      // Redirect to login if session expired — but not on SSO pages that handle 401 themselves
+      const { pathname } = window.location;
+      if (pathname !== '/login' && pathname !== '/auth/foreign') {
         window.location.href = '/login';
       }
     }
