@@ -1,5 +1,5 @@
 import { useState, useEffect, type FormEvent } from 'react';
-import { Shield, Server, Plus, Pencil, Trash2, Wifi, Eye, EyeOff } from 'lucide-react';
+import { Shield, Server, Plus, Pencil, Trash2, Wifi, Eye, EyeOff, ArrowLeftRight, Key } from 'lucide-react';
 import { SettingsPanel } from '@/components/settings/SettingsPanel';
 import { NotificationTypesPanel } from '@/components/agent/NotificationTypesPanel';
 import { useAuthStore } from '@/store/authStore';
@@ -7,7 +7,7 @@ import { smtpServerApi, type CreateSmtpServerRequest } from '@/api/smtpServer.ap
 import { appConfigApi } from '@/api/appConfig.api';
 import { Button } from '@/components/common/Button';
 import { Input } from '@/components/common/Input';
-import type { SmtpServer, AppConfig, AgentGlobalConfig, NotificationTypeConfig } from '@obliview/shared';
+import type { SmtpServer, AppConfig, AgentGlobalConfig, NotificationTypeConfig, ObliviewConfig } from '@obliview/shared';
 import { DEFAULT_AGENT_GLOBAL_CONFIG } from '@obliview/shared';
 import toast from 'react-hot-toast';
 import { cn } from '@/utils/cn';
@@ -53,6 +53,13 @@ export function SettingsPage() {
   const [appConfig, setAppConfig] = useState<AppConfig | null>(null);
   const [configSaving, setConfigSaving] = useState(false);
 
+  // ── Obliview Integration ──
+  const [obliviewCfg,      setObliviewCfg]      = useState<ObliviewConfig | null>(null);
+  const [obliviewUrl,      setObliviewUrl]      = useState('');
+  const [obliviewApiKey,   setObliviewApiKey]   = useState('');
+  const [showObliviewKey,  setShowObliviewKey]  = useState(false);
+  const [obliviewSaving,   setObliviewSaving]   = useState(false);
+
   // ── Agent Global Config ──
   const [agentGlobal, setAgentGlobal] = useState<AgentGlobalConfig | null>(null);
   const [agentSaving, setAgentSaving] = useState(false);
@@ -63,6 +70,10 @@ export function SettingsPage() {
     if (!admin) return;
     smtpServerApi.list().then(setServers).catch(() => {});
     appConfigApi.getConfig().then(setAppConfig).catch(() => {});
+    appConfigApi.getObliviewConfig().then((cfg) => {
+      setObliviewCfg(cfg);
+      setObliviewUrl(cfg.url ?? '');
+    }).catch(() => {});
     appConfigApi.getAgentGlobal().then((cfg) => {
       setAgentGlobal(cfg);
       setAgentInterval(cfg.checkIntervalSeconds !== null ? String(cfg.checkIntervalSeconds) : '');
@@ -179,6 +190,37 @@ export function SettingsPage() {
       toast.error(t('settings.failedUpdate'));
     } finally {
       setAgentSaving(false);
+    }
+  }
+
+  async function saveObliviewConfig() {
+    setObliviewSaving(true);
+    try {
+      const patch: { url?: string | null; apiKey?: string | null } = {
+        url: obliviewUrl.trim() || null,
+      };
+      if (obliviewApiKey.trim()) patch.apiKey = obliviewApiKey.trim();
+      const updated = await appConfigApi.patchObliviewConfig(patch);
+      setObliviewCfg(updated);
+      setObliviewApiKey('');
+      toast.success(t('common.saved'));
+    } catch {
+      toast.error(t('settings.failedUpdate'));
+    } finally {
+      setObliviewSaving(false);
+    }
+  }
+
+  async function clearObliviewApiKey() {
+    setObliviewSaving(true);
+    try {
+      const updated = await appConfigApi.patchObliviewConfig({ apiKey: null });
+      setObliviewCfg(updated);
+      toast.success(t('common.saved'));
+    } catch {
+      toast.error(t('settings.failedUpdate'));
+    } finally {
+      setObliviewSaving(false);
     }
   }
 
@@ -328,6 +370,102 @@ export function SettingsPage() {
                 </table>
               </div>
             )}
+          </div>
+
+          {/* ── Obliview Integration ── */}
+          <div>
+            <h2 className="text-lg font-semibold text-text-primary mb-1 flex items-center gap-2">
+              <ArrowLeftRight size={18} className="text-text-muted" />
+              Obliview Integration
+            </h2>
+            <p className="text-xs text-text-muted mb-4">
+              Connect this Obliguard instance to a companion Obliview monitoring instance.
+              Once configured, a global "Switch to Obliview" button appears in the sidebar,
+              and agent pages show a direct link to the matching agent on Obliview (matched by UUID).
+            </p>
+            <div className="rounded-lg border border-border bg-bg-secondary p-5 space-y-5">
+
+              {/* URL */}
+              <div className="flex items-start justify-between gap-4">
+                <div className="flex-1 min-w-0">
+                  <label className="block text-sm font-medium text-text-primary mb-1">Obliview URL</label>
+                  <p className="text-xs text-text-muted mb-2">Base URL of the Obliview instance (e.g. <code className="font-mono">https://monitor.example.com</code>).</p>
+                  <input
+                    type="url"
+                    value={obliviewUrl}
+                    onChange={e => setObliviewUrl(e.target.value)}
+                    placeholder="https://monitor.example.com"
+                    className="w-full max-w-md rounded-lg border border-border bg-bg-tertiary px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:ring-1 focus:ring-accent placeholder:text-text-muted"
+                  />
+                </div>
+              </div>
+
+              {/* API Key */}
+              <div>
+                <label className="block text-sm font-medium text-text-primary mb-1 flex items-center gap-1.5">
+                  <Key size={13} className="text-text-muted" />
+                  API Key
+                  {obliviewCfg?.apiKeySet && (
+                    <span className="ml-1 text-[10px] font-semibold rounded px-1.5 py-0.5 bg-green-500/10 text-green-400 border border-green-500/20">
+                      SET
+                    </span>
+                  )}
+                </label>
+                <p className="text-xs text-text-muted mb-2">
+                  Secret key configured on Obliview under <em>Obliguard Integration → API Key</em>.
+                  Leave blank to keep the current key.
+                </p>
+                <div className="flex items-center gap-2">
+                  <div className="relative flex-1 max-w-md">
+                    <input
+                      type={showObliviewKey ? 'text' : 'password'}
+                      value={obliviewApiKey}
+                      onChange={e => setObliviewApiKey(e.target.value)}
+                      placeholder={obliviewCfg?.apiKeySet ? '••••••••••••  (keep existing)' : 'Enter API key…'}
+                      className="w-full rounded-lg border border-border bg-bg-tertiary px-3 py-1.5 pr-8 text-sm text-text-primary focus:outline-none focus:ring-1 focus:ring-accent placeholder:text-text-muted"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowObliviewKey(v => !v)}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-text-muted hover:text-text-primary"
+                    >
+                      {showObliviewKey ? <EyeOff size={14} /> : <Eye size={14} />}
+                    </button>
+                  </div>
+                  {obliviewCfg?.apiKeySet && (
+                    <button
+                      type="button"
+                      onClick={() => void clearObliviewApiKey()}
+                      disabled={obliviewSaving}
+                      className="text-xs text-status-down hover:underline disabled:opacity-50"
+                    >
+                      Clear key
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Save button */}
+              <div className="flex items-center gap-3 pt-1">
+                <Button
+                  size="sm"
+                  onClick={() => void saveObliviewConfig()}
+                  disabled={obliviewSaving}
+                >
+                  {obliviewSaving ? t('common.saving') : t('common.save')}
+                </Button>
+                {obliviewCfg?.url && (
+                  <a
+                    href={obliviewCfg.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs text-accent hover:underline"
+                  >
+                    Open Obliview ↗
+                  </a>
+                )}
+              </div>
+            </div>
           </div>
 
           {/* ── Security / 2FA ── */}

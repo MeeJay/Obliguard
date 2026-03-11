@@ -14,4 +14,9 @@ router.put('/:key', requireAuth, requireRole('admin'), appConfigController.set);
 router.get('/agent-global', requireAuth, requireRole('admin'), appConfigController.getAgentGlobal);
 router.patch('/agent-global', requireAuth, requireRole('admin'), appConfigController.patchAgentGlobal);
 
+// Obliview integration — admin only for config; any authenticated user for agent link proxy
+router.get('/obliview/agent-link/:uuid', requireAuth, appConfigController.proxyObliviewAgentLink);
+router.get('/obliview',   requireAuth, requireRole('admin'), appConfigController.getObliview);
+router.patch('/obliview', requireAuth, requireRole('admin'), appConfigController.patchObliview);
+
 export default router;

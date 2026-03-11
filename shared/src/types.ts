@@ -269,6 +269,15 @@ export interface AppConfig {
 }
 
 /**
+ * Obliview integration settings stored under `obliview_config` in app_config.
+ * The raw apiKey is never exposed to clients — only `apiKeySet` (boolean) is returned.
+ */
+export interface ObliviewConfig {
+  url: string | null;
+  apiKeySet: boolean;
+}
+
+/**
  * Global agent defaults stored in app_config as JSON under key "agent_global_config".
  */
 export interface AgentGlobalConfig {

@@ -44,4 +44,57 @@ export const appConfigController = {
       res.json({ success: true, data: updated });
     } catch (err) { next(err); }
   },
+
+  // ── Obliview integration ────────────────────────────────────────────────
+
+  /** GET /admin/config/obliview — returns { url, apiKeySet } (admin only) */
+  async getObliview(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const cfg = await appConfigService.getObliviewConfig();
+      res.json({ success: true, data: cfg });
+    } catch (err) { next(err); }
+  },
+
+  /** PATCH /admin/config/obliview — sets url and/or apiKey (admin only) */
+  async patchObliview(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const patch: { url?: string | null; apiKey?: string | null } = {};
+      if ('url'    in req.body) patch.url    = (req.body as { url?: string | null }).url ?? null;
+      if ('apiKey' in req.body) patch.apiKey = (req.body as { apiKey?: string | null }).apiKey ?? null;
+      const updated = await appConfigService.setObliviewConfig(patch);
+      res.json({ success: true, data: updated });
+    } catch (err) { next(err); }
+  },
+
+  /**
+   * GET /admin/config/obliview/agent-link/:uuid
+   * Server-side proxy: asks Obliview if a device with this UUID exists.
+   * Returns { url: string } (full URL to Obliview agent page) or { url: null }.
+   */
+  async proxyObliviewAgentLink(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const { uuid } = req.params as { uuid: string };
+      const { url: obliviewUrl, apiKey } = await appConfigService.getObliviewRaw();
+      if (!obliviewUrl || !apiKey) {
+        res.json({ success: true, data: null });
+        return;
+      }
+      const endpoint = `${obliviewUrl.replace(/\/$/, '')}/api/obliguard/link?uuid=${encodeURIComponent(uuid)}`;
+      const resp = await fetch(endpoint, {
+        headers: { Authorization: `Bearer ${apiKey}` },
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!resp.ok) {
+        res.json({ success: true, data: null });
+        return;
+      }
+      const body = await resp.json() as { success: boolean; data?: { path: string } };
+      if (!body.success || !body.data?.path) {
+        res.json({ success: true, data: null });
+        return;
+      }
+      const fullUrl = `${obliviewUrl.replace(/\/$/, '')}${body.data.path}`;
+      res.json({ success: true, data: { url: fullUrl } });
+    } catch (err) { next(err); }
+  },
 };

@@ -4,10 +4,11 @@ import {
   ArrowLeft, RefreshCw, ShieldOff, ShieldCheck, ExternalLink,
   ChevronLeft, ChevronRight, Wifi, Cpu, Server, X, Eye,
   Trash2, AlertTriangle,
-  ChevronDown, ChevronUp, LayoutGrid, Network, Pencil,
+  ChevronDown, ChevronUp, LayoutGrid, Network, Pencil, ArrowLeftRight,
 } from 'lucide-react';
 import apiClient from '@/api/client';
 import { agentApi } from '@/api/agent.api';
+import { appConfigApi } from '@/api/appConfig.api';
 import { bansApi } from '@/api/bans.api';
 import { whitelistApi } from '@/api/whitelist.api';
 import { serviceTemplatesApi } from '@/api/serviceTemplates.api';
@@ -1012,6 +1013,9 @@ export function AgentDetailPage() {
   const [renameValue,   setRenameValue]   = useState('');
   const renameInputRef = useRef<HTMLInputElement>(null);
 
+  // Obliview companion link (resolved once after device loads)
+  const [obliviewAgentUrl, setObliviewAgentUrl] = useState<string | null>(null);
+
   // In-flight bans / whitelists
   const [banningIps,      setBanningIps]      = useState(new Set<string>());
   const [whitelistingIps, setWhitelistingIps] = useState(new Set<string>());
@@ -1023,6 +1027,14 @@ export function AgentDetailPage() {
       .then(d => setDevice(d))
       .finally(() => setDeviceLoading(false));
   }, [devId]);
+
+  // ── Resolve Obliview link for this agent ────────────────────────────────────
+  useEffect(() => {
+    if (!device?.uuid) return;
+    appConfigApi.getObliviewAgentLink(device.uuid)
+      .then(url => setObliviewAgentUrl(url))
+      .catch(() => {});
+  }, [device?.uuid]);
 
   // ── Load paginated events ───────────────────────────────────────────────────
   const loadEvents = useCallback(async () => {
@@ -1226,13 +1238,27 @@ export function AgentDetailPage() {
           </div>
         </div>
 
-        <button
-          onClick={() => { void loadEvents(); void loadSummary(); }}
-          className="flex-shrink-0 rounded p-1.5 text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors"
-          title="Refresh"
-        >
-          <RefreshCw size={16} className={eventsLoading || summaryLoading ? 'animate-spin' : ''} />
-        </button>
+        <div className="flex items-center gap-1.5 flex-shrink-0">
+          {obliviewAgentUrl && (
+            <a
+              href={obliviewAgentUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Open this agent in Obliview"
+              className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium text-accent border border-accent/30 bg-accent/5 hover:bg-accent/15 transition-colors"
+            >
+              <ArrowLeftRight size={12} />
+              Obliview
+            </a>
+          )}
+          <button
+            onClick={() => { void loadEvents(); void loadSummary(); }}
+            className="rounded p-1.5 text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors"
+            title="Refresh"
+          >
+            <RefreshCw size={16} className={eventsLoading || summaryLoading ? 'animate-spin' : ''} />
+          </button>
+        </div>
       </div>
 
       {/* ── Stats strip ──────────────────────────────────────────────────── */}

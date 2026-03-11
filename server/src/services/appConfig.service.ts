@@ -1,8 +1,15 @@
 import { db } from '../db';
-import type { AppConfig, AgentGlobalConfig, NotificationTypeConfig } from '@obliview/shared';
+import type { AppConfig, AgentGlobalConfig, NotificationTypeConfig, ObliviewConfig } from '@obliview/shared';
 import { DEFAULT_NOTIFICATION_TYPES } from '@obliview/shared';
 
 const AGENT_GLOBAL_CONFIG_KEY = 'agent_global_config';
+const OBLIVIEW_CONFIG_KEY     = 'obliview_config';
+
+/** Internal shape stored in DB (apiKey included). */
+interface ObliviewConfigRaw {
+  url?: string;
+  apiKey?: string;
+}
 
 export const appConfigService = {
   async get(key: string): Promise<string | null> {
@@ -55,6 +62,53 @@ export const appConfigService = {
     const updated: AgentGlobalConfig = { ...current, ...patch };
     await this.set(AGENT_GLOBAL_CONFIG_KEY, JSON.stringify(updated));
     return updated;
+  },
+
+  // ── Obliview integration ─────────────────────────────────────────────────
+
+  /** Get Obliview URL + whether an API key has been set (key itself never exposed). */
+  async getObliviewConfig(): Promise<ObliviewConfig> {
+    const raw = await this.get(OBLIVIEW_CONFIG_KEY);
+    if (!raw) return { url: null, apiKeySet: false };
+    try {
+      const cfg = JSON.parse(raw) as ObliviewConfigRaw;
+      return { url: cfg.url ?? null, apiKeySet: !!cfg.apiKey };
+    } catch {
+      return { url: null, apiKeySet: false };
+    }
+  },
+
+  /** Merge-patch Obliview config. Pass apiKey=null to clear it. */
+  async setObliviewConfig(patch: { url?: string | null; apiKey?: string | null }): Promise<ObliviewConfig> {
+    const raw = await this.get(OBLIVIEW_CONFIG_KEY);
+    const current: ObliviewConfigRaw = raw ? (JSON.parse(raw) as ObliviewConfigRaw) : {};
+    if ('url' in patch) {
+      if (patch.url) current.url = patch.url;
+      else delete current.url;
+    }
+    if ('apiKey' in patch) {
+      if (patch.apiKey) current.apiKey = patch.apiKey;
+      else delete current.apiKey;
+    }
+    await this.set(OBLIVIEW_CONFIG_KEY, JSON.stringify(current));
+    // Keep the obliview_url key in sync for getAll()
+    await this.set('obliview_url', current.url ?? '');
+    return { url: current.url ?? null, apiKeySet: !!current.apiKey };
+  },
+
+  /**
+   * Server-side only: returns the raw API key so the server can proxy requests to Obliview.
+   * Never send this to a client.
+   */
+  async getObliviewRaw(): Promise<{ url: string | null; apiKey: string | null }> {
+    const raw = await this.get(OBLIVIEW_CONFIG_KEY);
+    if (!raw) return { url: null, apiKey: null };
+    try {
+      const cfg = JSON.parse(raw) as ObliviewConfigRaw;
+      return { url: cfg.url ?? null, apiKey: cfg.apiKey ?? null };
+    } catch {
+      return { url: null, apiKey: null };
+    }
   },
 
   /**
