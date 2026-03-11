@@ -258,13 +258,14 @@ export async function listDevices(req: Request, res: Response): Promise<void> {
 export async function updateDevice(req: Request, res: Response): Promise<void> {
   const id = Number(req.params.id);
   const {
-    status, groupId, checkIntervalSeconds, agentThresholds, name,
+    status, groupId, checkIntervalSeconds, maxMissedPushes, agentThresholds, name,
     heartbeatMonitoring, sensorDisplayNames, overrideGroupSettings, displayConfig,
     notificationTypes, wanMatchingEnabled,
   } = req.body as {
     status?: 'approved' | 'refused' | 'pending' | 'suspended';
     groupId?: number | null;
     checkIntervalSeconds?: number;
+    maxMissedPushes?: number | null;
     agentThresholds?: AgentThresholds;
     name?: string | null;
     heartbeatMonitoring?: boolean;
@@ -320,6 +321,7 @@ export async function updateDevice(req: Request, res: Response): Promise<void> {
     status,
     groupId,
     checkIntervalSeconds,
+    ...('maxMissedPushes' in req.body ? { maxMissedPushes } : {}),
     name,
     heartbeatMonitoring,
     sensorDisplayNames,

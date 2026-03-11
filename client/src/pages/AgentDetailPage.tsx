@@ -4,7 +4,7 @@ import {
   ArrowLeft, RefreshCw, ShieldOff, ShieldCheck, ExternalLink,
   ChevronLeft, ChevronRight, Wifi, Cpu, Server, X, Eye,
   Trash2, AlertTriangle,
-  ChevronDown, ChevronUp, LayoutGrid, Network,
+  ChevronDown, ChevronUp, LayoutGrid, Network, Pencil,
 } from 'lucide-react';
 import apiClient from '@/api/client';
 import { agentApi } from '@/api/agent.api';
@@ -526,20 +526,22 @@ function AgentSettingsPanel({
   device: AgentDevice;
   onUpdate: (d: AgentDevice) => void;
 }) {
-  const [checkInterval,    setCheckInterval]    = useState(
-    String(device.resolvedSettings?.checkIntervalSeconds ?? device.checkIntervalSeconds ?? 60),
-  );
-  const [maxMissedPushes,  setMaxMissedPushes]  = useState(
-    String(device.resolvedSettings?.maxMissedPushes ?? 2),
-  );
-  const [overrideGroup,  setOverrideGroup]  = useState(device.overrideGroupSettings ?? false);
+  // Per-param override detection
+  const cisOverridden  = device.overrideGroupSettings ?? false;
+  const mmpOverridden  = device.maxMissedPushes !== null;
+
+  // Effective (resolved) values — inherited value shown in grey when not overriding
+  const resolvedCIS = device.resolvedSettings?.checkIntervalSeconds ?? 60;
+  const resolvedMMP = device.resolvedSettings?.maxMissedPushes ?? 2;
+
+  const [checkInterval,  setCheckInterval]  = useState(String(device.checkIntervalSeconds ?? 60));
+  const [maxMissed,      setMaxMissed]      = useState(String(device.maxMissedPushes ?? resolvedMMP));
   const [wanMatching,    setWanMatching]    = useState(device.wanMatchingEnabled ?? false);
   const [saving,         setSaving]         = useState(false);
 
   useEffect(() => {
-    setCheckInterval(String(device.resolvedSettings?.checkIntervalSeconds ?? device.checkIntervalSeconds ?? 60));
-    setMaxMissedPushes(String(device.resolvedSettings?.maxMissedPushes ?? 2));
-    setOverrideGroup(device.overrideGroupSettings ?? false);
+    setCheckInterval(String(device.checkIntervalSeconds ?? 60));
+    setMaxMissed(String(device.maxMissedPushes ?? (device.resolvedSettings?.maxMissedPushes ?? 2)));
     setWanMatching(device.wanMatchingEnabled ?? false);
   }, [device]);
 
@@ -576,47 +578,94 @@ function AgentSettingsPanel({
         Agent Settings
       </span>
 
-      {/* Check interval */}
-      <label className="flex items-center gap-2 text-xs text-text-secondary">
-        Check every
+      {/* ── Check interval ──────────────────────────────────────────────── */}
+      <div className="flex items-center gap-2 text-xs text-text-secondary">
+        <span>Check every</span>
         <input
           type="number"
           min={10}
-          value={checkInterval}
-          onChange={e => setCheckInterval(e.target.value)}
-          onBlur={() => void save({ checkIntervalSeconds: Math.max(10, Number(checkInterval) || 60) })}
-          className="w-14 rounded border border-border bg-bg-tertiary px-2 py-1 text-xs text-text-primary focus:outline-none focus:border-accent"
+          value={cisOverridden ? checkInterval : resolvedCIS}
+          onChange={e => { if (cisOverridden) setCheckInterval(e.target.value); }}
+          onBlur={() => {
+            if (cisOverridden) void save({ checkIntervalSeconds: Math.max(10, Number(checkInterval) || 60) });
+          }}
+          disabled={!cisOverridden}
+          className={`w-14 rounded border border-border px-2 py-1 text-xs focus:outline-none focus:border-accent ${
+            cisOverridden
+              ? 'bg-bg-tertiary text-text-primary'
+              : 'bg-bg-tertiary text-text-muted cursor-default'
+          }`}
         />
         <span className="text-text-muted">s</span>
-      </label>
+        {cisOverridden ? (
+          <button
+            type="button"
+            onClick={() => void save({ overrideGroupSettings: false })}
+            disabled={saving}
+            className="text-[10px] text-text-muted hover:text-status-down border border-border rounded px-1.5 py-0.5 transition-colors disabled:opacity-50"
+            title="Remove override — inherit from group / global settings"
+          >
+            Reset
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={() => void save({ overrideGroupSettings: true, checkIntervalSeconds: resolvedCIS })}
+            disabled={saving}
+            className="text-[10px] text-accent border border-accent/40 rounded px-1.5 py-0.5 hover:bg-accent/10 transition-colors disabled:opacity-50"
+            title="Override this setting at device level"
+          >
+            Override
+          </button>
+        )}
+      </div>
 
-      {/* Max missed pushes */}
-      <label
+      {/* ── Max missed pushes ───────────────────────────────────────────── */}
+      <div
         className="flex items-center gap-2 text-xs text-text-secondary"
         title="Agent is marked offline after this many consecutive missed pushes"
       >
-        Max missed pushes
+        <span>Max missed pushes</span>
         <input
           type="number"
           min={1}
           max={20}
-          value={maxMissedPushes}
-          onChange={e => setMaxMissedPushes(e.target.value)}
-          onBlur={() => void save({ maxMissedPushes: Math.max(1, Number(maxMissedPushes) || 2) })}
-          className="w-12 rounded border border-border bg-bg-tertiary px-2 py-1 text-xs text-text-primary focus:outline-none focus:border-accent"
+          value={mmpOverridden ? maxMissed : resolvedMMP}
+          onChange={e => { if (mmpOverridden) setMaxMissed(e.target.value); }}
+          onBlur={() => {
+            if (mmpOverridden) void save({ maxMissedPushes: Math.max(1, Number(maxMissed) || 2) });
+          }}
+          disabled={!mmpOverridden}
+          className={`w-12 rounded border border-border px-2 py-1 text-xs focus:outline-none focus:border-accent ${
+            mmpOverridden
+              ? 'bg-bg-tertiary text-text-primary'
+              : 'bg-bg-tertiary text-text-muted cursor-default'
+          }`}
         />
-      </label>
+        {mmpOverridden ? (
+          <button
+            type="button"
+            onClick={() => void save({ maxMissedPushes: null })}
+            disabled={saving}
+            className="text-[10px] text-text-muted hover:text-status-down border border-border rounded px-1.5 py-0.5 transition-colors disabled:opacity-50"
+            title="Remove override — inherit from group / global settings"
+          >
+            Reset
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={() => void save({ maxMissedPushes: resolvedMMP })}
+            disabled={saving}
+            className="text-[10px] text-accent border border-accent/40 rounded px-1.5 py-0.5 hover:bg-accent/10 transition-colors disabled:opacity-50"
+            title="Override this setting at device level"
+          >
+            Override
+          </button>
+        )}
+      </div>
 
-      {/* Override group settings */}
-      <label className="flex items-center gap-2 text-xs text-text-secondary cursor-pointer select-none">
-        <Toggle
-          value={overrideGroup}
-          onChange={() => { const v = !overrideGroup; setOverrideGroup(v); void save({ overrideGroupSettings: v }); }}
-        />
-        Override group settings
-      </label>
-
-      {/* WAN Matching — opt-in for dedicated/static public IPs */}
+      {/* ── WAN Matching — opt-in for dedicated/static public IPs ───────── */}
       <label
         className="flex items-center gap-2 text-xs text-text-secondary cursor-pointer select-none"
         title="Enable only if this agent has a dedicated/static public IP. Allows the NetMap to draw peer links for WAN traffic. Do not enable if behind a shared NAT."
@@ -958,6 +1007,11 @@ export function AgentDetailPage() {
   // IP drawer
   const [selectedIp, setSelectedIp] = useState<string | null>(null);
 
+  // Inline rename
+  const [renaming,      setRenaming]      = useState(false);
+  const [renameValue,   setRenameValue]   = useState('');
+  const renameInputRef = useRef<HTMLInputElement>(null);
+
   // In-flight bans / whitelists
   const [banningIps,      setBanningIps]      = useState(new Set<string>());
   const [whitelistingIps, setWhitelistingIps] = useState(new Set<string>());
@@ -1074,6 +1128,18 @@ export function AgentDetailPage() {
     }
   }, []);
 
+  // ── Inline rename ───────────────────────────────────────────────────────────
+  async function saveRename() {
+    if (!device) return;
+    setRenaming(false);
+    const trimmed = renameValue.trim();
+    if (trimmed === (device.name ?? '')) return;
+    try {
+      const updated = await agentApi.updateDevice(device.id, { name: trimmed || null });
+      setDevice(updated);
+    } catch { /* ignore */ }
+  }
+
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   // ── Loading / not found ─────────────────────────────────────────────────────
@@ -1110,7 +1176,28 @@ export function AgentDetailPage() {
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2.5 flex-wrap">
             <div className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${isOnline ? 'bg-status-up' : 'bg-status-down'}`} />
-            <h1 className="text-xl font-semibold text-text-primary">{displayName}</h1>
+            {renaming ? (
+              <form onSubmit={e => { e.preventDefault(); void saveRename(); }}>
+                <input
+                  ref={renameInputRef}
+                  value={renameValue}
+                  onChange={e => setRenameValue(e.target.value)}
+                  onBlur={() => void saveRename()}
+                  onKeyDown={e => { if (e.key === 'Escape') setRenaming(false); }}
+                  autoFocus
+                  className="text-xl font-semibold bg-bg-secondary border border-accent/60 rounded px-2 py-0.5 text-text-primary focus:outline-none focus:border-accent min-w-[8rem]"
+                />
+              </form>
+            ) : (
+              <button
+                type="button"
+                onClick={() => { setRenameValue(device.name ?? ''); setRenaming(true); }}
+                className="group flex items-center gap-1.5"
+              >
+                <h1 className="text-xl font-semibold text-text-primary">{displayName}</h1>
+                <Pencil size={14} className="text-text-muted opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0" />
+              </button>
+            )}
             <span className={`rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${
               isOnline ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'
             }`}>

@@ -496,6 +496,8 @@ export interface AgentDevice {
   status: 'pending' | 'approved' | 'refused' | 'suspended';
   heartbeatMonitoring: boolean;
   checkIntervalSeconds: number;
+  /** Raw device-level value. null = not set at device level = inherit from group/global. */
+  maxMissedPushes: number | null;
   approvedBy: number | null;
   approvedAt: string | null;
   groupId: number | null;

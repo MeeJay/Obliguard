@@ -6,6 +6,7 @@ import type {
   AgentApiKey,
   AgentDevice,
   AgentDisplayConfig,
+  AgentGlobalConfig,
   AgentGroupConfig,
   AgentThresholds,
   NotificationTypeConfig,
@@ -14,7 +15,12 @@ import type {
   AgentServiceConfig,
   AgentIpEvent,
 } from '@obliview/shared';
-import { DEFAULT_AGENT_THRESHOLDS, SOCKET_EVENTS } from '@obliview/shared';
+import {
+  DEFAULT_AGENT_THRESHOLDS,
+  DEFAULT_AGENT_GLOBAL_CONFIG,
+  SOCKET_EVENTS,
+} from '@obliview/shared';
+import { appConfigService } from './appConfig.service';
 import { notificationService } from './notification.service';
 import { logger } from '../utils/logger';
 import { whitelistService } from './whitelist.service';
@@ -105,24 +111,34 @@ function rowToApiKey(row: AgentApiKeyRow): AgentApiKey {
   };
 }
 
-function rowToDevice(row: AgentDeviceRow, groupConfig?: AgentGroupConfig | null, groupThresholds?: AgentThresholds | null): AgentDevice {
+function rowToDevice(
+  row: AgentDeviceRow,
+  groupConfig?: AgentGroupConfig | null,
+  groupThresholds?: AgentThresholds | null,
+  globalConfig?: AgentGlobalConfig | null,
+): AgentDevice {
   const override = row.override_group_settings ?? false;
 
-  // Compute effective (resolved) settings, honouring group inheritance when override=false.
-  let resolvedSettings: AgentDevice['resolvedSettings'];
-  if (!override && groupConfig) {
-    resolvedSettings = {
-      checkIntervalSeconds: groupConfig.pushIntervalSeconds ?? row.check_interval_seconds,
-      heartbeatMonitoring:  false,  // Obliguard: heartbeat monitoring removed
-      maxMissedPushes:      groupConfig.maxMissedPushes ?? (row.agent_max_missed_pushes ?? 2),
-    };
-  } else {
-    resolvedSettings = {
-      checkIntervalSeconds: row.check_interval_seconds,
-      heartbeatMonitoring:  false,  // Obliguard: heartbeat monitoring removed
-      maxMissedPushes:      row.agent_max_missed_pushes ?? 2,
-    };
-  }
+  // Global defaults (fall through when group/device have no override)
+  const globalCIS = globalConfig?.checkIntervalSeconds ?? DEFAULT_AGENT_GLOBAL_CONFIG.checkIntervalSeconds;
+  const globalMMP = globalConfig?.maxMissedPushes     ?? DEFAULT_AGENT_GLOBAL_CONFIG.maxMissedPushes;
+
+  // checkIntervalSeconds: when overrideGroupSettings=true use device value; else group → global → default
+  const resolvedCIS = override
+    ? row.check_interval_seconds
+    : (groupConfig?.pushIntervalSeconds ?? globalCIS);
+
+  // maxMissedPushes: null at device level = inherit from group → global → default
+  const deviceMMP = row.agent_max_missed_pushes ?? null;
+  const resolvedMMP = deviceMMP !== null
+    ? deviceMMP
+    : (groupConfig?.maxMissedPushes ?? globalMMP);
+
+  const resolvedSettings: AgentDevice['resolvedSettings'] = {
+    checkIntervalSeconds: resolvedCIS,
+    heartbeatMonitoring:  false,  // Obliguard: heartbeat monitoring removed
+    maxMissedPushes:      resolvedMMP,
+  };
 
   return {
     id: row.id,
@@ -137,6 +153,7 @@ function rowToDevice(row: AgentDeviceRow, groupConfig?: AgentGroupConfig | null,
     status: row.status as AgentDevice['status'],
     heartbeatMonitoring: row.heartbeat_monitoring ?? true,
     checkIntervalSeconds: row.check_interval_seconds,
+    maxMissedPushes: deviceMMP,
     approvedBy: row.approved_by,
     approvedAt: row.approved_at ? row.approved_at.toISOString() : null,
     groupId: row.group_id,
@@ -219,17 +236,22 @@ export const agentService = {
   async listDevices(tenantId: number, status?: AgentDevice['status']): Promise<AgentDevice[]> {
     // LEFT JOIN to fetch agent_group_config in one round-trip so resolvedSettings
     // can be computed without N+1 queries.
-    const query = db('agent_devices as d')
-      .leftJoin('monitor_groups as g', 'g.id', 'd.group_id')
-      .where({ 'd.tenant_id': tenantId })
-      .select(
-        'd.*',
-        db.raw('g.agent_group_config as _group_agent_config'),
-        db.raw('g.agent_thresholds as _group_agent_thresholds'),
-      )
-      .orderBy('d.created_at', 'desc');
-    if (status) query.where({ 'd.status': status });
-    const rows = await query as (AgentDeviceRow & { _group_agent_config: unknown; _group_agent_thresholds: unknown })[];
+    const [rows, globalConfig] = await Promise.all([
+      (async () => {
+        const query = db('agent_devices as d')
+          .leftJoin('monitor_groups as g', 'g.id', 'd.group_id')
+          .where({ 'd.tenant_id': tenantId })
+          .select(
+            'd.*',
+            db.raw('g.agent_group_config as _group_agent_config'),
+            db.raw('g.agent_thresholds as _group_agent_thresholds'),
+          )
+          .orderBy('d.created_at', 'desc');
+        if (status) query.where({ 'd.status': status });
+        return query as Promise<(AgentDeviceRow & { _group_agent_config: unknown; _group_agent_thresholds: unknown })[]>;
+      })(),
+      appConfigService.getAgentGlobal(),
+    ]);
     return rows.map((r) => {
       const gc = r._group_agent_config
         ? (typeof r._group_agent_config === 'string'
@@ -241,18 +263,19 @@ export const agentService = {
           ? JSON.parse(r._group_agent_thresholds)
           : r._group_agent_thresholds) as AgentThresholds
         : null;
-      return rowToDevice(r, gc, gt);
+      return rowToDevice(r, gc, gt, globalConfig);
     });
   },
 
   async getDeviceById(id: number): Promise<AgentDevice | null> {
     const row = await db('agent_devices').where({ id }).first() as AgentDeviceRow | undefined;
     if (!row) return null;
-    const [groupConfig, groupThresholds] = await Promise.all([
+    const [groupConfig, groupThresholds, globalConfig] = await Promise.all([
       row.group_id ? getGroupAgentConfig(row.group_id) : null,
       row.group_id ? getGroupAgentThresholds(row.group_id) : null,
+      appConfigService.getAgentGlobal(),
     ]);
-    return rowToDevice(row, groupConfig, groupThresholds);
+    return rowToDevice(row, groupConfig, groupThresholds, globalConfig);
   },
 
   async countOnlineDevices(tenantId: number): Promise<number> {
@@ -265,11 +288,12 @@ export const agentService = {
   async getDeviceByUuid(uuid: string): Promise<AgentDevice | null> {
     const row = await db('agent_devices').where({ uuid }).first() as AgentDeviceRow | undefined;
     if (!row) return null;
-    const [groupConfig, groupThresholds] = await Promise.all([
+    const [groupConfig, groupThresholds, globalConfig] = await Promise.all([
       row.group_id ? getGroupAgentConfig(row.group_id) : null,
       row.group_id ? getGroupAgentThresholds(row.group_id) : null,
+      appConfigService.getAgentGlobal(),
     ]);
-    return rowToDevice(row, groupConfig, groupThresholds);
+    return rowToDevice(row, groupConfig, groupThresholds, globalConfig);
   },
 
   async updateDevice(id: number, data: {
@@ -309,8 +333,12 @@ export const agentService = {
       .update(update)
       .returning('*') as AgentDeviceRow[];
     if (!row) return null;
-    const groupConfig = row.group_id ? await getGroupAgentConfig(row.group_id) : null;
-    const device = rowToDevice(row, groupConfig);
+    const [groupConfig, groupThresholds, globalConfig] = await Promise.all([
+      row.group_id ? getGroupAgentConfig(row.group_id) : null,
+      row.group_id ? getGroupAgentThresholds(row.group_id) : null,
+      appConfigService.getAgentGlobal(),
+    ]);
+    const device = rowToDevice(row, groupConfig, groupThresholds, globalConfig);
 
     // Broadcast so the sidebar can update name/status/group without polling
     if (_io) {
