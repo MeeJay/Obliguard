@@ -1,5 +1,5 @@
 import { useState, useEffect, type FormEvent } from 'react';
-import { Shield, Server, Plus, Pencil, Trash2, Wifi, Eye, EyeOff, ArrowLeftRight, Key } from 'lucide-react';
+import { Shield, Server, Plus, Pencil, Trash2, Wifi, Eye, EyeOff, ArrowLeftRight, RefreshCw, Copy } from 'lucide-react';
 import { SettingsPanel } from '@/components/settings/SettingsPanel';
 import { NotificationTypesPanel } from '@/components/agent/NotificationTypesPanel';
 import { useAuthStore } from '@/store/authStore';
@@ -211,19 +211,6 @@ export function SettingsPage() {
     }
   }
 
-  async function clearObliviewApiKey() {
-    setObliviewSaving(true);
-    try {
-      const updated = await appConfigApi.patchObliviewConfig({ apiKey: null });
-      setObliviewCfg(updated);
-      toast.success(t('common.saved'));
-    } catch {
-      toast.error(t('settings.failedUpdate'));
-    } finally {
-      setObliviewSaving(false);
-    }
-  }
-
   async function saveAgentNotifTypes(notifTypes: NotificationTypeConfig | null) {
     const updated = await appConfigApi.patchAgentGlobal({ notificationTypes: notifTypes });
     setAgentGlobal(updated);
@@ -379,70 +366,77 @@ export function SettingsPage() {
               Obliview Integration
             </h2>
             <p className="text-xs text-text-muted mb-4">
-              Connect this Obliguard instance to a companion Obliview monitoring instance.
-              Once configured, a global "Switch to Obliview" button appears in the sidebar,
-              and agent pages show a direct link to the matching agent on Obliview (matched by UUID).
+              Link Obliguard to an Obliview instance so agents can be cross-referenced between the two apps.
+              Both apps share the same secret key — generate it here, then paste it into Obliview's settings.
             </p>
             <div className="rounded-lg border border-border bg-bg-secondary p-5 space-y-5">
 
               {/* URL */}
-              <div className="flex items-start justify-between gap-4">
-                <div className="flex-1 min-w-0">
-                  <label className="block text-sm font-medium text-text-primary mb-1">Obliview URL</label>
-                  <p className="text-xs text-text-muted mb-2">Base URL of the Obliview instance (e.g. <code className="font-mono">https://monitor.example.com</code>).</p>
-                  <input
-                    type="url"
-                    value={obliviewUrl}
-                    onChange={e => setObliviewUrl(e.target.value)}
-                    placeholder="https://monitor.example.com"
-                    className="w-full max-w-md rounded-lg border border-border bg-bg-tertiary px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:ring-1 focus:ring-accent placeholder:text-text-muted"
-                  />
-                </div>
+              <div>
+                <label className="block text-sm font-medium text-text-primary mb-2">Obliview URL</label>
+                <input
+                  type="url"
+                  value={obliviewUrl}
+                  onChange={e => setObliviewUrl(e.target.value)}
+                  placeholder="https://monitor.example.com"
+                  className="w-full max-w-xl rounded-lg border border-border bg-bg-tertiary px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:ring-1 focus:ring-accent placeholder:text-text-muted"
+                />
               </div>
 
-              {/* API Key */}
+              {/* Secret */}
               <div>
-                <label className="block text-sm font-medium text-text-primary mb-1 flex items-center gap-1.5">
-                  <Key size={13} className="text-text-muted" />
-                  API Key
+                <label className="block text-sm font-medium text-text-primary mb-2">
+                  Secret
                   {obliviewCfg?.apiKeySet && (
-                    <span className="ml-1 text-[10px] font-semibold rounded px-1.5 py-0.5 bg-green-500/10 text-green-400 border border-green-500/20">
+                    <span className="ml-2 text-[10px] font-semibold rounded px-1.5 py-0.5 bg-green-500/10 text-green-400 border border-green-500/20">
                       SET
                     </span>
                   )}
                 </label>
-                <p className="text-xs text-text-muted mb-2">
-                  Secret key configured on Obliview under <em>Obliguard Integration → API Key</em>.
-                  Leave blank to keep the current key.
-                </p>
-                <div className="flex items-center gap-2">
-                  <div className="relative flex-1 max-w-md">
+                <div className="flex items-center gap-2 max-w-xl">
+                  <div className="relative flex-1">
                     <input
                       type={showObliviewKey ? 'text' : 'password'}
                       value={obliviewApiKey}
                       onChange={e => setObliviewApiKey(e.target.value)}
-                      placeholder={obliviewCfg?.apiKeySet ? '••••••••••••  (keep existing)' : 'Enter API key…'}
-                      className="w-full rounded-lg border border-border bg-bg-tertiary px-3 py-1.5 pr-8 text-sm text-text-primary focus:outline-none focus:ring-1 focus:ring-accent placeholder:text-text-muted"
+                      placeholder={obliviewCfg?.apiKeySet ? '••••••••••••••••••••••••••••••••••••' : 'Generate or paste a secret…'}
+                      className="w-full rounded-lg border border-border bg-bg-tertiary px-3 py-1.5 pr-8 text-sm font-mono text-text-primary focus:outline-none focus:ring-1 focus:ring-accent placeholder:text-text-muted"
                     />
                     <button
                       type="button"
                       onClick={() => setShowObliviewKey(v => !v)}
                       className="absolute right-2 top-1/2 -translate-y-1/2 text-text-muted hover:text-text-primary"
+                      title={showObliviewKey ? 'Hide' : 'Show'}
                     >
                       {showObliviewKey ? <EyeOff size={14} /> : <Eye size={14} />}
                     </button>
                   </div>
-                  {obliviewCfg?.apiKeySet && (
+                  {/* Generate */}
+                  <button
+                    type="button"
+                    onClick={() => setObliviewApiKey(crypto.randomUUID())}
+                    className="flex items-center gap-1.5 rounded-lg border border-border bg-bg-tertiary px-3 py-1.5 text-sm text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors whitespace-nowrap"
+                    title="Generate a new random secret"
+                  >
+                    <RefreshCw size={13} />
+                    Generate
+                  </button>
+                  {/* Copy */}
+                  {obliviewApiKey && (
                     <button
                       type="button"
-                      onClick={() => void clearObliviewApiKey()}
-                      disabled={obliviewSaving}
-                      className="text-xs text-status-down hover:underline disabled:opacity-50"
+                      onClick={() => { void navigator.clipboard.writeText(obliviewApiKey); toast.success('Copied!'); }}
+                      className="rounded-lg border border-border bg-bg-tertiary p-2 text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors"
+                      title="Copy to clipboard"
                     >
-                      Clear key
+                      <Copy size={14} />
                     </button>
                   )}
                 </div>
+                <p className="mt-2 text-xs text-text-muted">
+                  Use the same secret in{' '}
+                  <span className="text-text-secondary font-medium">Obliview → Settings → Obliguard Integration</span>.
+                </p>
               </div>
 
               {/* Save button */}
