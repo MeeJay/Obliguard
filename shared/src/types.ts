@@ -838,6 +838,13 @@ export interface IpReputation {
   status?: IpStatus;
   /** ID of the currently active ban (only set when status='banned') */
   activeBanId?: number | null;
+  /**
+   * True when the calling tenant has issued a "clear suspicious" for this IP,
+   * snapshotting the current total_failures as a baseline.
+   * The IP will become suspicious again if new failures arrive after the clear.
+   * Only meaningful for non-admin tenant views.
+   */
+  clearedForTenant?: boolean;
 }
 
 export type IpStatus = 'banned' | 'whitelisted' | 'suspicious' | 'clean';

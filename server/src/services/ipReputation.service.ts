@@ -50,6 +50,7 @@ function parseJsonArray(val: string[] | string | null | undefined): string[] {
 function rowToReputation(
   row: IpReputationRow,
   status: IpStatus = 'clean',
+  cleared = false,
 ): IpReputation {
   return {
     ip: row.ip,
@@ -66,6 +67,27 @@ function rowToReputation(
     asn: row.asn,
     updatedAt: row.updated_at.toISOString(),
     status,
+    clearedForTenant: cleared,
+  };
+}
+
+/** Minimal empty reputation row for IPs that are banned but have no events. */
+function emptyReputationRow(ip: string): IpReputationRow {
+  const now = new Date();
+  return {
+    ip,
+    total_failures: 0,
+    total_successes: 0,
+    affected_agents_count: 0,
+    affected_services: [],
+    attempted_usernames: [],
+    first_seen: null,
+    last_seen: null,
+    last_event_device_id: null,
+    geo_country_code: null,
+    geo_city: null,
+    asn: null,
+    updated_at: now,
   };
 }
 
@@ -224,24 +246,123 @@ class IpReputationService {
   }
 
   /**
+   * Ensures a minimal ip_reputation row exists for the given IP.
+   * Called when a ban is created to guarantee the IP is visible in the reputation module.
+   * Does NOT overwrite existing data (ON CONFLICT DO NOTHING).
+   */
+  async ensureExists(ip: string): Promise<void> {
+    const now = new Date();
+    await db('ip_reputation')
+      .insert({
+        ip,
+        total_failures: 0,
+        total_successes: 0,
+        affected_agents_count: 0,
+        affected_services: [],
+        attempted_usernames: [],
+        first_seen: null,
+        last_seen: null,
+        last_event_device_id: null,
+        geo_country_code: null,
+        geo_city: null,
+        asn: null,
+        updated_at: now,
+      })
+      .onConflict('ip')
+      .ignore();
+  }
+
+  /**
    * Lists IP reputation records with optional filters.
-   * Computes status by joining with ip_bans and ip_whitelist.
+   *
+   * For status='banned': queries from ip_bans as the driving table so that
+   * IPs with an active ban but no reputation row (e.g. manually-created bans
+   * or historical entries before the events fix) are always visible.
+   *
+   * For status='suspicious'/'clean'/'all': queries from ip_reputation.
+   *   - When tenantId is provided, restricts to IPs that have ip_events for
+   *     that tenant's agents.
+   *   - Suspicious threshold is adjusted by per-tenant clears: an IP is
+   *     suspicious for a tenant only when total_failures > baseline_failures
+   *     (the counter value at the time of their last "clear suspicious" action).
    */
   async list(filters: {
     tenantId?: number;
+    isAdmin?: boolean;
     status?: IpStatus;
     search?: string;
     limit?: number;
     offset?: number;
   }): Promise<{ data: IpReputation[]; total: number }> {
-    const limit = filters.limit ?? 50;
+    const limit  = filters.limit  ?? 50;
     const offset = filters.offset ?? 0;
+    const tenantId = filters.tenantId;
+    const isAdmin  = filters.isAdmin ?? false;
 
-    // Build a CTE that computes status per IP
+    // ── "Banned" uses ip_bans as the driving table ──────────────────────────
+    // This guarantees IPs that are banned but have no reputation row still appear.
+    if (filters.status === 'banned') {
+      let q = db('ip_bans as b')
+        .leftJoin('ip_reputation as r', db.raw('r.ip::inet = b.ip'))
+        .select(
+          db.raw("COALESCE(r.ip, b.ip::text) AS ip"),
+          db.raw("COALESCE(r.total_failures, 0) AS total_failures"),
+          db.raw("COALESCE(r.total_successes, 0) AS total_successes"),
+          db.raw("COALESCE(r.affected_agents_count, 0) AS affected_agents_count"),
+          db.raw("COALESCE(r.affected_services, '{}') AS affected_services"),
+          db.raw("COALESCE(r.attempted_usernames, '{}') AS attempted_usernames"),
+          db.raw('r.first_seen'),
+          db.raw('r.last_seen'),
+          db.raw('r.last_event_device_id'),
+          db.raw('r.geo_country_code'),
+          db.raw('r.geo_city'),
+          db.raw('r.asn'),
+          db.raw('COALESCE(r.updated_at, b.banned_at) AS updated_at'),
+          'b.id as active_ban_id',
+        )
+        .where('b.is_active', true)
+        .where(function () {
+          this.whereNull('b.expires_at').orWhere('b.expires_at', '>', new Date());
+        });
+
+      if (filters.search) {
+        q.whereRaw("b.ip::text ILIKE ?", [`%${filters.search}%`]);
+      }
+
+      const countResult = await q.clone().clearSelect().count('b.id as count').first() as { count: string } | undefined;
+      const total = Number(countResult?.count ?? 0);
+
+      const rows = await q.orderBy('b.banned_at', 'desc').limit(limit).offset(offset) as Array<
+        IpReputationRow & { active_ban_id: number | null }
+      >;
+
+      const data = rows.map((row) => ({
+        ...rowToReputation(row, 'banned'),
+        activeBanId: row.active_ban_id ?? null,
+      }));
+
+      return { data, total };
+    }
+
+    // ── All other statuses: ip_reputation as driving table ───────────────────
+
+    // Suspicious case: per-tenant clear baseline
+    // CASE expression is different depending on whether we have a tenant context.
+    const suspiciousExpr = tenantId && !isAdmin
+      ? `r.total_failures > COALESCE(clr.baseline_failures, 0)`
+      : `r.total_failures > 0`;
+
+    const STATUS_CASE = `(CASE
+      WHEN b.id IS NOT NULL THEN 'banned'
+      WHEN w.id IS NOT NULL THEN 'whitelisted'
+      WHEN ${suspiciousExpr} THEN 'suspicious'
+      ELSE 'clean'
+    END)`;
+
     const baseQuery = db
       .from('ip_reputation as r')
       .leftJoin('ip_bans as b', function () {
-        this.on('b.ip', '=', 'r.ip')
+        this.on('b.ip', '=', db.raw('r.ip::inet'))
           .andOn(db.raw('b.is_active = true'))
           .andOn(db.raw('(b.expires_at IS NULL OR b.expires_at > NOW())'));
       })
@@ -249,51 +370,63 @@ class IpReputationService {
       .select(
         'r.*',
         'b.id as active_ban_id',
-        db.raw(`
-          CASE
-            WHEN b.id IS NOT NULL THEN 'banned'
-            WHEN w.id IS NOT NULL THEN 'whitelisted'
-            WHEN r.total_failures > 0 THEN 'suspicious'
-            ELSE 'clean'
-          END AS computed_status
-        `),
+        db.raw(`${STATUS_CASE} AS computed_status`),
       );
 
-    // CASE expression used in WHERE to filter by computed status (HAVING without GROUP BY
-    // is invalid in PostgreSQL — use a plain WHERE on the same expression instead).
-    const STATUS_CASE_SQL = `(CASE
-      WHEN b.id IS NOT NULL THEN 'banned'
-      WHEN w.id IS NOT NULL THEN 'whitelisted'
-      WHEN r.total_failures > 0 THEN 'suspicious'
-      ELSE 'clean'
-    END) = ?`;
+    // Per-tenant clear baseline — join only for non-admin tenant users
+    if (tenantId && !isAdmin) {
+      baseQuery.leftJoin('ip_reputation_tenant_clears as clr', function () {
+        this.on('clr.ip', '=', 'r.ip').andOnVal('clr.tenant_id', '=', tenantId);
+      });
+      // Also expose whether this tenant has a clear record
+      baseQuery.select(db.raw('clr.baseline_failures IS NOT NULL AS cleared_for_tenant'));
+
+      // Restrict to IPs that have events for THIS tenant's agents
+      baseQuery.whereExists(
+        db('ip_events as e')
+          .where('e.ip', db.raw('r.ip'))
+          .where('e.tenant_id', tenantId)
+          .select(db.raw('1')),
+      );
+    }
 
     if (filters.search) {
-      // inet columns must be cast to text before using ILIKE
       baseQuery.whereRaw('r.ip::text ILIKE ?', [`%${filters.search}%`]);
     }
 
     if (filters.status) {
-      baseQuery.whereRaw(STATUS_CASE_SQL, [filters.status]);
+      baseQuery.whereRaw(`${STATUS_CASE} = ?`, [filters.status]);
     }
 
     // Count query (same joins + same filters, no limit/offset)
     const countQuery = db
       .from('ip_reputation as r')
       .leftJoin('ip_bans as b', function () {
-        this.on('b.ip', '=', 'r.ip')
+        this.on('b.ip', '=', db.raw('r.ip::inet'))
           .andOn(db.raw('b.is_active = true'))
           .andOn(db.raw('(b.expires_at IS NULL OR b.expires_at > NOW())'));
       })
       .leftJoin('ip_whitelist as w', db.raw("r.ip <<= w.ip"))
       .count<Array<{ count: string }>>({ count: 'r.ip' });
 
+    if (tenantId && !isAdmin) {
+      countQuery.leftJoin('ip_reputation_tenant_clears as clr', function () {
+        this.on('clr.ip', '=', 'r.ip').andOnVal('clr.tenant_id', '=', tenantId);
+      });
+      countQuery.whereExists(
+        db('ip_events as e')
+          .where('e.ip', db.raw('r.ip'))
+          .where('e.tenant_id', tenantId)
+          .select(db.raw('1')),
+      );
+    }
+
     if (filters.search) {
       countQuery.whereRaw('r.ip::text ILIKE ?', [`%${filters.search}%`]);
     }
 
     if (filters.status) {
-      countQuery.whereRaw(STATUS_CASE_SQL, [filters.status]);
+      countQuery.whereRaw(`${STATUS_CASE} = ?`, [filters.status]);
     }
 
     const [countResult] = await countQuery;
@@ -304,8 +437,12 @@ class IpReputationService {
       .limit(limit)
       .offset(offset);
 
-    const data = (rows as Array<IpReputationRow & { computed_status: string; active_ban_id: number | null }>).map((row) => ({
-      ...rowToReputation(row, row.computed_status as IpStatus),
+    const data = (rows as Array<IpReputationRow & {
+      computed_status: string;
+      active_ban_id: number | null;
+      cleared_for_tenant?: boolean;
+    }>).map((row) => ({
+      ...rowToReputation(row, row.computed_status as IpStatus, row.cleared_for_tenant ?? false),
       activeBanId: row.active_ban_id ?? null,
     }));
 
@@ -315,50 +452,83 @@ class IpReputationService {
   /**
    * Fetches a single IP reputation record by IP address.
    */
-  async getByIp(ip: string): Promise<IpReputation | null> {
+  async getByIp(ip: string, tenantId?: number, isAdmin?: boolean): Promise<IpReputation | null> {
     const row = await db<IpReputationRow>('ip_reputation').where({ ip }).first();
     if (!row) return null;
 
     // Compute status
     const ban = await db('ip_bans')
-      .where({ ip, is_active: true })
+      .where({ is_active: true })
+      .whereRaw('ip = ?::inet', [ip])
       .where(function () {
         this.whereNull('expires_at').orWhere('expires_at', '>', new Date());
       })
       .first();
 
     let status: IpStatus = 'clean';
+    let cleared = false;
+
     if (ban) {
       status = 'banned';
     } else {
-      const wl = await db('ip_whitelist').where({ ip }).first();
+      const wl = await db('ip_whitelist').whereRaw('?::inet <<= ip', [ip]).first();
       if (wl) {
         status = 'whitelisted';
       } else if (Number(row.total_failures) > 0) {
-        status = 'suspicious';
+        if (tenantId && !isAdmin) {
+          // Check per-tenant baseline
+          const clr = await db('ip_reputation_tenant_clears')
+            .where({ ip, tenant_id: tenantId })
+            .first() as { baseline_failures: number } | undefined;
+          if (clr) {
+            cleared = true;
+            status = Number(row.total_failures) > clr.baseline_failures ? 'suspicious' : 'clean';
+          } else {
+            status = 'suspicious';
+          }
+        } else {
+          status = 'suspicious';
+        }
       }
     }
 
-    return rowToReputation(row, status);
+    return rowToReputation(row, status, cleared);
   }
 
   /**
    * Returns detailed info about a specific IP: reputation + recent events.
    */
-  async getIpDetail(ip: string, tenantId?: number): Promise<{ reputation: IpReputation | null; recentEvents: IpEvent[] } | null> {
+  async getIpDetail(ip: string, tenantId?: number, isAdmin?: boolean): Promise<{ reputation: IpReputation | null; recentEvents: IpEvent[] } | null> {
     const row = await db<IpReputationRow>('ip_reputation').where({ ip }).first();
-    const ban = await db('ip_bans').where({ ip, is_active: true }).first();
+    const ban = await db('ip_bans').where({ is_active: true }).whereRaw('ip = ?::inet', [ip]).first();
 
     let status: IpStatus = 'clean';
+    let cleared = false;
+
     if (ban) {
       status = 'banned';
     } else {
-      const wl = await db('ip_whitelist').where({ ip }).first();
-      if (wl) { status = 'whitelisted'; }
-      else if (row && Number(row.total_failures) > 0) { status = 'suspicious'; }
+      const wl = await db('ip_whitelist').whereRaw('?::inet <<= ip', [ip]).first();
+      if (wl) {
+        status = 'whitelisted';
+      } else if (row && Number(row.total_failures) > 0) {
+        if (tenantId && !isAdmin) {
+          const clr = await db('ip_reputation_tenant_clears')
+            .where({ ip, tenant_id: tenantId })
+            .first() as { baseline_failures: number } | undefined;
+          if (clr) {
+            cleared = true;
+            status = Number(row.total_failures) > clr.baseline_failures ? 'suspicious' : 'clean';
+          } else {
+            status = 'suspicious';
+          }
+        } else {
+          status = 'suspicious';
+        }
+      }
     }
 
-    const reputation = row ? rowToReputation(row, status) : null;
+    const reputation = row ? rowToReputation(row, status, cleared) : null;
 
     const eventQ = db<IpEventRow>('ip_events as e')
       .leftJoin('agent_devices as d', 'd.id', 'e.device_id')
@@ -366,7 +536,7 @@ class IpReputationService {
       .select('e.*', 'd.hostname')
       .orderBy('e.timestamp', 'desc')
       .limit(50);
-    if (tenantId) { eventQ.where('e.tenant_id', tenantId); }
+    if (tenantId && !isAdmin) { eventQ.where('e.tenant_id', tenantId); }
     const eventRows = await eventQ;
     const recentEvents = eventRows.map(rowToEvent);
 
@@ -387,6 +557,48 @@ class IpReputationService {
       .limit(limit);
 
     return rows.map(rowToEvent);
+  }
+
+  /**
+   * Clears an IP's suspicious status for a specific tenant.
+   *
+   * Records a baseline equal to the current total_failures.
+   * The IP becomes suspicious again only when new failures arrive (total_failures > baseline).
+   */
+  async clearForTenant(ip: string, tenantId: number, userId: number): Promise<void> {
+    // Fetch current total_failures for this IP
+    const row = await db('ip_reputation').where({ ip }).first() as { total_failures: number } | undefined;
+    const baseline = Number(row?.total_failures ?? 0);
+
+    await db('ip_reputation_tenant_clears')
+      .insert({
+        ip,
+        tenant_id: tenantId,
+        baseline_failures: baseline,
+        cleared_at: new Date(),
+        cleared_by: userId,
+      })
+      .onConflict(['ip', 'tenant_id'])
+      .merge({
+        baseline_failures: baseline,
+        cleared_at: new Date(),
+        cleared_by: userId,
+      });
+  }
+
+  /**
+   * Globally clears an IP's suspicious status (admin only).
+   *
+   * Resets total_failures to 0 on the ip_reputation row AND removes all
+   * per-tenant clear baselines (everyone starts fresh at 0).
+   */
+  async clearGlobal(ip: string): Promise<void> {
+    await db('ip_reputation')
+      .where({ ip })
+      .update({ total_failures: 0, updated_at: new Date() });
+
+    // Remove per-tenant baselines — they're now obsolete (counter was reset to 0)
+    await db('ip_reputation_tenant_clears').where({ ip }).delete();
   }
 }
 

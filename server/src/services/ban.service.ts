@@ -3,6 +3,7 @@ import { db } from '../db';
 import type { IpBan, CreateBanRequest, BanScope } from '@obliview/shared';
 import { logger } from '../utils/logger';
 import { serviceTemplateService } from './serviceTemplate.service';
+import { ipReputationService } from './ipReputation.service';
 
 // ── Socket.io instance (injected from index.ts) ─────────────────────────────
 let _io: SocketIOServer | null = null;
@@ -372,6 +373,10 @@ class BanEngine {
       reason: `Auto-ban: ${failureCount} ${service} auth failures`,
       is_active: true,
     });
+
+    // Ensure the IP has a reputation row so it appears in the IP Reputation module
+    // even if ip_events were processed before the reputation upsert fix.
+    await ipReputationService.ensureExists(ip).catch(() => { /* non-fatal */ });
 
     logger.info({ ip, service, failureCount }, 'BanEngine: auto-banned IP');
     _io?.emit('ban:auto', { ip, service, failureCount, originTenantId });

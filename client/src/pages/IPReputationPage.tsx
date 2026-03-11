@@ -14,6 +14,7 @@ import {
   Clock,
   User,
   Server,
+  Eraser,
 } from 'lucide-react';
 import type {
   IpReputation,
@@ -24,6 +25,7 @@ import type {
 import { Button } from '@/components/common/Button';
 import { Input } from '@/components/common/Input';
 import { cn } from '@/utils/cn';
+import { useAuthStore } from '@/store/authStore';
 import toast from 'react-hot-toast';
 import apiClient from '../api/client';
 
@@ -134,9 +136,11 @@ interface IPDetailDrawerProps {
   onBan: (ip: string, scope: BanScope, reason: string) => Promise<void>;
   onWhitelist: (ip: string, label: string) => Promise<void>;
   onLiftBan: () => Promise<void>;
+  onClear: (ip: string) => Promise<void>;
+  isAdmin: boolean;
 }
 
-function IPDetailDrawer({ ip, onClose, onBan, onWhitelist, onLiftBan }: IPDetailDrawerProps) {
+function IPDetailDrawer({ ip, onClose, onBan, onWhitelist, onLiftBan, onClear, isAdmin }: IPDetailDrawerProps) {
   const [events, setEvents] = useState<IpEvent[]>([]);
   const [loadingEvents, setLoadingEvents] = useState(true);
   const [banScope, setBanScope] = useState<BanScope>('global');
@@ -435,6 +439,35 @@ function IPDetailDrawer({ ip, onClose, onBan, onWhitelist, onLiftBan }: IPDetail
                 <Shield size={13} className="mr-1.5" />Lift ban
               </Button>
             )}
+
+            {/* Clear suspicious — shown for suspicious IPs */}
+            {ip.status === 'suspicious' && (
+              <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 p-3 space-y-2">
+                <p className="text-xs text-amber-400 font-medium">
+                  {isAdmin
+                    ? 'Reset total_failures to 0 for ALL tenants (global clear).'
+                    : ip.clearedForTenant
+                      ? 'New failures occurred since your last clear. Clear again to reset.'
+                      : 'Mark this IP as reviewed. It will become suspicious again if new failures arrive.'}
+                </p>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  loading={actionLoading}
+                  onClick={async () => {
+                    setActionLoading(true);
+                    try {
+                      await onClear(ip.ip);
+                    } finally {
+                      setActionLoading(false);
+                    }
+                  }}
+                >
+                  <Eraser size={13} className="mr-1.5" />
+                  {isAdmin ? 'Clear globally' : 'Clear suspicious'}
+                </Button>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -453,6 +486,9 @@ const STATUS_FILTERS: { key: StatusFilter; label: string }[] = [
 ];
 
 export function IPReputationPage() {
+  const { user } = useAuthStore();
+  const isAdmin = user?.role === 'admin';
+
   const [rows, setRows] = useState<IpReputation[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -555,6 +591,32 @@ export function IPReputationPage() {
     const reason = window.prompt(`Ban reason for ${row.ip}:`);
     if (!reason) return;
     await handleBan(row.ip, 'global', reason);
+  };
+
+  const handleClear = async (ipAddr: string) => {
+    try {
+      await apiClient.post(`/ip-reputation/${encodeURIComponent(ipAddr)}/clear`);
+      const msg = isAdmin
+        ? `${ipAddr} reputation reset globally`
+        : `${ipAddr} marked as cleared`;
+      toast.success(msg);
+      // Update row: cleared status stays suspicious visually if admin didn't hard-reset,
+      // but mark clearedForTenant=true for tenant users
+      if (isAdmin) {
+        setRows(prev => prev.map(r => r.ip === ipAddr ? { ...r, totalFailures: 0, status: 'clean', clearedForTenant: false } : r));
+        if (selectedIp?.ip === ipAddr) {
+          setSelectedIp(prev => prev ? { ...prev, totalFailures: 0, status: 'clean', clearedForTenant: false } : prev);
+        }
+      } else {
+        setRows(prev => prev.map(r => r.ip === ipAddr ? { ...r, status: 'clean', clearedForTenant: true } : r));
+        if (selectedIp?.ip === ipAddr) {
+          setSelectedIp(prev => prev ? { ...prev, status: 'clean', clearedForTenant: true } : prev);
+        }
+      }
+    } catch {
+      toast.error('Failed to clear IP suspicious status');
+      throw new Error('Failed to clear');
+    }
   };
 
   const handleRowClick = (row: IpReputation) => {
@@ -675,11 +737,18 @@ export function IPReputationPage() {
                       </td>
                       <td className="px-4 py-3 text-text-muted text-xs">{formatDateShort(row.lastSeen)}</td>
                       <td className="px-4 py-3">
-                        <StatusBadge status={row.status} />
+                        <div className="flex flex-col gap-1">
+                          <StatusBadge status={row.status} />
+                          {row.clearedForTenant && (
+                            <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium bg-blue-500/10 text-blue-400">
+                              <Eraser size={8} />Cleared
+                            </span>
+                          )}
+                        </div>
                       </td>
                       <td className="px-4 py-3 text-right">
                         <div
-                          className="flex items-center justify-end gap-1"
+                          className="flex items-center justify-end gap-1 flex-wrap"
                           onClick={e => e.stopPropagation()}
                         >
                           {row.status !== 'banned' && (
@@ -710,6 +779,17 @@ export function IPReputationPage() {
                               }}
                             >
                               <Shield size={11} className="mr-1" />Lift ban
+                            </Button>
+                          )}
+                          {row.status === 'suspicious' && (
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              onClick={() => void handleClear(row.ip)}
+                              title={isAdmin ? 'Reset failure counter globally' : 'Clear suspicious for your tenant'}
+                            >
+                              <Eraser size={11} className="mr-1" />
+                              {isAdmin ? 'Clear (global)' : 'Clear'}
                             </Button>
                           )}
                         </div>
@@ -780,6 +860,8 @@ export function IPReputationPage() {
               toast.error('Could not find active ban for this IP');
             }
           }}
+          onClear={handleClear}
+          isAdmin={isAdmin}
         />
       )}
     </div>
