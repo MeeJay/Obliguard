@@ -22,6 +22,8 @@ import {
   PackageOpen,
   ShieldCheck,
   ChevronDown,
+  ChevronRight,
+  GripVertical,
   PanelLeft,
   PanelLeftClose,
   Network,
@@ -37,8 +39,9 @@ import { useGroupStore } from '@/store/groupStore';
 import { useUiStore } from '@/store/uiStore';
 import { agentApi } from '@/api/agent.api';
 import { getSocket } from '@/socket/socketClient';
-import type { AgentDevice, MonitorStatus } from '@obliview/shared';
+import type { AgentDevice, MonitorStatus, GroupTreeNode } from '@obliview/shared';
 import { SOCKET_EVENTS } from '@obliview/shared';
+import { groupsApi } from '@/api/groups.api';
 import toast from 'react-hot-toast';
 
 // ── localStorage helpers ─────────────────────────────────────────────────────
@@ -91,11 +94,11 @@ function AgentStatusBadge({ status }: { status: MonitorStatus | 'suspended' | un
 function DraggableDeviceItem({
   device,
   monitorStatus,
-  indent = false,
+  depth = 0,
 }: {
   device: AgentDevice;
   monitorStatus: MonitorStatus | undefined;
-  indent?: boolean;
+  depth?: number;
 }) {
   const location = useLocation();
   const isActive = location.pathname === `/agents/${device.id}`;
@@ -111,13 +114,12 @@ function DraggableDeviceItem({
       ref={setNodeRef}
       {...attributes}
       {...listeners}
-      style={{ opacity: isDragging ? 0.4 : 1, paddingLeft: indent ? '24px' : undefined }}
+      style={{ opacity: isDragging ? 0.4 : 1, paddingLeft: `${depth * 14}px` }}
     >
       <Link
         to={`/agents/${device.id}`}
         className={cn(
-          'flex items-center gap-2 rounded-md py-1 text-sm transition-colors',
-          indent ? '' : 'px-2',
+          'flex items-center gap-2 rounded-md px-2 py-1 text-sm transition-colors',
           isActive
             ? 'bg-bg-active text-text-primary'
             : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary',
@@ -130,6 +132,118 @@ function DraggableDeviceItem({
         <AgentStatusBadge status={device.status === 'suspended' ? 'suspended' : monitorStatus} />
         <span className="truncate flex-1 text-xs">{displayName}</span>
       </Link>
+    </div>
+  );
+}
+
+// ── Recursive Agent Group Section ─────────────────────────────────────────────
+
+function AgentGroupSection({
+  group,
+  devices,
+  depth,
+  getMonitorStatus,
+}: {
+  group: GroupTreeNode;
+  devices: AgentDevice[];
+  depth: number;
+  getMonitorStatus: (id: number) => MonitorStatus | undefined;
+}) {
+  const location = useLocation();
+  const [expanded, setExpanded] = usePersisted<boolean>(`sidebar:group-${group.id}-open`, true);
+
+  const isGroupActive = location.pathname === `/group/${group.id}`;
+  const groupDevices  = devices.filter(d => d.groupId === group.id);
+  const hasContent    = group.children.length > 0 || groupDevices.length > 0;
+
+  // Drop target: agents (and subgroups) can be dropped here
+  const { setNodeRef: setDropRef, isOver } = useDroppable({
+    id: `drop-agent-group-${group.id}`,
+    data: { type: 'agent-group', groupId: group.id },
+  });
+
+  // Draggable: the group itself can be dragged to reparent it
+  const { attributes, listeners, setNodeRef: setDragRef, isDragging } = useDraggable({
+    id: `drag-agent-group-${group.id}`,
+    data: { type: 'agent-group-drag', group },
+  });
+
+  return (
+    <div
+      ref={setDropRef}
+      className={cn(
+        'rounded-md transition-colors',
+        isOver && 'ring-1 ring-accent bg-accent/10',
+        isDragging && 'opacity-40',
+      )}
+    >
+      {/* Header row */}
+      <div
+        className="flex items-center gap-0.5 group/row"
+        style={{ paddingLeft: `${depth * 14}px` }}
+      >
+        {/* Drag handle — reveals on row hover */}
+        <div
+          ref={setDragRef}
+          {...attributes}
+          {...listeners}
+          className="cursor-grab p-1 text-text-muted opacity-0 group-hover/row:opacity-50 hover:!opacity-100 shrink-0 transition-opacity"
+          title="Drag to reparent group"
+        >
+          <GripVertical size={10} />
+        </div>
+
+        {/* Expand / collapse toggle */}
+        <button
+          onClick={() => setExpanded(v => !v)}
+          className={cn(
+            'p-0.5 text-text-muted hover:text-text-primary shrink-0 transition-colors',
+            !hasContent && 'invisible pointer-events-none',
+          )}
+        >
+          {expanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+        </button>
+
+        {/* Group link */}
+        <Link
+          to={`/group/${group.id}`}
+          className={cn(
+            'flex flex-1 items-center gap-2 rounded-md px-2 py-1 text-sm transition-colors',
+            isGroupActive
+              ? 'bg-bg-active text-text-primary'
+              : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary',
+          )}
+        >
+          <Server size={13} className="shrink-0 text-text-muted" />
+          <span className="truncate flex-1">{group.name}</span>
+          {groupDevices.length > 0 && (
+            <span className="text-xs text-text-muted">{groupDevices.length}</span>
+          )}
+        </Link>
+      </div>
+
+      {/* Expanded: child groups + direct agents */}
+      {expanded && (
+        <>
+          {group.children.map(child => (
+            <AgentGroupSection
+              key={child.id}
+              group={child}
+              devices={devices}
+              depth={depth + 1}
+              getMonitorStatus={getMonitorStatus}
+            />
+          ))}
+          {groupDevices.map(device => (
+            <DraggableDeviceItem
+              key={device.id}
+              device={device}
+              monitorStatus={getMonitorStatus(device.id)}
+              depth={depth + 1}
+            />
+          ))}
+        </>
+      )}
     </div>
   );
 }
@@ -193,7 +307,7 @@ export function Sidebar() {
   ];
 
   const { openAddAgentModal, sidebarFloating, toggleSidebarFloating } = useUiStore();
-  const { tree } = useGroupStore();
+  const { tree, fetchTree } = useGroupStore();
 
   const [approvedDevices, setApprovedDevices] = useState<AgentDevice[]>([]);
   // Real-time UP/ALERT/DOWN/INACTIVE status received via AGENT_STATUS_CHANGED events.
@@ -286,22 +400,37 @@ export function Sidebar() {
       const dragData = active.data.current;
       const dropData = over.data.current;
 
-      if (dragData?.type !== 'agent-device' || dropData?.type !== 'agent-group') return;
+      // Agent → Group: move agent to a different group
+      if (dragData?.type === 'agent-device' && dropData?.type === 'agent-group') {
+        const device       = dragData.device as AgentDevice;
+        const targetGroupId = dropData.groupId as number | null;
+        if (device.groupId === targetGroupId) return;
+        try {
+          await agentApi.updateDevice(device.id, { groupId: targetGroupId });
+          loadDevices();
+          toast.success('Agent moved');
+        } catch {
+          toast.error('Failed to move agent');
+        }
+        return;
+      }
 
-      const device = dragData.device as AgentDevice;
-      const targetGroupId = dropData.groupId as number | null;
-
-      if (device.groupId === targetGroupId) return;
-
-      try {
-        await agentApi.updateDevice(device.id, { groupId: targetGroupId });
-        loadDevices();
-        toast.success('Agent moved');
-      } catch {
-        toast.error('Failed to move agent');
+      // Group → Group: reparent a group under another group
+      if (dragData?.type === 'agent-group-drag' && dropData?.type === 'agent-group') {
+        const group        = dragData.group as GroupTreeNode;
+        const targetGroupId = dropData.groupId as number | null;
+        if (group.id === targetGroupId) return; // Can't drop on itself
+        try {
+          await groupsApi.move(group.id, targetGroupId);
+          void fetchTree();
+          loadDevices();
+          toast.success('Group moved');
+        } catch {
+          toast.error('Failed to move group');
+        }
       }
     },
-    [loadDevices],
+    [loadDevices, fetchTree],
   );
 
   // Filter nav items by search
@@ -319,6 +448,8 @@ export function Sidebar() {
     : approvedDevices;
 
   // ── Agent section render helper ──────────────────────────────────────────
+  const ungroupedDevices = filteredDevices.filter(d => d.groupId === null);
+
   const renderAgentContent = () => !admin ? null : (
     <DndContext sensors={sensors} onDragEnd={handleAgentDragEnd}>
       <div className="mt-2 pt-2 border-t border-border">
@@ -327,47 +458,29 @@ export function Sidebar() {
           {t('groups.agentGroup')}
         </div>
 
-        {/* Grouped devices */}
-        {agentGroups.map(group => {
-          const isGroupActive = location.pathname === `/group/${group.id}`;
-          const groupDevices = filteredDevices.filter(d => d.groupId === group.id);
-          return (
-            <DroppableGroupHeader key={group.id} groupId={group.id}>
-              <Link
-                to={`/group/${group.id}`}
-                className={cn(
-                  'flex items-center gap-2 rounded-md px-2 py-1 text-sm transition-colors',
-                  isGroupActive
-                    ? 'bg-bg-active text-text-primary'
-                    : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary',
-                )}
-              >
-                <Server size={14} className="shrink-0 text-text-muted" />
-                <span className="truncate flex-1">{group.name}</span>
-                {groupDevices.length > 0 && (
-                  <span className="text-xs text-text-muted">{groupDevices.length}</span>
-                )}
-              </Link>
-              {groupDevices.map(device => (
-                <DraggableDeviceItem
-                  key={device.id}
-                  device={device}
-                  monitorStatus={getMonitorStatus(device.id)}
-                  indent
-                />
-              ))}
-            </DroppableGroupHeader>
-          );
-        })}
+        {/* Hierarchical agent groups (recursive) */}
+        {agentGroups.map(group => (
+          <AgentGroupSection
+            key={group.id}
+            group={group}
+            devices={filteredDevices}
+            depth={0}
+            getMonitorStatus={getMonitorStatus}
+          />
+        ))}
 
-        {/* Ungrouped devices */}
-        {filteredDevices.filter(d => d.groupId === null).length > 0 && (
+        {/* Ungrouped devices — drop zone for null groupId */}
+        {ungroupedDevices.length > 0 && (
           <DroppableGroupHeader groupId={null}>
-            {filteredDevices.filter(d => d.groupId === null).map(device => (
+            <div className="px-2 py-0.5 mt-1 text-[10px] font-medium text-text-muted uppercase tracking-wider">
+              Ungrouped
+            </div>
+            {ungroupedDevices.map(device => (
               <DraggableDeviceItem
                 key={device.id}
                 device={device}
                 monitorStatus={getMonitorStatus(device.id)}
+                depth={0}
               />
             ))}
           </DroppableGroupHeader>

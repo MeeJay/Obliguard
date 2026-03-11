@@ -13,7 +13,7 @@ import type {
   UpdateServiceTemplateRequest,
   UpsertServiceAssignmentRequest,
 } from '@obliview/shared';
-import type { MonitorGroup } from '@obliview/shared';
+import type { GroupTreeNode } from '@obliview/shared';
 import type { AgentDevice } from '@obliview/shared';
 import { serviceTemplatesApi } from '@/api/serviceTemplates.api';
 import { groupsApi } from '@/api/groups.api';
@@ -247,20 +247,125 @@ function TemplateFormModal({ template, onSave, onClose }: TemplateFormModalProps
   );
 }
 
+// ── Helpers ────────────────────────────────────────────────────────────────────
+
+/** Recursively find a group in a GroupTreeNode[] by id */
+function findInTree(tree: GroupTreeNode[], id: number): GroupTreeNode | undefined {
+  for (const n of tree) {
+    if (n.id === id) return n;
+    const found = findInTree(n.children, id);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+// ── ScopeTreePicker — unified tree showing groups + agents ────────────────────
+
+interface ScopeSelection {
+  scope: 'group' | 'agent';
+  scopeId: number;
+}
+
+function ScopeTreePicker({
+  groups,
+  agents,
+  value,
+  onChange,
+}: {
+  groups: GroupTreeNode[];
+  agents: AgentDevice[];
+  value: ScopeSelection | null;
+  onChange: (v: ScopeSelection | null) => void;
+}) {
+  function renderGroup(group: GroupTreeNode, depth: number) {
+    const isSelected = value?.scope === 'group' && value.scopeId === group.id;
+    const groupAgents = agents.filter(a => a.groupId === group.id);
+
+    return (
+      <div key={group.id}>
+        <button
+          type="button"
+          onClick={() => onChange({ scope: 'group', scopeId: group.id })}
+          style={{ paddingLeft: `${depth * 14 + 8}px` }}
+          className={cn(
+            'w-full flex items-center gap-2 rounded-md py-1.5 pr-2 text-sm text-left transition-colors',
+            isSelected
+              ? 'bg-accent text-white'
+              : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary',
+          )}
+        >
+          <Users size={12} className="shrink-0" />
+          <span className="flex-1 truncate font-medium">{group.name}</span>
+          {(groupAgents.length > 0 || group.children.length > 0) && (
+            <span className={cn('text-[10px]', isSelected ? 'text-white/70' : 'text-text-muted')}>
+              {groupAgents.length}a{group.children.length > 0 ? ` ${group.children.length}sg` : ''}
+            </span>
+          )}
+        </button>
+        {/* Agents under this group */}
+        {groupAgents.map(a => renderAgent(a, depth + 1))}
+        {/* Child groups */}
+        {group.children.map(child => renderGroup(child, depth + 1))}
+      </div>
+    );
+  }
+
+  function renderAgent(agent: AgentDevice, depth: number) {
+    const isSelected = value?.scope === 'agent' && value.scopeId === agent.id;
+    return (
+      <button
+        key={agent.id}
+        type="button"
+        onClick={() => onChange({ scope: 'agent', scopeId: agent.id })}
+        style={{ paddingLeft: `${depth * 14 + 8}px` }}
+        className={cn(
+          'w-full flex items-center gap-2 rounded-md py-1.5 pr-2 text-sm text-left transition-colors',
+          isSelected
+            ? 'bg-accent text-white'
+            : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary',
+        )}
+      >
+        <Server size={11} className="shrink-0" />
+        <span className="flex-1 truncate">{agent.name ?? agent.hostname}</span>
+      </button>
+    );
+  }
+
+  const ungroupedAgents = agents.filter(a => a.groupId === null);
+
+  return (
+    <div className="max-h-52 overflow-y-auto rounded-md border border-border bg-bg-tertiary p-1 space-y-0.5">
+      {groups.length === 0 && agents.length === 0 && (
+        <p className="py-4 text-center text-xs text-text-muted">No groups or agents available</p>
+      )}
+      {groups.map(g => renderGroup(g, 0))}
+      {ungroupedAgents.length > 0 && (
+        <>
+          <div className="px-2 py-1 text-[10px] text-text-muted uppercase font-semibold tracking-wide border-t border-border/50 mt-1 pt-2">
+            Ungrouped agents
+          </div>
+          {ungroupedAgents.map(a => renderAgent(a, 0))}
+        </>
+      )}
+    </div>
+  );
+}
+
 // ── Assignment modal ──────────────────────────────────────────────────────────
 
 interface AssignmentModalProps {
   templateId: number;
   existing?: ServiceTemplateAssignment;
-  groups: MonitorGroup[];
+  groups: GroupTreeNode[];
   agents: AgentDevice[];
   onSave: () => void;
   onClose: () => void;
 }
 
 function AssignmentModal({ templateId, existing, groups, agents, onSave, onClose }: AssignmentModalProps) {
-  const [scope, setScope] = useState<'group' | 'agent'>(existing?.scope ?? 'agent');
-  const [scopeId, setScopeId] = useState<string>(existing ? String(existing.scopeId) : '');
+  const [selection, setSelection]   = useState<ScopeSelection | null>(
+    existing ? { scope: existing.scope, scopeId: existing.scopeId } : null,
+  );
   const [logPathOverride, setLogPathOverride] = useState(existing?.logPathOverride ?? '');
   const [thresholdOverride, setThresholdOverride] = useState(
     existing?.thresholdOverride != null ? String(existing.thresholdOverride) : '',
@@ -277,7 +382,7 @@ function AssignmentModal({ templateId, existing, groups, agents, onSave, onClose
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!scopeId) return;
+    if (!selection) return;
     setSaving(true);
     try {
       const data: UpsertServiceAssignmentRequest = {
@@ -286,7 +391,7 @@ function AssignmentModal({ templateId, existing, groups, agents, onSave, onClose
         windowSecondsOverride: windowOverride ? Number(windowOverride) : null,
         enabledOverride: enabledOverride === '' ? null : enabledOverride === 'true',
       };
-      await serviceTemplatesApi.upsertAssignment(templateId, scope, Number(scopeId), data);
+      await serviceTemplatesApi.upsertAssignment(templateId, selection.scope, selection.scopeId, data);
       toast.success(isEdit ? 'Assignment updated' : 'Assignment created');
       onSave();
     } catch {
@@ -296,11 +401,16 @@ function AssignmentModal({ templateId, existing, groups, agents, onSave, onClose
     }
   }
 
-  const items = scope === 'group' ? groups : agents;
-  const itemLabel = (item: MonitorGroup | AgentDevice) =>
-    scope === 'group'
-      ? (item as MonitorGroup).name
-      : (item as AgentDevice).name ?? (item as AgentDevice).hostname;
+  /** Human-readable label for the existing assignment scope (edit mode) */
+  function existingLabel() {
+    if (!existing) return '';
+    if (existing.scope === 'agent') {
+      const ag = agents.find(a => a.id === existing.scopeId);
+      return ag ? `Agent — ${ag.name ?? ag.hostname}` : `Agent #${existing.scopeId}`;
+    }
+    const gr = findInTree(groups, existing.scopeId);
+    return gr ? `Group — ${gr.name}` : `Group #${existing.scopeId}`;
+  }
 
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
@@ -314,48 +424,34 @@ function AssignmentModal({ templateId, existing, groups, agents, onSave, onClose
           </button>
         </div>
         <form onSubmit={handleSubmit} className="space-y-4">
-          {!isEdit && (
-            <div className="space-y-1">
-              <label className="block text-sm font-medium text-text-secondary">Scope</label>
-              <div className="flex gap-2">
-                <button type="button" onClick={() => { setScope('agent'); setScopeId(''); }}
-                  className={cn('flex-1 flex items-center justify-center gap-2 rounded-md border px-3 py-2 text-sm font-medium transition-colors',
-                    scope === 'agent' ? 'border-accent bg-accent/10 text-accent' : 'border-border bg-bg-tertiary text-text-muted hover:text-text-primary')}>
-                  <Server size={14} />Agent
-                </button>
-                <button type="button" onClick={() => { setScope('group'); setScopeId(''); }}
-                  className={cn('flex-1 flex items-center justify-center gap-2 rounded-md border px-3 py-2 text-sm font-medium transition-colors',
-                    scope === 'group' ? 'border-accent bg-accent/10 text-accent' : 'border-border bg-bg-tertiary text-text-muted hover:text-text-primary')}>
-                  <Users size={14} />Group
-                </button>
-              </div>
-            </div>
-          )}
+
+          {/* Target selector */}
           {isEdit ? (
             <div className="rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-muted">
-              {scope === 'agent' ? 'Agent' : 'Group'} #{existing?.scopeId}
-              {scope === 'agent' && agents.find(a => a.id === existing?.scopeId)
-                ? ` — ${agents.find(a => a.id === existing?.scopeId)?.name ?? agents.find(a => a.id === existing?.scopeId)?.hostname}`
-                : scope === 'group' && groups.find(g => g.id === existing?.scopeId)
-                ? ` — ${groups.find(g => g.id === existing?.scopeId)?.name}`
-                : ''}
+              {existingLabel()}
             </div>
           ) : (
-            <div className="space-y-1">
+            <div className="space-y-1.5">
               <label className="block text-sm font-medium text-text-secondary">
-                {scope === 'agent' ? 'Agent' : 'Group'}
+                Assign to
+                {selection && (
+                  <span className={cn(
+                    'ml-2 text-xs px-1.5 py-0.5 rounded font-normal',
+                    selection.scope === 'agent' ? 'bg-accent/15 text-accent' : 'bg-purple-500/15 text-purple-400',
+                  )}>
+                    {selection.scope === 'agent' ? 'Agent' : 'Group'} selected
+                  </span>
+                )}
               </label>
-              <select
-                value={scopeId}
-                onChange={e => setScopeId(e.target.value)}
-                required
-                className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
-              >
-                <option value="">Select {scope === 'agent' ? 'an agent' : 'a group'}…</option>
-                {items.map(item => (
-                  <option key={item.id} value={item.id}>{itemLabel(item)}</option>
-                ))}
-              </select>
+              <ScopeTreePicker
+                groups={groups}
+                agents={agents}
+                value={selection}
+                onChange={setSelection}
+              />
+              {!selection && (
+                <p className="text-xs text-text-muted">Click a group or agent above to select the target.</p>
+              )}
             </div>
           )}
 
@@ -393,14 +489,16 @@ function AssignmentModal({ templateId, existing, groups, agents, onSave, onClose
                 className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
               >
                 <option value="">Inherit from template</option>
-                <option value="true">Enabled</option>
-                <option value="false">Disabled</option>
+                <option value="true">Bound (enabled)</option>
+                <option value="false">Unbound (disabled)</option>
               </select>
             </div>
           </div>
 
           <div className="flex gap-2 pt-1">
-            <Button type="submit" loading={saving} className="flex-1">{isEdit ? 'Save Changes' : 'Assign'}</Button>
+            <Button type="submit" loading={saving} disabled={!selection && !isEdit} className="flex-1">
+              {isEdit ? 'Save Changes' : 'Assign'}
+            </Button>
             <Button type="button" variant="secondary" onClick={onClose} className="flex-1">Cancel</Button>
           </div>
         </form>
@@ -414,7 +512,7 @@ function AssignmentModal({ templateId, existing, groups, agents, onSave, onClose
 interface TemplateRowProps {
   template: ServiceTemplate;
   isAdmin: boolean;
-  groups: MonitorGroup[];
+  groups: GroupTreeNode[];
   agents: AgentDevice[];
   onEdit: () => void;
   onDelete: () => void;
@@ -476,7 +574,7 @@ function TemplateRow({ template, isAdmin, groups, agents, onEdit, onDelete, onTo
       const ag = agents.find(x => x.id === a.scopeId);
       return ag ? (ag.name ?? ag.hostname) : `Agent #${a.scopeId}`;
     }
-    const gr = groups.find(x => x.id === a.scopeId);
+    const gr = findInTree(groups, a.scopeId);
     return gr ? gr.name : `Group #${a.scopeId}`;
   }
 
@@ -691,7 +789,7 @@ export function ServiceTemplatesPage() {
 
   const [templates, setTemplates] = useState<ServiceTemplate[]>([]);
   const [loading, setLoading] = useState(true);
-  const [groups, setGroups] = useState<MonitorGroup[]>([]);
+  const [groups, setGroups] = useState<GroupTreeNode[]>([]);
   const [agents, setAgents] = useState<AgentDevice[]>([]);
   const [showCreate, setShowCreate] = useState(false);
   const [editingTemplate, setEditingTemplate] = useState<ServiceTemplate | null>(null);
@@ -711,10 +809,10 @@ export function ServiceTemplatesPage() {
     }
   }, []);
 
-  // Load groups and agents once for assignment dropdowns
+  // Load group tree and agents once for assignment picker
   useEffect(() => {
     if (!isAdmin) return;
-    void groupsApi.list().then(setGroups).catch(() => {});
+    void groupsApi.tree().then(setGroups).catch(() => {});
     void agentApi.listDevices().then(setAgents).catch(() => {});
   }, [isAdmin]);
 

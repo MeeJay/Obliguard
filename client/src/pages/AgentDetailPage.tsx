@@ -13,7 +13,7 @@ import { whitelistApi } from '@/api/whitelist.api';
 import { serviceTemplatesApi } from '@/api/serviceTemplates.api';
 import { getSocket } from '@/socket/socketClient';
 import type {
-  AgentDevice, ApiResponse,
+  AgentDevice,
   ServiceTemplate,
   CreateServiceTemplateRequest, NotificationTypeConfig, ServiceType,
 } from '@obliview/shared';
@@ -433,9 +433,14 @@ function IpDrawer({
 
   useEffect(() => {
     setLoading(true);
+    // Use the list endpoint with `ip` query param (ILIKE match — robust across IP formats).
+    // The /:ip path-param endpoint uses exact inet cast equality which can silently fail.
     apiClient
-      .get<ApiResponse<IpEventRow[]>>(`/ip-events/${encodeURIComponent(ip)}`)
-      .then(res => setEvents((res.data.data as IpEventRow[]) ?? []))
+      .get<{ success: boolean; data: IpEventRow[]; total: number }>(
+        '/ip-events',
+        { params: { ip, pageSize: 300 } },
+      )
+      .then(res => setEvents(res.data.data ?? []))
       .catch(() => setEvents([]))
       .finally(() => setLoading(false));
   }, [ip]);
