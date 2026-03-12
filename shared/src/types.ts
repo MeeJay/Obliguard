@@ -38,6 +38,7 @@ export interface User {
   enrollmentVersion: number;
   totpEnabled?: boolean;
   emailOtpEnabled?: boolean;
+  foreignSource?: string | null;
 }
 
 export interface UserWithPassword extends User {

@@ -16,6 +16,7 @@ import {
   Eye,
   Building2,
   X,
+  ArrowLeftRight,
 } from 'lucide-react';
 import type {
   User,
@@ -551,6 +552,11 @@ export function AdminUsersPage() {
                         }`}>
                           {user.role === 'admin' ? <><Shield size={10} className="inline mr-0.5" />{t('users.roleAdmin')}</> : t('users.roleUser')}
                         </span>
+                        {user.foreignSource && (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-[#1e1b4b]/60 border border-[#4338ca]/40 px-1.5 py-0.5 text-[10px] font-medium text-[#a5b4fc]">
+                            <ArrowLeftRight size={9} />SSO · {user.foreignSource}
+                          </span>
+                        )}
                         {!user.isActive && (
                           <span className="rounded-full bg-status-down/10 px-1.5 py-0.5 text-[10px] font-medium text-status-down">Off</span>
                         )}

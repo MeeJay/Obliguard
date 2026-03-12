@@ -1,6 +1,13 @@
 import crypto from 'node:crypto';
 import { db } from '../db';
 import { hashPassword } from '../utils/crypto';
+
+/** Thrown by findOrCreateForeignUser when the incoming username matches an existing local account. */
+export class AccountLinkRequiredError extends Error {
+  constructor(public readonly conflictingUsername: string) {
+    super('account_link_required');
+  }
+}
 import type { User } from '@obliview/shared';
 
 /** Internal DB row shape for switch_tokens */
@@ -133,6 +140,13 @@ export const foreignSsoService = {
       return { ...mapUser(updated), isFirstLogin: false };
     }
 
+    // If the username belongs to an existing LOCAL account, require password linking.
+    const localCollision = await db('users')
+      .where({ username })
+      .whereNull('foreign_source')
+      .first();
+    if (localCollision) throw new AccountLinkRequiredError(username);
+
     // Create new foreign user (no password)
     const [newId] = await db('users').insert({
       username,
@@ -176,7 +190,7 @@ export const foreignSsoService = {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-function mapUser(row: Record<string, unknown>): User {
+export function mapUser(row: Record<string, unknown>): User {
   return {
     id: row.id as number,
     username: row.username as string,
