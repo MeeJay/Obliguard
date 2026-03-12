@@ -6,12 +6,16 @@ import { useLiveAlertsStore } from './liveAlertsStore';
 import { setLanguage } from '../i18n';
 import { useTenantStore } from './tenantStore';
 import { useGroupStore } from './groupStore';
+import { applyTheme } from '../utils/theme';
 
 function syncPreferencesToStore(user: User) {
   const prefs = user.preferences;
   if (prefs) {
     useLiveAlertsStore.getState().setEnabled(prefs.toastEnabled ?? true);
     useLiveAlertsStore.getState().setPosition(prefs.toastPosition ?? 'bottom-right');
+    if (prefs.preferredTheme) {
+      applyTheme(prefs.preferredTheme);
+    }
   }
   if (user.preferredLanguage) {
     setLanguage(user.preferredLanguage);

@@ -31,6 +31,10 @@ import { ForeignLoginPage } from '@/pages/ForeignLoginPage';
 import { SsoEnrollPage } from '@/pages/SsoEnrollPage';
 import { NotFoundPage } from '@/pages/NotFoundPage';
 import '@/i18n';
+import { initTheme } from '@/utils/theme';
+
+// Apply saved theme immediately to avoid flash of unstyled content
+initTheme();
 
 export default function App() {
   const { checkSession } = useAuthStore();

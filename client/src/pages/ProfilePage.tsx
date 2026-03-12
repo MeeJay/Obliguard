@@ -1,6 +1,8 @@
 import { useState, useEffect, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import { User, Save, KeyRound, Bell, CheckCircle2, AlertTriangle, QrCode, Mail, ArrowLeftRight } from 'lucide-react';
+import { User, Save, KeyRound, Bell, CheckCircle2, AlertTriangle, QrCode, Mail, ArrowLeftRight, Palette } from 'lucide-react';
+import { ThemePicker } from '@/components/common/ThemePicker';
+import { loadSavedTheme, type AppTheme } from '@/utils/theme';
 import { profileApi } from '@/api/profile.api';
 import { appConfigApi } from '@/api/appConfig.api';
 import { twoFactorApi, type TwoFactorStatus } from '@/api/twoFactor.api';
@@ -27,6 +29,7 @@ export function ProfilePage() {
   const [savingPassword, setSavingPassword] = useState(false);
 
   const [savingPrefs, setSavingPrefs] = useState(false);
+  const [preferredTheme, setPreferredTheme] = useState<AppTheme>(loadSavedTheme);
 
   // 2FA state
   const [allow2fa, setAllow2fa] = useState(false);
@@ -512,6 +515,27 @@ export function ProfilePage() {
           </div>
         </div>
       )}
+
+      {/* ── Appearance ─────────────────────────────────────────────────────── */}
+      <div className="mb-8">
+        <div className="rounded-lg border border-border bg-bg-secondary p-5 space-y-4">
+          <div className="flex items-center gap-2 mb-2">
+            <Palette size={18} className="text-accent" />
+            <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide">
+              Apparence
+            </h2>
+          </div>
+          <ThemePicker
+            value={preferredTheme}
+            onChange={(theme) => {
+              setPreferredTheme(theme);
+              profileApi.update({
+                preferences: { toastEnabled: alertEnabled, toastPosition: alertPosition, preferredTheme: theme },
+              }).catch(() => {});
+            }}
+          />
+        </div>
+      </div>
     </div>
   );
 }

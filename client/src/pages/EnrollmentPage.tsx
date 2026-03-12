@@ -8,9 +8,11 @@ import { useAuthStore } from '@/store/authStore';
 import { SUPPORTED_LANGUAGES, setLanguage } from '@/i18n';
 import { Button } from '@/components/common/Button';
 import { Input } from '@/components/common/Input';
+import { ThemePicker } from '@/components/common/ThemePicker';
+import { loadSavedTheme, type AppTheme } from '@/utils/theme';
 
-type Step = 'language' | 'profile' | 'alerts' | 'security';
-const STEPS: Step[] = ['language', 'profile', 'alerts', 'security'];
+type Step = 'language' | 'profile' | 'alerts' | 'appearance' | 'security';
+const STEPS: Step[] = ['language', 'profile', 'alerts', 'appearance', 'security'];
 
 interface EnrollData {
   preferredLanguage: string;
@@ -18,6 +20,7 @@ interface EnrollData {
   email: string;
   toastEnabled: boolean;
   toastPosition: 'bottom-right' | 'top-center';
+  preferredTheme: AppTheme;
 }
 
 // ── Language flags (emoji) ──────────────────────────────────────────────────
@@ -32,10 +35,11 @@ const LANG_FLAGS: Record<string, string> = {
 function Stepper({ currentStep }: { currentStep: Step }) {
   const { t } = useTranslation();
   const labels: Record<Step, string> = {
-    language: t('enrollment.stepLanguage'),
-    profile:  t('enrollment.stepProfile'),
-    alerts:   t('enrollment.stepAlerts'),
-    security: t('enrollment.stepSecurity'),
+    language:   t('enrollment.stepLanguage'),
+    profile:    t('enrollment.stepProfile'),
+    alerts:     t('enrollment.stepAlerts'),
+    appearance: 'Apparence',
+    security:   t('enrollment.stepSecurity'),
   };
   const currentIdx = STEPS.indexOf(currentStep);
 
@@ -332,6 +336,7 @@ export function EnrollmentPage() {
     email: user?.email ?? '',
     toastEnabled: true,
     toastPosition: 'bottom-right',
+    preferredTheme: loadSavedTheme(),
   });
 
   const [emailError, setEmailError] = useState('');
@@ -394,6 +399,11 @@ export function EnrollmentPage() {
     }
 
     if (step === 'alerts') {
+      setStep('appearance');
+      return;
+    }
+
+    if (step === 'appearance') {
       await handleAdvanceToSecurity();
       return;
     }
@@ -417,6 +427,7 @@ export function EnrollmentPage() {
         preferredLanguage: data.preferredLanguage,
         toastEnabled: data.toastEnabled,
         toastPosition: data.toastPosition,
+        preferredTheme: data.preferredTheme,
       });
 
       await checkSession();
@@ -480,6 +491,16 @@ export function EnrollmentPage() {
               onEnabled={(v) => setData((d) => ({ ...d, toastEnabled: v }))}
               onPosition={(v) => setData((d) => ({ ...d, toastPosition: v }))}
             />
+          )}
+          {step === 'appearance' && (
+            <div>
+              <h2 className="text-xl font-semibold text-text-primary mb-1">Apparence</h2>
+              <p className="text-sm text-text-muted mb-5">Choisissez votre thème d'interface.</p>
+              <ThemePicker
+                value={data.preferredTheme}
+                onChange={(theme) => setData((d) => ({ ...d, preferredTheme: theme }))}
+              />
+            </div>
           )}
           {step === 'security' && (
             <SecurityStep
