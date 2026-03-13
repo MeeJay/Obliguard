@@ -4,10 +4,13 @@ import type { SettingsKey } from './settingsDefaults';
 // ============================================
 // User types
 // ============================================
+export type AppTheme = 'modern' | 'neon';
+
 export interface UserPreferences {
   toastEnabled: boolean;
   toastPosition: 'top-center' | 'bottom-right';
   multiTenantNotificationsEnabled?: boolean;
+  preferredTheme?: AppTheme;
 }
 
 /** Shape of a live alert as returned by the server. */
