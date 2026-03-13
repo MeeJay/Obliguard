@@ -8,21 +8,21 @@
    (e.g. bg-accent/30) works: Tailwind emits  rgb(var(--c-X) / 0.3)
    ───────────────────────────────────────────────────────────────────────────── */
 
-/* ── Modern UI (default) — warm dark with orange accent ───────────────────── */
+/* ── Modern UI (default) — neutral dark, barely-warm orange accent ─────────── */
 :root,
 [data-theme="modern"] {
-  --c-bg-primary:            13 11 9;
-  --c-bg-secondary:          21 18 14;
-  --c-bg-tertiary:           30 25 19;
-  --c-bg-hover:              38 32 24;
-  --c-bg-active:             48 40 29;
+  --c-bg-primary:            13 13 12;
+  --c-bg-secondary:          21 21 19;
+  --c-bg-tertiary:           29 28 27;
+  --c-bg-hover:              37 36 34;
+  --c-bg-active:             46 45 42;
 
-  --c-border:                56 47 34;
-  --c-border-light:          72 61 44;
+  --c-border:                55 54 51;
+  --c-border-light:          69 67 63;
 
-  --c-text-primary:          230 224 212;
-  --c-text-secondary:        148 136 116;
-  --c-text-muted:            112 100 82;
+  --c-text-primary:          229 227 224;
+  --c-text-secondary:        140 137 133;
+  --c-text-muted:            107 104 100;
 
   --c-status-up:             46 160 67;
   --c-status-up-bg:          13 40 24;
@@ -48,18 +48,18 @@
 
 /* ── Neon UI — deep dark with orange neon glow ────────────────────────────── */
 [data-theme="neon"] {
-  --c-bg-primary:            8 5 2;
-  --c-bg-secondary:          13 9 4;
-  --c-bg-tertiary:           20 13 6;
-  --c-bg-hover:              28 19 9;
-  --c-bg-active:             38 26 12;
+  --c-bg-primary:            7 8 10;
+  --c-bg-secondary:          13 14 17;
+  --c-bg-tertiary:           19 20 24;
+  --c-bg-hover:              27 27 32;
+  --c-bg-active:             36 36 42;
 
-  --c-border:                52 36 16;
-  --c-border-light:          68 48 22;
+  --c-border:                50 51 57;
+  --c-border-light:          65 66 73;
 
-  --c-text-primary:          255 238 205;
-  --c-text-secondary:        168 138 90;
-  --c-text-muted:            114 88 52;
+  --c-text-primary:          240 234 226;
+  --c-text-secondary:        152 138 118;
+  --c-text-muted:            106 94 78;
 
   --c-status-up:             0 195 95;
   --c-status-up-bg:          0 28 14;
