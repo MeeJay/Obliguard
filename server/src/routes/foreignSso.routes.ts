@@ -16,8 +16,11 @@ router.get('/users', requireObliviewSecret, foreignSsoController.listUsers);
 /** POST /api/sso/exchange — public — exchanges a foreign token for a local session */
 router.post('/exchange', foreignSsoController.exchange);
 
-/** POST /api/sso/complete-link — public — verifies local password and links foreign identity */
+/** POST /api/sso/complete-link — public — verifies local password; if 2FA enabled returns requires2fa */
 router.post('/complete-link', foreignSsoController.completeLink);
+
+/** POST /api/sso/verify-link-2fa — public — verifies 2FA code and completes the account link */
+router.post('/verify-link-2fa', foreignSsoController.verifyLinkMfa);
 
 /** POST /api/sso/set-password — session auth — set local password for SSO-only account */
 router.post('/set-password', requireAuth, foreignSsoController.setPassword);

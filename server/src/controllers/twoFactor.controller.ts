@@ -11,6 +11,7 @@ import { logger } from '../utils/logger';
 declare module 'express-session' {
   interface SessionData {
     pendingMfaUserId?: number;
+    pendingMfaLinkToken?: string;
     pendingTotpSecret?: string;
     pendingEmailOtp?: { code: string; email: string; expires: number };
     pendingEmailOtpSetup?: { code: string; email: string; expires: number };
