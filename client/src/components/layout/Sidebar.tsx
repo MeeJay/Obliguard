@@ -110,6 +110,14 @@ function DraggableDeviceItem({
   });
 
   const displayName = device.name ?? device.hostname;
+  const effectiveStatus = device.status === 'suspended' ? 'suspended' : monitorStatus;
+
+  const borderClass =
+    effectiveStatus === 'up'       ? 'border-l-status-up' :
+    effectiveStatus === 'down'     ? 'border-l-status-down' :
+    effectiveStatus === 'alert'    ? 'border-l-orange-500' :
+    effectiveStatus === 'pending'  ? 'border-l-status-pending' :
+    'border-l-transparent';
 
   return (
     <div
@@ -121,7 +129,8 @@ function DraggableDeviceItem({
       <Link
         to={`/agents/${device.id}`}
         className={cn(
-          'flex items-center gap-2 rounded-md px-2 py-1 text-sm transition-colors',
+          'flex items-center gap-2 rounded-md px-2 py-1 text-sm transition-colors border-l-2',
+          borderClass,
           isActive
             ? 'bg-bg-active text-text-primary'
             : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary',
@@ -131,7 +140,7 @@ function DraggableDeviceItem({
           if (isDragging) e.preventDefault();
         }}
       >
-        <AgentStatusBadge status={device.status === 'suspended' ? 'suspended' : monitorStatus} />
+        <AgentStatusBadge status={effectiveStatus} />
         <span className="truncate flex-1 text-xs">{displayName}</span>
       </Link>
     </div>

@@ -196,6 +196,10 @@
   border-color: rgb(255 56 96 / 0.75) !important;
   box-shadow: 0 0 8px rgb(255 56 96 / 0.4);
 }
+[data-theme="neon"] [data-status="events"] {
+  border-color: rgb(168 85 247 / 0.65) !important;
+  box-shadow: 0 0 10px rgb(168 85 247 / 0.35);
+}
 
 /* ── Left-border status glow (list views) ───────────────────────────────────── */
 /* border-l-status-up: no outer glow — green left border is sufficient */

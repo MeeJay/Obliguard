@@ -1,11 +1,13 @@
 import { useEffect, useState, useTransition } from 'react';
-import { LogOut, Menu, Download, ArrowLeftRight } from 'lucide-react';
+import { LogOut, Menu, Download, ArrowLeftRight, ShieldOff, ShieldAlert } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useAuthStore } from '@/store/authStore';
 import { useUiStore } from '@/store/uiStore';
 import { useSocketStore } from '@/store/socketStore';
 import { appConfigApi } from '@/api/appConfig.api';
+import apiClient from '@/api/client';
+import type { ApiResponse } from '@obliview/shared';
 import { Button } from '@/components/common/Button';
 import { NotificationCenter } from './NotificationCenter';
 import { TenantSwitcher } from './TenantSwitcher';
@@ -25,6 +27,10 @@ export function Header() {
   const [ssoSwitching, setSsoSwitching] = useState(false);
   const [, startSsoTransition] = useTransition();
 
+  // Security chips data
+  const [activeBans, setActiveBans] = useState<number | null>(null);
+  const [suspicious, setSuspicious] = useState<number | null>(null);
+
   useEffect(() => {
     appConfigApi.getConfig()
       .then(cfg => {
@@ -36,6 +42,31 @@ export function Header() {
         setObliviewSsoEnabled(!!sso);
       })
       .catch(() => {});
+  }, []);
+
+  // Fetch ban + suspicious counts; refresh every 60 s
+  useEffect(() => {
+    async function fetchChipData() {
+      try {
+        const [bansRes, susRes] = await Promise.allSettled([
+          apiClient.get<ApiResponse<{ active: number; today: number }>>('/bans/stats'),
+          apiClient.get<ApiResponse<never[]> & { total: number }>('/ip-reputation', {
+            params: { status: 'suspicious', limit: 1 },
+          }),
+        ]);
+        if (bansRes.status === 'fulfilled') {
+          setActiveBans(bansRes.value.data.data?.active ?? 0);
+        }
+        if (susRes.status === 'fulfilled') {
+          setSuspicious(susRes.value.data.total ?? 0);
+        }
+      } catch {
+        // silent — chips just don't show
+      }
+    }
+    void fetchChipData();
+    const interval = setInterval(() => { void fetchChipData(); }, 60_000);
+    return () => clearInterval(interval);
   }, []);
 
   const handleObliviewClick = async () => {
@@ -99,7 +130,36 @@ export function Header() {
         )}
       </div>
 
-      <div className="flex items-center gap-4">
+      <div className="flex items-center gap-3">
+        {/* Security chips — ban + suspicious counts */}
+        {(activeBans !== null || suspicious !== null) && (
+          <div className="hidden sm:flex items-center gap-1.5">
+            {activeBans !== null && (
+              <Link
+                to="/bans"
+                title={t('dashboard.activeBans', { defaultValue: 'Active Bans' })}
+                className="flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold
+                  text-red-400 bg-red-500/10 border border-red-500/25
+                  hover:bg-red-500/20 transition-colors"
+              >
+                <ShieldOff size={10} />
+                {activeBans} ban
+              </Link>
+            )}
+            {suspicious !== null && suspicious > 0 && (
+              <Link
+                to="/ip-reputation"
+                title={t('header.suspiciousIps', { defaultValue: 'Suspicious IPs' })}
+                className="flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold
+                  text-yellow-400 bg-yellow-500/10 border border-yellow-500/25
+                  hover:bg-yellow-500/20 transition-colors"
+              >
+                <ShieldAlert size={10} />
+                {suspicious} sus
+              </Link>
+            )}
+          </div>
+        )}
 
         {/* Download App link — hidden inside the native desktop app */}
         {!isNativeApp && (

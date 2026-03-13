@@ -346,8 +346,8 @@ export function DashboardPage() {
           value={stats?.eventsToday ?? null}
           icon={<Activity size={16} />}
           loading={statsLoading}
-          colorClass="text-accent"
-          status="pending"
+          colorClass="text-purple-400"
+          status="events"
         />
       </div>
 
