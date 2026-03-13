@@ -112,13 +112,6 @@ function DraggableDeviceItem({
   const displayName = device.name ?? device.hostname;
   const effectiveStatus = device.status === 'suspended' ? 'suspended' : monitorStatus;
 
-  const borderClass =
-    effectiveStatus === 'up'       ? 'border-l-status-up' :
-    effectiveStatus === 'down'     ? 'border-l-status-down' :
-    effectiveStatus === 'alert'    ? 'border-l-orange-500' :
-    effectiveStatus === 'pending'  ? 'border-l-status-pending' :
-    'border-l-transparent';
-
   return (
     <div
       ref={setNodeRef}
@@ -129,8 +122,7 @@ function DraggableDeviceItem({
       <Link
         to={`/agents/${device.id}`}
         className={cn(
-          'flex items-center gap-2 rounded-md px-2 py-1 text-sm transition-colors border-l-2',
-          borderClass,
+          'flex items-center gap-2 rounded-md px-2 py-1 text-sm transition-colors',
           isActive
             ? 'bg-bg-active text-text-primary'
             : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary',

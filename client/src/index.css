@@ -201,17 +201,6 @@
   box-shadow: 0 0 10px rgb(168 85 247 / 0.35);
 }
 
-/* ── Left-border status glow (list views) ───────────────────────────────────── */
-/* border-l-status-up: no outer glow — green left border is sufficient */
-[data-theme="neon"] .border-l-status-down {
-  box-shadow: -4px 0 14px rgb(var(--c-status-down) / 0.55);
-}
-[data-theme="neon"] .border-l-status-pending {
-  box-shadow: -4px 0 14px rgb(var(--c-status-pending) / 0.5);
-}
-[data-theme="neon"] .border-l-orange-500 {
-  box-shadow: -4px 0 14px rgb(255 165 20 / 0.55);
-}
 
 /* ── Accent border / ring glow ──────────────────────────────────────────────── */
 [data-theme="neon"] .border-accent {
