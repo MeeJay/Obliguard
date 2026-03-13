@@ -1,6 +1,6 @@
 {
   "name": "@obliview/server",
-  "version": "2.0.76",
+  "version": "2.0.77",
   "private": true,
   "main": "dist/src/index.js",
   "scripts": {

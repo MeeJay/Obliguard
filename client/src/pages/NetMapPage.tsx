@@ -419,7 +419,7 @@ function drawBadgeAt(
   ctx.save();
   ctx.globalAlpha = alpha;
   ctx.font = BADGE_FONT;
-  ctx.fillStyle = 'rgba(4,6,22,0.88)';
+  ctx.fillStyle = 'rgba(7,5,2,0.90)';
   ctx.beginPath();
   if (typeof ctx.roundRect === 'function') ctx.roundRect(bx, by, bw, BADGE_H, 3);
   else ctx.rect(bx, by, bw, BADGE_H);
@@ -492,15 +492,15 @@ export function NetMapPage() {
     const oc = bgRef.current;
     oc.width = w; oc.height = h;
     const ctx = oc.getContext('2d')!;
-    ctx.fillStyle = '#030310';
+    ctx.fillStyle = '#030202';
     ctx.fillRect(0, 0, w, h);
     const nebulae: [number, number, number, string][] = [
-      [w * 0.80, h * 0.38, Math.min(w, h) * 0.50, 'rgba(155,65,15,0.20)'],
-      [w * 0.72, h * 0.58, Math.min(w, h) * 0.32, 'rgba(185,100,8,0.13)'],
-      [w * 0.88, h * 0.22, Math.min(w, h) * 0.28, 'rgba(120,45,8,0.14)'],
-      [w * 0.18, h * 0.28, Math.min(w, h) * 0.38, 'rgba(18,38,110,0.22)'],
-      [w * 0.12, h * 0.60, Math.min(w, h) * 0.26, 'rgba(35,12,80,0.16)'],
-      [w * 0.48, h * 0.75, Math.min(w, h) * 0.20, 'rgba(55,18,8,0.10)'],
+      [w * 0.80, h * 0.38, Math.min(w, h) * 0.50, 'rgba(170,75,12,0.22)'],
+      [w * 0.72, h * 0.58, Math.min(w, h) * 0.32, 'rgba(200,110,8,0.14)'],
+      [w * 0.88, h * 0.22, Math.min(w, h) * 0.28, 'rgba(140,55,8,0.15)'],
+      [w * 0.18, h * 0.28, Math.min(w, h) * 0.38, 'rgba(22,16,8,0.18)'],
+      [w * 0.12, h * 0.60, Math.min(w, h) * 0.26, 'rgba(28,18,8,0.14)'],
+      [w * 0.48, h * 0.75, Math.min(w, h) * 0.20, 'rgba(60,22,6,0.12)'],
     ];
     for (const [nx, ny, nr, c] of nebulae) {
       const g = ctx.createRadialGradient(nx, ny, 0, nx, ny, nr);
@@ -1749,10 +1749,10 @@ export function NetMapPage() {
   // ── JSX ───────────────────────────────────────────────────────────────────
 
   return (
-    <div className="flex flex-col h-[calc(100vh-4rem)] bg-[#030310] overflow-hidden select-none">
+    <div className="flex flex-col h-[calc(100vh-4rem)] bg-[#030202] overflow-hidden select-none">
 
       {/* ── Header ──────────────────────────────────────────────────────────── */}
-      <div className="flex items-center justify-between px-5 py-2 border-b border-[#0a0a28] shrink-0 bg-[#050514]">
+      <div className="flex items-center justify-between px-5 py-2 border-b border-[#110c04] shrink-0 bg-[#070502]">
         <div className="flex items-center gap-3">
           <span className="relative flex h-2 w-2">
             <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75" />
@@ -1815,7 +1815,7 @@ export function NetMapPage() {
         )}
 
         {/* ── Left panel ──────────────────────────────────────────────────── */}
-        <div className="absolute top-4 left-4 bg-[#050514]/95 border border-slate-800/60 rounded-sm p-3 backdrop-blur-sm min-w-[152px] z-10">
+        <div className="absolute top-4 left-4 bg-[#070502]/95 border border-[#1a1208]/60 rounded-sm p-3 backdrop-blur-sm min-w-[152px] z-10">
           {selectedAgent ? (
             <>
               <div className="flex items-center justify-between mb-2">
@@ -1887,8 +1887,8 @@ export function NetMapPage() {
             style={{
               left: tooltip.x + 14,
               top: tooltip.y - 8,
-              backgroundColor: 'rgba(5,5,20,0.97)',
-              border: '1px solid rgba(51,65,85,0.7)',
+              backgroundColor: 'rgba(7,5,2,0.97)',
+              border: '1px solid rgba(60,45,20,0.7)',
               boxShadow: '0 4px 24px rgba(0,0,0,0.8)',
               transform: tooltip.x > canvasSize.w * 0.70 ? 'translateX(-110%)' : undefined,
             }}
@@ -1919,9 +1919,9 @@ export function NetMapPage() {
       </div>
 
       {/* ── Bottom live feed ────────────────────────────────────────────────── */}
-      <div className="shrink-0 border-t border-[#0a0a28] bg-[#050514]">
+      <div className="shrink-0 border-t border-[#110c04] bg-[#070502]">
         {/* Header */}
-        <div className="flex items-center gap-2.5 px-4 py-1.5 border-b border-[#080820]">
+        <div className="flex items-center gap-2.5 px-4 py-1.5 border-b border-[#150e05]">
           <span className="relative flex h-2 w-2">
             <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-500 opacity-75" />
             <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500" />

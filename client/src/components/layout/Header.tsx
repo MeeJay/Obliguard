@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { LogOut, Menu, Download, ExternalLink } from 'lucide-react';
+import { useEffect, useState, useTransition } from 'react';
+import { LogOut, Menu, Download, ArrowLeftRight } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useAuthStore } from '@/store/authStore';
@@ -21,17 +21,46 @@ export function Header() {
   const { toggleSidebar, sidebarFloating } = useUiStore();
   const { status: socketStatus } = useSocketStore();
   const [obliviewUrl, setObliviewUrl] = useState<string | null>(null);
+  const [obliviewSsoEnabled, setObliviewSsoEnabled] = useState(false);
+  const [ssoSwitching, setSsoSwitching] = useState(false);
+  const [, startSsoTransition] = useTransition();
 
   useEffect(() => {
     appConfigApi.getConfig()
       .then(cfg => {
         const url = (cfg as unknown as Record<string, unknown>).obliview_url;
+        const sso = (cfg as unknown as Record<string, unknown>).obliview_sso_enabled;
         if (url && typeof url === 'string' && url.trim()) {
           setObliviewUrl(url.trim());
         }
+        setObliviewSsoEnabled(!!sso);
       })
       .catch(() => {});
   }, []);
+
+  const handleObliviewClick = async () => {
+    if (!obliviewUrl) return;
+    if (!obliviewSsoEnabled) {
+      window.location.href = obliviewUrl;
+      return;
+    }
+    setSsoSwitching(true);
+    try {
+      const res = await fetch('/api/sso/generate-token', { method: 'POST', credentials: 'include' });
+      const body = await res.json() as { success: boolean; data?: { token: string } };
+      if (body.success && body.data?.token) {
+        const from = encodeURIComponent(window.location.origin);
+        const token = encodeURIComponent(body.data.token);
+        window.location.href = `${obliviewUrl.replace(/\/$/, '')}/auth/foreign?token=${token}&from=${from}&source=obliguard`;
+      } else {
+        window.location.href = obliviewUrl;
+      }
+    } catch {
+      window.location.href = obliviewUrl;
+    } finally {
+      setSsoSwitching(false);
+    }
+  };
 
   return (
     <header className="flex h-14 shrink-0 items-center justify-between border-b border-border bg-bg-secondary px-4">
@@ -54,21 +83,23 @@ export function Header() {
 
         {/* Tenant switcher — hidden when single-tenant (tenants.length <= 1) */}
         <TenantSwitcher />
+
+        {/* Obliview switch — shown in header only when sidebar is floating */}
+        {sidebarFloating && obliviewUrl && (
+          <button
+            type="button"
+            onClick={() => { startSsoTransition(() => { void handleObliviewClick(); }); }}
+            disabled={ssoSwitching}
+            title="Switch to Obliview"
+            className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium text-[#58a6ff] border border-[#1d4ed8]/40 bg-[#0c1929]/50 hover:bg-[#0c1929]/70 hover:border-[#3b82f6] transition-colors disabled:opacity-60"
+          >
+            <ArrowLeftRight size={12} className={ssoSwitching ? 'animate-pulse' : ''} />
+            Obliview
+          </button>
+        )}
       </div>
 
       <div className="flex items-center gap-4">
-        {/* Obliview back-link — shown when obliview_url is configured */}
-        {obliviewUrl && (
-          <a
-            href={obliviewUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex items-center gap-1.5 text-sm text-text-secondary hover:text-text-primary transition-colors"
-          >
-            <ExternalLink size={14} />
-            {t('header.obliviewLink', { defaultValue: '← Obliview' })}
-          </a>
-        )}
 
         {/* Download App link — hidden inside the native desktop app */}
         {!isNativeApp && (

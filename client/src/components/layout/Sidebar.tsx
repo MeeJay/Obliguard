@@ -328,7 +328,7 @@ export function Sidebar() {
   const handleObliviewClick = useCallback(async () => {
     if (!obliviewUrl) return;
     if (!obliviewSsoEnabled) {
-      window.open(obliviewUrl, '_blank', 'noopener,noreferrer');
+      window.location.href = obliviewUrl;
       return;
     }
     setSsoSwitching(true);
@@ -340,10 +340,10 @@ export function Sidebar() {
         const token = encodeURIComponent(body.data.token);
         window.location.href = `${obliviewUrl.replace(/\/$/, '')}/auth/foreign?token=${token}&from=${from}&source=obliguard`;
       } else {
-        window.open(obliviewUrl, '_blank', 'noopener,noreferrer');
+        window.location.href = obliviewUrl;
       }
     } catch {
-      window.open(obliviewUrl, '_blank', 'noopener,noreferrer');
+      window.location.href = obliviewUrl;
     } finally {
       setSsoSwitching(false);
     }
@@ -542,13 +542,13 @@ export function Sidebar() {
           <span className="text-lg font-semibold text-text-primary truncate">Obliguard</span>
         </Link>
         <div className="flex items-center gap-1 flex-shrink-0 ml-2">
-          {obliviewUrl && (
+          {obliviewUrl && !sidebarFloating && (
             <button
               type="button"
               onClick={() => { void handleObliviewClick(); }}
               disabled={ssoSwitching}
               title="Switch to Obliview"
-              className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium text-accent border border-accent/30 bg-accent/5 hover:bg-accent/15 transition-colors disabled:opacity-60"
+              className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium text-[#58a6ff] border border-[#1d4ed8]/40 bg-[#0c1929]/50 hover:bg-[#0c1929]/70 hover:border-[#3b82f6] transition-colors disabled:opacity-60"
             >
               <ArrowLeftRight size={12} className={ssoSwitching ? 'animate-pulse' : ''} />
               Obliview

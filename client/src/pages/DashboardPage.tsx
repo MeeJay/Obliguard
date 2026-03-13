@@ -52,15 +52,17 @@ function StatCard({
   icon,
   loading,
   colorClass = 'text-text-primary',
+  status,
 }: {
   label: string;
   value: number | null;
   icon: React.ReactNode;
   loading: boolean;
   colorClass?: string;
+  status?: string;
 }) {
   return (
-    <div className="rounded-lg border border-border bg-bg-secondary p-4">
+    <div className="rounded-lg border border-border bg-bg-secondary p-4" data-status={status}>
       <div className="flex items-center gap-2 mb-2">
         <span className="text-text-muted">{icon}</span>
         <span className="text-sm text-text-secondary">{label}</span>
@@ -321,6 +323,7 @@ export function DashboardPage() {
           icon={<ShieldOff size={16} />}
           loading={statsLoading}
           colorClass="text-status-down"
+          status="down"
         />
         <StatCard
           label={t('dashboard.blockedToday', { defaultValue: 'IPs Blocked Today' })}
@@ -328,6 +331,7 @@ export function DashboardPage() {
           icon={<ShieldOff size={16} />}
           loading={statsLoading}
           colorClass="text-orange-400"
+          status="alert"
         />
         <StatCard
           label={t('dashboard.agentsOnline', { defaultValue: 'Agents Online' })}
@@ -335,6 +339,7 @@ export function DashboardPage() {
           icon={<Cpu size={16} />}
           loading={statsLoading}
           colorClass="text-status-up"
+          status="up"
         />
         <StatCard
           label={t('dashboard.eventsToday', { defaultValue: 'Events Today' })}
@@ -342,6 +347,7 @@ export function DashboardPage() {
           icon={<Activity size={16} />}
           loading={statsLoading}
           colorClass="text-accent"
+          status="pending"
         />
       </div>
 
