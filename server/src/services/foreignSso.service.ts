@@ -140,12 +140,14 @@ export const foreignSsoService = {
       return { ...mapUser(updated), isFirstLogin: false };
     }
 
-    // If the username belongs to an existing LOCAL account, require password linking.
-    const localCollision = await db('users')
+    // If the username belongs to ANY existing account (local or foreign from another source),
+    // require password linking. Removing .whereNull('foreign_source') ensures that accounts
+    // already linked to a different SSO source also trigger the linking flow rather than
+    // falling through to a duplicate-insert that would fail with a unique constraint violation.
+    const anyCollision = await db('users')
       .where({ username })
-      .whereNull('foreign_source')
       .first();
-    if (localCollision) throw new AccountLinkRequiredError(username);
+    if (anyCollision) throw new AccountLinkRequiredError(username);
 
     // Create new foreign user (no password)
     const [newId] = await db('users').insert({
