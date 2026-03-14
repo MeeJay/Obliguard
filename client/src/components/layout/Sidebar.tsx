@@ -39,7 +39,6 @@ import { useAuthStore } from '@/store/authStore';
 import { useGroupStore } from '@/store/groupStore';
 import { useUiStore } from '@/store/uiStore';
 import { agentApi } from '@/api/agent.api';
-import { appConfigApi } from '@/api/appConfig.api';
 import { getSocket } from '@/socket/socketClient';
 import type { AgentDevice, MonitorStatus, GroupTreeNode } from '@obliview/shared';
 import { SOCKET_EVENTS } from '@obliview/shared';
@@ -312,44 +311,6 @@ export function Sidebar() {
   const { openAddAgentModal, sidebarFloating, toggleSidebarFloating } = useUiStore();
   const { tree, fetchTree } = useGroupStore();
 
-  // Obliview companion URL — shown as a global switch button when configured
-  const [obliviewUrl, setObliviewUrl] = useState<string | null>(null);
-  const [obliviewSsoEnabled, setObliviewSsoEnabled] = useState(false);
-  const [ssoSwitching, setSsoSwitching] = useState(false);
-  useEffect(() => {
-    appConfigApi.getConfig()
-      .then(cfg => {
-        setObliviewUrl(cfg.obliview_url ?? null);
-        setObliviewSsoEnabled(cfg.enable_foreign_sso ?? false);
-      })
-      .catch(() => {});
-  }, []);
-
-  /** SSO redirect: generate a switch token then navigate to Obliview */
-  const handleObliviewClick = useCallback(async () => {
-    if (!obliviewUrl) return;
-    if (!obliviewSsoEnabled) {
-      window.location.href = obliviewUrl;
-      return;
-    }
-    setSsoSwitching(true);
-    try {
-      const res = await fetch('/api/sso/generate-token', { method: 'POST', credentials: 'include' });
-      const body = await res.json() as { success: boolean; data?: { token: string } };
-      if (body.success && body.data?.token) {
-        const from = encodeURIComponent(window.location.origin);
-        const token = encodeURIComponent(body.data.token);
-        window.location.href = `${obliviewUrl.replace(/\/$/, '')}/auth/foreign?token=${token}&from=${from}&source=obliguard`;
-      } else {
-        window.location.href = obliviewUrl;
-      }
-    } catch {
-      window.location.href = obliviewUrl;
-    } finally {
-      setSsoSwitching(false);
-    }
-  }, [obliviewUrl, obliviewSsoEnabled]);
-
   const [approvedDevices, setApprovedDevices] = useState<AgentDevice[]>([]);
   // Real-time UP/ALERT/DOWN/INACTIVE status received via AGENT_STATUS_CHANGED events.
   const [deviceStatuses, setDeviceStatuses] = useState<Map<number, string>>(new Map());
@@ -536,25 +497,13 @@ export function Sidebar() {
 
   return (
     <aside className="flex h-full w-full flex-col border-r border-border bg-bg-secondary">
-      {/* Logo + Obliview switch + float/pin toggle */}
+      {/* Logo + float/pin toggle */}
       <div className="flex h-14 shrink-0 items-center justify-between border-b border-border px-4">
         <Link to="/" className="flex items-center gap-2 min-w-0">
           <img src="/logo.webp" alt="Obliguard" className="h-8 w-8 rounded-lg flex-shrink-0" />
           <span className="text-lg font-semibold text-text-primary truncate">Obliguard</span>
         </Link>
         <div className="flex items-center gap-1 flex-shrink-0 ml-2">
-          {obliviewUrl && !sidebarFloating && (
-            <button
-              type="button"
-              onClick={() => { void handleObliviewClick(); }}
-              disabled={ssoSwitching}
-              title="Switch to Obliview"
-              className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium text-[#58a6ff] border border-[#1d4ed8]/40 bg-[#0c1929]/50 hover:bg-[#0c1929]/70 hover:border-[#3b82f6] transition-colors disabled:opacity-60"
-            >
-              <ArrowLeftRight size={12} className={ssoSwitching ? 'animate-pulse' : ''} />
-              Obliview
-            </button>
-          )}
           <button
             onClick={toggleSidebarFloating}
             title={sidebarFloating ? t('nav.pinSidebar') : t('nav.floatSidebar')}
