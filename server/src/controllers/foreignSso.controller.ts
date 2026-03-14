@@ -19,8 +19,18 @@ export async function requireObliviewSecret(
       throw new AppError(401, 'Missing Bearer token');
     }
     const provided = authHeader.slice(7).trim();
-    const { apiKey } = await appConfigService.getObliviewRaw();
-    if (!apiKey || provided !== apiKey) {
+
+    // Accept the shared API key from ANY configured source (Obliview, Oblimap, Obliance)
+    const [obliviewRaw, oblimapRaw, oblianceRaw] = await Promise.all([
+      appConfigService.getObliviewRaw(),
+      appConfigService.getOblimapRaw(),
+      appConfigService.getOblianceRaw(),
+    ]);
+
+    const validKeys = [obliviewRaw.apiKey, oblimapRaw.apiKey, oblianceRaw.apiKey]
+      .filter((k): k is string => !!k);
+
+    if (validKeys.length === 0 || !validKeys.includes(provided)) {
       throw new AppError(401, 'Invalid secret');
     }
     next();
@@ -65,18 +75,36 @@ export const foreignSsoController = {
     try {
       const cfg = await appConfigService.getAll();
       if (!cfg.enable_foreign_sso) throw new AppError(403, 'Foreign SSO is not enabled');
-      const { token, from, foreignSource = 'obliview' } = req.body as {
-        token?: string; from?: string; foreignSource?: string;
+      const { token, from } = req.body as {
+        token?: string; from?: string;
       };
       if (!token || !from) throw new AppError(400, 'Missing required fields: token, from');
-      const { apiKey: sharedSecret } = await appConfigService.getObliviewRaw();
-      if (!sharedSecret) throw new AppError(503, 'Obliguard shared secret is not configured');
+      // Resolve which source app sent this token, and use its API key
+      const normalise = (u: string | null | undefined) => (u ?? '').replace(/\/$/, '').toLowerCase();
       const fromBase = from.replace(/\/$/, '');
+      const fromNorm = normalise(fromBase);
+
+      const [obliviewRaw, oblimapRaw, oblianceRaw] = await Promise.all([
+        appConfigService.getObliviewRaw(),
+        appConfigService.getOblimapRaw(),
+        appConfigService.getOblianceRaw(),
+      ]);
+
+      const knownSources = [
+        { name: 'obliview', ...obliviewRaw },
+        { name: 'oblimap',  ...oblimapRaw  },
+        { name: 'obliance', ...oblianceRaw  },
+      ] as { name: string; url: string | null; apiKey: string | null }[];
+
+      const matchedSource = knownSources.find((s) => s.url && normalise(s.url) === fromNorm);
+      if (!matchedSource?.apiKey) throw new AppError(503, 'No SSO config found for this source');
+
+      const foreignSource = matchedSource.name;
       const validateUrl = fromBase + '/api/sso/validate-token?token=' + encodeURIComponent(token);
       let foreignUser: { id: number; username: string; displayName: string | null; role: string; email: string | null };
       try {
         const resp = await fetch(validateUrl, {
-          headers: { Authorization: 'Bearer ' + sharedSecret },
+          headers: { Authorization: 'Bearer ' + matchedSource.apiKey },
           signal: AbortSignal.timeout(5000),
         });
         if (!resp.ok) throw new AppError(401, 'Token rejected by foreign platform');
