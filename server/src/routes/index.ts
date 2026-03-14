@@ -23,6 +23,8 @@ import serviceTemplatesRoutes from './serviceTemplates.routes';
 import geoRoutes from './geo.routes';
 import foreignSsoRoutes from './foreignSso.routes';
 import obliviewRoutes from './obliview.routes';
+import oblimapRoutes from './oblimap.routes';
+import oblianceRoutes from './obliance.routes';
 
 const router = Router();
 
@@ -34,6 +36,8 @@ router.use('/profile/2fa', twoFactorRoutes); // must be before /profile
 router.use('/live-alerts', liveAlertRouter);
 router.use('/sso', foreignSsoRoutes);        // Cross-platform SSO (generate-token, validate-token, exchange, users)
 router.use('/obliguard', obliviewRoutes);    // Obliview cross-platform lookup (Bearer-authenticated)
+router.use('/oblimap', oblimapRoutes);       // Oblimap cross-platform lookup (Bearer-authenticated)
+router.use('/obliance', oblianceRoutes);    // Obliance cross-platform lookup (Bearer-authenticated)
 
 // ── Tenant management ─────────────────────────────────────────────────────────
 router.use('/tenants', tenantRoutes);

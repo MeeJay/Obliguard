@@ -270,8 +270,14 @@ export interface AppConfig {
   otp_smtp_server_id: number | null;
   /** URL of the companion Obliview instance. When set, a "Switch to Obliview" button appears in the header. */
   obliview_url: string | null;
+  /** URL of the companion Oblimap instance. */
+  oblimap_url: string | null;
+  /** URL of the companion Obliance instance. */
+  obliance_url: string | null;
   /** When true, users can log in via a one-time SSO token issued by the connected Obliview instance. */
   enable_foreign_sso: boolean;
+  enable_oblimap_sso: boolean;
+  enable_obliance_sso: boolean;
 }
 
 /**
@@ -279,6 +285,24 @@ export interface AppConfig {
  * The raw apiKey is never exposed to clients — only `apiKeySet` (boolean) is returned.
  */
 export interface ObliviewConfig {
+  url: string | null;
+  apiKeySet: boolean;
+}
+
+/**
+ * Oblimap integration settings stored under `oblimap_config` in app_config.
+ * The raw apiKey is never exposed to clients — only `apiKeySet` (boolean) is returned.
+ */
+export interface OblimapConfig {
+  url: string | null;
+  apiKeySet: boolean;
+}
+
+/**
+ * Obliance integration settings stored under `obliance_config` in app_config.
+ * The raw apiKey is never exposed to clients — only `apiKeySet` (boolean) is returned.
+ */
+export interface OblianceConfig {
   url: string | null;
   apiKeySet: boolean;
 }

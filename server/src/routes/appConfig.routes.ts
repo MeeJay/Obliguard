@@ -19,4 +19,14 @@ router.get('/obliview/agent-link/:uuid', requireAuth, appConfigController.proxyO
 router.get('/obliview',   requireAuth, requireRole('admin'), appConfigController.getObliview);
 router.patch('/obliview', requireAuth, requireRole('admin'), appConfigController.patchObliview);
 
+// Oblimap integration
+router.get('/oblimap/agent-link/:uuid', requireAuth, appConfigController.proxyOblimapAgentLink);
+router.get('/oblimap',   requireAuth, requireRole('admin'), appConfigController.getOblimap);
+router.patch('/oblimap', requireAuth, requireRole('admin'), appConfigController.patchOblimap);
+
+// Obliance integration
+router.get('/obliance/agent-link/:uuid', requireAuth, appConfigController.proxyOblianceAgentLink);
+router.get('/obliance',   requireAuth, requireRole('admin'), appConfigController.getObliance);
+router.patch('/obliance', requireAuth, requireRole('admin'), appConfigController.patchObliance);
+
 export default router;

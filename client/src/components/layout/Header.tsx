@@ -22,8 +22,12 @@ export function Header() {
   const { user, logout } = useAuthStore();
   const { toggleSidebar, sidebarFloating } = useUiStore();
   const { status: socketStatus } = useSocketStore();
-  const [obliviewUrl, setObliviewUrl] = useState<string | null>(null);
+  const [obliviewUrl, setObliviewUrl]   = useState<string | null>(null);
   const [obliviewSsoEnabled, setObliviewSsoEnabled] = useState(false);
+  const [oblimapUrl, setOblimapUrl]     = useState<string | null>(null);
+  const [oblimapSsoEnabled, setOblimapSsoEnabled]   = useState(false);
+  const [oblianceUrl, setOblianceUrl]   = useState<string | null>(null);
+  const [oblianceSsoEnabled, setOblianceSsoEnabled] = useState(false);
   const [ssoSwitching, setSsoSwitching] = useState(false);
   const [, startSsoTransition] = useTransition();
 
@@ -34,12 +38,16 @@ export function Header() {
   useEffect(() => {
     appConfigApi.getConfig()
       .then(cfg => {
-        const url = (cfg as unknown as Record<string, unknown>).obliview_url;
-        const sso = (cfg as unknown as Record<string, unknown>).obliview_sso_enabled;
-        if (url && typeof url === 'string' && url.trim()) {
-          setObliviewUrl(url.trim());
-        }
-        setObliviewSsoEnabled(!!sso);
+        const raw = cfg as unknown as Record<string, unknown>;
+        const obliviewUrlVal  = raw.obliview_url;
+        const oblimapUrlVal   = raw.oblimap_url;
+        const oblianceUrlVal  = raw.obliance_url;
+        if (obliviewUrlVal  && typeof obliviewUrlVal  === 'string' && obliviewUrlVal.trim())  setObliviewUrl(obliviewUrlVal.trim());
+        if (oblimapUrlVal   && typeof oblimapUrlVal   === 'string' && oblimapUrlVal.trim())   setOblimapUrl(oblimapUrlVal.trim());
+        if (oblianceUrlVal  && typeof oblianceUrlVal  === 'string' && oblianceUrlVal.trim())  setOblianceUrl(oblianceUrlVal.trim());
+        setObliviewSsoEnabled(!!(raw.obliview_sso_enabled ?? raw.enable_foreign_sso));
+        setOblimapSsoEnabled(!!(raw.enable_oblimap_sso));
+        setOblianceSsoEnabled(!!(raw.enable_obliance_sso));
       })
       .catch(() => {});
   }, []);
@@ -69,28 +77,24 @@ export function Header() {
     return () => clearInterval(interval);
   }, []);
 
-  const handleObliviewClick = async () => {
-    if (!obliviewUrl) return;
-    if (!obliviewSsoEnabled) {
-      window.location.href = obliviewUrl;
-      return;
-    }
+  const handleSsoSwitch = async (targetUrl: string, ssoEnabled: boolean, source: string) => {
+    if (!ssoEnabled) { window.location.href = targetUrl; return; }
     setSsoSwitching(true);
     try {
       const res = await fetch('/api/sso/generate-token', { method: 'POST', credentials: 'include' });
       const body = await res.json() as { success: boolean; data?: { token: string } };
       if (body.success && body.data?.token) {
-        const from = encodeURIComponent(window.location.origin);
+        const from  = encodeURIComponent(window.location.origin);
         const token = encodeURIComponent(body.data.token);
-        window.location.href = `${obliviewUrl.replace(/\/$/, '')}/auth/foreign?token=${token}&from=${from}&source=obliguard`;
-      } else {
-        window.location.href = obliviewUrl;
-      }
-    } catch {
-      window.location.href = obliviewUrl;
-    } finally {
-      setSsoSwitching(false);
-    }
+        window.location.href = `${targetUrl.replace(/\/$/, '')}/auth/foreign?token=${token}&from=${from}&source=${source}`;
+      } else { window.location.href = targetUrl; }
+    } catch { window.location.href = targetUrl; }
+    finally { setSsoSwitching(false); }
+  };
+
+  const handleObliviewClick = async () => {
+    if (!obliviewUrl) return;
+    await handleSsoSwitch(obliviewUrl, obliviewSsoEnabled, 'obliguard');
   };
 
   return (
@@ -115,7 +119,7 @@ export function Header() {
         {/* Tenant switcher — hidden when single-tenant (tenants.length <= 1) */}
         <TenantSwitcher />
 
-        {/* Obliview switch — shown in header only when sidebar is floating */}
+        {/* Cross-app switch buttons — shown in header only when sidebar is floating */}
         {sidebarFloating && obliviewUrl && (
           <button
             type="button"
@@ -126,6 +130,30 @@ export function Header() {
           >
             <ArrowLeftRight size={12} className={ssoSwitching ? 'animate-pulse' : ''} />
             Obliview
+          </button>
+        )}
+        {sidebarFloating && oblimapUrl && (
+          <button
+            type="button"
+            onClick={() => { startSsoTransition(() => { void handleSsoSwitch(oblimapUrl, oblimapSsoEnabled, 'obliguard'); }); }}
+            disabled={ssoSwitching}
+            title="Switch to Oblimap"
+            className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium text-[#10b981] border border-[#047857]/40 bg-[#022c22]/50 hover:bg-[#022c22]/70 hover:border-[#10b981] transition-colors disabled:opacity-60"
+          >
+            <ArrowLeftRight size={12} className={ssoSwitching ? 'animate-pulse' : ''} />
+            Oblimap
+          </button>
+        )}
+        {sidebarFloating && oblianceUrl && (
+          <button
+            type="button"
+            onClick={() => { startSsoTransition(() => { void handleSsoSwitch(oblianceUrl, oblianceSsoEnabled, 'obliguard'); }); }}
+            disabled={ssoSwitching}
+            title="Switch to Obliance"
+            className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium text-[#a78bfa] border border-[#7c3aed]/40 bg-[#2e1065]/50 hover:bg-[#2e1065]/70 hover:border-[#a78bfa] transition-colors disabled:opacity-60"
+          >
+            <ArrowLeftRight size={12} className={ssoSwitching ? 'animate-pulse' : ''} />
+            Obliance
           </button>
         )}
       </div>

@@ -1,5 +1,5 @@
 import apiClient from './client';
-import type { AppConfig, AgentGlobalConfig, ObliviewConfig, ApiResponse } from '@obliview/shared';
+import type { AppConfig, AgentGlobalConfig, ObliviewConfig, OblimapConfig, OblianceConfig, ApiResponse } from '@obliview/shared';
 
 export const appConfigApi = {
   async getConfig(): Promise<AppConfig> {
@@ -43,6 +43,52 @@ export const appConfigApi = {
     try {
       const res = await apiClient.get<ApiResponse<{ url: string } | null>>(
         `/admin/config/obliview/agent-link/${encodeURIComponent(uuid)}`,
+      );
+      return res.data.data?.url ?? null;
+    } catch {
+      return null;
+    }
+  },
+
+  // ── Oblimap integration ───────────────────────────────────────────────────
+
+  async getOblimapConfig(): Promise<OblimapConfig> {
+    const res = await apiClient.get<ApiResponse<OblimapConfig>>('/admin/config/oblimap');
+    return res.data.data!;
+  },
+
+  async patchOblimapConfig(data: { url?: string | null; apiKey?: string | null }): Promise<OblimapConfig> {
+    const res = await apiClient.patch<ApiResponse<OblimapConfig>>('/admin/config/oblimap', data);
+    return res.data.data!;
+  },
+
+  async getOblimapAgentLink(uuid: string): Promise<string | null> {
+    try {
+      const res = await apiClient.get<ApiResponse<{ url: string } | null>>(
+        `/admin/config/oblimap/agent-link/${encodeURIComponent(uuid)}`,
+      );
+      return res.data.data?.url ?? null;
+    } catch {
+      return null;
+    }
+  },
+
+  // ── Obliance integration ──────────────────────────────────────────────────
+
+  async getOblianceConfig(): Promise<OblianceConfig> {
+    const res = await apiClient.get<ApiResponse<OblianceConfig>>('/admin/config/obliance');
+    return res.data.data!;
+  },
+
+  async patchOblianceConfig(data: { url?: string | null; apiKey?: string | null }): Promise<OblianceConfig> {
+    const res = await apiClient.patch<ApiResponse<OblianceConfig>>('/admin/config/obliance', data);
+    return res.data.data!;
+  },
+
+  async getOblianceAgentLink(uuid: string): Promise<string | null> {
+    try {
+      const res = await apiClient.get<ApiResponse<{ url: string } | null>>(
+        `/admin/config/obliance/agent-link/${encodeURIComponent(uuid)}`,
       );
       return res.data.data?.url ?? null;
     } catch {

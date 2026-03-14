@@ -2,7 +2,10 @@ import type { Request, Response, NextFunction } from 'express';
 import { appConfigService } from '../services/appConfig.service';
 import { AppError } from '../middleware/errorHandler';
 
-const ALLOWED_KEYS = ['allow_2fa', 'force_2fa', 'otp_smtp_server_id', 'enable_foreign_sso'] as const;
+const ALLOWED_KEYS = [
+  'allow_2fa', 'force_2fa', 'otp_smtp_server_id',
+  'enable_foreign_sso', 'enable_oblimap_sso', 'enable_obliance_sso',
+] as const;
 
 export const appConfigController = {
   async getAll(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -69,32 +72,93 @@ export const appConfigController = {
   /**
    * GET /admin/config/obliview/agent-link/:uuid
    * Server-side proxy: asks Obliview if a device with this UUID exists.
-   * Returns { url: string } (full URL to Obliview agent page) or { url: null }.
+   * Returns { url: string } (full URL to Obliview agent page) or null.
    */
   async proxyObliviewAgentLink(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const { uuid } = req.params as { uuid: string };
       const { url: obliviewUrl, apiKey } = await appConfigService.getObliviewRaw();
-      if (!obliviewUrl || !apiKey) {
-        res.json({ success: true, data: null });
-        return;
-      }
+      if (!obliviewUrl || !apiKey) { res.json({ success: true, data: null }); return; }
       const endpoint = `${obliviewUrl.replace(/\/$/, '')}/api/obliguard/link?uuid=${encodeURIComponent(uuid)}`;
-      const resp = await fetch(endpoint, {
-        headers: { Authorization: `Bearer ${apiKey}` },
-        signal: AbortSignal.timeout(5000),
-      });
-      if (!resp.ok) {
-        res.json({ success: true, data: null });
-        return;
-      }
+      const resp = await fetch(endpoint, { headers: { Authorization: `Bearer ${apiKey}` }, signal: AbortSignal.timeout(5000) });
+      if (!resp.ok) { res.json({ success: true, data: null }); return; }
       const body = await resp.json() as { success: boolean; data?: { path: string } };
-      if (!body.success || !body.data?.path) {
-        res.json({ success: true, data: null });
-        return;
-      }
-      const fullUrl = `${obliviewUrl.replace(/\/$/, '')}${body.data.path}`;
-      res.json({ success: true, data: { url: fullUrl } });
+      if (!body.success || !body.data?.path) { res.json({ success: true, data: null }); return; }
+      res.json({ success: true, data: { url: `${obliviewUrl.replace(/\/$/, '')}${body.data.path}` } });
+    } catch (err) { next(err); }
+  },
+
+  // ── Oblimap integration ─────────────────────────────────────────────────
+
+  async getOblimap(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const cfg = await appConfigService.getOblimapConfig();
+      res.json({ success: true, data: cfg });
+    } catch (err) { next(err); }
+  },
+
+  async patchOblimap(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const patch: { url?: string | null; apiKey?: string | null } = {};
+      if ('url'    in req.body) patch.url    = (req.body as { url?: string | null }).url ?? null;
+      if ('apiKey' in req.body) patch.apiKey = (req.body as { apiKey?: string | null }).apiKey ?? null;
+      const updated = await appConfigService.setOblimapConfig(patch);
+      res.json({ success: true, data: updated });
+    } catch (err) { next(err); }
+  },
+
+  /**
+   * GET /admin/config/oblimap/agent-link/:uuid
+   * Server-side proxy: asks Oblimap if a probe device with this UUID exists.
+   */
+  async proxyOblimapAgentLink(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const { uuid } = req.params as { uuid: string };
+      const { url: oblimapUrl, apiKey } = await appConfigService.getOblimapRaw();
+      if (!oblimapUrl || !apiKey) { res.json({ success: true, data: null }); return; }
+      const endpoint = `${oblimapUrl.replace(/\/$/, '')}/api/oblimap/link?uuid=${encodeURIComponent(uuid)}`;
+      const resp = await fetch(endpoint, { headers: { Authorization: `Bearer ${apiKey}` }, signal: AbortSignal.timeout(5000) });
+      if (!resp.ok) { res.json({ success: true, data: null }); return; }
+      const body = await resp.json() as { success: boolean; data?: { path: string } };
+      if (!body.success || !body.data?.path) { res.json({ success: true, data: null }); return; }
+      res.json({ success: true, data: { url: `${oblimapUrl.replace(/\/$/, '')}${body.data.path}` } });
+    } catch (err) { next(err); }
+  },
+
+  // ── Obliance integration ────────────────────────────────────────────────
+
+  async getObliance(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const cfg = await appConfigService.getOblianceConfig();
+      res.json({ success: true, data: cfg });
+    } catch (err) { next(err); }
+  },
+
+  async patchObliance(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const patch: { url?: string | null; apiKey?: string | null } = {};
+      if ('url'    in req.body) patch.url    = (req.body as { url?: string | null }).url ?? null;
+      if ('apiKey' in req.body) patch.apiKey = (req.body as { apiKey?: string | null }).apiKey ?? null;
+      const updated = await appConfigService.setOblianceConfig(patch);
+      res.json({ success: true, data: updated });
+    } catch (err) { next(err); }
+  },
+
+  /**
+   * GET /admin/config/obliance/agent-link/:uuid
+   * Server-side proxy: asks Obliance if a device with this UUID exists.
+   */
+  async proxyOblianceAgentLink(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const { uuid } = req.params as { uuid: string };
+      const { url: oblianceUrl, apiKey } = await appConfigService.getOblianceRaw();
+      if (!oblianceUrl || !apiKey) { res.json({ success: true, data: null }); return; }
+      const endpoint = `${oblianceUrl.replace(/\/$/, '')}/api/obliance/link?uuid=${encodeURIComponent(uuid)}`;
+      const resp = await fetch(endpoint, { headers: { Authorization: `Bearer ${apiKey}` }, signal: AbortSignal.timeout(5000) });
+      if (!resp.ok) { res.json({ success: true, data: null }); return; }
+      const body = await resp.json() as { success: boolean; data?: { path: string } };
+      if (!body.success || !body.data?.path) { res.json({ success: true, data: null }); return; }
+      res.json({ success: true, data: { url: `${oblianceUrl.replace(/\/$/, '')}${body.data.path}` } });
     } catch (err) { next(err); }
   },
 };
