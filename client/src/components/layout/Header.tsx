@@ -119,8 +119,8 @@ export function Header() {
         {/* Tenant switcher — hidden when single-tenant (tenants.length <= 1) */}
         <TenantSwitcher />
 
-        {/* Cross-app switch buttons — shown in header only when sidebar is floating */}
-        {sidebarFloating && obliviewUrl && (
+        {/* Cross-app switch buttons — always shown when integration URL is configured */}
+        {obliviewUrl && (
           <button
             type="button"
             onClick={() => { startSsoTransition(() => { void handleObliviewClick(); }); }}
@@ -132,7 +132,7 @@ export function Header() {
             Obliview
           </button>
         )}
-        {sidebarFloating && oblimapUrl && (
+        {oblimapUrl && (
           <button
             type="button"
             onClick={() => { startSsoTransition(() => { void handleSsoSwitch(oblimapUrl, oblimapSsoEnabled, 'obliguard'); }); }}
@@ -144,7 +144,7 @@ export function Header() {
             Oblimap
           </button>
         )}
-        {sidebarFloating && oblianceUrl && (
+        {oblianceUrl && (
           <button
             type="button"
             onClick={() => { startSsoTransition(() => { void handleSsoSwitch(oblianceUrl, oblianceSsoEnabled, 'obliguard'); }); }}
