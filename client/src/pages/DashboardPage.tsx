@@ -112,6 +112,7 @@ function AgentCard({
   return (
     <button
       onClick={onClick}
+      data-status={isOnline ? 'up' : 'down'}
       className="rounded-lg border border-border bg-bg-secondary p-4 text-left hover:bg-bg-hover hover:border-accent/30 transition-colors w-full"
     >
       {/* Header row */}

@@ -119,6 +119,7 @@ function DraggableDeviceItem({
     >
       <Link
         to={`/agents/${device.id}`}
+        data-status={effectiveStatus ?? 'inactive'}
         className={cn(
           'flex items-center gap-2 rounded-md px-2 py-1 text-sm transition-colors',
           isActive
