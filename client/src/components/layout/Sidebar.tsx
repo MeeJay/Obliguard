@@ -31,7 +31,6 @@ import {
   Ban,
   ScanSearch,
   Building2,
-  ArrowLeftRight,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { cn } from '@/utils/cn';
