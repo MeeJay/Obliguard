@@ -205,7 +205,18 @@ export const foreignSsoController = {
         return;
       }
 
-      // No 2FA — complete the link immediately
+      // No 2FA — complete the link immediately.
+      // Upsert into sso_foreign_users so this source is remembered without
+      // overwriting any other linked source on this account.
+      await db('sso_foreign_users')
+        .insert({
+          foreign_source: linkRow.foreign_source,
+          foreign_user_id: linkRow.foreign_id,
+          local_user_id: localUser.id,
+        })
+        .onConflict(['foreign_source', 'foreign_user_id'])
+        .merge({ local_user_id: localUser.id });
+      // Keep users.foreign_source/foreign_id in sync for display purposes
       await db('users').where({ id: localUser.id }).update({
         foreign_source: linkRow.foreign_source,
         foreign_id: linkRow.foreign_id,
@@ -274,7 +285,15 @@ export const foreignSsoController = {
       }
       if (!valid) throw new AppError(401, 'Invalid code');
 
-      // Complete the link
+      // Complete the link — upsert into sso_foreign_users (multi-source safe)
+      await db('sso_foreign_users')
+        .insert({
+          foreign_source: linkRow.foreign_source,
+          foreign_user_id: linkRow.foreign_id,
+          local_user_id: localUser.id,
+        })
+        .onConflict(['foreign_source', 'foreign_user_id'])
+        .merge({ local_user_id: localUser.id });
       await db('users').where({ id: localUser.id }).update({
         foreign_source: linkRow.foreign_source,
         foreign_id: linkRow.foreign_id,

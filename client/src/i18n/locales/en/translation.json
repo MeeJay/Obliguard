@@ -164,6 +164,7 @@
     "stepLanguage": "Language",
     "stepProfile": "Profile",
     "stepAlerts": "Alerts",
+    "stepPassword": "Password",
     "stepSecurity": "Security",
     "completing": "Completing…",
     "complete": "Finish setup",
@@ -197,6 +198,22 @@
       "topCenter": "Top center",
       "topCenterDesc": "Latest alert only, auto-dismiss after 10 seconds.",
       "previewAlt": "Alert position preview"
+    },
+
+    "password": {
+      "title": "Set a password",
+      "subtitleRequired": "Your account was created via SSO and has no password yet. Set one to be able to log in directly.",
+      "subtitleOptional": "You already have a password. Leave the fields blank to keep your current one.",
+      "label": "Password",
+      "newLabel": "New password",
+      "confirmLabel": "Confirm password",
+      "placeholder": "At least 8 characters",
+      "optionalPlaceholder": "Leave blank to keep current",
+      "confirmPlaceholder": "Repeat your password",
+      "tooShort": "Password must be at least 8 characters.",
+      "mismatch": "Passwords do not match.",
+      "required": "A password is required for your account.",
+      "failed": "Failed to set password. Please try again."
     },
 
     "security": {

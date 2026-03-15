@@ -15,4 +15,9 @@ export const profileApi = {
   async changePassword(currentPassword: string, newPassword: string): Promise<void> {
     await apiClient.put('/profile/password', { currentPassword, newPassword });
   },
+
+  /** Set a local password for SSO-only accounts (no current password required). */
+  async setLocalPassword(password: string): Promise<void> {
+    await apiClient.post('/sso/set-password', { password });
+  },
 };

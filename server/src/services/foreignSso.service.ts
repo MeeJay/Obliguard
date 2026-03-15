@@ -119,35 +119,55 @@ export const foreignSsoService = {
   }): Promise<User & { isFirstLogin: boolean }> {
     const { foreignSource, foreignId, foreignSourceUrl, username, displayName, role, email } = opts;
 
-    // Try to find existing by foreign identity
-    const existing = await db('users')
-      .where({ foreign_source: foreignSource, foreign_id: foreignId })
-      .first();
+    // Look up via sso_foreign_users — supports multiple linked sources per user
+    const link = await db('sso_foreign_users')
+      .where({ foreign_source: foreignSource, foreign_user_id: foreignId })
+      .first() as { local_user_id: number } | undefined;
 
-    if (existing) {
-      // Update mutable fields in case they changed on the remote side
-      await db('users')
-        .where({ id: existing.id as number })
-        .update({
-          username,
-          display_name: displayName,
+    if (link) {
+      const existing = await db('users').where({ id: link.local_user_id }).first();
+      if (existing) {
+        // Update mutable fields in case they changed on the remote side
+        await db('users')
+          .where({ id: existing.id as number })
+          .update({
+            username,
+            display_name: displayName,
+            email,
+            foreign_source_url: foreignSourceUrl,
+            updated_at: new Date(),
+          });
+
+        const updated = await db('users').where({ id: existing.id as number }).first();
+        return { ...mapUser(updated), isFirstLogin: false };
+      }
+    }
+
+    // Check for username collision with any existing account.
+    const anyCollision = await db('users')
+      .where({ username })
+      .first() as Record<string, unknown> | undefined;
+
+    if (anyCollision) {
+      if (!anyCollision.password_hash) {
+        // The existing account is a password-less SSO account (created via another source).
+        // Auto-link this new source — no password proof needed since the account has no secret.
+        const colId = anyCollision.id as number;
+        await db('sso_foreign_users')
+          .insert({ foreign_source: foreignSource, foreign_user_id: foreignId, local_user_id: colId })
+          .onConflict(['foreign_source', 'foreign_user_id'])
+          .merge({ local_user_id: colId });
+        await db('users').where({ id: colId }).update({
           email,
           foreign_source_url: foreignSourceUrl,
           updated_at: new Date(),
         });
-
-      const updated = await db('users').where({ id: existing.id as number }).first();
-      return { ...mapUser(updated), isFirstLogin: false };
+        const updated = await db('users').where({ id: colId }).first();
+        return { ...mapUser(updated), isFirstLogin: false };
+      }
+      // The existing account has a password (local account) — require ownership proof.
+      throw new AccountLinkRequiredError(username);
     }
-
-    // If the username belongs to ANY existing account (local or foreign from another source),
-    // require password linking. Removing .whereNull('foreign_source') ensures that accounts
-    // already linked to a different SSO source also trigger the linking flow rather than
-    // falling through to a duplicate-insert that would fail with a unique constraint violation.
-    const anyCollision = await db('users')
-      .where({ username })
-      .first();
-    if (anyCollision) throw new AccountLinkRequiredError(username);
 
     // Create new foreign user (no password)
     const [newId] = await db('users').insert({
@@ -167,6 +187,13 @@ export const foreignSsoService = {
     }).returning('id');
 
     const id = typeof newId === 'object' ? (newId as { id: number }).id : newId;
+
+    // Record in sso_foreign_users for future multi-source lookups
+    await db('sso_foreign_users').insert({
+      foreign_source: foreignSource,
+      foreign_user_id: foreignId,
+      local_user_id: id,
+    });
 
     // Assign to default tenant
     await db('tenant_memberships')
