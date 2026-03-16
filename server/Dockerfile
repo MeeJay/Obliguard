@@ -70,14 +70,15 @@ COPY --from=go-agent-builder /build/dist/obliguard-agent-darwin-arm64  ./agent/d
 COPY agent/dist/ ./agent/dist/
 
 # Obli.tools VERSION file (read by GET /api/agent/desktop-version to drive the update banner).
-# Must be present — without it the endpoint returns 0.0.0 and the banner never fires.
-COPY obli.tools/VERSION ./obli.tools/
+# obli.tools/ is a Windows junction in sibling repos — Docker cannot follow junctions when
+# building the context tarball, so we inject the version via a build ARG instead of COPY.
+ARG OBLTOOLS_VER=0.0.0
+RUN mkdir -p ./obli.tools && printf '%s' "${OBLTOOLS_VER}" > ./obli.tools/VERSION
 
 # Obli.tools release binaries (build on Windows: obli.tools/build-windows.ps1 → dist/ObliTools.exe)
 #                              (build on macOS:   obli.tools/build-mac.sh      → dist/ObliTools-*.dmg/zip)
 # If absent, the /downloads/:filename endpoint returns 404 (no hard failure).
 RUN mkdir -p ./obli.tools/dist
-COPY obli.tools/dist/ ./obli.tools/dist/
 
 COPY server/docker-entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
