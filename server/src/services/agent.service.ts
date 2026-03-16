@@ -980,16 +980,16 @@ export const agentService = {
   async getMetricsFromDB(_deviceId: number): Promise<null> { return null; },
 
   getDesktopVersion(): { version: string } {
-    // 1. Try desktop-app/VERSION (plain text "X.Y.Z\n")
+    // 1. Try obli.tools/VERSION (plain text "X.Y.Z\n")
     try {
-      const versionFilePath = path.resolve(__dirname, '../../../../desktop-app/VERSION');
+      const versionFilePath = path.resolve(__dirname, '../../../../obli.tools/VERSION');
       const v = fs.readFileSync(versionFilePath, 'utf-8').trim();
       if (v) return { version: v };
     } catch { /* not found, try next */ }
 
-    // 2. Dev fallback: parse `const appVersion = "x.y.z"` from desktop-app/main.go
+    // 2. Dev fallback: parse `const appVersion = "x.y.z"` from obli.tools/main.go
     try {
-      const mainGoPath = path.resolve(__dirname, '../../../../desktop-app/main.go');
+      const mainGoPath = path.resolve(__dirname, '../../../../obli.tools/main.go');
       const content = fs.readFileSync(mainGoPath, 'utf-8');
       const match = content.match(/(?:var|const)\s+appVersion\s*=\s*"([^"]+)"/);
       if (match?.[1]) return { version: match[1] };
