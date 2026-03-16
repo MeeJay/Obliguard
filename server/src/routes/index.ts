@@ -23,6 +23,7 @@ import serviceTemplatesRoutes from './serviceTemplates.routes';
 import geoRoutes from './geo.routes';
 import foreignSsoRoutes from './foreignSso.routes';
 import obliviewRoutes from './obliview.routes';
+import systemRoutes from './system.routes';
 import oblimapRoutes from './oblimap.routes';
 import oblianceRoutes from './obliance.routes';
 
@@ -32,6 +33,7 @@ const router = Router();
 router.use('/auth', authRoutes);
 router.use('/agent', agentRoutes);           // agent push (authenticated via API key)
 router.use('/admin/config', appConfigRoutes);
+router.use('/system', systemRoutes);         // system info / about (admin only, no tenant required)
 router.use('/profile/2fa', twoFactorRoutes); // must be before /profile
 router.use('/live-alerts', liveAlertRouter);
 router.use('/sso', foreignSsoRoutes);        // Cross-platform SSO (generate-token, validate-token, exchange, users)
