@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { Toaster } from 'react-hot-toast';
 import { useAuthStore } from '@/store/authStore';
 import { ProtectedRoute } from '@/components/layout/ProtectedRoute';
@@ -11,8 +11,6 @@ import { ResetPasswordPage } from '@/pages/ResetPasswordPage';
 import { DashboardPage } from '@/pages/DashboardPage';
 import { NetMapPage } from '@/pages/NetMapPage';
 import { IPReputationPage } from '@/pages/IPReputationPage';
-import { BansPage } from '@/pages/BansPage';
-import { WhitelistPage } from '@/pages/WhitelistPage';
 import { GroupManagePage } from '@/pages/GroupManagePage';
 import { SettingsPage } from '@/pages/SettingsPage';
 import { NotificationsPage } from '@/pages/NotificationsPage';
@@ -70,8 +68,8 @@ export default function App() {
 
             {/* Admin-only routes */}
             <Route element={<ProtectedRoute requiredRole="admin" />}>
-              <Route path="/bans" element={<BansPage />} />
-              <Route path="/whitelist" element={<WhitelistPage />} />
+              <Route path="/bans" element={<Navigate to="/ip-reputation" replace />} />
+              <Route path="/whitelist" element={<Navigate to="/ip-reputation" replace />} />
               <Route path="/groups" element={<GroupManagePage />} />
               <Route path="/notifications" element={<NotificationsPage />} />
               <Route path="/admin/users" element={<AdminUsersPage />} />

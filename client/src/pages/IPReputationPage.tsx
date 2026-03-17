@@ -17,12 +17,22 @@ import {
   Eraser,
   Pencil,
   Tag,
+  Plus,
+  Trash2,
+  AlertTriangle,
+  EyeOff,
+  Eye,
 } from 'lucide-react';
 import type {
   IpReputation,
   IpEvent,
   IpStatus,
   BanScope,
+  IpWhitelist,
+  WhitelistScope,
+  CreateWhitelistRequest,
+  IpBan,
+  CreateBanRequest,
 } from '@obliview/shared';
 import { Button } from '@/components/common/Button';
 import { Input } from '@/components/common/Input';
@@ -33,6 +43,10 @@ import apiClient from '../api/client';
 import { ipLabelsApi } from '../api/ipLabels.api';
 
 const PAGE_SIZE = 25;
+
+// ── Page tabs ──────────────────────────────────────────────────────────────────
+
+type PageTab = 'activity' | 'whitelist' | 'bans';
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -63,6 +77,11 @@ function countryCodeToFlag(code: string | null): string {
   return Array.from(code.toUpperCase())
     .map(c => String.fromCodePoint(c.codePointAt(0)! + offset))
     .join('');
+}
+
+function isExpired(expiresAt: string | null): boolean {
+  if (!expiresAt) return false;
+  return new Date(expiresAt) < new Date();
 }
 
 // ── CopyButton ─────────────────────────────────────────────────────────────────
@@ -114,9 +133,9 @@ function StatusBadge({ status }: { status: IpStatus | undefined }) {
   );
 }
 
-// ── Skeleton row ───────────────────────────────────────────────────────────────
+// ── Skeleton rows ───────────────────────────────────────────────────────────────
 
-function SkeletonRow() {
+function ActivitySkeletonRow() {
   return (
     <tr className="animate-pulse">
       <td className="px-4 py-3"><div className="h-4 w-28 rounded bg-bg-tertiary" /></td>
@@ -128,6 +147,67 @@ function SkeletonRow() {
       <td className="px-4 py-3"><div className="h-5 w-16 rounded-full bg-bg-tertiary" /></td>
       <td className="px-4 py-3"><div className="h-6 w-16 rounded bg-bg-tertiary ml-auto" /></td>
     </tr>
+  );
+}
+
+function WhitelistSkeletonRow() {
+  return (
+    <tr className="animate-pulse">
+      <td className="px-4 py-3"><div className="h-4 w-28 rounded bg-bg-tertiary" /></td>
+      <td className="px-4 py-3"><div className="h-4 w-32 rounded bg-bg-tertiary" /></td>
+      <td className="px-4 py-3"><div className="h-5 w-14 rounded-full bg-bg-tertiary" /></td>
+      <td className="px-4 py-3"><div className="h-4 w-16 rounded bg-bg-tertiary" /></td>
+      <td className="px-4 py-3"><div className="h-4 w-24 rounded bg-bg-tertiary" /></td>
+      <td className="px-4 py-3"><div className="h-6 w-8 rounded bg-bg-tertiary ml-auto" /></td>
+    </tr>
+  );
+}
+
+function BansSkeletonRow({ cols }: { cols: number }) {
+  return (
+    <tr className="animate-pulse">
+      {Array.from({ length: cols }).map((_, i) => (
+        <td key={i} className="px-4 py-3">
+          <div className="h-4 rounded bg-bg-tertiary" style={{ width: i === 0 ? '120px' : '60px' }} />
+        </td>
+      ))}
+    </tr>
+  );
+}
+
+// ── ConfirmDialog (shared) ──────────────────────────────────────────────────────
+
+interface ConfirmDialogProps {
+  title: string;
+  message: string;
+  confirmLabel?: string;
+  variant?: 'danger' | 'primary';
+  onConfirm: () => void;
+  onCancel: () => void;
+  loading?: boolean;
+}
+
+function ConfirmDialog({ title, message, confirmLabel = 'Confirm', variant = 'danger', onConfirm, onCancel, loading }: ConfirmDialogProps) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+      <div className="w-full max-w-sm rounded-xl border border-border bg-bg-primary shadow-2xl p-6">
+        <div className="flex items-start gap-3 mb-4">
+          <AlertTriangle size={18} className="text-status-down shrink-0 mt-0.5" />
+          <div>
+            <h2 className="text-base font-semibold text-text-primary">{title}</h2>
+            <p className="text-sm text-text-muted mt-1">{message}</p>
+          </div>
+        </div>
+        <div className="flex gap-2">
+          <Button variant={variant} loading={loading} onClick={onConfirm} className="flex-1">
+            {confirmLabel}
+          </Button>
+          <Button variant="secondary" onClick={onCancel} className="flex-1">
+            Cancel
+          </Button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -557,7 +637,7 @@ function IPDetailDrawer({ ip, onClose, onBan, onWhitelist, onLiftBan, onClear, o
   );
 }
 
-// ── IPReputationPage ───────────────────────────────────────────────────────────
+// ── Activity tab ───────────────────────────────────────────────────────────────
 
 const STATUS_FILTERS: { key: StatusFilter; label: string }[] = [
   { key: 'all', label: 'All' },
@@ -567,10 +647,16 @@ const STATUS_FILTERS: { key: StatusFilter; label: string }[] = [
   { key: 'clean', label: 'Clean' },
 ];
 
-export function IPReputationPage() {
-  const { user } = useAuthStore();
-  const isAdmin = user?.role === 'admin';
+interface Tenant {
+  id: number;
+  name: string;
+}
 
+interface ActivityTabProps {
+  isAdmin: boolean;
+}
+
+function ActivityTab({ isAdmin }: ActivityTabProps) {
   const [rows, setRows] = useState<IpReputation[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -579,10 +665,11 @@ export function IPReputationPage() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [page, setPage] = useState(0);
   const [selectedIp, setSelectedIp] = useState<IpReputation | null>(null);
-  // Track the active ban ID for the selected IP so the drawer can lift it
   const [selectedBanId, setSelectedBanId] = useState<number | null>(null);
-  // Custom IP labels (display names)
   const [ipLabels, setIpLabels] = useState<Map<string, string>>(new Map());
+  // Admin-only tenant selector
+  const [tenants, setTenants] = useState<Tenant[]>([]);
+  const [selectedTenantId, setSelectedTenantId] = useState<number | null>(null);
 
   // Debounce search
   useEffect(() => {
@@ -593,7 +680,18 @@ export function IPReputationPage() {
   // Reset page on filter/search change
   useEffect(() => {
     setPage(0);
-  }, [statusFilter, debouncedSearch]);
+  }, [statusFilter, debouncedSearch, selectedTenantId]);
+
+  // Fetch tenants for admin selector
+  useEffect(() => {
+    if (!isAdmin) return;
+    apiClient.get<{ data: Tenant[] } | Tenant[]>('/tenants')
+      .then(res => {
+        const data = Array.isArray(res.data) ? res.data : (res.data as { data: Tenant[] }).data ?? [];
+        setTenants(data);
+      })
+      .catch(() => { /* non-critical */ });
+  }, [isAdmin]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -604,6 +702,7 @@ export function IPReputationPage() {
       };
       if (statusFilter !== 'all') params.status = statusFilter;
       if (debouncedSearch.trim()) params.search = debouncedSearch.trim();
+      if (isAdmin && selectedTenantId != null) params.tenantId = String(selectedTenantId);
 
       const res = await apiClient.get<{ data: IpReputation[]; total: number }>(
         '/ip-reputation',
@@ -616,7 +715,7 @@ export function IPReputationPage() {
     } finally {
       setLoading(false);
     }
-  }, [statusFilter, debouncedSearch, page]);
+  }, [statusFilter, debouncedSearch, page, isAdmin, selectedTenantId]);
 
   useEffect(() => {
     load();
@@ -712,8 +811,6 @@ export function IPReputationPage() {
         ? `${ipAddr} reputation reset globally`
         : `${ipAddr} marked as cleared`;
       toast.success(msg);
-      // Update row: cleared status stays suspicious visually if admin didn't hard-reset,
-      // but mark clearedForTenant=true for tenant users
       if (isAdmin) {
         setRows(prev => prev.map(r => r.ip === ipAddr ? { ...r, totalFailures: 0, status: 'clean', clearedForTenant: false } : r));
         if (selectedIp?.ip === ipAddr) {
@@ -733,57 +830,67 @@ export function IPReputationPage() {
 
   const handleRowClick = (row: IpReputation) => {
     setSelectedIp(row);
-    // Populate the ban ID directly from the reputation row when available
     setSelectedBanId(row.activeBanId ?? null);
   };
 
   const totalPages = Math.ceil(total / PAGE_SIZE);
 
   return (
-    <div className="p-6 max-w-7xl mx-auto">
-      {/* Header */}
-      <div className="flex items-center justify-between mb-6">
-        <div>
-          <h1 className="text-xl font-semibold text-text-primary">IP Reputation</h1>
-          <p className="text-sm text-text-muted mt-0.5">Monitor and manage IP reputation across all agents</p>
+    <>
+      {/* Filters row */}
+      <div className="flex items-center gap-3 mb-5 flex-wrap">
+        {/* Status filter pills */}
+        <div className="flex items-center gap-1 rounded-lg bg-bg-secondary p-1 border border-border">
+          {STATUS_FILTERS.map(f => (
+            <button
+              key={f.key}
+              onClick={() => setStatusFilter(f.key)}
+              className={cn(
+                'px-4 py-1.5 text-sm font-medium rounded-md transition-colors',
+                statusFilter === f.key
+                  ? 'bg-accent text-white'
+                  : 'text-text-muted hover:text-text-primary',
+              )}
+            >
+              {f.label}
+            </button>
+          ))}
         </div>
-        <div className="flex items-center gap-2">
-          <div className="relative">
-            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted pointer-events-none" />
-            <input
-              type="text"
-              placeholder="Search IP or country..."
-              value={search}
-              onChange={e => setSearch(e.target.value)}
-              className="pl-9 pr-3 py-2 text-sm rounded-md border border-border bg-bg-secondary text-text-primary placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-accent w-64"
-            />
-          </div>
-          <button
-            onClick={load}
-            className="p-2 rounded-lg text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors"
-            title="Refresh"
+
+        {/* Admin-only: tenant selector */}
+        {isAdmin && tenants.length > 0 && (
+          <select
+            value={selectedTenantId ?? ''}
+            onChange={e => setSelectedTenantId(e.target.value === '' ? null : Number(e.target.value))}
+            className="rounded-md border border-border bg-bg-secondary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
           >
-            <RefreshCw size={14} />
-          </button>
-        </div>
+            <option value="">All Tenants</option>
+            {tenants.map(t => (
+              <option key={t.id} value={t.id}>{t.name}</option>
+            ))}
+          </select>
+        )}
       </div>
 
-      {/* Filter tabs */}
-      <div className="flex items-center gap-1 mb-5 rounded-lg bg-bg-secondary p-1 border border-border w-fit">
-        {STATUS_FILTERS.map(f => (
-          <button
-            key={f.key}
-            onClick={() => setStatusFilter(f.key)}
-            className={cn(
-              'px-4 py-1.5 text-sm font-medium rounded-md transition-colors',
-              statusFilter === f.key
-                ? 'bg-accent text-white'
-                : 'text-text-muted hover:text-text-primary',
-            )}
-          >
-            {f.label}
-          </button>
-        ))}
+      {/* Search + refresh */}
+      <div className="flex items-center gap-2 mb-4">
+        <div className="relative flex-1 max-w-xs">
+          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted pointer-events-none" />
+          <input
+            type="text"
+            placeholder="Search IP or country..."
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            className="pl-9 pr-3 py-2 text-sm rounded-md border border-border bg-bg-secondary text-text-primary placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-accent w-full"
+          />
+        </div>
+        <button
+          onClick={load}
+          className="p-2 rounded-lg text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors"
+          title="Refresh"
+        >
+          <RefreshCw size={14} />
+        </button>
       </div>
 
       {/* Table */}
@@ -812,9 +919,11 @@ export function IPReputationPage() {
             </thead>
             <tbody className="divide-y divide-border">
               {loading
-                ? Array.from({ length: 8 }).map((_, i) => <SkeletonRow key={i} />)
+                ? Array.from({ length: 8 }).map((_, i) => <ActivitySkeletonRow key={i} />)
                 : rows.map(row => {
                   const flag = countryCodeToFlag(row.geoCountryCode);
+                  // Single label: use ip_display_names label (ipLabels) as the one source of truth
+                  const displayLabel = ipLabels.get(row.ip);
                   return (
                     <tr
                       key={row.ip}
@@ -823,10 +932,10 @@ export function IPReputationPage() {
                     >
                       <td className="px-4 py-3">
                         <span className="font-mono text-text-primary">{row.ip}</span>
-                        {ipLabels.get(row.ip) && (
+                        {displayLabel && (
                           <div className="flex items-center gap-1 mt-0.5">
                             <Tag size={10} className="text-accent shrink-0" />
-                            <span className="text-xs text-accent">{ipLabels.get(row.ip)}</span>
+                            <span className="text-xs text-accent">{displayLabel}</span>
                           </div>
                         )}
                       </td>
@@ -899,7 +1008,6 @@ export function IPReputationPage() {
                               size="sm"
                               variant="secondary"
                               onClick={() => {
-                                // Open the drawer to use the lift ban button there (which has the banId)
                                 handleRowClick(row);
                               }}
                             >
@@ -968,7 +1076,6 @@ export function IPReputationPage() {
             if (selectedBanId != null) {
               await handleLiftBanById(selectedBanId, selectedIp.ip);
             } else {
-              // Fetch the ban ID from the API if we don't have it
               try {
                 const res = await apiClient.get<{ data: Array<{ id: number }> }>(
                   '/bans',
@@ -991,6 +1098,903 @@ export function IPReputationPage() {
           isAdmin={isAdmin}
         />
       )}
+    </>
+  );
+}
+
+// ── Whitelist tab ──────────────────────────────────────────────────────────────
+
+const WHITELIST_SCOPE_CLASSES: Record<WhitelistScope, string> = {
+  global: 'bg-status-up/10 text-status-up',
+  tenant: 'bg-yellow-500/10 text-yellow-400',
+  group: 'bg-blue-500/10 text-blue-400',
+  agent: 'bg-text-muted/15 text-text-muted',
+};
+
+function WhitelistScopeBadge({ scope }: { scope: WhitelistScope }) {
+  return (
+    <span className={cn('inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium capitalize', WHITELIST_SCOPE_CLASSES[scope])}>
+      {scope}
+    </span>
+  );
+}
+
+const WHITELIST_SCOPE_FILTERS: { key: WhitelistScope | 'all'; label: string }[] = [
+  { key: 'all', label: 'All' },
+  { key: 'global', label: 'Global' },
+  { key: 'tenant', label: 'Tenant' },
+  { key: 'group', label: 'Group' },
+  { key: 'agent', label: 'Agent' },
+];
+
+interface AddWhitelistModalProps {
+  onSave: (req: CreateWhitelistRequest) => Promise<void>;
+  onClose: () => void;
+}
+
+function AddWhitelistModal({ onSave, onClose }: AddWhitelistModalProps) {
+  const [ip, setIp] = useState('');
+  const [label, setLabel] = useState('');
+  const [scope, setScope] = useState<WhitelistScope>('global');
+  const [scopeId, setScopeId] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const needsScopeId = scope !== 'global';
+
+  const handleSubmit = async () => {
+    if (!ip.trim()) {
+      toast.error('IP address or CIDR range is required');
+      return;
+    }
+    if (needsScopeId && !scopeId.trim()) {
+      toast.error('Scope ID is required for this scope');
+      return;
+    }
+    setSaving(true);
+    try {
+      const req: CreateWhitelistRequest = {
+        ip: ip.trim(),
+        label: label.trim() || null,
+        scope,
+        scopeId: needsScopeId && scopeId ? Number(scopeId) : null,
+      };
+      await onSave(req);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+      <div className="w-full max-w-md rounded-xl border border-border bg-bg-primary shadow-2xl p-6">
+        <div className="flex items-center justify-between mb-5">
+          <h2 className="text-base font-semibold text-text-primary">Add whitelist entry</h2>
+          <button
+            onClick={onClose}
+            className="p-1.5 rounded-lg text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="space-y-4">
+          <Input
+            label="IP / CIDR"
+            placeholder="e.g. 192.168.1.0/24 or 10.0.0.1"
+            value={ip}
+            onChange={e => setIp(e.target.value)}
+            autoFocus
+          />
+
+          <Input
+            label="Label (optional)"
+            placeholder="e.g. Office network, Monitoring server"
+            value={label}
+            onChange={e => setLabel(e.target.value)}
+          />
+
+          <div className="space-y-1">
+            <label className="block text-sm font-medium text-text-secondary">Scope</label>
+            <select
+              value={scope}
+              onChange={e => { setScope(e.target.value as WhitelistScope); setScopeId(''); }}
+              className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
+            >
+              <option value="global">Global</option>
+              <option value="tenant">Tenant</option>
+              <option value="group">Group</option>
+              <option value="agent">Agent</option>
+            </select>
+          </div>
+
+          {needsScopeId && (
+            <Input
+              label={`${scope.charAt(0).toUpperCase() + scope.slice(1)} ID`}
+              placeholder={`Enter the ${scope} ID`}
+              type="number"
+              value={scopeId}
+              onChange={e => setScopeId(e.target.value)}
+            />
+          )}
+        </div>
+
+        <div className="flex gap-2 mt-6">
+          <Button loading={saving} onClick={handleSubmit} className="flex-1">
+            <ShieldCheck size={14} className="mr-1.5" />Add entry
+          </Button>
+          <Button variant="secondary" onClick={onClose} className="flex-1">
+            Cancel
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function WhitelistTab() {
+  const [entries, setEntries] = useState<IpWhitelist[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [scopeFilter, setScopeFilter] = useState<WhitelistScope | 'all'>('all');
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [deletingEntry, setDeletingEntry] = useState<IpWhitelist | null>(null);
+  const [confirmDeleteLoading, setConfirmDeleteLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams();
+      if (scopeFilter !== 'all') params.set('scope', scopeFilter);
+
+      const res = await fetch(`/api/whitelist?${params.toString()}`);
+      if (!res.ok) throw new Error('Failed to load whitelist');
+      const json = await res.json();
+      const data: IpWhitelist[] = Array.isArray(json) ? json : (json.data ?? []);
+      setEntries(data);
+    } catch {
+      toast.error('Failed to load whitelist');
+    } finally {
+      setLoading(false);
+    }
+  }, [scopeFilter]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const handleAdd = async (req: CreateWhitelistRequest) => {
+    try {
+      const res = await fetch('/api/whitelist', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(req),
+      });
+      if (!res.ok) throw new Error('Failed to add whitelist entry');
+      toast.success(`${req.ip} added to whitelist`);
+      setShowAddModal(false);
+      load();
+    } catch {
+      toast.error('Failed to add whitelist entry');
+      throw new Error('Failed to add whitelist entry');
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!deletingEntry) return;
+    setConfirmDeleteLoading(true);
+    try {
+      const res = await fetch(`/api/whitelist/${deletingEntry.id}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error('Failed to remove whitelist entry');
+      toast.success(`${deletingEntry.ip} removed from whitelist`);
+      setDeletingEntry(null);
+      load();
+    } catch {
+      toast.error('Failed to remove whitelist entry');
+    } finally {
+      setConfirmDeleteLoading(false);
+    }
+  };
+
+  return (
+    <>
+      {/* Header row */}
+      <div className="flex items-center justify-between mb-5">
+        <p className="text-sm text-text-muted">Manage trusted IP addresses and CIDR ranges</p>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={load}
+            className="p-2 rounded-lg text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors"
+            title="Refresh"
+          >
+            <RefreshCw size={14} />
+          </button>
+          <Button onClick={() => setShowAddModal(true)}>
+            <Plus size={14} className="mr-1.5" />Add entry
+          </Button>
+        </div>
+      </div>
+
+      {/* Scope filter */}
+      <div className="flex items-center gap-1 mb-5 rounded-lg bg-bg-secondary p-1 border border-border w-fit">
+        {WHITELIST_SCOPE_FILTERS.map(f => (
+          <button
+            key={f.key}
+            onClick={() => setScopeFilter(f.key)}
+            className={cn(
+              'px-4 py-1.5 text-sm font-medium rounded-md transition-colors',
+              scopeFilter === f.key
+                ? 'bg-accent text-white'
+                : 'text-text-muted hover:text-text-primary',
+            )}
+          >
+            {f.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Table */}
+      <div className="rounded-lg border border-border bg-bg-secondary overflow-hidden">
+        {!loading && entries.length === 0 ? (
+          <div className="py-16 text-center">
+            <ShieldCheck size={32} className="mx-auto mb-2 text-text-muted" />
+            <p className="text-sm text-text-muted">No whitelist entries found</p>
+            {scopeFilter !== 'all' && (
+              <p className="text-xs text-text-muted mt-1">Try selecting a different scope filter</p>
+            )}
+            <Button
+              className="mt-4"
+              onClick={() => setShowAddModal(true)}
+            >
+              <Plus size={14} className="mr-1.5" />Add first entry
+            </Button>
+          </div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-border bg-bg-tertiary">
+                <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">IP / CIDR</th>
+                <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">Label</th>
+                <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">Scope</th>
+                <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">Added by</th>
+                <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">Added at</th>
+                <th className="px-4 py-2.5 text-right text-xs font-medium text-text-muted uppercase tracking-wide">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border">
+              {loading
+                ? Array.from({ length: 6 }).map((_, i) => <WhitelistSkeletonRow key={i} />)
+                : entries.map(entry => (
+                  <tr key={entry.id} className="hover:bg-bg-hover transition-colors">
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-1.5">
+                        <Globe size={13} className="text-text-muted shrink-0" />
+                        <span className="font-mono text-text-primary">{entry.ip}</span>
+                      </div>
+                    </td>
+                    <td className="px-4 py-3 text-text-secondary">
+                      {entry.label || <span className="text-text-muted italic">No label</span>}
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-1.5">
+                        <WhitelistScopeBadge scope={entry.scope} />
+                        {entry.scopeId != null && (
+                          <span className="text-xs text-text-muted font-mono">#{entry.scopeId}</span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="px-4 py-3 text-text-muted text-xs">
+                      {entry.createdBy != null ? `User #${entry.createdBy}` : '—'}
+                    </td>
+                    <td className="px-4 py-3 text-text-muted text-xs">
+                      {formatDate(entry.createdAt)}
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      <button
+                        onClick={() => setDeletingEntry(entry)}
+                        className="p-1.5 rounded-md text-text-muted hover:text-status-down hover:bg-status-down/10 transition-colors"
+                        title="Remove from whitelist"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {showAddModal && (
+        <AddWhitelistModal
+          onSave={handleAdd}
+          onClose={() => setShowAddModal(false)}
+        />
+      )}
+
+      {deletingEntry && (
+        <ConfirmDialog
+          title="Remove whitelist entry"
+          message={`Are you sure you want to remove ${deletingEntry.ip} from the whitelist? This IP may be blocked again if it triggers security rules.`}
+          confirmLabel="Remove"
+          loading={confirmDeleteLoading}
+          onConfirm={handleDelete}
+          onCancel={() => setDeletingEntry(null)}
+        />
+      )}
+    </>
+  );
+}
+
+// ── Bans tab ───────────────────────────────────────────────────────────────────
+
+const BAN_SCOPE_CLASSES: Record<BanScope, string> = {
+  global: 'bg-status-down/10 text-status-down',
+  tenant: 'bg-yellow-500/10 text-yellow-400',
+  group: 'bg-blue-500/10 text-blue-400',
+  agent: 'bg-text-muted/15 text-text-muted',
+};
+
+function BanScopeBadge({ scope }: { scope: BanScope }) {
+  return (
+    <span className={cn('inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium capitalize', BAN_SCOPE_CLASSES[scope])}>
+      {scope}
+    </span>
+  );
+}
+
+function BanStatusBadge({ ban }: { ban: IpBan }) {
+  if (!ban.isActive) {
+    return (
+      <span className="inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium bg-text-muted/15 text-text-muted">
+        Lifted
+      </span>
+    );
+  }
+  if (isExpired(ban.expiresAt)) {
+    return (
+      <span className="inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium bg-yellow-500/10 text-yellow-400">
+        Expired
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium bg-status-down/10 text-status-down">
+      Active
+    </span>
+  );
+}
+
+function ExcludedBadge() {
+  return (
+    <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium bg-yellow-500/10 text-yellow-400">
+      <EyeOff size={10} />Excluded
+    </span>
+  );
+}
+
+interface AddBanModalProps {
+  onSave: (req: CreateBanRequest) => Promise<void>;
+  onClose: () => void;
+}
+
+function AddBanModal({ onSave, onClose }: AddBanModalProps) {
+  const [ip, setIp] = useState('');
+  const [cidrPrefix, setCidrPrefix] = useState('');
+  const [reason, setReason] = useState('');
+  const [scope, setScope] = useState<BanScope>('global');
+  const [expiresAt, setExpiresAt] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const handleSubmit = async () => {
+    if (!ip.trim()) {
+      toast.error('IP address is required');
+      return;
+    }
+    setSaving(true);
+    try {
+      const req: CreateBanRequest = {
+        ip: ip.trim(),
+        reason: reason.trim() || null,
+        scope,
+        cidrPrefix: cidrPrefix ? Number(cidrPrefix) : null,
+        expiresAt: expiresAt || null,
+      };
+      await onSave(req);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+      <div className="w-full max-w-md rounded-xl border border-border bg-bg-primary shadow-2xl p-6">
+        <div className="flex items-center justify-between mb-5">
+          <h2 className="text-base font-semibold text-text-primary">Add ban manually</h2>
+          <button
+            onClick={onClose}
+            className="p-1.5 rounded-lg text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="space-y-4">
+          <div className="flex gap-3">
+            <div className="flex-1">
+              <Input
+                label="IP Address"
+                placeholder="192.168.1.1"
+                value={ip}
+                onChange={e => setIp(e.target.value)}
+                autoFocus
+              />
+            </div>
+            <div className="w-24">
+              <Input
+                label="CIDR prefix"
+                placeholder="32"
+                type="number"
+                min={0}
+                max={128}
+                value={cidrPrefix}
+                onChange={e => setCidrPrefix(e.target.value)}
+              />
+            </div>
+          </div>
+
+          <div className="space-y-1">
+            <label className="block text-sm font-medium text-text-secondary">Scope</label>
+            <select
+              value={scope}
+              onChange={e => setScope(e.target.value as BanScope)}
+              className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
+            >
+              <option value="global">Global</option>
+              <option value="tenant">Tenant</option>
+              <option value="group">Group</option>
+              <option value="agent">Agent</option>
+            </select>
+          </div>
+
+          <Input
+            label="Reason (optional)"
+            placeholder="Why is this IP being banned?"
+            value={reason}
+            onChange={e => setReason(e.target.value)}
+          />
+
+          <div className="space-y-1">
+            <label className="block text-sm font-medium text-text-secondary">Expires at (optional)</label>
+            <input
+              type="datetime-local"
+              value={expiresAt}
+              onChange={e => setExpiresAt(e.target.value)}
+              className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
+            />
+            <p className="text-xs text-text-muted">Leave blank for a permanent ban.</p>
+          </div>
+        </div>
+
+        <div className="flex gap-2 mt-6">
+          <Button variant="danger" loading={saving} onClick={handleSubmit} className="flex-1">
+            <ShieldOff size={14} className="mr-1.5" />Add ban
+          </Button>
+          <Button variant="secondary" onClick={onClose} className="flex-1">
+            Cancel
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+interface BanListResponse {
+  data: IpBan[];
+  total: number;
+}
+
+interface BansTabProps {
+  isAdmin: boolean;
+}
+
+function BansTab({ isAdmin }: BansTabProps) {
+  const [bans, setBans] = useState<IpBan[]>([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const [showExpired, setShowExpired] = useState(false);
+  const [page, setPage] = useState(0);
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [liftingBan, setLiftingBan] = useState<IpBan | null>(null);
+  const [confirmLiftLoading, setConfirmLiftLoading] = useState(false);
+  const [promotingBanId, setPromotingBanId] = useState<number | null>(null);
+  const [excludingBanId, setExcludingBanId] = useState<number | null>(null);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(search), 300);
+    return () => clearTimeout(timer);
+  }, [search]);
+
+  useEffect(() => {
+    setPage(0);
+  }, [showExpired, debouncedSearch]);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams({
+        page: String(page + 1),
+        pageSize: String(PAGE_SIZE),
+        active: showExpired ? 'false' : 'true',
+      });
+      if (debouncedSearch.trim()) params.set('search', debouncedSearch.trim());
+
+      const res = await fetch(`/api/bans?${params.toString()}`);
+      if (!res.ok) throw new Error('Failed to load bans');
+      const json: BanListResponse = await res.json();
+      setBans(json.data);
+      setTotal(json.total);
+    } catch {
+      toast.error('Failed to load bans');
+    } finally {
+      setLoading(false);
+    }
+  }, [page, showExpired, debouncedSearch]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const handleAddBan = async (req: CreateBanRequest) => {
+    try {
+      const res = await fetch('/api/bans', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(req),
+      });
+      if (!res.ok) throw new Error('Failed to create ban');
+      toast.success(`${req.ip} banned`);
+      setShowAddModal(false);
+      load();
+    } catch {
+      toast.error('Failed to create ban');
+      throw new Error('Failed to create ban');
+    }
+  };
+
+  const handleLiftBan = async () => {
+    if (!liftingBan) return;
+    setConfirmLiftLoading(true);
+    try {
+      const res = await fetch(`/api/bans/${liftingBan.id}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error('Failed to lift ban');
+      toast.success(`Ban on ${liftingBan.ip} lifted`);
+      setLiftingBan(null);
+      load();
+    } catch {
+      toast.error('Failed to lift ban');
+    } finally {
+      setConfirmLiftLoading(false);
+    }
+  };
+
+  const handleExclude = async (ban: IpBan) => {
+    setExcludingBanId(ban.id);
+    try {
+      const res = await fetch(`/api/bans/${ban.id}/exclude`, { method: 'POST' });
+      if (!res.ok) throw new Error('Failed to exclude ban');
+      toast.success(`${ban.ip} excluded from your network`);
+      load();
+    } catch {
+      toast.error('Failed to exclude ban');
+    } finally {
+      setExcludingBanId(null);
+    }
+  };
+
+  const handleRemoveExclusion = async (ban: IpBan) => {
+    setExcludingBanId(ban.id);
+    try {
+      const res = await fetch(`/api/bans/${ban.id}/exclude`, { method: 'DELETE' });
+      if (!res.ok) throw new Error('Failed to remove exclusion');
+      toast.success(`Exclusion on ${ban.ip} removed`);
+      load();
+    } catch {
+      toast.error('Failed to remove exclusion');
+    } finally {
+      setExcludingBanId(null);
+    }
+  };
+
+  const handlePromoteGlobal = async (ban: IpBan) => {
+    setPromotingBanId(ban.id);
+    try {
+      const res = await fetch(`/api/bans/${ban.id}/promote-global`, { method: 'POST' });
+      if (!res.ok) throw new Error('Failed to promote ban');
+      toast.success(`Ban on ${ban.ip} promoted to global`);
+      load();
+    } catch {
+      toast.error('Failed to promote ban');
+    } finally {
+      setPromotingBanId(null);
+    }
+  };
+
+  const totalPages = Math.ceil(total / PAGE_SIZE);
+  const colCount = isAdmin ? 9 : 8;
+
+  return (
+    <>
+      {/* Header row */}
+      <div className="flex items-center justify-between mb-5">
+        <p className="text-sm text-text-muted">Manage IP bans across all scopes</p>
+        <div className="flex items-center gap-2">
+          <div className="relative">
+            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted pointer-events-none" />
+            <input
+              type="text"
+              placeholder="Search IP or reason..."
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              className="pl-9 pr-3 py-2 text-sm rounded-md border border-border bg-bg-secondary text-text-primary placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-accent w-56"
+            />
+          </div>
+          <button
+            onClick={load}
+            className="p-2 rounded-lg text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors"
+            title="Refresh"
+          >
+            <RefreshCw size={14} />
+          </button>
+          <Button onClick={() => setShowAddModal(true)}>
+            <Plus size={14} className="mr-1.5" />Add ban manually
+          </Button>
+        </div>
+      </div>
+
+      {/* Show expired toggle */}
+      <div className="flex items-center gap-2 mb-5">
+        <label className="flex items-center gap-2 cursor-pointer select-none">
+          <div className="relative h-4 w-4 shrink-0">
+            <input
+              type="checkbox"
+              checked={showExpired}
+              onChange={e => setShowExpired(e.target.checked)}
+              className="peer appearance-none h-4 w-4 rounded border cursor-pointer transition-colors bg-bg-tertiary border-border checked:bg-accent checked:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30"
+            />
+            <svg className="pointer-events-none absolute top-0 left-0 hidden h-4 w-4 text-white peer-checked:block" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M2.5 8L6 11.5L13.5 4.5" />
+            </svg>
+          </div>
+          <span className="text-sm text-text-secondary">Show expired &amp; lifted bans</span>
+        </label>
+      </div>
+
+      {/* Table */}
+      <div className="rounded-lg border border-border bg-bg-secondary overflow-hidden">
+        {!loading && bans.length === 0 ? (
+          <div className="py-16 text-center">
+            <ShieldOff size={32} className="mx-auto mb-2 text-text-muted" />
+            <p className="text-sm text-text-muted">No bans found</p>
+            {(debouncedSearch || !showExpired) && (
+              <p className="text-xs text-text-muted mt-1">
+                {debouncedSearch ? 'Try a different search term' : 'Enable "Show expired" to see past bans'}
+              </p>
+            )}
+          </div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-border bg-bg-tertiary">
+                <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">IP</th>
+                <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">Scope</th>
+                <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">Reason</th>
+                <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">Type</th>
+                {isAdmin && (
+                  <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">Origin</th>
+                )}
+                <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">Banned at</th>
+                <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">Expires</th>
+                <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">Status</th>
+                <th className="px-4 py-2.5 text-right text-xs font-medium text-text-muted uppercase tracking-wide">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border">
+              {loading
+                ? Array.from({ length: 8 }).map((_, i) => <BansSkeletonRow key={i} cols={colCount} />)
+                : bans.map(ban => (
+                  <tr key={ban.id} className="hover:bg-bg-hover transition-colors">
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-1.5">
+                        <Globe size={13} className="text-text-muted shrink-0" />
+                        <span className="font-mono text-text-primary">
+                          {ban.ip}{ban.cidrPrefix != null && ban.cidrPrefix !== 32 ? `/${ban.cidrPrefix}` : ''}
+                        </span>
+                      </div>
+                    </td>
+                    <td className="px-4 py-3">
+                      <BanScopeBadge scope={ban.scope} />
+                    </td>
+                    <td className="px-4 py-3 text-text-secondary max-w-[200px]">
+                      <span className="truncate block" title={ban.reason ?? undefined}>
+                        {ban.reason || <span className="text-text-muted italic">No reason</span>}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className={cn(
+                        'inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium capitalize',
+                        ban.banType === 'auto'
+                          ? 'bg-blue-500/10 text-blue-400'
+                          : 'bg-text-muted/15 text-text-muted',
+                      )}>
+                        {ban.banType}
+                      </span>
+                    </td>
+                    {isAdmin && (
+                      <td className="px-4 py-3 text-text-muted text-xs">
+                        {ban.originTenantName ?? (ban.originTenantId ? `Tenant #${ban.originTenantId}` : '—')}
+                      </td>
+                    )}
+                    <td className="px-4 py-3 text-text-muted text-xs">{formatDate(ban.bannedAt)}</td>
+                    <td className="px-4 py-3 text-text-muted text-xs">
+                      {ban.expiresAt
+                        ? <span className={cn(isExpired(ban.expiresAt) ? 'text-status-down' : '')}>{formatDate(ban.expiresAt)}</span>
+                        : <span className="italic">Never</span>}
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="flex flex-col gap-1">
+                        <BanStatusBadge ban={ban} />
+                        {ban.isExcludedByTenant && <ExcludedBadge />}
+                      </div>
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      <div className="flex items-center justify-end gap-1 flex-wrap">
+                        {ban.isActive && !isExpired(ban.expiresAt) &&
+                          (isAdmin || ban.scope === 'tenant') && (
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            onClick={() => setLiftingBan(ban)}
+                          >
+                            <Shield size={11} className="mr-1" />Lift ban
+                          </Button>
+                        )}
+                        {isAdmin && ban.scope !== 'global' && ban.isActive && !isExpired(ban.expiresAt) && (
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            loading={promotingBanId === ban.id}
+                            onClick={() => handlePromoteGlobal(ban)}
+                          >
+                            <Globe size={11} className="mr-1" />Promote global
+                          </Button>
+                        )}
+                        {!isAdmin && ban.scope === 'global' && ban.isActive && !isExpired(ban.expiresAt) && (
+                          ban.isExcludedByTenant ? (
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              loading={excludingBanId === ban.id}
+                              onClick={() => handleRemoveExclusion(ban)}
+                              title="Re-enable enforcement of this ban on your network"
+                            >
+                              <Eye size={11} className="mr-1" />Re-enable
+                            </Button>
+                          ) : (
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              loading={excludingBanId === ban.id}
+                              onClick={() => handleExclude(ban)}
+                              title="Exclude this ban from your network without lifting it globally"
+                            >
+                              <EyeOff size={11} className="mr-1" />Exclude
+                            </Button>
+                          )
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {/* Pagination */}
+      {totalPages > 1 && (
+        <div className="flex items-center justify-between mt-4">
+          <p className="text-sm text-text-muted">
+            Showing {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, total)} of {total}
+          </p>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setPage(p => Math.max(0, p - 1))}
+              disabled={page === 0}
+              className="p-1.5 rounded-md border border-border text-text-muted hover:text-text-primary hover:bg-bg-hover disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              <ChevronLeft size={16} />
+            </button>
+            <span className="text-sm text-text-secondary px-2">
+              {page + 1} / {totalPages}
+            </span>
+            <button
+              onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))}
+              disabled={page >= totalPages - 1}
+              className="p-1.5 rounded-md border border-border text-text-muted hover:text-text-primary hover:bg-bg-hover disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              <ChevronRight size={16} />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {showAddModal && (
+        <AddBanModal
+          onSave={handleAddBan}
+          onClose={() => setShowAddModal(false)}
+        />
+      )}
+
+      {liftingBan && (
+        <ConfirmDialog
+          title="Lift ban"
+          message={`Are you sure you want to lift the ban on ${liftingBan.ip}? This will allow the IP to connect again.`}
+          confirmLabel="Lift ban"
+          variant="primary"
+          loading={confirmLiftLoading}
+          onConfirm={handleLiftBan}
+          onCancel={() => setLiftingBan(null)}
+        />
+      )}
+    </>
+  );
+}
+
+// ── IPReputationPage ───────────────────────────────────────────────────────────
+
+const PAGE_TABS: { key: PageTab; label: string }[] = [
+  { key: 'activity', label: 'Activity' },
+  { key: 'whitelist', label: 'Whitelist' },
+  { key: 'bans', label: 'Bans' },
+];
+
+export function IPReputationPage() {
+  const { user } = useAuthStore();
+  const isAdmin = user?.role === 'admin';
+
+  const [activeTab, setActiveTab] = useState<PageTab>('activity');
+
+  return (
+    <div className="p-6 max-w-7xl mx-auto">
+      {/* Page header */}
+      <div className="mb-6">
+        <h1 className="text-xl font-semibold text-text-primary">IP Reputation</h1>
+        <p className="text-sm text-text-muted mt-0.5">Monitor and manage IP reputation across all agents</p>
+      </div>
+
+      {/* Tab bar */}
+      <div className="flex items-center gap-1 mb-6 border-b border-border">
+        {PAGE_TABS.map(tab => (
+          <button
+            key={tab.key}
+            onClick={() => setActiveTab(tab.key)}
+            className={cn(
+              'px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors',
+              activeTab === tab.key
+                ? 'border-accent text-accent'
+                : 'border-transparent text-text-muted hover:text-text-primary hover:border-border',
+            )}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Tab content */}
+      {activeTab === 'activity' && <ActivityTab isAdmin={isAdmin} />}
+      {activeTab === 'whitelist' && <WhitelistTab />}
+      {activeTab === 'bans' && <BansTab isAdmin={isAdmin} />}
     </div>
   );
 }
