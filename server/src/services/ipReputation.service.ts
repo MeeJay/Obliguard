@@ -303,7 +303,7 @@ class IpReputationService {
     // This guarantees IPs that are banned but have no reputation row still appear.
     if (filters.status === 'banned') {
       let q = db('ip_bans as b')
-        .leftJoin('ip_reputation as r', db.raw('r.ip::inet = b.ip'))
+        .leftJoin('ip_reputation as r', db.raw('r.ip = host(b.ip)'))
         .select(
           db.raw("COALESCE(r.ip, b.ip::text) AS ip"),
           db.raw("COALESCE(r.total_failures, 0) AS total_failures"),

@@ -16,6 +16,7 @@ import { Shield, Ban, Activity, RefreshCw, Zap, X, ExternalLink } from 'lucide-r
 import { Link } from 'react-router-dom';
 import { getSocket } from '../socket/socketClient';
 import apiClient from '../api/client';
+import { ipLabelsApi } from '../api/ipLabels.api';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -49,6 +50,8 @@ interface IpNode {
   lastSeen: number;
   glowUntil: number;
   whitelistLabel?: string | null;
+  /** Custom display label from ip_display_names — shown for any status. */
+  displayLabel?: string | null;
 }
 
 interface Particle {
@@ -534,10 +537,14 @@ export function NetMapPage() {
 
     if (map.has(ip)) {
       const node = map.get(ip)!;
-      node.status     = status;
+      // Never downgrade a whitelisted node on live events — the whitelist
+      // takes permanent precedence over transient auth-failure/success events.
+      if (node.status !== 'whitelisted') {
+        node.status = status;
+        node.color  = statusColor(status);
+      }
       node.failures   = Math.max(node.failures, failures);
       node.services   = [...new Set([...node.services, ...services])];
-      node.color      = statusColor(status);
       node.dotR       = 2.5 + Math.min(node.failures / 10, 8);
       node.lastSeen   = now;
       node.eventCount += evtCount;
@@ -871,15 +878,21 @@ export function NetMapPage() {
       layoutAgents(agentsRef.current, w, h);
       const agentMap = new Map(agentsRef.current.map(a => [a.id, a]));
 
-      // IP reputation + whitelist labels (parallel)
+      // IP reputation + whitelist labels + custom display names (parallel)
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const [repRes, wlRes] = await Promise.all([
+      const [repRes, wlRes, displayNamesRaw] = await Promise.all([
         apiClient.get<{
           data: { ip: string; geoCountryCode?: string | null; totalFailures: number; status: string; affectedServices?: string[] }[]
         }>('/ip-reputation?limit=200').catch(() => ({ data: { data: [] } })),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         apiClient.get<{ data: any[] }>('/whitelist').catch(() => ({ data: { data: [] } })),
+        ipLabelsApi.list().catch(() => [] as import('../api/ipLabels.api').IpDisplayName[]),
       ]);
+      // Build display-name lookup: ip → label
+      const displayNameMap = new Map<string, string>();
+      for (const entry of displayNamesRaw) {
+        if (entry.ip && entry.label) displayNameMap.set(entry.ip, entry.label);
+      }
       const repMap = new Map<string, { country: string; status: string; failures: number; services: string[] }>();
       for (const r of repRes.data?.data ?? []) {
         repMap.set(r.ip, {
@@ -938,6 +951,7 @@ export function NetMapPage() {
           services: allServices, eventCount: totalCount,
           lastSeen: Date.now(), glowUntil: 0,
           whitelistLabel: matchWhitelist(evIp, wlEntries)?.label,
+          displayLabel:   displayNameMap.get(evIp) ?? null,
         };
         ipsRef.current.set(evIp, node);
         cnt++;
@@ -963,6 +977,7 @@ export function NetMapPage() {
           status:   rep.status, failures: rep.failures, services: rep.services,
           eventCount: 0, lastSeen: Date.now(), glowUntil: 0,
           whitelistLabel: matchWhitelist(repIp, wlEntries)?.label,
+          displayLabel:   displayNameMap.get(repIp) ?? null,
         };
         ipsRef.current.set(repIp, node);
         cnt++;
@@ -988,13 +1003,13 @@ export function NetMapPage() {
           status: 'whitelisted', failures: 0, services: [],
           eventCount: 0, lastSeen: Date.now(), glowUntil: 0,
           whitelistLabel: wle.label,
+          displayLabel:   displayNameMap.get(wle.plainIp) ?? null,
         };
         ipsRef.current.set(wle.plainIp, node);
         cnt++;
       }
 
-      // Post-process: apply whitelist status to ALL nodes (handles CIDR ranges like /24).
-      // An IP that falls inside a whitelisted CIDR is marked green regardless of prior status.
+      // Post-process: apply whitelist status + display names to ALL nodes.
       for (const node of ipsRef.current.values()) {
         const wlMatch = matchWhitelist(node.ip, wlEntries);
         if (wlMatch) {
@@ -1002,6 +1017,7 @@ export function NetMapPage() {
           node.status = 'whitelisted';
           node.color  = '#22c55e';
         }
+        if (!node.displayLabel) node.displayLabel = displayNameMap.get(node.ip) ?? null;
       }
 
       // Batch layout with repulsion
@@ -1246,10 +1262,11 @@ export function NetMapPage() {
       ctx.restore();
 
       if (!dimmed && shouldLabel(ip)) {
-        const badgeTxt = ip.status === 'whitelisted' && ip.whitelistLabel
-          ? `✓ ${ip.whitelistLabel}`
-          : ip.status === 'whitelisted'
-          ? `✓ ${ip.ip}`
+        const effectiveLabel = ip.displayLabel ?? ip.whitelistLabel ?? null;
+        const badgeTxt = ip.status === 'whitelisted'
+          ? `✓ ${effectiveLabel ?? ip.ip}`
+          : effectiveLabel
+          ? effectiveLabel
           : badgeText(ip.country, ip.ip);
         badges.push({ txt: badgeTxt, sx: ip.x, sy: ip.y, r: ip.dotR, color: ip.color, alpha: Math.min(0.95, alpha + 0.1) });
       }

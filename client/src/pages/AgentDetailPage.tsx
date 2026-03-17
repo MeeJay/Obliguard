@@ -1051,6 +1051,11 @@ export function AgentDetailPage() {
 
   /** Generic SSO redirect to another app's agent page */
   const handleAgentSwitch = useCallback(async (targetUrl: string, ssoEnabled: boolean, source: string) => {
+    // In ObliTools: navigate directly in the target WebView tab — no SSO needed.
+    if (typeof (window as any).__go_openInAppTab === 'function') {
+      (window as any).__go_openInAppTab(targetUrl).catch(() => {});
+      return;
+    }
     if (!ssoEnabled) { window.location.href = targetUrl; return; }
     setSsoSwitching(true);
     try {

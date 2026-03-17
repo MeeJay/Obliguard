@@ -57,7 +57,6 @@
     "email": "Email",
     "username": "Username"
   },
-
   "status": {
     "up": "UP",
     "down": "DOWN",
@@ -74,7 +73,6 @@
     "inactive": "Inactive",
     "disabled": "Disabled"
   },
-
   "nav": {
     "dashboard": "Dashboard",
     "netmap": "Network Map",
@@ -97,7 +95,6 @@
     "pinSidebar": "Pin sidebar",
     "floatSidebar": "Float sidebar"
   },
-
   "login": {
     "title": "Monitoring Dashboard",
     "username": "Username",
@@ -126,7 +123,6 @@
     "clientVersion": "client v{{version}}",
     "serverVersion": "server v{{version}}"
   },
-
   "forgotPassword": {
     "title": "Reset your password",
     "description": "Enter your email address and we'll send you a reset link.",
@@ -139,7 +135,6 @@
     "backToLogin": "Back to login",
     "invalidEmail": "Please enter a valid email address"
   },
-
   "resetPassword": {
     "title": "Set a new password",
     "newPassword": "New password",
@@ -156,7 +151,6 @@
     "invalidToken": "This reset link is invalid or has expired.",
     "failed": "Failed to reset password"
   },
-
   "enrollment": {
     "welcomeTitle": "Welcome to {{appName}}",
     "welcomeSubtitle": "Let's set up your account in a few quick steps.",
@@ -168,12 +162,10 @@
     "stepSecurity": "Security",
     "completing": "Completing…",
     "complete": "Finish setup",
-
     "language": {
       "title": "Choose your language",
       "subtitle": "Select the language for the Obliguard interface."
     },
-
     "profile": {
       "title": "Your profile",
       "subtitle": "Set your display name and email address.",
@@ -186,7 +178,6 @@
       "emailRequired": "Email address is required",
       "emailInvalid": "Please enter a valid email address"
     },
-
     "alerts": {
       "title": "Live alert notifications",
       "subtitle": "Choose how you want to be notified of status changes.",
@@ -199,7 +190,6 @@
       "topCenterDesc": "Latest alert only, auto-dismiss after 10 seconds.",
       "previewAlt": "Alert position preview"
     },
-
     "password": {
       "title": "Set a password",
       "subtitleRequired": "Your account was created via SSO and has no password yet. Set one to be able to log in directly.",
@@ -215,7 +205,6 @@
       "required": "A password is required for your account.",
       "failed": "Failed to set password. Please try again."
     },
-
     "security": {
       "title": "Two-Factor Authentication",
       "subtitle": "Add an extra layer of security to your account.",
@@ -229,12 +218,10 @@
       "totpEnabled": "Authenticator app enabled",
       "setupLater": "You can set up 2FA later from your Profile."
     },
-
     "errors": {
       "failed": "Failed to complete setup. Please try again."
     }
   },
-
   "dashboard": {
     "title": "Dashboard",
     "select": "Select",
@@ -264,7 +251,6 @@
     "selectedCountAgent_one": "{{count}} agent selected",
     "selectedCountAgent_other": "{{count}} agents selected"
   },
-
   "monitors": {
     "new": "Add Monitor",
     "edit": "Edit Monitor",
@@ -289,7 +275,6 @@
     "failedCreate": "Failed to create monitor",
     "failedUpdate": "Failed to update monitor",
     "failedDelete": "Failed to delete monitor",
-
     "stats": {
       "responseTime": "Response Time",
       "uptime": "Uptime",
@@ -300,7 +285,6 @@
       "sslExpired": "SSL Certificate Expired",
       "currentValue": "Current Value"
     },
-
     "history": "History",
     "heartbeatHistory": "Heartbeat History",
     "valueHistory": "Value History",
@@ -310,7 +294,6 @@
     "sectionRemediations": "Remediations",
     "sectionSettings": "Monitor Settings",
     "zoomed": "zoomed",
-
     "form": {
       "sectionGeneral": "General",
       "name": "Name",
@@ -320,7 +303,6 @@
       "descriptionPlaceholder": "Optional description",
       "group": "Group",
       "noGroup": "No group",
-
       "sectionHttp": "HTTP Settings",
       "url": "URL",
       "urlPlaceholder": "https://example.com",
@@ -333,7 +315,6 @@
       "jsonPathPlaceholder": "$.status or data.health",
       "expectedValue": "Expected Value",
       "expectedValuePlaceholder": "ok",
-
       "sectionHost": "Host Settings",
       "hostname": "Hostname",
       "hostnamePlaceholder": "example.com",
@@ -344,13 +325,11 @@
       "dnsExpected": "Expected Value (optional)",
       "dnsExpectedPlaceholder": "Expected record value",
       "warnDays": "Warn Days Before Expiry",
-
       "sectionDocker": "Docker Settings",
       "dockerHost": "Docker Host",
       "dockerHostPlaceholder": "/var/run/docker.sock or tcp://host:2375",
       "containerName": "Container Name",
       "containerNamePlaceholder": "my-container",
-
       "sectionGame": "Game Server Settings",
       "gameType": "Game Type",
       "gameTypePlaceholder": "minecraft, csgo, valheim…",
@@ -358,18 +337,15 @@
       "gameHostPlaceholder": "play.example.com",
       "gamePort": "Port",
       "gamePortPlaceholder": "25565",
-
       "sectionPush": "Push Monitor Settings",
       "pushMaxInterval": "Max Interval (seconds)",
       "pushMaxIntervalPlaceholder": "300",
       "pushUrl": "Push URL",
-
       "sectionScript": "Script Settings",
       "scriptCommand": "Command",
       "scriptCommandPlaceholder": "/path/to/script.sh",
       "scriptExpectedExit": "Expected Exit Code",
       "scriptExpectedExitPlaceholder": "0",
-
       "sectionBrowser": "Browser Settings",
       "browserDesc": "Uses a headless Chromium browser (Playwright) to load the page with full JavaScript rendering.",
       "browserUrl": "URL",
@@ -379,7 +355,6 @@
       "browserKeyword": "Keyword (optional)",
       "browserKeywordPlaceholder": "Keyword to find in rendered page",
       "browserKeywordInverted": "Alert if keyword IS present (inverted)",
-
       "sectionValueWatcher": "Value Watcher Settings",
       "valueWatcherDesc": "Fetches a JSON API and monitors a numeric value extracted via JSON path.",
       "valueWatcherUrl": "API URL",
@@ -398,7 +373,6 @@
       "minThreshold": "Min Threshold",
       "threshold": "Threshold",
       "maxThreshold": "Max Threshold",
-
       "sectionTiming": "Timing",
       "checkInterval": "Check Interval (seconds)",
       "checkIntervalPlaceholder": "inherited (60)",
@@ -411,7 +385,6 @@
       "upsideDown": "Upside Down Mode (invert UP/DOWN logic)"
     }
   },
-
   "groups": {
     "new": "New Group",
     "edit": "Edit Group",
@@ -447,7 +420,6 @@
     "noActive": "No active monitors to pause",
     "failedPause": "Failed to pause monitors",
     "failedResume": "Failed to resume monitors",
-
     "form": {
       "name": "Name",
       "namePlaceholder": "Group name",
@@ -465,7 +437,6 @@
       "moveUp": "Move up",
       "moveDown": "Move down"
     },
-
     "detail": {
       "totalAgents": "Total Agents",
       "online": "Online",
@@ -509,7 +480,6 @@
       "clearData": "Clear Data"
     }
   },
-
   "notifications": {
     "title": "Notifications",
     "newChannel": "New Channel",
@@ -541,7 +511,6 @@
     "removeTenantAccess": "Remove workspace access",
     "failedTenantAssign": "Failed to update workspace access"
   },
-
   "settings": {
     "title": "Global Settings",
     "globalDesc": "These defaults apply to all groups and monitors unless overridden at a lower level.",
@@ -601,7 +570,6 @@
     },
     "failedUpdate": "Failed to update setting"
   },
-
   "profile": {
     "title": "My Profile",
     "sectionProfile": "Display Name",
@@ -615,7 +583,6 @@
     "saveProfile": "Save Profile",
     "profileUpdated": "Profile updated",
     "failedProfile": "Failed to update profile",
-
     "password": {
       "title": "Change Password",
       "current": "Current Password",
@@ -630,7 +597,6 @@
       "changed": "Password changed successfully",
       "failed": "Failed to change password"
     },
-
     "alerts": {
       "title": "Live Alert Notifications",
       "enableLabel": "Enable live alerts",
@@ -644,7 +610,6 @@
       "preferencesSaved": "Preferences saved",
       "failedPreferences": "Failed to save preferences"
     },
-
     "security": {
       "title": "Security",
       "force2faWarning": "Your administrator requires Two-Factor Authentication. Please enable a method below.",
@@ -669,7 +634,6 @@
       "invalidCode": "Invalid code"
     }
   },
-
   "users": {
     "tabUsers": "Users",
     "tabTeams": "Teams",
@@ -693,7 +657,6 @@
     "changePasswordTitle": "Password: {{username}}",
     "newPassword": "New Password",
     "changePassword": "Change",
-
     "teams": {
       "noTeams": "No teams created yet",
       "newTeam": "New Team",
@@ -724,7 +687,6 @@
       "failedRemovePermission": "Failed to remove permission"
     }
   },
-
   "agents": {
     "tabKeys": "API Keys",
     "tabDevices": "Devices",
@@ -767,7 +729,6 @@
       "attackDesc": "Notify when an IP is banned due to activity from this agent"
     }
   },
-
   "remediations": {
     "title": "Remediations",
     "typeWebhook": "Generic Webhook",
@@ -794,7 +755,6 @@
     "sectionConfig": "{{type}} Configuration",
     "credentialsNote": "Credentials are stored encrypted (AES-256-GCM) on the server."
   },
-
   "maintenance": {
     "title": "Maintenance Windows",
     "description": "Define scheduled maintenance periods. During maintenance, alerts are suppressed and heartbeats are shown in blue.",
@@ -809,7 +769,6 @@
     "rule8": "One-time windows are automatically deleted after their end date.",
     "allWindows": "All Maintenance Windows",
     "failedLoad": "Failed to load maintenance data",
-
     "editTitle": "Edit Maintenance Window",
     "newTitle": "New Maintenance Window",
     "fieldName": "Name",
@@ -844,7 +803,6 @@
     "willCreate_other": "{{count}} windows will be created",
     "withExclusions_one": " (with {{count}} exclusion)",
     "withExclusions_other": " (with {{count}} exclusions)",
-
     "addWindow": "Add window",
     "add": "Add",
     "noWindows": "No maintenance windows defined.",
@@ -867,7 +825,6 @@
     "filterAgents": "Agents",
     "disableBtn": "Disable",
     "enableBtn": "Enable",
-
     "scopeGlobalBtn": "Global — apply to everything",
     "colMonitors": "Monitors",
     "colAgents": "Agents",
@@ -875,7 +832,6 @@
     "noAgentsInList": "No agents",
     "noGroupLabel": "No group",
     "partialLabel": "partial",
-
     "dayMon": "Mon",
     "dayTue": "Tue",
     "dayWed": "Wed",
@@ -884,7 +840,6 @@
     "daySat": "Sat",
     "daySun": "Sun"
   },
-
   "importExport": {
     "title": "Import / Export",
     "description": "Export your configuration to a portable JSON file, or import a previously saved file.",
@@ -931,10 +886,9 @@
     "statUpdated": "{{count}} updated",
     "statSkipped": "{{count}} skipped"
   },
-
   "download": {
-    "title": "Obliguard Desktop",
-    "description": "A lightweight native wrapper for your Obliview instance.\nGet system-level sound notifications and a distraction-free monitoring experience.",
+    "title": "Obli.tools",
+    "description": "A lightweight native interface that groups all your Obli apps into one window.\nGet sound notifications and a distraction-free monitoring experience.",
     "downloadFolder": "Download folder: ",
     "downloadFolderPlaceholder": "Will ask on first download",
     "changeFolder": "Change",
@@ -951,8 +905,8 @@
     "buildFromSource": "Build from source",
     "buildFromSourceDesc": "The desktop app lives in the desktop-app/ directory of the Obliview repository.",
     "howItWorks": "How it works",
-    "step1": "On first launch, enter your Obliview server URL. It is saved locally.",
-    "step2": "The app opens your Obliview in a native window — no browser tabs, no address bar.",
+    "step1": "On first launch, enter your Obliview server URL. Linked apps (Obliguard, Oblimap, Obliance) are discovered automatically.",
+    "step2": "Each app opens in its own native tab — no browser overhead, no address bar, sessions are preserved when switching tabs.",
     "step3": "Sound notifications play when a probe goes down/up or an agent threshold is breached/cleared.",
     "step4": "Click the ⚙ gear icon (bottom-right corner) to change the server URL at any time.",
     "step5": "No rebuild is needed after Obliview updates — the app always loads the latest web UI.",
@@ -964,13 +918,11 @@
       "alwaysUpToDate": "Always up-to-date — no rebuilds needed"
     }
   },
-
   "notFound": {
     "title": "404",
     "message": "Page not found",
     "goToDashboard": "Go to Dashboard"
   },
-
   "header": {
     "signedInAs": "Signed in as",
     "disableAlerts": "Disable live alerts",

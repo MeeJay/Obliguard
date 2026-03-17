@@ -19,9 +19,11 @@ import bansRoutes from './bans.routes';
 import whitelistRoutes from './whitelist.routes';
 import ipEventsRoutes from './ipEvents.routes';
 import ipReputationRoutes from './ipReputation.routes';
+import ipDisplayNamesRoutes from './ipDisplayNames.routes';
 import serviceTemplatesRoutes from './serviceTemplates.routes';
 import geoRoutes from './geo.routes';
 import foreignSsoRoutes from './foreignSso.routes';
+import oblitoolsRoutes from './oblitools.routes';
 import obliviewRoutes from './obliview.routes';
 import systemRoutes from './system.routes';
 import oblimapRoutes from './oblimap.routes';
@@ -37,6 +39,7 @@ router.use('/system', systemRoutes);         // system info / about (admin only,
 router.use('/profile/2fa', twoFactorRoutes); // must be before /profile
 router.use('/live-alerts', liveAlertRouter);
 router.use('/sso', foreignSsoRoutes);        // Cross-platform SSO (generate-token, validate-token, exchange, users)
+router.use('/oblitools', oblitoolsRoutes);   // ObliTools desktop manifest (auth required)
 router.use('/obliguard', obliviewRoutes);    // Obliview cross-platform lookup (Bearer-authenticated)
 router.use('/oblimap', oblimapRoutes);       // Oblimap cross-platform lookup (Bearer-authenticated)
 router.use('/obliance', oblianceRoutes);    // Obliance cross-platform lookup (Bearer-authenticated)
@@ -64,6 +67,7 @@ tenantRouter.use('/bans', bansRoutes);
 tenantRouter.use('/whitelist', whitelistRoutes);
 tenantRouter.use('/ip-events', ipEventsRoutes);
 tenantRouter.use('/ip-reputation', ipReputationRoutes);
+  tenantRouter.use('/ip-labels', ipDisplayNamesRoutes);
 tenantRouter.use('/service-templates', serviceTemplatesRoutes);
 tenantRouter.use('/geo', geoRoutes);
 

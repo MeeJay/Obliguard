@@ -15,6 +15,8 @@ import {
   User,
   Server,
   Eraser,
+  Pencil,
+  Tag,
 } from 'lucide-react';
 import type {
   IpReputation,
@@ -28,6 +30,7 @@ import { cn } from '@/utils/cn';
 import { useAuthStore } from '@/store/authStore';
 import toast from 'react-hot-toast';
 import apiClient from '../api/client';
+import { ipLabelsApi } from '../api/ipLabels.api';
 
 const PAGE_SIZE = 25;
 
@@ -137,10 +140,12 @@ interface IPDetailDrawerProps {
   onWhitelist: (ip: string, label: string) => Promise<void>;
   onLiftBan: () => Promise<void>;
   onClear: (ip: string) => Promise<void>;
+  onRename: (ip: string, label: string) => Promise<void>;
+  currentLabel?: string;
   isAdmin: boolean;
 }
 
-function IPDetailDrawer({ ip, onClose, onBan, onWhitelist, onLiftBan, onClear, isAdmin }: IPDetailDrawerProps) {
+function IPDetailDrawer({ ip, onClose, onBan, onWhitelist, onLiftBan, onClear, onRename, currentLabel, isAdmin }: IPDetailDrawerProps) {
   const [events, setEvents] = useState<IpEvent[]>([]);
   const [loadingEvents, setLoadingEvents] = useState(true);
   const [banScope, setBanScope] = useState<BanScope>('global');
@@ -149,6 +154,8 @@ function IPDetailDrawer({ ip, onClose, onBan, onWhitelist, onLiftBan, onClear, i
   const [actionLoading, setActionLoading] = useState(false);
   const [showBanForm, setShowBanForm] = useState(false);
   const [showWhitelistForm, setShowWhitelistForm] = useState(false);
+  const [showRenameForm, setShowRenameForm] = useState(false);
+  const [renameValue, setRenameValue] = useState(currentLabel ?? '');
 
   const loadEvents = useCallback(async () => {
     setLoadingEvents(true);
@@ -195,6 +202,16 @@ function IPDetailDrawer({ ip, onClose, onBan, onWhitelist, onLiftBan, onClear, i
     }
   };
 
+  const handleRename = async () => {
+    setActionLoading(true);
+    try {
+      await onRename(ip.ip, renameValue.trim());
+      setShowRenameForm(false);
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
   const flag = countryCodeToFlag(ip.geoCountryCode);
   const services = ip.affectedServices ?? [];
   const usernames = ip.attemptedUsernames ?? [];
@@ -217,6 +234,12 @@ function IPDetailDrawer({ ip, onClose, onBan, onWhitelist, onLiftBan, onClear, i
               <CopyButton text={ip.ip} />
               <StatusBadge status={ip.status} />
             </div>
+            {currentLabel && (
+              <div className="flex items-center gap-1.5 mt-1">
+                <Tag size={11} className="text-accent shrink-0" />
+                <span className="text-sm font-medium text-accent">{currentLabel}</span>
+              </div>
+            )}
             {(ip.geoCountryCode || ip.geoCity || ip.asn) && (
               <p className="text-xs text-text-muted mt-0.5">
                 {flag && <span className="mr-1">{flag}</span>}
@@ -468,6 +491,65 @@ function IPDetailDrawer({ ip, onClose, onBan, onWhitelist, onLiftBan, onClear, i
                 </Button>
               </div>
             )}
+
+            {/* Rename / custom label */}
+            <div>
+              {!showRenameForm ? (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => {
+                    setRenameValue(currentLabel ?? '');
+                    setShowRenameForm(true);
+                    setShowBanForm(false);
+                    setShowWhitelistForm(false);
+                  }}
+                >
+                  <Tag size={13} className="mr-1.5" />
+                  {currentLabel ? 'Edit label' : 'Add label'}
+                </Button>
+              ) : (
+                <div className="rounded-lg border border-border bg-bg-secondary p-4 space-y-3">
+                  <p className="text-sm font-medium text-text-primary">
+                    {currentLabel ? 'Edit label for' : 'Label'} {ip.ip}
+                  </p>
+                  <Input
+                    label="Label"
+                    placeholder="e.g. Home router, Office ISP…"
+                    value={renameValue}
+                    onChange={e => setRenameValue(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter') void handleRename(); }}
+                    autoFocus
+                  />
+                  <div className="flex gap-2 flex-wrap">
+                    <Button size="sm" loading={actionLoading} onClick={handleRename}>
+                      Save label
+                    </Button>
+                    {currentLabel && (
+                      <Button
+                        size="sm"
+                        variant="danger"
+                        loading={actionLoading}
+                        onClick={async () => {
+                          setActionLoading(true);
+                          try {
+                            await onRename(ip.ip, '');
+                            setShowRenameForm(false);
+                          } finally {
+                            setActionLoading(false);
+                          }
+                        }}
+                      >
+                        Remove label
+                      </Button>
+                    )}
+                    <Button variant="secondary" size="sm" onClick={() => setShowRenameForm(false)}>
+                      Cancel
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       </div>
@@ -499,6 +581,8 @@ export function IPReputationPage() {
   const [selectedIp, setSelectedIp] = useState<IpReputation | null>(null);
   // Track the active ban ID for the selected IP so the drawer can lift it
   const [selectedBanId, setSelectedBanId] = useState<number | null>(null);
+  // Custom IP labels (display names)
+  const [ipLabels, setIpLabels] = useState<Map<string, string>>(new Map());
 
   // Debounce search
   useEffect(() => {
@@ -537,6 +621,34 @@ export function IPReputationPage() {
   useEffect(() => {
     load();
   }, [load]);
+
+  // Fetch custom IP labels on mount
+  useEffect(() => {
+    ipLabelsApi.list()
+      .then(labels => {
+        const m = new Map<string, string>();
+        for (const { ip, label } of labels) if (label) m.set(ip, label);
+        setIpLabels(m);
+      })
+      .catch(() => { /* non-critical */ });
+  }, []);
+
+  const handleRename = async (ipAddr: string, label: string) => {
+    try {
+      if (label.trim()) {
+        await ipLabelsApi.upsert(ipAddr, label.trim());
+        setIpLabels(prev => new Map(prev).set(ipAddr, label.trim()));
+        toast.success(`Label "${label.trim()}" saved for ${ipAddr}`);
+      } else {
+        await ipLabelsApi.remove(ipAddr);
+        setIpLabels(prev => { const m = new Map(prev); m.delete(ipAddr); return m; });
+        toast.success(`Label removed for ${ipAddr}`);
+      }
+    } catch {
+      toast.error('Failed to save label');
+      throw new Error('Failed to save label');
+    }
+  };
 
   const handleBan = async (ipAddr: string, scope: BanScope, reason: string) => {
     try {
@@ -711,6 +823,12 @@ export function IPReputationPage() {
                     >
                       <td className="px-4 py-3">
                         <span className="font-mono text-text-primary">{row.ip}</span>
+                        {ipLabels.get(row.ip) && (
+                          <div className="flex items-center gap-1 mt-0.5">
+                            <Tag size={10} className="text-accent shrink-0" />
+                            <span className="text-xs text-accent">{ipLabels.get(row.ip)}</span>
+                          </div>
+                        )}
                       </td>
                       <td className="px-4 py-3 text-text-secondary">
                         {flag && <span className="mr-1.5">{flag}</span>}
@@ -751,6 +869,13 @@ export function IPReputationPage() {
                           className="flex items-center justify-end gap-1 flex-wrap"
                           onClick={e => e.stopPropagation()}
                         >
+                          <button
+                            title={ipLabels.get(row.ip) ? 'Edit label' : 'Add label'}
+                            onClick={() => handleRowClick(row)}
+                            className="p-1 rounded text-text-muted hover:text-accent hover:bg-bg-hover transition-colors"
+                          >
+                            <Pencil size={12} />
+                          </button>
                           {row.status !== 'banned' && (
                             <Button
                               size="sm"
@@ -837,6 +962,8 @@ export function IPReputationPage() {
           onClose={() => { setSelectedIp(null); setSelectedBanId(null); }}
           onBan={handleBan}
           onWhitelist={handleWhitelist}
+          onRename={handleRename}
+          currentLabel={ipLabels.get(selectedIp.ip)}
           onLiftBan={async () => {
             if (selectedBanId != null) {
               await handleLiftBanById(selectedBanId, selectedIp.ip);
