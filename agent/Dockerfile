@@ -10,7 +10,10 @@ RUN go mod download
 # Build Linux amd64 binary
 COPY . .
 ENV CGO_ENABLED=0 GOOS=linux GOARCH=amd64
-RUN go build -ldflags="-s -w" -o obliguard-agent .
+# AGENT_VERSION is passed by the build script (--build-arg AGENT_VERSION=x.y.z)
+# so the binary embeds the correct version string instead of the Go default "dev".
+ARG AGENT_VERSION=dev
+RUN go build -ldflags="-s -w -X main.agentVersion=${AGENT_VERSION}" -o obliguard-agent .
 
 # ---- Production stage ----
 FROM alpine:latest

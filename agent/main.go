@@ -48,7 +48,7 @@ type Config struct {
 	DeviceUUID           string                        `json:"deviceUuid"`
 	CheckIntervalSeconds int                           `json:"checkIntervalSeconds"`
 	AgentVersion         string                        `json:"agentVersion"`
-	BackoffUntil         int64                         `json:"_backoffUntil,omitempty"`
+	BackoffUntil         int64                         `json:"-"` // never persisted — in-memory only
 	// Cached service configs received from server (restored on restart)
 	ServiceConfigs       map[string]AgentServiceConfig `json:"serviceConfigs,omitempty"`
 }
@@ -358,15 +358,6 @@ func mainLoop(cfg *Config) {
 	log.Printf("Server: %s", cfg.ServerURL)
 	log.Printf("Device UUID: %s", cfg.DeviceUUID)
 
-	// Clear any stale BackoffUntil that may have been written by an older
-	// version of the agent (before backoff was made in-memory-only).
-	// This ensures agents reconnect immediately after a service restart,
-	// even if a previous crash left a non-zero _backoffUntil in config.json.
-	if cfg.BackoffUntil != 0 {
-		log.Printf("Clearing stale backoff timestamp from previous run")
-		cfg.BackoffUntil = 0
-		_ = saveConfig(cfg)
-	}
 
 	// Detect and initialise the local firewall backend
 	fw := DetectFirewall()
