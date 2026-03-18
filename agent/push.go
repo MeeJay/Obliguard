@@ -212,7 +212,12 @@ func applyBackoff(cfg *Config) {
 	waitSec := backoffSteps[idx]
 	cfg.BackoffUntil = time.Now().UnixMilli() + int64(waitSec)*1000
 	backoffLevel++
-	_ = saveConfig(cfg)
+	// NOTE: backoff is intentionally NOT persisted to disk.
+	// Saving it caused agents to remain stuck after a server reboot: the
+	// BackoffUntil timestamp written before the reboot survived process restarts
+	// and prevented reconnection even after the server was back online.
+	// In-memory backoff is sufficient — it still prevents hammering during an
+	// outage, and restarting the agent service always clears the wait period.
 }
 
 // backoffSteps and backoffLevel are declared in main.go

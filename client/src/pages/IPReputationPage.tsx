@@ -1966,7 +1966,7 @@ export function IPReputationPage() {
   const [activeTab, setActiveTab] = useState<PageTab>('activity');
 
   return (
-    <div className="p-6 max-w-7xl mx-auto">
+    <div className="p-6">
       {/* Page header */}
       <div className="mb-6">
         <h1 className="text-xl font-semibold text-text-primary">IP Reputation</h1>
