@@ -350,6 +350,7 @@ func applyWindowsMSIUpdate(msiPath, serverURL, apiKey string) error {
 
 // ── Main loop ─────────────────────────────────────────────────────────────────
 
+// backoffSteps / backoffLevel are referenced by applyBackoff() in push.go.
 var backoffSteps = []int{5 * 60, 10 * 60, 30 * 60, 60 * 60}
 var backoffLevel = 0
 
@@ -357,7 +358,6 @@ func mainLoop(cfg *Config) {
 	log.Printf("Obliguard Agent v%s starting", cfg.AgentVersion)
 	log.Printf("Server: %s", cfg.ServerURL)
 	log.Printf("Device UUID: %s", cfg.DeviceUUID)
-
 
 	// Detect and initialise the local firewall backend
 	fw := DetectFirewall()
@@ -374,29 +374,12 @@ func mainLoop(cfg *Config) {
 	startPlatformEventLogWatcher(lw)
 
 	// Poll the OS TCP connection table every 5 s and emit auth_success events
-	// for every new inbound connection to a known service port.  This surfaces
-	// all real-time network traffic on the NetMap, not just log-parsed events.
-	// Platform-specific: /proc/net/tcp on Linux, Get-NetTCPConnection on Windows.
+	// for every new inbound connection to a known service port.
 	startNetConnMonitor(lw)
 
-	// Check for a newer version before entering the main loop.
-	checkForUpdate(cfg)
-
-	for {
-		now := time.Now().UnixMilli()
-		if cfg.BackoffUntil > 0 && now < cfg.BackoffUntil {
-			waitSec := (cfg.BackoffUntil - now) / 1000
-			if waitSec > 60 {
-				waitSec = 60
-			}
-			log.Printf("In backoff period, waiting %ds...", waitSec)
-			time.Sleep(time.Duration(waitSec) * time.Second)
-			continue
-		}
-
-		push(cfg, lw, fw)
-		time.Sleep(time.Duration(cfg.CheckIntervalSeconds) * time.Second)
-	}
+	// Run the persistent WS command channel (replaces old push loop).
+	// Reconnects automatically with exponential backoff.
+	runCmdWS(cfg, lw, fw)
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 {
   "name": "@obliview/server",
-  "version": "2.2.7",
+  "version": "2.2.8",
   "private": true,
   "main": "dist/src/index.js",
   "scripts": {
@@ -48,6 +48,7 @@
     "@types/node": "^20.11.0",
     "@types/nodemailer": "^7.0.9",
     "@types/qrcode": "^1.5.6",
+    "@types/ws": "^8.18.1",
     "tsx": "^4.7.0",
     "typescript": "^5.4.0"
   }

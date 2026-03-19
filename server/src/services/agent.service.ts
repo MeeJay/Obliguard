@@ -897,6 +897,172 @@ export const agentService = {
     };
   },
 
+  // ── Events-only flush (WS real-time path) ─────────────────
+  //
+  // Called by obliguardHub when the agent sends a `{ type:"events" }` frame
+  // between heartbeats (500 ms debounce).  Runs the same enrichment + insert
+  // pipeline as handlePush but skips the heavy per-push bookkeeping (LAN-IP
+  // rebuild, ban-delta, service-config sync) that only needs to run every 30 s.
+
+  async processEventsFlush(
+    deviceId: number,
+    tenantId: number,
+    events: AgentIpEvent[],
+  ): Promise<void> {
+    if (events.length === 0) return;
+
+    // Resolve group ancestry (needed for track-only and peer-link lookups)
+    let groupIds: number[] = [];
+    try {
+      const row = await db('agent_devices').where({ id: deviceId }).select('group_id').first() as
+        { group_id: number | null } | undefined;
+      if (row?.group_id) {
+        const groupRows = await db('group_closure')
+          .where('descendant_id', row.group_id)
+          .select('ancestor_id')
+          .orderBy('depth', 'asc') as { ancestor_id: number }[];
+        groupIds = groupRows.map(r => r.ancestor_id);
+      }
+    } catch (err) {
+      logger.warn({ err, deviceId }, 'processEventsFlush: group ancestry lookup failed');
+    }
+
+    // Track-only service set
+    const trackOnlyServices = new Set<string>();
+    try {
+      const { serviceTemplateService } = await import('./serviceTemplate.service');
+      const resolved = await serviceTemplateService.resolveForAgent(deviceId, groupIds);
+      for (const cfg of resolved) {
+        if (cfg.mode === 'track') trackOnlyServices.add(cfg.serviceType);
+      }
+    } catch { /* not yet configured — all services default to ban mode */ }
+
+    // Peer link maps (LAN + WAN) — same logic as handlePush
+    const lanIpToAgentId = new Map<string, number>();
+    const wanIpToAgentId = new Map<string, number>();
+    try {
+      const lanRows = await db('agent_ips as ai')
+        .join('agent_devices as ad', 'ad.id', 'ai.agent_id')
+        .where({ 'ad.tenant_id': tenantId })
+        .whereNot({ 'ai.agent_id': deviceId })
+        .select('ai.ip_address', 'ai.agent_id') as { ip_address: string; agent_id: number }[];
+      for (const row of lanRows) {
+        if (lanIpToAgentId.has(row.ip_address)) {
+          lanIpToAgentId.set(row.ip_address, -1);
+        } else {
+          lanIpToAgentId.set(row.ip_address, row.agent_id);
+        }
+      }
+
+      const wanRows = await db('agent_devices')
+        .where({ tenant_id: tenantId, wan_matching_enabled: true })
+        .whereNot({ id: deviceId })
+        .whereNotNull('ip')
+        .select('id', 'ip') as { id: number; ip: string }[];
+      for (const row of wanRows) {
+        if (wanIpToAgentId.has(row.ip)) {
+          wanIpToAgentId.set(row.ip, -1);
+        } else {
+          wanIpToAgentId.set(row.ip, row.id);
+        }
+      }
+    } catch (err) {
+      logger.warn({ err, deviceId }, 'processEventsFlush: peer link lookup failed');
+    }
+
+    // Enrich + insert events
+    try {
+      const enrichedEvents = events.map((ev: AgentIpEvent) => {
+        let sourceAgentId: number | null = null;
+        let sourceIpType: 'lan' | 'wan' | null = null;
+
+        if (isRfc1918(ev.ip)) {
+          const matchId = lanIpToAgentId.get(ev.ip);
+          if (matchId !== undefined && matchId !== -1) {
+            sourceAgentId = matchId;
+            sourceIpType = 'lan';
+          }
+        } else {
+          const matchId = wanIpToAgentId.get(ev.ip);
+          if (matchId !== undefined && matchId !== -1) {
+            sourceAgentId = matchId;
+            sourceIpType = 'wan';
+          }
+        }
+
+        return {
+          device_id: deviceId,
+          ip: ev.ip,
+          username: ev.username ?? null,
+          service: ev.service,
+          event_type: ev.eventType,
+          timestamp: new Date(ev.timestamp),
+          raw_log: ev.rawLog ?? null,
+          track_only: trackOnlyServices.has(ev.service),
+          tenant_id: tenantId,
+          source_agent_id: sourceAgentId,
+          source_ip_type: sourceIpType,
+        };
+      });
+
+      await db('ip_events').insert(enrichedEvents);
+
+      await ipReputationService.upsertFromEvents(
+        events.map((ev: AgentIpEvent) => ({
+          ip: ev.ip,
+          service: ev.service,
+          username: ev.username ?? null,
+          deviceId,
+          eventType: ev.eventType,
+        })),
+      );
+
+      // Threat detection — same check as handlePush
+      const failureIps = [...new Set(
+        events
+          .filter((ev: AgentIpEvent) => ev.eventType === 'auth_failure')
+          .map((ev: AgentIpEvent) => ev.ip),
+      )];
+      if (failureIps.length > 0) {
+        const suspiciousRows = await db('ip_reputation')
+          .whereIn('ip', failureIps)
+          .where('total_failures', '>', 0)
+          .select('ip')
+          .limit(1);
+        if (suspiciousRows.length > 0) {
+          await db('agent_devices').where({ id: deviceId }).update({ last_threat_at: new Date() });
+          const deviceLabel = await db('agent_devices').where({ id: deviceId })
+            .select('name', 'hostname').first() as { name: string | null; hostname: string } | undefined;
+          const label = deviceLabel?.name ?? deviceLabel?.hostname ?? String(deviceId);
+          notificationService.sendForAgent(deviceId, label, 'threat', 'ok', [], 'threat').catch(
+            (err) => logger.warn({ err, deviceId }, 'processEventsFlush: threat notification failed'),
+          );
+        }
+      }
+
+      // Emit real-time events to the Starmap
+      if (_io) {
+        const seen = new Set<string>();
+        for (const enriched of enrichedEvents) {
+          const key = `${enriched.ip}:${enriched.event_type}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          _io.emit('ip:flow', {
+            ip: enriched.ip,
+            service: enriched.service,
+            eventType: enriched.event_type,
+            deviceId,
+            tenantId,
+            sourceAgentId: enriched.source_agent_id,
+            sourceIpType: enriched.source_ip_type,
+          });
+        }
+      }
+    } catch (err) {
+      logger.warn({ err, deviceId }, 'processEventsFlush: event insert failed');
+    }
+  },
+
   // ── Version / download endpoints ─────────────────────────
 
   getAgentVersion(): { version: string } {

@@ -1,5 +1,9 @@
 import './env';
 import http from 'http';
+import type { IncomingMessage } from 'http';
+import type { Duplex } from 'stream';
+import { WebSocketServer } from 'ws';
+import type { WebSocket } from 'ws';
 import { createApp } from './app';
 import { createSocketServer } from './socket';
 import { db } from './db';
@@ -9,6 +13,7 @@ import { authService } from './services/auth.service';
 import { setAgentServiceIO, agentService } from './services/agent.service';
 import { setLiveAlertIO } from './services/liveAlert.service';
 import { banEngine } from './services/ban.service';
+import { obliguardHub } from './services/obliguardHub.service';
 
 async function main() {
   // 1. Run pending migrations
@@ -35,6 +40,54 @@ async function main() {
   // Provide io to services for real-time push events
   setAgentServiceIO(io);
   setLiveAlertIO(io);
+
+  // ── Obliguard agent WebSocket command channel ────────────────────────────
+  // We intercept 'upgrade' events on the same HTTP server used by Socket.io
+  // so the agent WS endpoint shares the same port as the REST API.
+  const agentWss = new WebSocketServer({ noServer: true });
+
+  const sioUpgradeListeners = server.rawListeners('upgrade').slice();
+  server.removeAllListeners('upgrade');
+
+  const OBLIGUARD_AGENT_WS_RE = /^\/api\/agent\/ws$/;
+
+  server.on('upgrade', (request: IncomingMessage, socket: Duplex, head: Buffer) => {
+    const pathname = new URL(request.url ?? '/', 'http://localhost').pathname;
+
+    if (OBLIGUARD_AGENT_WS_RE.test(pathname)) {
+      const apiKey  = request.headers['x-api-key'] as string | undefined;
+      const reqUrl  = new URL(request.url ?? '/', 'http://localhost');
+      const devUuid = reqUrl.searchParams.get('uuid');
+
+      agentWss.handleUpgrade(request, socket, head, async (ws: WebSocket) => {
+        try {
+          if (!apiKey)  { ws.close(4003, 'Missing X-Api-Key'); return; }
+          if (!devUuid) { ws.close(4000, 'Missing uuid query param'); return; }
+
+          const keyRow = await db('agent_api_keys')
+            .where({ key: apiKey }).first();
+          if (!keyRow) { ws.close(4003, 'Invalid API key'); return; }
+
+          const clientIp =
+            (request.headers['x-forwarded-for'] as string | undefined)?.split(',')[0].trim() ??
+            (socket as any).remoteAddress ??
+            '';
+
+          await obliguardHub.register(devUuid, keyRow.tenant_id, keyRow.id, clientIp, ws);
+        } catch (err) {
+          logger.error(err, 'Obliguard agent WS setup error');
+          ws.close(4000, 'Internal error');
+        }
+      });
+      return; // handled — do NOT forward to socket.io
+    }
+
+    // Forward everything else to socket.io's original upgrade listeners
+    for (const listener of sioUpgradeListeners) {
+      (listener as (...args: unknown[]) => void).call(server, request, socket, head);
+    }
+  });
+  // ─────────────────────────────────────────────────────────────────────────
 
   // 6. Start BanEngine — evaluates IP thresholds and enforces bans every 30s
   banEngine.start();
@@ -92,6 +145,7 @@ async function main() {
     clearInterval(agentCleanupTimer);
     clearInterval(banExpiryTimer);
     banEngine.stop();
+    agentWss.close();
     server.close();
     await db.destroy();
     process.exit(0);

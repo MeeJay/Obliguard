@@ -20,13 +20,16 @@ import (
 // LogWatcher tails log files for configured services and accumulates
 // auth events to be sent on the next push.
 type LogWatcher struct {
-	mu         sync.Mutex
-	events     []AgentIpEvent
-	samples    map[string][]string // logPath → last N lines (when sample requested)
-	configs    map[string]AgentServiceConfig
-	parsers    map[string]LogParser // serviceType → parser
-	watchedFiles map[string]struct{} // paths currently being tailed
-	stopCh     chan struct{}
+	mu           sync.Mutex
+	events       []AgentIpEvent
+	samples      map[string][]string // logPath → last N lines (when sample requested)
+	configs      map[string]AgentServiceConfig
+	parsers      map[string]LogParser // serviceType → parser
+	watchedFiles map[string]struct{}  // paths currently being tailed
+	stopCh       chan struct{}
+	// flushCh receives a non-blocking signal whenever a new event is added.
+	// The WS loop uses this to debounce real-time event flushes (≤500 ms latency).
+	flushCh      chan struct{}
 }
 
 func NewLogWatcher(initialConfigs map[string]AgentServiceConfig) *LogWatcher {
@@ -35,6 +38,7 @@ func NewLogWatcher(initialConfigs map[string]AgentServiceConfig) *LogWatcher {
 		configs:      map[string]AgentServiceConfig{},
 		watchedFiles: map[string]struct{}{},
 		stopCh:       make(chan struct{}),
+		flushCh:      make(chan struct{}, 1),
 	}
 
 	lw.parsers = map[string]LogParser{
@@ -98,8 +102,20 @@ func (lw *LogWatcher) DrainSamples() map[string][]string {
 
 func (lw *LogWatcher) addEvent(e AgentIpEvent) {
 	lw.mu.Lock()
-	defer lw.mu.Unlock()
 	lw.events = append(lw.events, e)
+	lw.mu.Unlock()
+
+	// Non-blocking signal so the WS loop can debounce and flush quickly.
+	select {
+	case lw.flushCh <- struct{}{}:
+	default: // channel already has a pending signal — no-op
+	}
+}
+
+// FlushCh returns the channel that receives a signal when new events are available.
+// Consumers should read this channel and then call DrainEvents() after a short debounce.
+func (lw *LogWatcher) FlushCh() <-chan struct{} {
+	return lw.flushCh
 }
 
 // watchLoop runs every 10s and ensures each configured log file is being tailed.
