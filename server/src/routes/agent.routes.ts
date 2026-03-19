@@ -33,6 +33,20 @@ const router = Router();
 
 // ── Public routes (no session auth required) ──────────────────────────────────
 
+// Safety net for misconfigured reverse proxies.
+// The real /ws endpoint is a WebSocket upgrade handled by the 'upgrade' event
+// listener in index.ts — it never reaches Express.  If a proxy (e.g. Nginx
+// Proxy Manager) does NOT have WebSocket Support enabled it strips the Upgrade
+// header, Node.js emits 'request' instead of 'upgrade', and Express processes
+// it as a plain GET.  Without this route it would fall through to the
+// tenant-scoped router (requireAuth) and return a confusing 401.
+// With this route the agent gets a clear 400 + explanation instead.
+router.get('/ws', (_req, res) => {
+  res.status(400).json({
+    error: 'WebSocket upgrade required — enable WebSocket Support on the reverse-proxy host for this service',
+  });
+});
+
 // Agent push — authenticated via X-API-Key header
 router.post('/push', agentAuth, agentPush);
 

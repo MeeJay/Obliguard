@@ -29,14 +29,13 @@ export const apiLimiter = rateLimit({
     // Auth state probe — returns 401 for unauthenticated callers, no info leak.
     req.path === '/api/auth/me' ||
     // ── Machine-to-machine endpoints ───────────────────────────────────────
-    // Agent pushes (X-API-Key authenticated, high-frequency — up to 1 req/2s per agent).
-    req.path.startsWith('/api/agent/push') ||
+    // All /api/agent/* paths are API-key authenticated (X-API-Key header).
+    // Rate-limiting them would cause false positives when agents post metrics,
+    // version checks, download updates, and serve installer scripts at their
+    // natural cadence. Security is provided by the API key itself.
+    req.path.startsWith('/api/agent/') ||
     // Passive heartbeats (token authenticated, triggered by external systems).
-    req.path.startsWith('/api/heartbeat/') ||
-    // Agent auto-update checks and installer downloads (API-key authenticated).
-    req.path.startsWith('/api/agent/version') ||
-    req.path.startsWith('/api/agent/download/') ||
-    req.path.startsWith('/api/agent/installer/'),
+    req.path.startsWith('/api/heartbeat/'),
   message: {
     success: false,
     error: 'Too many requests, please try again later',
