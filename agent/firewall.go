@@ -13,9 +13,9 @@ import (
 
 // FirewallManager abstracts platform-specific firewall operations.
 type FirewallManager interface {
-	// BanIP adds a DROP rule for the given IP.
+	// BanIP adds DROP rules (inbound + outbound) for the given IP.
 	BanIP(ip string) error
-	// UnbanIP removes the DROP rule for the given IP.
+	// UnbanIP removes all Obliguard rules for the given IP.
 	UnbanIP(ip string) error
 	// GetBannedIPs returns the list of IPs currently banned by Obliguard.
 	GetBannedIPs() ([]string, error)
@@ -69,6 +69,7 @@ func DetectFirewall() FirewallManager {
 
 const nftTable = "obliguard"
 const nftChain = "blocklist"
+const nftChainOut = "blocklist_out"
 
 type NftablesFirewall struct{ initialized bool }
 
@@ -86,6 +87,7 @@ func (f *NftablesFirewall) ensureTable() error {
 	cmds := []string{
 		fmt.Sprintf("add table inet %s", nftTable),
 		fmt.Sprintf("add chain inet %s %s { type filter hook input priority -10; policy accept; }", nftTable, nftChain),
+		fmt.Sprintf("add chain inet %s %s { type filter hook output priority -10; policy accept; }", nftTable, nftChainOut),
 	}
 	for _, c := range cmds {
 		if err := exec.Command("nft", strings.Fields(c)...).Run(); err != nil {
@@ -100,26 +102,30 @@ func (f *NftablesFirewall) BanIP(ip string) error {
 	if err := f.ensureTable(); err != nil {
 		return err
 	}
-	rule := fmt.Sprintf("add rule inet %s %s ip saddr %s drop comment \"obliguard\"", nftTable, nftChain, ip)
-	return exec.Command("nft", strings.Fields(rule)...).Run()
+	ruleIn := fmt.Sprintf("add rule inet %s %s ip saddr %s drop comment \"obliguard\"", nftTable, nftChain, ip)
+	ruleOut := fmt.Sprintf("add rule inet %s %s ip daddr %s drop comment \"obliguard\"", nftTable, nftChainOut, ip)
+	if err := exec.Command("nft", strings.Fields(ruleIn)...).Run(); err != nil {
+		return err
+	}
+	return exec.Command("nft", strings.Fields(ruleOut)...).Run()
 }
 
 func (f *NftablesFirewall) UnbanIP(ip string) error {
-	// List rules, find handle for this IP, delete it
-	out, err := exec.Command("nft", "-a", "list", "chain", "inet", nftTable, nftChain).Output()
-	if err != nil {
-		return err
-	}
-	for _, line := range strings.Split(string(out), "\n") {
-		if strings.Contains(line, ip) && strings.Contains(line, "obliguard") {
-			// Extract handle number
-			parts := strings.Split(line, "# handle ")
-			if len(parts) < 2 {
-				continue
+	for _, chain := range []string{nftChain, nftChainOut} {
+		out, err := exec.Command("nft", "-a", "list", "chain", "inet", nftTable, chain).Output()
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(out), "\n") {
+			if strings.Contains(line, ip) && strings.Contains(line, "obliguard") {
+				parts := strings.Split(line, "# handle ")
+				if len(parts) < 2 {
+					continue
+				}
+				handle := strings.TrimSpace(parts[1])
+				del := fmt.Sprintf("delete rule inet %s %s handle %s", nftTable, chain, handle)
+				exec.Command("nft", strings.Fields(del)...).Run()
 			}
-			handle := strings.TrimSpace(parts[1])
-			del := fmt.Sprintf("delete rule inet %s %s handle %s", nftTable, nftChain, handle)
-			return exec.Command("nft", strings.Fields(del)...).Run()
 		}
 	}
 	return nil
@@ -159,16 +165,18 @@ func (f *FirewalldFirewall) IsAvailable() bool {
 }
 
 func (f *FirewalldFirewall) BanIP(ip string) error {
-	// Use a rich rule with source=<ip> action=drop
-	rule := fmt.Sprintf("rule family=ipv4 source address=%s drop", ip)
-	return exec.Command("firewall-cmd", "--permanent",
-		fmt.Sprintf("--add-rich-rule=%s", rule)).Run()
+	ruleIn := fmt.Sprintf("rule family=ipv4 source address=%s drop", ip)
+	ruleOut := fmt.Sprintf("rule family=ipv4 destination address=%s drop", ip)
+	exec.Command("firewall-cmd", "--permanent", fmt.Sprintf("--add-rich-rule=%s", ruleIn)).Run()
+	exec.Command("firewall-cmd", "--permanent", fmt.Sprintf("--add-rich-rule=%s", ruleOut)).Run()
+	return exec.Command("firewall-cmd", "--reload").Run()
 }
 
 func (f *FirewalldFirewall) UnbanIP(ip string) error {
-	rule := fmt.Sprintf("rule family=ipv4 source address=%s drop", ip)
-	_ = exec.Command("firewall-cmd", "--permanent",
-		fmt.Sprintf("--remove-rich-rule=%s", rule)).Run()
+	ruleIn := fmt.Sprintf("rule family=ipv4 source address=%s drop", ip)
+	ruleOut := fmt.Sprintf("rule family=ipv4 destination address=%s drop", ip)
+	exec.Command("firewall-cmd", "--permanent", fmt.Sprintf("--remove-rich-rule=%s", ruleIn)).Run()
+	exec.Command("firewall-cmd", "--permanent", fmt.Sprintf("--remove-rich-rule=%s", ruleOut)).Run()
 	return exec.Command("firewall-cmd", "--reload").Run()
 }
 
@@ -177,11 +185,13 @@ func (f *FirewalldFirewall) GetBannedIPs() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	seen := make(map[string]bool)
 	var ips []string
 	ipRe := ipPattern()
 	for _, line := range strings.Split(string(out), "\n") {
 		if strings.Contains(line, "drop") {
-			if m := ipRe.FindString(line); m != "" {
+			if m := ipRe.FindString(line); m != "" && !seen[m] {
+				seen[m] = true
 				ips = append(ips, m)
 			}
 		}
@@ -201,11 +211,16 @@ func (f *UFWFirewall) IsAvailable() bool {
 }
 
 func (f *UFWFirewall) BanIP(ip string) error {
-	return exec.Command("ufw", "insert", "1", "deny", "from", ip, "to", "any").Run()
+	// Block inbound from IP
+	exec.Command("ufw", "insert", "1", "deny", "from", ip, "to", "any").Run()
+	// Block outbound to IP
+	return exec.Command("ufw", "insert", "1", "deny", "out", "from", "any", "to", ip).Run()
 }
 
 func (f *UFWFirewall) UnbanIP(ip string) error {
-	return exec.Command("ufw", "delete", "deny", "from", ip, "to", "any").Run()
+	exec.Command("ufw", "delete", "deny", "from", ip, "to", "any").Run()
+	exec.Command("ufw", "delete", "deny", "out", "from", "any", "to", ip).Run()
+	return nil
 }
 
 func (f *UFWFirewall) GetBannedIPs() ([]string, error) {
@@ -213,11 +228,13 @@ func (f *UFWFirewall) GetBannedIPs() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	seen := make(map[string]bool)
 	var ips []string
 	ipRe := ipPattern()
 	for _, line := range strings.Split(string(out), "\n") {
 		if strings.Contains(strings.ToUpper(line), "DENY") {
-			if m := ipRe.FindString(line); m != "" {
+			if m := ipRe.FindString(line); m != "" && !seen[m] {
+				seen[m] = true
 				ips = append(ips, m)
 			}
 		}
@@ -228,6 +245,7 @@ func (f *UFWFirewall) GetBannedIPs() ([]string, error) {
 // ── iptables ──────────────────────────────────────────────────────────────────
 
 const iptChain = "OBLIGUARD"
+const iptChainOut = "OBLIGUARD_OUT"
 
 type IptablesFirewall struct{ initialized bool }
 
@@ -242,12 +260,17 @@ func (f *IptablesFirewall) ensureChain() error {
 	if f.initialized {
 		return nil
 	}
-	// Create chain if not exists
+	// Input chain
 	exec.Command("iptables", "-N", iptChain).Run()
-	// Jump to chain from INPUT if not already there
-	checkCmd := exec.Command("iptables", "-C", "INPUT", "-j", iptChain)
-	if checkCmd.Run() != nil {
+	checkIn := exec.Command("iptables", "-C", "INPUT", "-j", iptChain)
+	if checkIn.Run() != nil {
 		exec.Command("iptables", "-I", "INPUT", "1", "-j", iptChain).Run()
+	}
+	// Output chain
+	exec.Command("iptables", "-N", iptChainOut).Run()
+	checkOut := exec.Command("iptables", "-C", "OUTPUT", "-j", iptChainOut)
+	if checkOut.Run() != nil {
+		exec.Command("iptables", "-I", "OUTPUT", "1", "-j", iptChainOut).Run()
 	}
 	f.initialized = true
 	return nil
@@ -255,11 +278,13 @@ func (f *IptablesFirewall) ensureChain() error {
 
 func (f *IptablesFirewall) BanIP(ip string) error {
 	_ = f.ensureChain()
-	return exec.Command("iptables", "-A", iptChain, "-s", ip, "-j", "DROP").Run()
+	exec.Command("iptables", "-A", iptChain, "-s", ip, "-j", "DROP").Run()
+	return exec.Command("iptables", "-A", iptChainOut, "-d", ip, "-j", "DROP").Run()
 }
 
 func (f *IptablesFirewall) UnbanIP(ip string) error {
 	exec.Command("iptables", "-D", iptChain, "-s", ip, "-j", "DROP").Run()
+	exec.Command("iptables", "-D", iptChainOut, "-d", ip, "-j", "DROP").Run()
 	return nil
 }
 
@@ -282,6 +307,13 @@ func (f *IptablesFirewall) GetBannedIPs() ([]string, error) {
 
 // ── Windows Firewall ──────────────────────────────────────────────────────────
 
+// Rule naming:
+//   new:    Obliguard-Block-A-B-C-D-in   (inbound)
+//           Obliguard-Block-A-B-C-D-out  (outbound)
+//   legacy: Obliguard-Block-A-B-C-D      (inbound only, pre-fix)
+//
+// UnbanIP always removes all three variants to clean up duplicates.
+
 const winRulePrefix = "Obliguard-Block-"
 
 type WindowsFirewall struct{}
@@ -293,44 +325,98 @@ func (f *WindowsFirewall) IsAvailable() bool {
 	return err == nil
 }
 
+func (f *WindowsFirewall) ruleBase(ip string) string {
+	return winRulePrefix + strings.ReplaceAll(ip, ".", "-")
+}
+
+// ruleExists checks whether a firewall rule with exactly this name exists.
+func (f *WindowsFirewall) ruleExists(name string) bool {
+	out, err := exec.Command("netsh", "advfirewall", "firewall", "show", "rule",
+		"name="+name).Output()
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(out), name)
+}
+
 func (f *WindowsFirewall) BanIP(ip string) error {
-	ruleName := winRulePrefix + strings.ReplaceAll(ip, ".", "-")
-	return exec.Command("netsh", "advfirewall", "firewall", "add", "rule",
-		"name="+ruleName,
-		"dir=in",
-		"action=block",
-		"remoteip="+ip,
-		"enable=yes",
-		"description=Obliguard auto-ban",
-	).Run()
+	base := f.ruleBase(ip)
+	ruleIn := base + "-in"
+	ruleOut := base + "-out"
+
+	// Inbound — skip if already present (idempotent)
+	if !f.ruleExists(ruleIn) {
+		if err := exec.Command("netsh", "advfirewall", "firewall", "add", "rule",
+			"name="+ruleIn,
+			"dir=in",
+			"action=block",
+			"remoteip="+ip,
+			"enable=yes",
+			"description=Obliguard auto-ban",
+		).Run(); err != nil {
+			return fmt.Errorf("add inbound rule: %w", err)
+		}
+	}
+
+	// Outbound — skip if already present (idempotent)
+	if !f.ruleExists(ruleOut) {
+		if err := exec.Command("netsh", "advfirewall", "firewall", "add", "rule",
+			"name="+ruleOut,
+			"dir=out",
+			"action=block",
+			"remoteip="+ip,
+			"enable=yes",
+			"description=Obliguard auto-ban",
+		).Run(); err != nil {
+			return fmt.Errorf("add outbound rule: %w", err)
+		}
+	}
+
+	return nil
 }
 
 func (f *WindowsFirewall) UnbanIP(ip string) error {
-	ruleName := winRulePrefix + strings.ReplaceAll(ip, ".", "-")
-	return exec.Command("netsh", "advfirewall", "firewall", "delete", "rule",
-		"name="+ruleName,
-	).Run()
+	base := f.ruleBase(ip)
+	// Remove new-style rules
+	exec.Command("netsh", "advfirewall", "firewall", "delete", "rule", "name="+base+"-in").Run()
+	exec.Command("netsh", "advfirewall", "firewall", "delete", "rule", "name="+base+"-out").Run()
+	// Remove legacy rules (without suffix) — also cleans up duplicates from the loop bug
+	exec.Command("netsh", "advfirewall", "firewall", "delete", "rule", "name="+base).Run()
+	return nil
 }
 
+// GetBannedIPs reads the Windows Firewall rule list and extracts banned IPs
+// from rule NAMES (locale-independent — avoids relying on translated field
+// labels like "RemoteIP:" which differ on French/other-language Windows).
 func (f *WindowsFirewall) GetBannedIPs() ([]string, error) {
 	out, err := exec.Command("netsh", "advfirewall", "firewall", "show", "rule",
 		"name=all", "dir=in").Output()
 	if err != nil {
 		return nil, err
 	}
+
+	seen := make(map[string]bool)
 	var ips []string
-	lines := strings.Split(string(out), "\n")
-	inObliguard := false
 	ipRe := ipPattern()
-	for _, line := range lines {
-		if strings.Contains(line, winRulePrefix) {
-			inObliguard = true
+
+	for _, line := range strings.Split(string(out), "\n") {
+		// Find any line that contains our rule prefix (the rule name line).
+		// Works regardless of Windows UI language since rule names are never translated.
+		idx := strings.Index(line, winRulePrefix)
+		if idx < 0 {
+			continue
 		}
-		if inObliguard && strings.Contains(line, "RemoteIP:") {
-			if m := ipRe.FindString(line); m != "" {
-				ips = append(ips, m)
-				inObliguard = false
-			}
+		// Extract from the prefix onward, trim whitespace/CR
+		raw := strings.TrimRight(line[idx:], " \r\n\t")
+		// Strip -in / -out suffix so both old and new naming resolve to the same IP
+		raw = strings.TrimSuffix(raw, "-in")
+		raw = strings.TrimSuffix(raw, "-out")
+		// The remaining part after the prefix is the IP with dashes
+		ipDashes := strings.TrimPrefix(raw, winRulePrefix)
+		ip := strings.ReplaceAll(ipDashes, "-", ".")
+		if ipRe.MatchString(ip) && !seen[ip] {
+			seen[ip] = true
+			ips = append(ips, ip)
 		}
 	}
 	return ips, nil
@@ -377,11 +463,11 @@ func (f *PFFirewall) GetBannedIPs() ([]string, error) {
 
 type NoOpFirewall struct{}
 
-func (f *NoOpFirewall) Name() string                      { return "none" }
-func (f *NoOpFirewall) IsAvailable() bool                 { return true }
-func (f *NoOpFirewall) BanIP(ip string) error             { return nil }
-func (f *NoOpFirewall) UnbanIP(ip string) error           { return nil }
-func (f *NoOpFirewall) GetBannedIPs() ([]string, error)   { return nil, nil }
+func (f *NoOpFirewall) Name() string                    { return "none" }
+func (f *NoOpFirewall) IsAvailable() bool               { return true }
+func (f *NoOpFirewall) BanIP(ip string) error           { return nil }
+func (f *NoOpFirewall) UnbanIP(ip string) error         { return nil }
+func (f *NoOpFirewall) GetBannedIPs() ([]string, error) { return nil, nil }
 
 // ── Shared helper ─────────────────────────────────────────────────────────────
 
