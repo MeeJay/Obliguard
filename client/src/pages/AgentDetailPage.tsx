@@ -1155,7 +1155,7 @@ export function AgentDetailPage() {
   // ── Online detection ────────────────────────────────────────────────────────
   const isOnline = device
     ? Date.now() - new Date(device.updatedAt).getTime() <
-      (device.resolvedSettings?.checkIntervalSeconds ?? 60) * 3 * 1000
+      (device.resolvedSettings?.checkIntervalSeconds ?? 60) * (device.resolvedSettings?.maxMissedPushes ?? 2) * 1000
     : false;
 
   // ── Quick ban ───────────────────────────────────────────────────────────────

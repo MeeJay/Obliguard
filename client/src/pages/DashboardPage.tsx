@@ -101,7 +101,8 @@ function AgentCard({
 }) {
   const displayName = device.name ?? device.hostname;
   const intervalSecs = device.resolvedSettings?.checkIntervalSeconds ?? 60;
-  const isOnline = Date.now() - new Date(device.updatedAt).getTime() < intervalSecs * 3 * 1000;
+  const maxMissed = device.resolvedSettings?.maxMissedPushes ?? 2;
+  const isOnline = Date.now() - new Date(device.updatedAt).getTime() < intervalSecs * maxMissed * 1000;
 
   const osLabel = device.osInfo
     ? [device.osInfo.distro ?? device.osInfo.platform, device.osInfo.release]
@@ -303,7 +304,8 @@ export function DashboardPage() {
   const onlineCount = useMemo(() => {
     return agentDevices.filter(d => {
       const interval = d.resolvedSettings?.checkIntervalSeconds ?? 60;
-      return Date.now() - new Date(d.updatedAt).getTime() < interval * 3 * 1000;
+      const maxMissed = d.resolvedSettings?.maxMissedPushes ?? 2;
+      return Date.now() - new Date(d.updatedAt).getTime() < interval * maxMissed * 1000;
     }).length;
   }, [agentDevices]);
 
