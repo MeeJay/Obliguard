@@ -3,6 +3,8 @@ import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { ShieldOff, Cpu, Activity, Calendar, Server, Wifi, ChevronRight } from 'lucide-react';
 import apiClient from '@/api/client';
+import { getSocket } from '@/socket/socketClient';
+import { SOCKET_EVENTS } from '@obliview/shared';
 import type { AgentDevice, ApiResponse } from '@obliview/shared';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -100,9 +102,7 @@ function AgentCard({
   onClick: () => void;
 }) {
   const displayName = device.name ?? device.hostname;
-  const intervalSecs = device.resolvedSettings?.checkIntervalSeconds ?? 60;
-  const maxMissed = device.resolvedSettings?.maxMissedPushes ?? 2;
-  const isOnline = Date.now() - new Date(device.updatedAt).getTime() < intervalSecs * maxMissed * 1000;
+  const isOnline = device.wsConnected;
 
   const osLabel = device.osInfo
     ? [device.osInfo.distro ?? device.osInfo.platform, device.osInfo.release]
@@ -290,6 +290,20 @@ export function DashboardPage() {
     fetchAgents();
   }, []);
 
+  // Live-update wsConnected when agents connect/disconnect
+  useEffect(() => {
+    const socket = getSocket();
+    if (!socket) return;
+    function handleStatus(data: { deviceId: number; wsConnected?: boolean }) {
+      if (data.wsConnected === undefined) return;
+      setAgentDevices(prev =>
+        prev.map(d => d.id === data.deviceId ? { ...d, wsConnected: data.wsConnected! } : d),
+      );
+    }
+    socket.on(SOCKET_EVENTS.AGENT_STATUS_CHANGED, handleStatus);
+    return () => { socket.off(SOCKET_EVENTS.AGENT_STATUS_CHANGED, handleStatus); };
+  }, []);
+
   const handleLiftBan = async (banId: number) => {
     try {
       await apiClient.delete(`/bans/${banId}`);
@@ -302,11 +316,7 @@ export function DashboardPage() {
 
   // Count how many agents are online
   const onlineCount = useMemo(() => {
-    return agentDevices.filter(d => {
-      const interval = d.resolvedSettings?.checkIntervalSeconds ?? 60;
-      const maxMissed = d.resolvedSettings?.maxMissedPushes ?? 2;
-      return Date.now() - new Date(d.updatedAt).getTime() < interval * maxMissed * 1000;
-    }).length;
+    return agentDevices.filter(d => d.wsConnected).length;
   }, [agentDevices]);
 
   return (

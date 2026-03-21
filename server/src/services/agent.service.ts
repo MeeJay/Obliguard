@@ -2,6 +2,7 @@ import type { Server as SocketIOServer } from 'socket.io';
 import * as fs from 'fs';
 import * as path from 'path';
 import { db } from '../db';
+import { obliguardHub } from './obliguardHub.service';
 import type {
   AgentApiKey,
   AgentDevice,
@@ -43,6 +44,9 @@ function isRfc1918(ip: string): boolean {
 let _io: SocketIOServer | null = null;
 export function setAgentServiceIO(io: SocketIOServer): void {
   _io = io;
+}
+export function getAgentServiceIO(): SocketIOServer | null {
+  return _io;
 }
 
 // ============================================================
@@ -178,6 +182,7 @@ function rowToDevice(
     lastThreatAt: row.last_threat_at ? row.last_threat_at.toISOString() : null,
     lastAttackAt: row.last_attack_at ? row.last_attack_at.toISOString() : null,
     wanMatchingEnabled: row.wan_matching_enabled ?? false,
+    wsConnected: obliguardHub.isConnected(row.uuid),
   };
 }
 
@@ -880,6 +885,7 @@ export const agentService = {
       _io.emit(SOCKET_EVENTS.AGENT_STATUS_CHANGED, {
         deviceId,
         status: 'up',
+        wsConnected: true,
         violations: [],
         violationKeys: [],
       });

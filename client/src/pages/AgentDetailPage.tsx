@@ -18,6 +18,7 @@ import type {
   ServiceTemplate,
   CreateServiceTemplateRequest, NotificationTypeConfig, ServiceType,
 } from '@obliview/shared';
+import { SOCKET_EVENTS } from '@obliview/shared';
 import { NotificationTypesPanel } from '@/components/agent/NotificationTypesPanel';
 import { ServiceTemplatesPanel } from '@/components/agent/ServiceTemplatesPanel';
 
@@ -1034,6 +1035,18 @@ export function AgentDetailPage() {
       .finally(() => setDeviceLoading(false));
   }, [devId]);
 
+  // ── Live wsConnected updates ────────────────────────────────────────────────
+  useEffect(() => {
+    const socket = getSocket();
+    if (!socket || !devId) return;
+    function handleStatus(data: { deviceId: number; wsConnected?: boolean }) {
+      if (data.deviceId !== devId || data.wsConnected === undefined) return;
+      setDevice(prev => prev ? { ...prev, wsConnected: data.wsConnected! } : prev);
+    }
+    socket.on(SOCKET_EVENTS.AGENT_STATUS_CHANGED, handleStatus);
+    return () => { socket.off(SOCKET_EVENTS.AGENT_STATUS_CHANGED, handleStatus); };
+  }, [devId]);
+
   // ── Resolve cross-app links for this agent ──────────────────────────────────
   useEffect(() => {
     if (!device?.uuid) return;
@@ -1153,10 +1166,7 @@ export function AgentDetailPage() {
   }, [summaryEvents]);
 
   // ── Online detection ────────────────────────────────────────────────────────
-  const isOnline = device
-    ? Date.now() - new Date(device.updatedAt).getTime() <
-      (device.resolvedSettings?.checkIntervalSeconds ?? 60) * (device.resolvedSettings?.maxMissedPushes ?? 2) * 1000
-    : false;
+  const isOnline = device?.wsConnected ?? false;
 
   // ── Quick ban ───────────────────────────────────────────────────────────────
   const handleBan = useCallback(async (ip: string) => {

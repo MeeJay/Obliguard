@@ -1,7 +1,8 @@
 import type { WebSocket } from 'ws';
 import { db } from '../db';
 import { logger } from '../utils/logger';
-import { agentService } from './agent.service';
+import { agentService, getAgentServiceIO } from './agent.service';
+import { SOCKET_EVENTS } from '@obliview/shared';
 import type { AgentIpEvent, ObliguardPushBody } from '@obliview/shared';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -29,6 +30,8 @@ export interface OrCommand {
 class ObliguardHubService {
   /** deviceUuid → active connection */
   private byDevice = new Map<string, ObliguardConn>();
+  /** deviceUuid → pending offline timer (cleared if agent reconnects before expiry) */
+  private offlineTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor() {
     // Ping every 15 s to keep the connection alive through reverse proxies.
@@ -53,6 +56,14 @@ class ObliguardHubService {
     clientIp: string,
     ws: WebSocket,
   ): Promise<void> {
+    // Cancel any pending offline timer — agent reconnected in time
+    const pendingTimer = this.offlineTimers.get(deviceUuid);
+    if (pendingTimer) {
+      clearTimeout(pendingTimer);
+      this.offlineTimers.delete(deviceUuid);
+      logger.info({ deviceUuid }, 'Obliguard agent reconnected — offline timer cancelled');
+    }
+
     const existing = this.byDevice.get(deviceUuid);
     if (existing && existing.ws.readyState === 1) {
       try { existing.ws.close(1000, 'replaced'); } catch {}
@@ -85,9 +96,52 @@ class ObliguardHubService {
   private _unregister(deviceUuid: string, ws: WebSocket): void {
     const existing = this.byDevice.get(deviceUuid);
     if (existing?.ws === ws) {
+      const deviceId = existing.deviceId;
       this.byDevice.delete(deviceUuid);
       logger.info({ deviceUuid }, 'Obliguard agent command channel disconnected');
+
+      // Start an offline grace timer based on the device's resolved settings.
+      // If the agent reconnects before the timer fires, register() cancels it.
+      if (deviceId) {
+        this._startOfflineTimer(deviceUuid, deviceId);
+      }
     }
+  }
+
+  /**
+   * Start a delayed offline notification. The delay = checkIntervalSeconds × maxMissedPushes
+   * resolved from the device's settings (group → global → defaults).
+   * This absorbs brief WS reconnections without flashing the UI red.
+   */
+  private async _startOfflineTimer(deviceUuid: string, deviceId: number): Promise<void> {
+    // Resolve the device's effective settings for the grace period
+    let delaySec = 60 * 2; // fallback: 2 minutes
+    try {
+      const device = await agentService.getDeviceById(deviceId);
+      if (device) {
+        const cis = device.resolvedSettings?.checkIntervalSeconds ?? 60;
+        const mmp = device.resolvedSettings?.maxMissedPushes ?? 2;
+        delaySec = cis * mmp;
+      }
+    } catch { /* use fallback */ }
+
+    const timer = setTimeout(() => {
+      this.offlineTimers.delete(deviceUuid);
+      // Only emit if the agent hasn't reconnected
+      if (!this.isConnected(deviceUuid)) {
+        const io = getAgentServiceIO();
+        if (io) {
+          logger.info({ deviceUuid, deviceId }, 'Obliguard agent offline grace period expired');
+          io.to('role:admin').emit(SOCKET_EVENTS.AGENT_STATUS_CHANGED, {
+            deviceId,
+            status: 'down',
+            wsConnected: false,
+          });
+        }
+      }
+    }, delaySec * 1000);
+
+    this.offlineTimers.set(deviceUuid, timer);
   }
 
   /**
@@ -235,7 +289,9 @@ class ObliguardHubService {
 
   isConnected(deviceUuid: string): boolean {
     const conn = this.byDevice.get(deviceUuid);
-    return !!conn && conn.ws.readyState === 1;
+    if (conn && conn.ws.readyState === 1) return true;
+    // During grace period, report as still connected to avoid UI flicker
+    return this.offlineTimers.has(deviceUuid);
   }
 }
 

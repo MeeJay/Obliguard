@@ -30,6 +30,7 @@ interface AgentNode {
   lastPushAt: number;     // epoch ms of last heartbeat/push
   checkIntervalMs: number; // push interval in ms
   maxMissedPushes: number; // offline after checkIntervalMs * maxMissedPushes without a push
+  wsConnected: boolean;   // true when agent has active WS connection
 }
 
 interface IpNode {
@@ -798,7 +799,7 @@ export function NetMapPage() {
 
     try {
       const [devRes, evRes, banRes] = await Promise.all([
-        apiClient.get<{ data: { id: number; hostname: string; name: string | null; status: string; updatedAt: string; resolvedSettings: { checkIntervalSeconds: number; maxMissedPushes: number } }[] }>('/agent/devices'),
+        apiClient.get<{ data: { id: number; hostname: string; name: string | null; status: string; updatedAt: string; wsConnected: boolean; resolvedSettings: { checkIntervalSeconds: number; maxMissedPushes: number } }[] }>('/agent/devices'),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         apiClient.get<{ data: any[] }>('/ip-events', { params: { pageSize: 500 } })
           .catch(() => ({ data: { data: [] } })),
@@ -857,7 +858,7 @@ export function NetMapPage() {
       const placed = devs.length > 0
         ? devs.slice(0, 20)
         : [{ id: -1, hostname: 'Server', name: null, status: 'approved',
-             updatedAt: '', resolvedSettings: { checkIntervalSeconds: 60, maxMissedPushes: 2 } }];
+             updatedAt: '', wsConnected: true, resolvedSettings: { checkIntervalSeconds: 60, maxMissedPushes: 2 } }];
 
       agentsRef.current = placed.map(d => {
         const lastPushAt      = d.updatedAt ? new Date(d.updatedAt).getTime() : 0;
@@ -873,6 +874,7 @@ export function NetMapPage() {
           lastPushAt,
           checkIntervalMs,
           maxMissedPushes,
+          wsConnected:     d.wsConnected,
         };
       });
       layoutAgents(agentsRef.current, w, h);
@@ -1180,7 +1182,7 @@ export function NetMapPage() {
       if (ipCount === 0) continue;
       const rings    = Math.ceil(ipCount / PER_RING);
       const dimmed   = selId !== null && selId !== ag.id;
-      const agOnline = now - ag.lastPushAt < ag.checkIntervalMs * ag.maxMissedPushes;
+      const agOnline = ag.wsConnected;
       for (let ring = 0; ring < rings; ring++) {
         const r = RING_INNER_R + ring * RING_GAP;
         ctx.save();
@@ -1276,7 +1278,7 @@ export function NetMapPage() {
     for (const agent of agents) {
       const isSel    = selId === agent.id;
       const dimmed   = selId !== null && !isSel;
-      const isOnline = now - agent.lastPushAt < agent.checkIntervalMs * agent.maxMissedPushes;
+      const isOnline = agent.wsConnected;
       const pulse    = (Math.sin(ts / 1100 + agent.phase) + 1) / 2;
       const alpha    = dimmed ? 0.22 : 1.0;
       const nr       = agent.r;

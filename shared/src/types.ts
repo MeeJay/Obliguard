@@ -574,6 +574,8 @@ export interface AgentDevice {
    * Defaults to false — without it, WAN matching is ambiguous (many machines behind same NAT).
    */
   wanMatchingEnabled: boolean;
+  /** True when the agent has an active WebSocket command channel to the server. */
+  wsConnected: boolean;
 }
 
 // ============================================
