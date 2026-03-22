@@ -208,6 +208,27 @@ router.get('/sso-config', async (_req, res) => {
 });
 
 /**
+ * GET /api/auth/sso-logout-url
+ * Returns Obligate logout URL so the client can redirect after local logout.
+ */
+router.get('/sso-logout-url', async (req, res) => {
+  try {
+    const cfg = await appConfigService.getObligateRaw();
+    if (!cfg.url) {
+      res.json({ success: true, data: null });
+      return;
+    }
+    const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+    const host = req.headers['x-forwarded-host'] || req.headers.host;
+    const redirectUri = `${protocol}://${host}/login`;
+    const logoutUrl = `${cfg.url}/logout?redirect_uri=${encodeURIComponent(redirectUri)}`;
+    res.json({ success: true, data: logoutUrl });
+  } catch {
+    res.json({ success: true, data: null });
+  }
+});
+
+/**
  * GET /api/auth/connected-apps
  * Returns list of connected apps from Obligate (for cross-app nav buttons).
  */

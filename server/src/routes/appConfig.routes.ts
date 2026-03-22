@@ -7,8 +7,6 @@ const router = Router();
 
 // GET is available to all authenticated users (needed for profile page to check allow_2fa)
 router.get('/', requireAuth, appConfigController.getAll);
-// PUT is admin only
-router.put('/:key', requireAuth, requireRole('admin'), appConfigController.set);
 
 // Agent global defaults — admin only
 router.get('/agent-global', requireAuth, requireRole('admin'), appConfigController.getAgentGlobal);
@@ -17,5 +15,8 @@ router.patch('/agent-global', requireAuth, requireRole('admin'), appConfigContro
 // Obligate SSO gateway — admin only
 router.get('/obligate',  requireAuth, requireRole('admin'), appConfigController.getObligateConfig);
 router.put('/obligate',  requireAuth, requireRole('admin'), appConfigController.setObligateConfig);
+
+// Generic key setter — MUST be LAST (/:key catches everything)
+router.put('/:key', requireAuth, requireRole('admin'), appConfigController.set);
 
 export default router;

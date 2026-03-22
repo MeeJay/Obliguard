@@ -102,6 +102,16 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       disconnectSocket();
       set({ user: null, permissions: null, requires2faSetup: false });
     }
+
+    // Redirect to Obligate logout to destroy SSO session
+    try {
+      const res = await fetch('/api/auth/sso-logout-url', { credentials: 'include' });
+      const data = await res.json() as { success: boolean; data: string | null };
+      if (data.success && data.data) {
+        window.location.href = data.data;
+        return;
+      }
+    } catch { /* ignore */ }
   },
 
   checkSession: async () => {
