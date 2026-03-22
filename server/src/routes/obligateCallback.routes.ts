@@ -100,6 +100,26 @@ router.get('/callback', async (req, res) => {
       }
     }
 
+    // Sync preferences from Obligate (theme, language, toast settings)
+    if (assertion.preferences) {
+      const prefUpdate: Record<string, unknown> = {};
+      if (assertion.preferences.preferredLanguage) prefUpdate.preferred_language = assertion.preferences.preferredLanguage;
+      if (Object.keys(prefUpdate).length > 0) {
+        await db('users').where({ id: localUserId }).update(prefUpdate);
+      }
+      const uiPrefs: Record<string, unknown> = {};
+      if (assertion.preferences.preferredTheme) uiPrefs.preferredTheme = assertion.preferences.preferredTheme;
+      if (assertion.preferences.toastEnabled !== undefined) uiPrefs.toastEnabled = assertion.preferences.toastEnabled;
+      if (assertion.preferences.toastPosition) uiPrefs.toastPosition = assertion.preferences.toastPosition;
+      if (Object.keys(uiPrefs).length > 0) {
+        const existingRow = await db('users').where({ id: localUserId }).select('preferences').first() as { preferences: unknown } | undefined;
+        const existing = (typeof existingRow?.preferences === 'string' ? JSON.parse(existingRow.preferences) : existingRow?.preferences) ?? {};
+        await db('users').where({ id: localUserId }).update({
+          preferences: JSON.stringify({ ...existing, ...uiPrefs }),
+        });
+      }
+    }
+
     // Establish session
     req.session.userId = localUserId;
     const user = await db('users').where({ id: localUserId }).first() as { username: string; role: string } | undefined;
