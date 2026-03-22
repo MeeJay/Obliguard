@@ -96,6 +96,14 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   logout: async () => {
+    // Fetch Obligate logout URL BEFORE destroying local state
+    let obligateLogoutUrl: string | null = null;
+    try {
+      const res = await fetch('/api/auth/sso-logout-url', { credentials: 'include' });
+      const data = await res.json() as { success: boolean; data: string | null };
+      if (data.success && data.data) obligateLogoutUrl = data.data;
+    } catch { /* ignore */ }
+
     try {
       await authApi.logout();
     } finally {
@@ -103,15 +111,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       set({ user: null, permissions: null, requires2faSetup: false });
     }
 
-    // Redirect to Obligate logout to destroy SSO session
-    try {
-      const res = await fetch('/api/auth/sso-logout-url', { credentials: 'include' });
-      const data = await res.json() as { success: boolean; data: string | null };
-      if (data.success && data.data) {
-        window.location.href = data.data;
-        return;
-      }
-    } catch { /* ignore */ }
+    if (obligateLogoutUrl) {
+      window.location.href = obligateLogoutUrl;
+    }
   },
 
   checkSession: async () => {
