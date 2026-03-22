@@ -16,7 +16,6 @@ import {
   Eye,
   Building2,
   X,
-  ArrowLeftRight,
 } from 'lucide-react';
 import type {
   User,
