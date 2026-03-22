@@ -1,73 +1,164 @@
-# Obliview
+# Obliguard
 
-Self-hosted uptime & infrastructure monitoring built for teams. Multi-tenant workspaces, hierarchical groups, RBAC, 13 monitor types, 10 notification channels, native system agent, and automated remediation - deployable in one command.
+Self-hosted network intrusion prevention system (IPS) with automated IP banning, real-time threat visualization, and multi-agent firewall enforcement. Detects brute-force attacks across SSH, RDP, Nginx, Apache, and more — then blocks attackers at the firewall level on every agent simultaneously.
+
 ---
+
 ## Features at a Glance
 
-- **13 monitor types** - HTTP, Ping, TCP, DNS, SSL, SMTP, Docker, Game Server, Push, Script, JSON API, Browser, Value Watcher
-- **Native system agent** - Windows/Linux/macOS, with CPU, memory, disk, network, temperature, GPU metrics
-- **10 notification channels** - Telegram, Discord, Slack, Teams, SMTP, Webhook, Gotify, Ntfy, Pushover, Free Mobile
-- **5 remediation actions** - Webhook, N8N, Script, Docker restart, SSH command
-- **Multi-tenant workspaces** - isolated tenants with per-workspace roles
-- **Teams & RBAC** - read-only / read-write per group or monitor
-- **Maintenance windows** - one-time or recurring, scope-based, suppresses notifications
-- **2FA** - TOTP authenticator apps + Email OTP
-- **Import / Export** - full config backup as JSON with conflict resolution
+- **Automated ban engine** — detects brute-force patterns across all agents, auto-bans attackers globally
+- **8 service parsers** — SSH, RDP, Nginx, Apache, IIS, FTP, Mail, MySQL with auto-detected log paths
+- **Real-time NetMap** — canvas visualization of agents, attacking IPs, peer links, and live event sparks
+- **Multi-platform firewall** — enforces bans via nftables, firewalld, ufw, iptables, Windows netsh, macOS pf
+- **IP reputation tracking** — failure counts, affected agents, targeted services, attempted usernames, GeoIP
+- **Whitelist system** — CIDR-aware, hierarchical (global/tenant/group/agent), respects exclusions before banning
+- **Service templates** — customizable regex, thresholds, time windows, ban or track mode per service
+- **10 notification channels** — Telegram, Discord, Slack, Teams, SMTP, Webhook, Gotify, Ntfy, Pushover, Free Mobile
+- **Multi-tenant workspaces** — isolated tenants with per-workspace roles
+- **Teams & RBAC** — read-only / read-write per group
+- **2FA** — TOTP authenticator apps + Email OTP
+- **Import / Export** — full config backup as JSON with conflict resolution
 - **18 UI languages**
-- **Real-time** - Socket.io live updates and live alert toasts
-- **Desktop tray app** - Windows & macOS, multi-tenant tab bar, auto-update
+- **Real-time** — Socket.io live updates, live alert toasts, real-time event streaming
+- **Desktop tray app** — Windows & macOS, multi-tenant tab bar, auto-update
 
 ---
 
-## Monitor Types
+## How It Works
 
-| Type | Description |
-|------|-------------|
-| **HTTP(S)** | URL monitoring with keyword matching, status code validation, custom headers & body, upside-down mode |
-| **Ping** | ICMP round-trip with response time tracking |
-| **TCP Port** | Raw TCP connectivity to any host:port |
-| **DNS** | Record lookup validation (A, AAAA, CNAME, MX, TXT…) |
-| **SSL Certificate** | Certificate expiry monitoring with configurable warning threshold |
-| **SMTP** | SMTP server availability check |
-| **Docker Container** | Container running/stopped status via Docker socket |
-| **Game Server** | Availability & player count via GameDig (Minecraft, CS2, Valheim, and 300+ games) |
-| **Push / Heartbeat** | Passive monitoring - external systems POST to a token URL, Obliview alerts if they stop |
-| **Script** | Run a shell command, validate exit code |
-| **JSON API** | Fetch a JSON endpoint, extract a value via JSONPath, validate it |
-| **Browser** | Headless Playwright browser check - renders JS, waits for selectors, optional screenshot on failure |
-| **Value Watcher** | Numeric value monitoring with operators: `>`, `<`, `>=`, `<=`, `==`, `!=`, `between`, `changed` |
-
-Agent monitors (CPU, memory, disk, etc.) are a 14th category managed through the native agent system.
+1. **Agents** run on your servers and tail service logs (SSH auth.log, Nginx error.log, etc.)
+2. Auth failure events are pushed to the Obliguard server in real-time via WebSocket
+3. The **Ban Engine** evaluates thresholds every 30 seconds — if an IP exceeds the configured failure count within the time window, it's auto-banned
+4. The ban is **distributed to all agents** on their next push — each agent enforces it at the local firewall
+5. The **NetMap** visualizes the entire network in real-time: agents, attacking IPs, peer links, and live event particles
 
 ---
 
-## Native System Agent
+## Ban Engine
 
-A lightweight Go binary runs on monitored hosts and pushes metrics to the server every N seconds. No inbound ports required.
+The core of Obliguard. Runs a 30-second evaluation cycle:
 
-**Collected metrics**
-- CPU usage (total + per-core)
-- Memory & swap usage
-- Disk usage per mount point
-- Network throughput (in/out per interface)
-- Temperatures - CPU, GPU, motherboard, NVMe (Windows: LibreHardwareMonitor + PawnIO + ASUS ATK; Linux/macOS: native sensors)
-- GPU utilization, VRAM, temperature (NVIDIA & AMD)
+- Resolves active service templates per agent (opt-in model)
+- Counts `auth_failure` events within configured time windows
+- Auto-creates global IP bans when thresholds are exceeded
+- Checks whitelist before banning
+- Fires attack notifications to affected agents
 
-**Installation**
-- Windows: MSI installer (WiX v4) with optional PawnIO kernel driver for temperature sensors
+**Ban scoping:**
+
+| Scope | Effect |
+|-------|--------|
+| **Global** | All tenants, all agents enforce |
+| **Tenant** | Single workspace only |
+| **Group** | All agents in the group |
+| **Agent** | Single device |
+
+- **Auto bans** (engine-created) vs. **manual bans** (admin action)
+- Optional TTL with auto-deactivation on expiry
+- Tenant exemptions: exclude from a global ban without revoking it globally
+
+---
+
+## Service Detection & Log Parsing
+
+Agents auto-detect listening services by scanning ports, then tail the corresponding log files.
+
+| Service | Default Log Paths |
+|---------|-------------------|
+| **SSH** | `/var/log/auth.log`, `/var/log/secure`, `journald:sshd.service` |
+| **RDP** | Windows Security Event Log (EventID 4625/4624) |
+| **Nginx** | `/var/log/nginx/error.log` |
+| **Apache** | `/var/log/apache2/error.log`, `/var/log/httpd/error_log` |
+| **IIS** | `C:\inetpub\logs\LogFiles\` |
+| **FTP** | `/var/log/vsftpd.log`, `/var/log/proftpd/proftpd.log` |
+| **Mail** | `/var/log/mail.log`, `/var/log/maillog` |
+| **MySQL** | `/var/log/mysql/error.log` |
+
+- Regex extraction with named groups (`?P<ip>`, `?P<username>`)
+- Custom regex overrides per service template
+- On-demand log sampling for debugging
+
+---
+
+## Service Templates
+
+Define detection rules per service type, then assign them at any level of the hierarchy.
+
+| Field | Description |
+|-------|-------------|
+| **Threshold** | Number of failures before triggering (e.g., 5) |
+| **Window** | Time window in seconds (e.g., 300 = 5 minutes) |
+| **Mode** | `ban` (auto-create IP ban) or `track` (log only) |
+| **Custom regex** | Override the built-in log parser |
+| **Log path** | Override auto-detected path per agent |
+
+**Resolution priority:** Agent-level > Group-level > Template default.
+
+---
+
+## IP Reputation
+
+Tracks every IP that touches your infrastructure:
+
+- Total failure/success counts
+- Number of affected agents and services
+- Attempted usernames (deduped)
+- GeoIP: country, city, ASN
+- Status: `clean` | `suspicious` | `whitelisted` | `banned`
+- Lookup integrations: AbuseIPDB, Shodan, VirusTotal, WHOIS, MXToolbox
+
+---
+
+## Whitelist
+
+- CIDR notation support (e.g., `10.0.0.0/8`, `192.168.1.0/24`)
+- Same hierarchical scoping as bans (global / tenant / group / agent)
+- Pre-ban check: whitelisted IPs are never auto-banned, even if threshold is met
+- Per-tenant overrides: whitelist a globally-banned IP at tenant level
+
+---
+
+## NetMap (Real-Time Threat Visualization)
+
+A full-screen canvas rendering your network security posture in real-time:
+
+- **Agents** at the center, force-repelled to avoid overlap
+- **IP nodes** in arcs around each agent, sorted by activity
+- **Color coding:** red (banned), orange (suspicious), yellow (whitelisted), gray (clean)
+- **Peer links:** directed edges when an IP matches another agent's LAN IP (compromised peer detection)
+- **Live particles:** event sparks on auth_success / auth_failure
+- **Ripples:** expanding shock waves on auto-ban events
+- **Country flags** from GeoIP data
+- **Interactive:** drag agents, hover for stats, click for IP details
+
+---
+
+## Native Agent
+
+A lightweight Go binary that runs on monitored hosts. No inbound ports required — agents push to the server via persistent WebSocket.
+
+**Capabilities:**
+- Auto-detect listening services (port scan)
+- Tail service logs and parse auth events in real-time
+- Enforce firewall bans locally (add/remove rules)
+- Report current firewall state for delta sync
+- Report LAN IPs for peer-link detection on the NetMap
+
+**Firewall backends (auto-detected):**
+
+| Platform | Backend |
+|----------|---------|
+| **Linux** | nftables > firewalld > ufw > iptables (priority order) |
+| **Windows** | Windows Defender Firewall (`netsh`) |
+| **macOS** | BSD `pf` |
+
+**Installation:**
+- Windows: MSI installer (WiX v4)
 - Linux / macOS: native binary, systemd / launchctl service
-- Auto-update: agent downloads and reinstalls itself silently when a new version is available
-- Auto-uninstall command via server → agent executes uninstaller and exits
+- Auto-update: agent downloads and reinstalls silently when a new version is available
+- Auto-uninstall command via server
 
-**Configuration per device**
-- Threshold overrides per metric (CPU, memory, disk, network, temperature)
-- Group-level default thresholds with per-device override toggle
-- Push interval (seconds) - group default or device-specific
-- Heartbeat monitoring (alert if agent stops pushing)
-- Display config: hide/show sections, custom labels, chart preferences
-- Sensor display name renaming
-
-**Device management**
+**Device management:**
 - Approval workflow (auto or manual)
 - Suspend / resume without deletion
 - Bulk approve, suspend, or uninstall
@@ -77,7 +168,7 @@ A lightweight Go binary runs on monitored hosts and pushes metrics to the server
 
 ## Notification Channels
 
-Bind channels at **global**, **group**, or **monitor** level with **merge**, **replace**, or **exclude** inheritance modes.
+Bind channels at **global**, **group**, or **agent** level with **merge**, **replace**, or **exclude** inheritance modes.
 
 | Channel | Notes |
 |---------|-------|
@@ -86,47 +177,24 @@ Bind channels at **global**, **group**, or **monitor** level with **merge**, **r
 | **Slack** | Incoming webhook |
 | **Microsoft Teams** | Webhook URL |
 | **Email (SMTP)** | Custom SMTP server or platform SMTP |
-| **Webhook** | Generic HTTP - GET / POST / PUT / PATCH, custom headers |
+| **Webhook** | Generic HTTP — GET / POST / PUT / PATCH, custom headers |
 | **Gotify** | Self-hosted push (server URL + token) |
 | **Ntfy** | Self-hosted or ntfy.sh push |
 | **Pushover** | Mobile push via Pushover app |
 | **Free Mobile** | SMS via French mobile operator API |
 
-**Group notification mode** - receive one alert when the first monitor in a group goes down, and one recovery when all are back up.
-
 Test messages can be sent directly from the UI to validate channel configuration.
-
----
-
-## Remediation System
-
-Automatically react to monitor state changes with configurable actions.
-
-| Action | Description |
-|--------|-------------|
-| **Generic Webhook** | HTTP request (GET / POST / PUT / PATCH) to any endpoint |
-| **N8N Workflow** | Trigger an N8N automation workflow |
-| **Custom Script** | Run a shell script on the Obliview server |
-| **Docker Restart** | Restart a Docker container by name |
-| **SSH Command** | Execute a remote command over SSH (password or key auth) |
-
-- Trigger on: **down**, **up**, or **both**
-- Configurable cooldown between executions
-- Scope-based binding with merge / replace / exclude inheritance
-- AES-256-GCM encryption for SSH credentials
-- Full execution history: status, output, error, duration
 
 ---
 
 ## Multi-Tenant Workspaces
 
-Create isolated workspaces (tenants) within a single Obliview instance.
+Create isolated workspaces within a single Obliguard instance.
 
-- Each workspace has its own monitors, groups, teams, notification channels, settings, and remediation actions
+- Each workspace has its own agents, groups, bans, whitelist, service templates, notification channels, and settings
 - Users can belong to multiple workspaces with independent **admin** or **member** roles
-- Platform admins have cross-workspace visibility and can manage all tenants
+- Platform admins have cross-workspace visibility
 - Workspace switching from the UI without re-login
-- Notification channels can be shared across workspaces
 
 ---
 
@@ -134,22 +202,21 @@ Create isolated workspaces (tenants) within a single Obliview instance.
 
 - Create **teams** per workspace
 - Assign users to teams
-- Grant teams **read-only** (RO) or **read-write** (RW) access per group or monitor
-- Access cascades through the group hierarchy - assign a group and all children are covered
-- `canCreate` flag per team: allows non-admins to create monitors/groups
-- Platform admins always have full access to their workspace
+- Grant teams **read-only** or **read-write** access per group
+- Access cascades through the group hierarchy
+- `canCreate` flag per team: allows non-admins to create groups
+- Platform admins always have full access
 
 ---
 
 ## Hierarchical Groups
 
-Organize monitors into nested groups with unlimited depth using a **closure table** for efficient queries.
+Organize agents into nested groups with unlimited depth using a **closure table**.
 
 - Settings cascade: configure once at a parent group, override where needed
 - Notification channels cascade with merge / replace / exclude modes
+- Service template overrides per group (thresholds, log paths, enabled state)
 - **General groups** are visible to all users regardless of team permissions
-- Drag-and-drop reordering
-- Group notification mode for aggregate alerting
 
 ---
 
@@ -159,42 +226,17 @@ Organize monitors into nested groups with unlimited depth using a **closure tabl
 |-------|-------|
 | Global | Applies to everything in the workspace |
 | Group | Applies to the group and all subgroups |
-| Monitor | Monitor-specific override |
+| Agent | Device-specific override |
 
-Deleting a setting at any scope reverts it to the inherited value from the parent. Settings include: check interval, timeout, retry interval, max retries, heartbeat monitoring (agents), push interval (agents).
-
----
-
-## Maintenance Windows
-
-Suppress alerts and exclude downtime from uptime statistics during planned maintenance.
-
-- **One-time** windows (auto-deleted after expiry) or **recurring** (daily / weekly)
-- Scope: global, group, monitor, or agent device
-- Scope inheritance - set a window on a group and it applies to all child monitors
-- Heartbeat records are shown in blue during maintenance
-- Notifications and remediations are suppressed
-- Uptime % and response time averages exclude maintenance periods
+Settings include: push interval, max missed pushes (offline grace), service template overrides, notification channels.
 
 ---
 
 ## Two-Factor Authentication
 
-- **TOTP** - any authenticator app (Google Authenticator, Authy, 1Password, etc.)
-- **Email OTP** - one-time code sent via SMTP
+- **TOTP** — any authenticator app (Google Authenticator, Authy, 1Password, etc.)
+- **Email OTP** — one-time code sent via SMTP
 - Optional system-wide enforcement (all users must enroll 2FA)
-- Setup available during enrollment wizard or from the profile page
-
----
-
-## Enrollment Wizard
-
-New users are guided through a 4-step wizard on first login:
-
-1. **Language** - pick from 18 supported languages
-2. **Profile** - display name, email address
-3. **Alerts** - configure notification preferences
-4. **2FA** - optional TOTP or Email OTP setup
 
 ---
 
@@ -202,26 +244,24 @@ New users are guided through a 4-step wizard on first login:
 
 Full configuration backup and restore as JSON.
 
-**Exportable sections:** monitor groups, monitors, settings, notification channels, agent groups, teams, remediation actions, remediation bindings.
+**Exportable sections:** groups, settings, notification channels, agent configurations, teams, service templates, bans, whitelist.
 
-**Conflict resolution strategies** (when a UUID matches an existing record):
-- **Update** - overwrite the existing record
-- **Generate new** - create a duplicate with a fresh UUID
-- **Skip** - leave the existing record untouched
-
-Export and import are scoped to the **active workspace** - cross-tenant data is never included.
+**Conflict resolution strategies:**
+- **Update** — overwrite the existing record
+- **Generate new** — create a duplicate with a fresh UUID
+- **Skip** — leave the existing record untouched
 
 ---
 
 ## Live Alerts
 
-Real-time status-change notifications delivered via Socket.io without polling.
+Real-time notifications delivered via Socket.io.
 
-- Floating toast notifications (bottom-right stack, 1-minute auto-dismiss)
-- Top-center banner showing the latest alert (10-second auto-dismiss)
-- Click to navigate directly to the affected monitor or agent
-- Per-workspace filtering - only see alerts relevant to your current tenant
-- Desktop app: unread badge per workspace tab, optional auto-switch to the alerting workspace
+- Floating toast notifications (bottom-right, auto-dismiss)
+- Top-center banner for the latest alert
+- Click to navigate to the affected agent
+- Per-workspace filtering
+- Desktop app: unread badge per workspace tab, optional auto-switch to alerting workspace
 
 ---
 
@@ -230,53 +270,15 @@ Real-time status-change notifications delivered via Socket.io without polling.
 A lightweight system tray application (Go) for quick access without keeping a browser tab open.
 
 - **Windows** (MSI installer) and **macOS** (DMG)
-- Per-workspace tab bar - switch between tenants
+- Per-workspace tab bar
 - Unread alert badge per tab
-- **Auto-cycle mode** - rotate through workspaces every N seconds
-- **Follow alerts mode** - automatically switch to the workspace that just received an alert
-- Auto-update with in-tray update prompt
-- Starts minimized to tray, opens on click
-
----
-
-## User Management
-
-- Create, edit, disable, and delete users
-- Platform roles: **admin** (full access) or **user** (team-based access)
-- Per-user workspace assignment with **admin** or **member** role per workspace
-- Password reset via email token (1-hour expiry)
-- Admin safeguards: cannot delete or demote the last active admin
-
----
-
-## Internationalization
-
-18 UI languages with full translation coverage:
-
-English · French · Spanish · German · Portuguese (BR) · Chinese (Simplified) · Japanese · Korean · Russian · Arabic · Italian · Dutch · Polish · Turkish · Swedish · Danish · Czech · Ukrainian
-
-Language is saved per user and applied immediately without page reload.
-
----
-
-## Real-Time Dashboard
-
-- Live status updates via Socket.io - no manual refresh needed
-- Per-monitor status: `UP`, `DOWN`, `ALERT`, `PAUSED`, `PENDING`, `MAINTENANCE`, `SSL_WARNING`, `SSL_EXPIRED`, `OFFLINE`
-- 24-hour uptime %, average/min/max response time
-- Group-level aggregated status (number of monitors down, in alert, pending, etc.)
-- Bulk operations: multi-select, pause/resume, delete, edit
-- Configurable heartbeat retention
+- **Auto-cycle mode** — rotate through workspaces every N seconds
+- **Follow alerts mode** — auto-switch to the workspace with the latest alert
+- Auto-update with in-tray prompt
 
 ---
 
 ## Deployment
-
-### One-command install
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/MeeJay/obliview/main/install.sh | sh
-```
 
 ### Docker Compose (built-in PostgreSQL)
 
@@ -296,15 +298,14 @@ Set `DATABASE_URL` in your `.env` to point at your existing PostgreSQL instance.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `DATABASE_URL` | PostgreSQL connection string | `postgres://obliview:changeme@localhost:5432/obliview` |
-| `SESSION_SECRET` | Session signing secret | - |
+| `DATABASE_URL` | PostgreSQL connection string | `postgres://obliguard:changeme@localhost:5432/obliguard` |
+| `SESSION_SECRET` | Session signing secret | — |
 | `PORT` | Server port | `3001` |
 | `NODE_ENV` | `production` or `development` | `production` |
 | `CLIENT_ORIGIN` | CORS origin for the client | `http://localhost` |
-| `APP_NAME` | Prefix for notification messages | `Obliview` |
+| `APP_NAME` | Prefix for notification messages | `Obliguard` |
 | `DEFAULT_ADMIN_USERNAME` | Admin account created on first run | `admin` |
 | `DEFAULT_ADMIN_PASSWORD` | Admin password on first run | `admin123` |
-| `MIN_CHECK_INTERVAL` | Minimum allowed check interval (seconds) | `10` |
 
 ---
 
@@ -314,14 +315,12 @@ Set `DATABASE_URL` in your `.env` to point at your existing PostgreSQL instance.
 |-------|-----------|
 | **Server** | Node.js 24 LTS, TypeScript, Express |
 | **Database** | PostgreSQL 16, Knex (migrations + query builder) |
-| **Real-time** | Socket.io |
+| **Real-time** | Socket.io + native WebSocket (agent channel) |
 | **Client** | React 18, Vite, Tailwind CSS, Zustand |
 | **Agent** | Go (cross-platform binary) |
-| **Desktop app** | Go (Wails / systray) |
-| **Browser monitors** | Playwright (headless Chromium) |
+| **Desktop app** | Go (systray) |
 | **Monorepo** | npm workspaces (`shared/`, `server/`, `client/`) |
 
-
-> **🤖 An experiment with Claude Code**
+> **An experiment with Claude Code**
 >
 > This project was built as an experiment to see how far Claude Code could be pushed as a development tool. Claude was used as a coding assistant throughout the entire development process.
