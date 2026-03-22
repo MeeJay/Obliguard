@@ -38,6 +38,7 @@ function rowToUser(row: UserRow): User {
     enrollmentVersion: row.enrollment_version ?? 0,
     totpEnabled: row.totp_enabled ?? false,
     emailOtpEnabled: row.email_otp_enabled ?? false,
+    foreignSource: row.foreign_source ?? null,
   };
 }
 

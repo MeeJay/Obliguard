@@ -120,7 +120,7 @@ router.get('/callback', async (req, res) => {
       if (err) { logger.error(err, 'Session save failed'); res.redirect('/login?error=sso_failed'); return; }
       logger.info({ sessionId: req.sessionID, userId: req.session.userId }, 'Session saved, redirecting to /');
       res.setHeader('Content-Type', 'text/html');
-      res.end('<html><head><meta http-equiv="refresh" content="0;url=/"></head><body>Redirecting...</body></html>');
+      res.end(`<!DOCTYPE html><html><head><meta http-equiv="refresh" content="0;url=/"><style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0d1117;color:#8b949e;font-family:-apple-system,BlinkMacSystemFont,sans-serif}.s{text-align:center}.d{width:28px;height:28px;border:2.5px solid #30363d;border-top-color:#58a6ff;border-radius:50%;animation:r .6s linear infinite;margin:0 auto 14px}@keyframes r{to{transform:rotate(360deg)}}</style></head><body><div class="s"><div class="d"></div><div>Signing in...</div></div></body></html>`);
     });
   } catch (err) {
     logger.error(err, 'Obligate callback error');
@@ -211,6 +211,30 @@ router.get('/app-info', async (req, res) => {
     logger.error(err, 'app-info error');
     res.status(500).json({ success: false, error: 'Failed to fetch app info' });
   }
+});
+
+/**
+ * GET /api/auth/dashboard-stats
+ * Called by Obligate (Bearer auth) to display stats on the Obligate dashboard.
+ */
+router.get('/dashboard-stats', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) { res.status(401).json({ success: false }); return; }
+    const raw = await appConfigService.getObligateRaw();
+    if (!raw.apiKey || authHeader.slice(7) !== raw.apiKey) { res.status(401).json({ success: false }); return; }
+
+    const [agents, activeBans, threats] = await Promise.all([
+      db('agent_devices').where({ status: 'approved' }).count('id as c').first(),
+      db('ip_bans').where({ is_active: true }).count('id as c').first(),
+      db('ip_events').count('id as c').first(),
+    ]);
+    res.json({ success: true, data: { stats: [
+      { label: 'Agents', value: Number((agents as any)?.c ?? 0), color: '#58a6ff' },
+      { label: 'Active Bans', value: Number((activeBans as any)?.c ?? 0), color: '#f85149' },
+      { label: 'Events Logged', value: Number((threats as any)?.c ?? 0), color: '#d29922' },
+    ] } });
+  } catch { res.json({ success: true, data: null }); }
 });
 
 /**
