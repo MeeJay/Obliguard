@@ -1,5 +1,5 @@
 import apiClient from './client';
-import type { AppConfig, AgentGlobalConfig, ObliviewConfig, OblimapConfig, OblianceConfig, ApiResponse } from '@obliview/shared';
+import type { AppConfig, AgentGlobalConfig, ObligateConfig, ApiResponse } from '@obliview/shared';
 
 export const appConfigApi = {
   async getConfig(): Promise<AppConfig> {
@@ -21,78 +21,15 @@ export const appConfigApi = {
     return res.data.data!;
   },
 
-  // ── Obliview integration ──────────────────────────────────────────────────
+  // ── Obligate SSO gateway ────────────────────────────────────────────────
 
-  /** Fetch Obliview URL + whether an API key has been set. Admin only. */
-  async getObliviewConfig(): Promise<ObliviewConfig> {
-    const res = await apiClient.get<ApiResponse<ObliviewConfig>>('/admin/config/obliview');
+  async getObligateConfig(): Promise<ObligateConfig> {
+    const res = await apiClient.get<ApiResponse<ObligateConfig>>('/admin/config/obligate');
     return res.data.data!;
   },
 
-  /** Save Obliview URL and/or API key. Pass apiKey=null to clear it. Admin only. */
-  async patchObliviewConfig(data: { url?: string | null; apiKey?: string | null }): Promise<ObliviewConfig> {
-    const res = await apiClient.patch<ApiResponse<ObliviewConfig>>('/admin/config/obliview', data);
+  async patchObligateConfig(patch: { url?: string | null; apiKey?: string | null; enabled?: boolean }): Promise<ObligateConfig> {
+    const res = await apiClient.put<ApiResponse<ObligateConfig>>('/admin/config/obligate', patch);
     return res.data.data!;
-  },
-
-  /**
-   * Ask the Obliguard server to look up a device UUID on the Obliview instance.
-   * Returns the full URL to the Obliview agent page, or null if not found / not configured.
-   */
-  async getObliviewAgentLink(uuid: string): Promise<string | null> {
-    try {
-      const res = await apiClient.get<ApiResponse<{ url: string } | null>>(
-        `/admin/config/obliview/agent-link/${encodeURIComponent(uuid)}`,
-      );
-      return res.data.data?.url ?? null;
-    } catch {
-      return null;
-    }
-  },
-
-  // ── Oblimap integration ───────────────────────────────────────────────────
-
-  async getOblimapConfig(): Promise<OblimapConfig> {
-    const res = await apiClient.get<ApiResponse<OblimapConfig>>('/admin/config/oblimap');
-    return res.data.data!;
-  },
-
-  async patchOblimapConfig(data: { url?: string | null; apiKey?: string | null }): Promise<OblimapConfig> {
-    const res = await apiClient.patch<ApiResponse<OblimapConfig>>('/admin/config/oblimap', data);
-    return res.data.data!;
-  },
-
-  async getOblimapAgentLink(uuid: string): Promise<string | null> {
-    try {
-      const res = await apiClient.get<ApiResponse<{ url: string } | null>>(
-        `/admin/config/oblimap/agent-link/${encodeURIComponent(uuid)}`,
-      );
-      return res.data.data?.url ?? null;
-    } catch {
-      return null;
-    }
-  },
-
-  // ── Obliance integration ──────────────────────────────────────────────────
-
-  async getOblianceConfig(): Promise<OblianceConfig> {
-    const res = await apiClient.get<ApiResponse<OblianceConfig>>('/admin/config/obliance');
-    return res.data.data!;
-  },
-
-  async patchOblianceConfig(data: { url?: string | null; apiKey?: string | null }): Promise<OblianceConfig> {
-    const res = await apiClient.patch<ApiResponse<OblianceConfig>>('/admin/config/obliance', data);
-    return res.data.data!;
-  },
-
-  async getOblianceAgentLink(uuid: string): Promise<string | null> {
-    try {
-      const res = await apiClient.get<ApiResponse<{ url: string } | null>>(
-        `/admin/config/obliance/agent-link/${encodeURIComponent(uuid)}`,
-      );
-      return res.data.data?.url ?? null;
-    } catch {
-      return null;
-    }
   },
 };

@@ -4,11 +4,10 @@ import {
   ArrowLeft, RefreshCw, ShieldOff, ShieldCheck, ExternalLink,
   ChevronLeft, ChevronRight, Wifi, Cpu, Server, X, Eye,
   Trash2, AlertTriangle,
-  ChevronDown, ChevronUp, LayoutGrid, Network, Pencil, ArrowLeftRight,
+  ChevronDown, ChevronUp, LayoutGrid, Network, Pencil,
 } from 'lucide-react';
 import apiClient from '@/api/client';
 import { agentApi } from '@/api/agent.api';
-import { appConfigApi } from '@/api/appConfig.api';
 import { bansApi } from '@/api/bans.api';
 import { whitelistApi } from '@/api/whitelist.api';
 import { serviceTemplatesApi } from '@/api/serviceTemplates.api';
@@ -1014,14 +1013,6 @@ export function AgentDetailPage() {
   const [renameValue,   setRenameValue]   = useState('');
   const renameInputRef = useRef<HTMLInputElement>(null);
 
-  // Cross-app companion links (resolved once after device loads)
-  const [obliviewAgentUrl, setObliviewAgentUrl]   = useState<string | null>(null);
-  const [obliviewSsoEnabled, setObliviewSsoEnabled] = useState(false);
-  const [oblimapAgentUrl, setOblimapAgentUrl]     = useState<string | null>(null);
-  const [oblimapSsoEnabled, setOblimapSsoEnabled] = useState(false);
-  const [oblianceAgentUrl, setOblianceAgentUrl]   = useState<string | null>(null);
-  const [oblianceSsoEnabled, setOblianceSsoEnabled] = useState(false);
-  const [ssoSwitching, setSsoSwitching] = useState(false);
 
   // In-flight bans / whitelists
   const [banningIps,      setBanningIps]      = useState(new Set<string>());
@@ -1047,47 +1038,6 @@ export function AgentDetailPage() {
     return () => { socket.off(SOCKET_EVENTS.AGENT_STATUS_CHANGED, handleStatus); };
   }, [devId]);
 
-  // ── Resolve cross-app links for this agent ──────────────────────────────────
-  useEffect(() => {
-    if (!device?.uuid) return;
-    appConfigApi.getObliviewAgentLink(device.uuid).then(url => setObliviewAgentUrl(url)).catch(() => {});
-    appConfigApi.getOblimapAgentLink(device.uuid).then(url => setOblimapAgentUrl(url)).catch(() => {});
-    appConfigApi.getOblianceAgentLink(device.uuid).then(url => setOblianceAgentUrl(url)).catch(() => {});
-    appConfigApi.getConfig()
-      .then(cfg => {
-        setObliviewSsoEnabled(cfg.enable_foreign_sso ?? false);
-        setOblimapSsoEnabled(cfg.enable_oblimap_sso ?? false);
-        setOblianceSsoEnabled(cfg.enable_obliance_sso ?? false);
-      })
-      .catch(() => {});
-  }, [device?.uuid]);
-
-  /** Generic SSO redirect to another app's agent page */
-  const handleAgentSwitch = useCallback(async (targetUrl: string, ssoEnabled: boolean, source: string) => {
-    // In ObliTools: navigate directly in the target WebView tab — no SSO needed.
-    if (typeof (window as any).__go_openInAppTab === 'function') {
-      (window as any).__go_openInAppTab(targetUrl).catch(() => {});
-      return;
-    }
-    if (!ssoEnabled) { window.location.href = targetUrl; return; }
-    setSsoSwitching(true);
-    try {
-      const res = await fetch('/api/sso/generate-token', { method: 'POST', credentials: 'include' });
-      const body = await res.json() as { success: boolean; data?: { token: string } };
-      if (body.success && body.data?.token) {
-        const agentUrl = new URL(targetUrl);
-        const from     = encodeURIComponent(window.location.origin);
-        const token    = encodeURIComponent(body.data.token);
-        const redirect = encodeURIComponent(agentUrl.pathname + agentUrl.search);
-        window.location.href = `${agentUrl.origin}/auth/foreign?token=${token}&from=${from}&source=${source}&redirect=${redirect}`;
-      } else { window.location.href = targetUrl; }
-    } catch { window.location.href = targetUrl; }
-    finally { setSsoSwitching(false); }
-  }, []);
-
-  const handleObliviewAgentClick  = useCallback(() => obliviewAgentUrl  ? handleAgentSwitch(obliviewAgentUrl,  obliviewSsoEnabled,  'obliguard') : Promise.resolve(), [obliviewAgentUrl,  obliviewSsoEnabled,  handleAgentSwitch]);
-  const handleOblimapAgentClick   = useCallback(() => oblimapAgentUrl   ? handleAgentSwitch(oblimapAgentUrl,   oblimapSsoEnabled,   'obliguard') : Promise.resolve(), [oblimapAgentUrl,   oblimapSsoEnabled,   handleAgentSwitch]);
-  const handleOblianceAgentClick  = useCallback(() => oblianceAgentUrl  ? handleAgentSwitch(oblianceAgentUrl,  oblianceSsoEnabled,  'obliguard') : Promise.resolve(), [oblianceAgentUrl,  oblianceSsoEnabled,  handleAgentSwitch]);
 
   // ── Load paginated events ───────────────────────────────────────────────────
   const loadEvents = useCallback(async () => {
@@ -1289,42 +1239,6 @@ export function AgentDetailPage() {
         </div>
 
         <div className="flex items-center gap-1.5 flex-shrink-0">
-          {obliviewAgentUrl && (
-            <button
-              type="button"
-              onClick={() => { void handleObliviewAgentClick(); }}
-              disabled={ssoSwitching}
-              title="Open this agent in Obliview"
-              className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium text-[#58a6ff] border border-[#1d4ed8]/40 bg-[#0c1929]/50 hover:bg-[#0c1929]/70 hover:border-[#3b82f6] transition-colors disabled:opacity-60"
-            >
-              <ArrowLeftRight size={12} className={ssoSwitching ? 'animate-pulse' : ''} />
-              Obliview
-            </button>
-          )}
-          {oblimapAgentUrl && (
-            <button
-              type="button"
-              onClick={() => { void handleOblimapAgentClick(); }}
-              disabled={ssoSwitching}
-              title="Open this agent in Oblimap"
-              className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium text-[#10b981] border border-[#047857]/40 bg-[#022c22]/50 hover:bg-[#022c22]/70 hover:border-[#10b981] transition-colors disabled:opacity-60"
-            >
-              <ArrowLeftRight size={12} className={ssoSwitching ? 'animate-pulse' : ''} />
-              Oblimap
-            </button>
-          )}
-          {oblianceAgentUrl && (
-            <button
-              type="button"
-              onClick={() => { void handleOblianceAgentClick(); }}
-              disabled={ssoSwitching}
-              title="Open this agent in Obliance"
-              className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium text-[#a78bfa] border border-[#7c3aed]/40 bg-[#2e1065]/50 hover:bg-[#2e1065]/70 hover:border-[#a78bfa] transition-colors disabled:opacity-60"
-            >
-              <ArrowLeftRight size={12} className={ssoSwitching ? 'animate-pulse' : ''} />
-              Obliance
-            </button>
-          )}
           <button
             onClick={() => { void loadEvents(); void loadSummary(); }}
             className="rounded p-1.5 text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors"

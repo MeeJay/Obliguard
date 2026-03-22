@@ -22,27 +22,21 @@ import ipReputationRoutes from './ipReputation.routes';
 import ipDisplayNamesRoutes from './ipDisplayNames.routes';
 import serviceTemplatesRoutes from './serviceTemplates.routes';
 import geoRoutes from './geo.routes';
-import foreignSsoRoutes from './foreignSso.routes';
+import obligateCallbackRoutes from './obligateCallback.routes';
 import oblitoolsRoutes from './oblitools.routes';
-import obliviewRoutes from './obliview.routes';
 import systemRoutes from './system.routes';
-import oblimapRoutes from './oblimap.routes';
-import oblianceRoutes from './obliance.routes';
 
 const router = Router();
 
 // ── Global (no tenant required) ──────────────────────────────────────────────
 router.use('/auth', authRoutes);
+router.use('/auth', obligateCallbackRoutes);      // Obligate SSO callback, sso-config, connected-apps
 router.use('/agent', agentRoutes);           // agent push (authenticated via API key)
 router.use('/admin/config', appConfigRoutes);
 router.use('/system', systemRoutes);         // system info / about (admin only, no tenant required)
 router.use('/profile/2fa', twoFactorRoutes); // must be before /profile
 router.use('/live-alerts', liveAlertRouter);
-router.use('/sso', foreignSsoRoutes);        // Cross-platform SSO (generate-token, validate-token, exchange, users)
 router.use('/oblitools', oblitoolsRoutes);   // ObliTools desktop manifest (auth required)
-router.use('/obliguard', obliviewRoutes);    // Obliview cross-platform lookup (Bearer-authenticated)
-router.use('/oblimap', oblimapRoutes);       // Oblimap cross-platform lookup (Bearer-authenticated)
-router.use('/obliance', oblianceRoutes);    // Obliance cross-platform lookup (Bearer-authenticated)
 
 // ── Tenant management ─────────────────────────────────────────────────────────
 router.use('/tenants', tenantRoutes);
