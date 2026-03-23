@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
+import { requireRole } from '../middleware/rbac';
 import {
   listWhitelist,
   createWhitelistEntry,
@@ -9,7 +10,7 @@ import {
 const router = Router();
 
 router.get('/', requireAuth, listWhitelist);
-router.post('/', requireAuth, createWhitelistEntry);
-router.delete('/:id', requireAuth, deleteWhitelistEntry);
+router.post('/', requireAuth, requireRole('admin'), createWhitelistEntry);
+router.delete('/:id', requireAuth, requireRole('admin'), deleteWhitelistEntry);
 
 export default router;

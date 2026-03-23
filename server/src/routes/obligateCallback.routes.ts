@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { db } from '../db';
+import { requireAuth } from '../middleware/auth';
 import { obligateService } from '../services/obligate.service';
 import { tenantService } from '../services/tenant.service';
 import { appConfigService } from '../services/appConfig.service';
@@ -295,12 +296,8 @@ router.get('/sso-logout-url', async (req, res) => {
  * GET /api/auth/connected-apps
  * Returns list of connected apps from Obligate (for cross-app nav buttons).
  */
-router.get('/connected-apps', async (req, res) => {
+router.get('/connected-apps', requireAuth, async (req, res) => {
   try {
-    if (!req.session?.userId) {
-      res.status(401).json({ success: false, error: 'Authentication required' });
-      return;
-    }
     const apps = await obligateService.getConnectedApps();
     res.json({ success: true, data: apps });
   } catch (err) {

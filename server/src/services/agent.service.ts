@@ -24,6 +24,7 @@ import {
 import { appConfigService } from './appConfig.service';
 import { notificationService } from './notification.service';
 import { logger } from '../utils/logger';
+import { obligateService } from './obligate.service';
 import { whitelistService } from './whitelist.service';
 import { banService } from './ban.service';
 import { ipReputationService } from './ipReputation.service';
@@ -522,6 +523,8 @@ export const agentService = {
         })
         .returning('*') as AgentDeviceRow[];
       device = rowToDevice(row);
+      // Register device UUID with Obligate for cross-app linking (non-blocking)
+      obligateService.registerDeviceLink(deviceUuid, `/agents/${device.id}`).catch(() => {});
     } else {
       // ── b. Update device metadata ─────────────────────
       // Clear updating_since if set (agent came back after update)

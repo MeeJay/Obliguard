@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
+import { requireRole } from '../middleware/rbac';
 import { tenantService } from '../services/tenant.service';
 import { AppError } from '../middleware/errorHandler';
 
@@ -52,9 +53,8 @@ router.get('/', async (req, res, next) => {
 });
 
 // ── Create tenant (platform admin only) ───────────────────────────────────
-router.post('/', async (req, res, next) => {
+router.post('/', requireRole('admin'), async (req, res, next) => {
   try {
-    if (req.session.role !== 'admin') throw new AppError(403, 'Admin only');
     const { name, slug } = req.body as { name: string; slug: string };
     if (!name || !slug) throw new AppError(400, 'name and slug are required');
     const tenant = await tenantService.create({ name, slug });
@@ -84,9 +84,8 @@ router.get('/:id', async (req, res, next) => {
 });
 
 // ── Update tenant (platform admin only) ───────────────────────────────────
-router.put('/:id', async (req, res, next) => {
+router.put('/:id', requireRole('admin'), async (req, res, next) => {
   try {
-    if (req.session.role !== 'admin') throw new AppError(403, 'Admin only');
     const id = parseInt(req.params.id);
     const { name, slug } = req.body as { name?: string; slug?: string };
     const tenant = await tenantService.update(id, { name, slug });
@@ -98,9 +97,8 @@ router.put('/:id', async (req, res, next) => {
 });
 
 // ── Delete tenant (platform admin only, cannot delete tenant 1) ───────────
-router.delete('/:id', async (req, res, next) => {
+router.delete('/:id', requireRole('admin'), async (req, res, next) => {
   try {
-    if (req.session.role !== 'admin') throw new AppError(403, 'Admin only');
     const id = parseInt(req.params.id);
     if (id === 1) throw new AppError(400, 'Cannot delete the default tenant');
     await tenantService.delete(id);
@@ -112,9 +110,8 @@ router.delete('/:id', async (req, res, next) => {
 
 // ── Tenant members ─────────────────────────────────────────────────────────
 // GET /api/tenants/:id/members
-router.get('/:id/members', async (req, res, next) => {
+router.get('/:id/members', requireRole('admin'), async (req, res, next) => {
   try {
-    if (req.session.role !== 'admin') throw new AppError(403, 'Admin only');
     const tenantId = parseInt(req.params.id);
     const members = await tenantService.getMembers(tenantId);
     res.json({ success: true, data: members });
@@ -124,9 +121,8 @@ router.get('/:id/members', async (req, res, next) => {
 });
 
 // POST /api/tenants/:id/members  { userId, role }
-router.post('/:id/members', async (req, res, next) => {
+router.post('/:id/members', requireRole('admin'), async (req, res, next) => {
   try {
-    if (req.session.role !== 'admin') throw new AppError(403, 'Admin only');
     const tenantId = parseInt(req.params.id);
     const { userId, role } = req.body as { userId: number; role?: 'admin' | 'member' };
     if (!userId) throw new AppError(400, 'userId is required');
@@ -138,9 +134,8 @@ router.post('/:id/members', async (req, res, next) => {
 });
 
 // PUT /api/tenants/:id/members/:uid  { role }
-router.put('/:id/members/:uid', async (req, res, next) => {
+router.put('/:id/members/:uid', requireRole('admin'), async (req, res, next) => {
   try {
-    if (req.session.role !== 'admin') throw new AppError(403, 'Admin only');
     const tenantId = parseInt(req.params.id);
     const userId = parseInt(req.params.uid);
     const { role } = req.body as { role: 'admin' | 'member' };
@@ -153,9 +148,8 @@ router.put('/:id/members/:uid', async (req, res, next) => {
 });
 
 // DELETE /api/tenants/:id/members/:uid
-router.delete('/:id/members/:uid', async (req, res, next) => {
+router.delete('/:id/members/:uid', requireRole('admin'), async (req, res, next) => {
   try {
-    if (req.session.role !== 'admin') throw new AppError(403, 'Admin only');
     const tenantId = parseInt(req.params.id);
     const userId = parseInt(req.params.uid);
     await tenantService.removeUser(tenantId, userId);

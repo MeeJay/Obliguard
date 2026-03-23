@@ -100,6 +100,44 @@ export const obligateService = {
   },
 
   /**
+   * Register a device UUID + path with Obligate for cross-app linking.
+   */
+  async registerDeviceLink(uuid: string, appPath: string): Promise<void> {
+    const raw = await appConfigService.getObligateRaw();
+    if (!raw.url || !raw.apiKey) return;
+
+    try {
+      await fetch(`${raw.url}/api/devices/register`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${raw.apiKey}`,
+        },
+        body: JSON.stringify({ uuid, path: appPath }),
+      });
+    } catch { /* non-critical */ }
+  },
+
+  /**
+   * Get cross-app links for a device UUID from Obligate.
+   */
+  async getDeviceLinks(uuid: string): Promise<Array<{ appType: string; name: string; url: string; icon: string | null; color: string | null }>> {
+    const raw = await appConfigService.getObligateRaw();
+    if (!raw.url || !raw.apiKey) return [];
+
+    try {
+      const res = await fetch(`${raw.url}/api/devices/links?uuid=${encodeURIComponent(uuid)}`, {
+        headers: { 'Authorization': `Bearer ${raw.apiKey}` },
+      });
+      if (!res.ok) return [];
+      const data = await res.json() as { success: boolean; data?: Array<{ appType: string; name: string; url: string; icon: string | null; color: string | null }> };
+      return data.data ?? [];
+    } catch {
+      return [];
+    }
+  },
+
+  /**
    * Get the list of connected apps from Obligate (for cross-app nav buttons).
    */
   async getConnectedApps(): Promise<Array<{ appType: string; name: string; baseUrl: string; icon: string | null; color: string | null }>> {

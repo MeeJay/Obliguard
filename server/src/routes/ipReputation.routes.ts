@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
+import { requireRole } from '../middleware/rbac';
 import {
   listReputation,
   getIpDetail,
@@ -15,7 +16,7 @@ router.get('/', requireAuth, listReputation);
  * Clears suspicious status for the calling tenant (or globally for admins).
  * Must come BEFORE the /:ip GET to avoid route conflict.
  */
-router.post('/:ip/clear', requireAuth, clearSuspicious);
+router.post('/:ip/clear', requireAuth, requireRole('admin'), clearSuspicious);
 
 /**
  * GET /api/ip-reputation/:ip

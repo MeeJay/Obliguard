@@ -16,12 +16,12 @@ const router = Router();
 // ⚠️ /stats must be before /:id
 router.get('/stats', requireAuth, getBanStats);
 router.get('/', requireAuth, listBans);
-router.post('/', requireAuth, createBan);
-router.delete('/:id', requireAuth, liftBan);
+router.post('/', requireAuth, requireRole('admin'), createBan);
+router.delete('/:id', requireAuth, requireRole('admin'), liftBan);
 router.post('/:id/promote-global', requireAuth, requireRole('admin'), promoteBan);
 
-// Per-tenant exclusions: any authenticated user can exclude/re-include a global ban
-router.post('/:id/exclude', requireAuth, excludeBan);
-router.delete('/:id/exclude', requireAuth, removeExclusion);
+// Per-tenant exclusions
+router.post('/:id/exclude', requireAuth, requireRole('admin'), excludeBan);
+router.delete('/:id/exclude', requireAuth, requireRole('admin'), removeExclusion);
 
 export default router;
