@@ -4,7 +4,7 @@ import {
   ArrowLeft, RefreshCw, ShieldOff, ShieldCheck, ExternalLink,
   ChevronLeft, ChevronRight, Wifi, Cpu, Server, X, Eye,
   Trash2, AlertTriangle,
-  ChevronDown, ChevronUp, LayoutGrid, Network, Pencil,
+  ChevronDown, ChevronUp, LayoutGrid, Network, Pencil, ArrowLeftRight,
 } from 'lucide-react';
 import apiClient from '@/api/client';
 import { agentApi } from '@/api/agent.api';
@@ -988,6 +988,9 @@ export function AgentDetailPage() {
   const [device,        setDevice]        = useState<AgentDevice | null>(null);
   const [deviceLoading, setDeviceLoading] = useState(true);
 
+  // Cross-app links
+  const [crossAppLinks, setCrossAppLinks] = useState<Array<{ appType: string; name: string; url: string; color: string | null }>>([]);
+
   // Active tab
   const [activeTab, setActiveTab] = useState<TabId>('overview');
 
@@ -1025,6 +1028,17 @@ export function AgentDetailPage() {
       .then(d => setDevice(d))
       .finally(() => setDeviceLoading(false));
   }, [devId]);
+
+  // ── Resolve cross-app links for this agent ──────────────────────────────────
+  useEffect(() => {
+    if (!device?.uuid) return;
+    fetch(`/api/auth/device-links?uuid=${encodeURIComponent(device.uuid)}`, { credentials: 'include' })
+      .then(r => r.json())
+      .then((d: { success: boolean; data?: Array<{ appType: string; name: string; url: string; color: string | null }> }) => {
+        if (d.success && d.data) setCrossAppLinks(d.data);
+      })
+      .catch(() => {});
+  }, [device?.uuid]);
 
   // ── Live wsConnected updates ────────────────────────────────────────────────
   useEffect(() => {
@@ -1239,6 +1253,20 @@ export function AgentDetailPage() {
         </div>
 
         <div className="flex items-center gap-1.5 flex-shrink-0">
+          {crossAppLinks.map(link => (
+            <a
+              key={link.appType}
+              href={link.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              title={`Open in ${link.name}`}
+              className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium border transition-colors"
+              style={{ color: link.color ?? '#58a6ff', borderColor: `${link.color ?? '#58a6ff'}40`, backgroundColor: `${link.color ?? '#58a6ff'}0d` }}
+            >
+              <ArrowLeftRight size={12} />
+              {link.name}
+            </a>
+          ))}
           <button
             onClick={() => { void loadEvents(); void loadSummary(); }}
             className="rounded p-1.5 text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors"
