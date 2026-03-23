@@ -305,4 +305,19 @@ router.get('/connected-apps', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * GET /api/auth/device-links?uuid=xxx
+ * Returns cross-app links for a device UUID via Obligate.
+ */
+router.get('/device-links', requireAuth, async (req, res) => {
+  try {
+    const uuid = req.query.uuid as string;
+    if (!uuid) { res.json({ success: true, data: [] }); return; }
+    const links = await obligateService.getDeviceLinks(uuid);
+    res.json({ success: true, data: links });
+  } catch {
+    res.json({ success: true, data: [] });
+  }
+});
+
 export default router;
