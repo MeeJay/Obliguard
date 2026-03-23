@@ -523,8 +523,6 @@ export const agentService = {
         })
         .returning('*') as AgentDeviceRow[];
       device = rowToDevice(row);
-      // Register device UUID with Obligate for cross-app linking (non-blocking)
-      obligateService.registerDeviceLink(deviceUuid, `/agents/${device.id}`).catch(() => {});
     } else {
       // ── b. Update device metadata ─────────────────────
       // Clear updating_since if set (agent came back after update)
@@ -546,6 +544,9 @@ export const agentService = {
       // Refresh device from DB
       device = (await this.getDeviceByUuid(deviceUuid))!;
     }
+
+    // Register/update device UUID with Obligate for cross-app linking (non-blocking, idempotent)
+    obligateService.registerDeviceLink(deviceUuid, `/agents/${device.id}`).catch(() => {});
 
     // ── c. Pending status ─────────────────────────────────
     if (device.status === 'pending') {
