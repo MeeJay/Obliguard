@@ -20,6 +20,7 @@ import type {
 import { SOCKET_EVENTS } from '@obliview/shared';
 import { NotificationTypesPanel } from '@/components/agent/NotificationTypesPanel';
 import { ServiceTemplatesPanel } from '@/components/agent/ServiceTemplatesPanel';
+import { anonIp, anonHostname, anonUsername } from '@/utils/anonymize';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -398,7 +399,7 @@ function AgentMiniMap({ deviceId, summaryEvents, onSelectIp }: AgentMiniMapProps
           className="pointer-events-none absolute z-10 rounded-lg border border-border bg-bg-secondary px-3 py-2 text-xs shadow-xl"
           style={{ left: tooltip.x, top: tooltip.y }}
         >
-          <p className="font-mono font-semibold text-text-primary">{tooltip.ip}</p>
+          <p className="font-mono font-semibold text-text-primary">{anonIp(tooltip.ip)}</p>
           {(() => {
             const n = layoutRef.current.find(x => x.ip === tooltip.ip);
             if (!n) return null;
@@ -456,7 +457,7 @@ function IpDrawer({
       <div className="relative z-10 w-full max-w-2xl bg-bg-secondary border-l border-border flex flex-col overflow-hidden shadow-2xl">
         <div className="flex items-start justify-between px-5 py-4 border-b border-border flex-shrink-0">
           <div className="min-w-0">
-            <h2 className="font-mono text-lg font-semibold text-text-primary">{ip}</h2>
+            <h2 className="font-mono text-lg font-semibold text-text-primary">{anonIp(ip)}</h2>
             <p className="text-xs text-text-muted mt-0.5 space-x-2">
               <span>{events.length} events</span>
               <span>·</span>
@@ -503,10 +504,10 @@ function IpDrawer({
                 {events.map(ev => (
                   <tr key={ev.id} className="hover:bg-bg-hover transition-colors">
                     <td className="px-4 py-2 text-text-muted whitespace-nowrap">{formatTs(ev.timestamp)}</td>
-                    <td className="px-4 py-2 text-text-secondary">{ev.hostname ?? <span className="text-text-muted">—</span>}</td>
+                    <td className="px-4 py-2 text-text-secondary">{ev.hostname ? anonHostname(ev.hostname) : <span className="text-text-muted">—</span>}</td>
                     <td className="px-4 py-2 text-text-primary">{ev.service}</td>
                     <td className="px-4 py-2"><EventTypeBadge type={ev.event_type} /></td>
-                    <td className="px-4 py-2 font-mono text-text-secondary">{ev.username ?? <span className="text-text-muted">—</span>}</td>
+                    <td className="px-4 py-2 font-mono text-text-secondary">{ev.username ? anonUsername(ev.username) : <span className="text-text-muted">—</span>}</td>
                   </tr>
                 ))}
               </tbody>
@@ -1220,7 +1221,7 @@ export function AgentDetailPage() {
                 onClick={() => { setRenameValue(device.name ?? ''); setRenaming(true); }}
                 className="group flex items-center gap-1.5"
               >
-                <h1 className="text-xl font-semibold text-text-primary">{displayName}</h1>
+                <h1 className="text-xl font-semibold text-text-primary">{anonHostname(displayName)}</h1>
                 <Pencil size={14} className="text-text-muted opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0" />
               </button>
             )}
@@ -1235,7 +1236,7 @@ export function AgentDetailPage() {
           </div>
           <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-text-secondary">
             {device.hostname !== displayName && (
-              <span className="flex items-center gap-1"><Server size={11} className="text-text-muted" />{device.hostname}</span>
+              <span className="flex items-center gap-1"><Server size={11} className="text-text-muted" />{anonHostname(device.hostname)}</span>
             )}
             {osLabel && (
               <span className="flex items-center gap-1">
@@ -1245,7 +1246,7 @@ export function AgentDetailPage() {
             )}
             {device.ip && (
               <span className="flex items-center gap-1 font-mono">
-                <Wifi size={11} className="text-text-muted" />{device.ip}
+                <Wifi size={11} className="text-text-muted" />{anonIp(device.ip)}
               </span>
             )}
             <span className="text-text-muted">Last seen: {new Date(device.updatedAt).toLocaleString()}</span>
@@ -1348,13 +1349,13 @@ export function AgentDetailPage() {
                               <td className="px-4 py-2.5 text-text-muted whitespace-nowrap">{relativeTime(ev.timestamp)}</td>
                               <td className="px-4 py-2.5">
                                 <button onClick={() => setSelectedIp(ev.ip)} className="font-mono text-accent hover:underline">
-                                  {ev.ip}
+                                  {anonIp(ev.ip)}
                                 </button>
                               </td>
                               <td className="px-4 py-2.5 text-text-secondary">{ev.service}</td>
                               <td className="px-4 py-2.5"><EventTypeBadge type={ev.event_type} /></td>
                               <td className="px-4 py-2.5 font-mono text-text-secondary">
-                                {ev.username ?? <span className="text-text-muted">—</span>}
+                                {ev.username ? anonUsername(ev.username) : <span className="text-text-muted">—</span>}
                               </td>
                               <td className="px-4 py-2.5 max-w-[160px]">
                                 {ev.raw_log ? (
@@ -1419,7 +1420,7 @@ export function AgentDetailPage() {
                                 onClick={() => setSelectedIp(item.ip)}
                                 className="font-mono text-sm text-accent hover:underline text-left min-w-0 truncate"
                               >
-                                {item.ip}
+                                {anonIp(item.ip)}
                               </button>
                               <div className="flex gap-0.5 flex-shrink-0">
                                 <button onClick={() => void handleBan(item.ip)} disabled={banningIps.has(item.ip)} title="Quick ban"

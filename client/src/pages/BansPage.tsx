@@ -18,6 +18,7 @@ import { Button } from '@/components/common/Button';
 import { Input } from '@/components/common/Input';
 import { useAuthStore } from '@/store/authStore';
 import { cn } from '@/utils/cn';
+import { anonIp } from '@/utils/anonymize';
 import toast from 'react-hot-toast';
 
 const PAGE_SIZE = 25;
@@ -486,7 +487,7 @@ export function BansPage() {
                       <div className="flex items-center gap-1.5">
                         <Globe size={13} className="text-text-muted shrink-0" />
                         <span className="font-mono text-text-primary">
-                          {ban.ip}{ban.cidrPrefix != null && ban.cidrPrefix !== 32 ? `/${ban.cidrPrefix}` : ''}
+                          {anonIp(ban.ip)}{ban.cidrPrefix != null && ban.cidrPrefix !== 32 ? `/${ban.cidrPrefix}` : ''}
                         </span>
                       </div>
                     </td>

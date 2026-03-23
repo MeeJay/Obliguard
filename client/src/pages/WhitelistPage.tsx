@@ -12,6 +12,7 @@ import type { IpWhitelist, WhitelistScope, CreateWhitelistRequest } from '@obliv
 import { Button } from '@/components/common/Button';
 import { Input } from '@/components/common/Input';
 import { cn } from '@/utils/cn';
+import { anonIp } from '@/utils/anonymize';
 import toast from 'react-hot-toast';
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -350,7 +351,7 @@ export function WhitelistPage() {
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-1.5">
                         <Globe size={13} className="text-text-muted shrink-0" />
-                        <span className="font-mono text-text-primary">{entry.ip}</span>
+                        <span className="font-mono text-text-primary">{anonIp(entry.ip)}</span>
                       </div>
                     </td>
                     <td className="px-4 py-3 text-text-secondary">

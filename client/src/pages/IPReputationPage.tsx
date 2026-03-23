@@ -41,6 +41,7 @@ import { useAuthStore } from '@/store/authStore';
 import toast from 'react-hot-toast';
 import apiClient from '../api/client';
 import { ipLabelsApi } from '../api/ipLabels.api';
+import { anonIp, anonHostname, anonUsername, anonLog } from '@/utils/anonymize';
 
 const PAGE_SIZE = 25;
 
@@ -310,7 +311,7 @@ function IPDetailDrawer({ ip, onClose, onBan, onWhitelist, onLiftBan, onClear, o
           <Globe size={18} className="text-text-muted" />
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-lg font-mono font-semibold text-text-primary">{ip.ip}</span>
+              <span className="text-lg font-mono font-semibold text-text-primary">{anonIp(ip.ip)}</span>
               <CopyButton text={ip.ip} />
               <StatusBadge status={ip.status} />
             </div>
@@ -385,7 +386,7 @@ function IPDetailDrawer({ ip, onClose, onBan, onWhitelist, onLiftBan, onClear, o
                 {usernames.slice(0, 10).map(u => (
                   <li key={u} className="flex items-center gap-2 text-sm text-text-secondary">
                     <User size={12} className="text-text-muted shrink-0" />
-                    <span className="font-mono">{u}</span>
+                    <span className="font-mono">{anonUsername(u)}</span>
                   </li>
                 ))}
                 {usernames.length > 10 && (
@@ -426,11 +427,11 @@ function IPDetailDrawer({ ip, onClose, onBan, onWhitelist, onLiftBan, onClear, o
                           {formatDateShort(ev.timestamp)}
                         </td>
                         <td className="px-3 py-2 text-text-secondary">{ev.service ?? '—'}</td>
-                        <td className="px-3 py-2 font-mono text-text-secondary">{ev.username ?? '—'}</td>
-                        <td className="px-3 py-2 text-text-muted">{(ev as any).hostname ?? ev.deviceHostname ?? '—'}</td>
+                        <td className="px-3 py-2 font-mono text-text-secondary">{ev.username ? anonUsername(ev.username) : '—'}</td>
+                        <td className="px-3 py-2 text-text-muted">{anonHostname((ev as any).hostname ?? ev.deviceHostname ?? '—')}</td>
                         <td className="px-3 py-2 text-text-muted max-w-[180px]">
-                          <span className="truncate block" title={ev.rawLog ?? undefined}>
-                            {ev.rawLog ? ev.rawLog.slice(0, 60) + (ev.rawLog.length > 60 ? '…' : '') : '—'}
+                          <span className="truncate block" title={ev.rawLog ? anonLog(ev.rawLog) : undefined}>
+                            {ev.rawLog ? anonLog(ev.rawLog.slice(0, 60) + (ev.rawLog.length > 60 ? '…' : '')) : '—'}
                           </span>
                         </td>
                       </tr>
@@ -458,7 +459,7 @@ function IPDetailDrawer({ ip, onClose, onBan, onWhitelist, onLiftBan, onClear, o
                   </Button>
                 ) : (
                   <div className="rounded-lg border border-border bg-bg-secondary p-4 space-y-3">
-                    <p className="text-sm font-medium text-text-primary">Ban {ip.ip}</p>
+                    <p className="text-sm font-medium text-text-primary">Ban {anonIp(ip.ip)}</p>
                     <div className="space-y-1">
                       <label className="block text-sm font-medium text-text-secondary">Scope</label>
                       <select
@@ -504,7 +505,7 @@ function IPDetailDrawer({ ip, onClose, onBan, onWhitelist, onLiftBan, onClear, o
                   </Button>
                 ) : (
                   <div className="rounded-lg border border-border bg-bg-secondary p-4 space-y-3">
-                    <p className="text-sm font-medium text-text-primary">Whitelist {ip.ip}</p>
+                    <p className="text-sm font-medium text-text-primary">Whitelist {anonIp(ip.ip)}</p>
                     <Input
                       label="Label (optional)"
                       placeholder="e.g. Office IP"
@@ -591,7 +592,7 @@ function IPDetailDrawer({ ip, onClose, onBan, onWhitelist, onLiftBan, onClear, o
               ) : (
                 <div className="rounded-lg border border-border bg-bg-secondary p-4 space-y-3">
                   <p className="text-sm font-medium text-text-primary">
-                    {currentLabel ? 'Edit label for' : 'Label'} {ip.ip}
+                    {currentLabel ? 'Edit label for' : 'Label'} {anonIp(ip.ip)}
                   </p>
                   <Input
                     label="Label"
@@ -931,7 +932,7 @@ function ActivityTab({ isAdmin }: ActivityTabProps) {
                       className="hover:bg-bg-hover transition-colors cursor-pointer"
                     >
                       <td className="px-4 py-3">
-                        <span className="font-mono text-text-primary">{row.ip}</span>
+                        <span className="font-mono text-text-primary">{anonIp(row.ip)}</span>
                         {displayLabel && (
                           <div className="flex items-center gap-1 mt-0.5">
                             <Tag size={10} className="text-accent shrink-0" />
@@ -1367,7 +1368,7 @@ function WhitelistTab() {
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-1.5">
                         <Globe size={13} className="text-text-muted shrink-0" />
-                        <span className="font-mono text-text-primary">{entry.ip}</span>
+                        <span className="font-mono text-text-primary">{anonIp(entry.ip)}</span>
                       </div>
                     </td>
                     <td className="px-4 py-3 text-text-secondary">

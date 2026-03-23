@@ -17,6 +17,7 @@ import { Link } from 'react-router-dom';
 import { getSocket } from '../socket/socketClient';
 import apiClient from '../api/client';
 import { ipLabelsApi } from '../api/ipLabels.api';
+import { anonHostname, anonIp } from '../utils/anonymize';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -866,7 +867,7 @@ export function NetMapPage() {
         const maxMissedPushes = d.resolvedSettings?.maxMissedPushes ?? 2;
         return {
           id:              d.id,
-          label:           (d.name ?? d.hostname).slice(0, 22),
+          label:           anonHostname((d.name ?? d.hostname)).slice(0, 22),
           x: w / 2, y: h / 2,
           r:               10 + Math.min((agentEvtCount.get(d.id) ?? 0) / 15, 22),
           eventCount:      agentEvtCount.get(d.id) ?? 0,
@@ -1266,10 +1267,10 @@ export function NetMapPage() {
       if (!dimmed && shouldLabel(ip)) {
         const effectiveLabel = ip.displayLabel ?? ip.whitelistLabel ?? null;
         const badgeTxt = ip.status === 'whitelisted'
-          ? `✓ ${effectiveLabel ?? ip.ip}`
+          ? `✓ ${effectiveLabel ?? anonIp(ip.ip)}`
           : effectiveLabel
           ? effectiveLabel
-          : badgeText(ip.country, ip.ip);
+          : badgeText(ip.country, anonIp(ip.ip));
         badges.push({ txt: badgeTxt, sx: ip.x, sy: ip.y, r: ip.dotR, color: ip.color, alpha: Math.min(0.95, alpha + 0.1) });
       }
     }
@@ -1726,7 +1727,7 @@ export function NetMapPage() {
     const wx = (mx - tr.x) / tr.k, wy = (my - tr.y) / tr.k;
     for (const ip of ipsRef.current.values()) {
       if ((wx - ip.x) ** 2 + (wy - ip.y) ** 2 <= (ip.dotR + 7) ** 2) {
-        setTooltip({ x: mx, y: my, ip: ip.ip, flag: ip.flag, country: ip.country,
+        setTooltip({ x: mx, y: my, ip: anonIp(ip.ip), flag: ip.flag, country: ip.country,
           status: ip.status, failures: ip.failures, services: ip.services, color: ip.color });
         return;
       }
@@ -1857,7 +1858,7 @@ export function NetMapPage() {
                   .map(n => (
                     <div key={n.key} className="flex items-center gap-1.5 py-[2px]">
                       <div className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: n.color, boxShadow: `0 0 4px ${n.color}` }} />
-                      <span className="font-mono text-[8px] truncate" style={{ color: n.color }}>{n.flag} {n.ip.slice(0, 14)}</span>
+                      <span className="font-mono text-[8px] truncate" style={{ color: n.color }}>{n.flag} {anonIp(n.ip).slice(0, 14)}</span>
                     </div>
                   ))}
               </div>
@@ -2012,11 +2013,11 @@ export function NetMapPage() {
                         isBan ? 'line-through text-red-400/55' : isFailure ? 'text-orange-300/75' : 'text-slate-400'
                       }`}
                     >
-                      {ev.ip}
+                      {anonIp(ev.ip)}
                     </span>
                     <span className="text-slate-700 shrink-0 text-[10px]">▸</span>
                     <span className="text-slate-500 text-[11px] shrink-0 max-w-[6rem] truncate">
-                      {ev.agentName || 'Server'}
+                      {anonHostname(ev.agentName || 'Server')}
                     </span>
                     {ev.failures != null && ev.failures > 0 && (
                       <span className="text-orange-700/60 text-[11px] shrink-0">{ev.failures}×</span>
@@ -2026,7 +2027,7 @@ export function NetMapPage() {
                         onClick={() => void quickBan(ev.ip)}
                         disabled={banningIp === ev.ip}
                         className="ml-auto shrink-0 px-1.5 py-0.5 rounded text-[10px] font-mono border border-red-900/40 text-red-700/60 hover:text-red-400 hover:border-red-500/50 transition-colors disabled:opacity-40 leading-none"
-                        title={`Ban ${ev.ip}`}
+                        title={`Ban ${anonIp(ev.ip)}`}
                       >
                         {banningIp === ev.ip ? '…' : '⛔'}
                       </button>

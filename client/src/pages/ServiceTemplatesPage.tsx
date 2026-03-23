@@ -22,6 +22,7 @@ import { Button } from '@/components/common/Button';
 import { Input } from '@/components/common/Input';
 import { useAuthStore } from '@/store/authStore';
 import { cn } from '@/utils/cn';
+import { anonPath } from '@/utils/anonymize';
 
 const SERVICE_ICONS: Record<string, string> = {
   ssh: '🔐', rdp: '🖥', nginx: '🌐', apache: '🌐', iis: '🌐',
@@ -704,8 +705,8 @@ function TemplateRow({ template, isAdmin, groups, agents, onEdit, onDelete, onTo
                         <span className="font-medium text-text-primary">{scopeLabel(a)}</span>
                         <div className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 text-text-muted">
                           {a.logPathOverride && (
-                            <span className="font-mono truncate max-w-[200px]" title={a.logPathOverride}>
-                              path: {a.logPathOverride}
+                            <span className="font-mono truncate max-w-[200px]" title={anonPath(a.logPathOverride)}>
+                              path: {anonPath(a.logPathOverride)}
                             </span>
                           )}
                           {a.thresholdOverride != null && <span>threshold: {a.thresholdOverride}</span>}

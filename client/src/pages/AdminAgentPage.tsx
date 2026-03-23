@@ -28,6 +28,7 @@ import { getSocket } from '@/socket/socketClient';
 import { Button } from '@/components/common/Button';
 import { Input } from '@/components/common/Input';
 import { useUiStore } from '@/store/uiStore';
+import { anonHostname, anonIp } from '@/utils/anonymize';
 import toast from 'react-hot-toast';
 
 type Tab = 'keys' | 'devices';
@@ -182,7 +183,7 @@ function ApproveModal({
       <div className="w-full max-w-sm rounded-xl border border-border bg-bg-primary shadow-2xl p-6">
         <h2 className="text-base font-semibold text-text-primary mb-1">{t('agents.approveTitle')}</h2>
         <p className="text-sm text-text-muted mb-4">
-          {t('agents.approveDesc', { hostname: device.hostname })}
+          {t('agents.approveDesc', { hostname: anonHostname(device.hostname) })}
         </p>
 
         <div className="space-y-1 mb-4">
@@ -261,7 +262,7 @@ function EditAgentModal({
       <div className="w-full max-w-sm rounded-xl border border-border bg-bg-primary shadow-2xl p-6">
         <h2 className="text-base font-semibold text-text-primary mb-1">{t('agents.editAgent')}</h2>
         <p className="text-xs text-text-muted mb-5">
-          {t('agents.hostnameInfo', { hostname: device.hostname })}
+          {t('agents.hostnameInfo', { hostname: anonHostname(device.hostname) })}
         </p>
 
         <div className="space-y-4">
@@ -997,17 +998,17 @@ export function AdminAgentPage() {
                             to={`/agents/${device.id}`}
                             className="font-medium text-text-primary hover:text-accent transition-colors"
                           >
-                            {device.name ?? device.hostname}
+                            {anonHostname(device.name ?? device.hostname)}
                           </Link>
                         ) : (
-                          <span className="font-medium text-text-primary">{device.name ?? device.hostname}</span>
+                          <span className="font-medium text-text-primary">{anonHostname(device.name ?? device.hostname)}</span>
                         )}
                         {device.name && (
-                          <div className="text-[10px] text-text-muted mt-0.5">{device.hostname}</div>
+                          <div className="text-[10px] text-text-muted mt-0.5">{anonHostname(device.hostname)}</div>
                         )}
                         <div className="text-[10px] text-text-muted font-mono mt-0.5">{device.uuid.slice(0, 12)}…</div>
                       </td>
-                      <td className="px-4 py-3 text-text-muted">{device.ip ?? '—'}</td>
+                      <td className="px-4 py-3 text-text-muted">{anonIp(device.ip)}</td>
                       <td className="px-4 py-3 text-text-muted">
                         {device.osInfo
                           ? `${device.osInfo.distro ?? device.osInfo.platform} ${device.osInfo.release ?? ''}`

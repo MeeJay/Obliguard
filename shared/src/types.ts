@@ -11,6 +11,7 @@ export interface UserPreferences {
   toastPosition: 'top-center' | 'bottom-right';
   multiTenantNotificationsEnabled?: boolean;
   preferredTheme?: AppTheme;
+  anonymousMode?: boolean;
 }
 
 /** Shape of a live alert as returned by the server. */

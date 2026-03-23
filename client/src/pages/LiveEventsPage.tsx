@@ -6,6 +6,7 @@ import apiClient from '@/api/client';
 import { bansApi } from '@/api/bans.api';
 import { whitelistApi } from '@/api/whitelist.api';
 import type { AgentDevice, ApiResponse } from '@obliview/shared';
+import { anonIp, anonHostname, anonUsername } from '@/utils/anonymize';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -138,7 +139,7 @@ function IpDrawer({
       <div className="relative z-10 w-full max-w-2xl bg-bg-secondary border-l border-border flex flex-col overflow-hidden shadow-2xl">
         <div className="flex items-start justify-between px-5 py-4 border-b border-border flex-shrink-0">
           <div className="min-w-0">
-            <h2 className="font-mono text-lg font-semibold text-text-primary">{ip}</h2>
+            <h2 className="font-mono text-lg font-semibold text-text-primary">{anonIp(ip)}</h2>
             <p className="text-xs text-text-muted mt-0.5 space-x-2">
               <span>{events.length} events</span>
               <span>·</span>
@@ -183,10 +184,10 @@ function IpDrawer({
                 {events.map(ev => (
                   <tr key={ev.id} className="hover:bg-bg-hover transition-colors">
                     <td className="px-4 py-2 text-text-muted whitespace-nowrap">{formatTs(ev.timestamp)}</td>
-                    <td className="px-4 py-2 text-text-secondary">{ev.hostname ?? <span className="text-text-muted">—</span>}</td>
+                    <td className="px-4 py-2 text-text-secondary">{anonHostname(ev.hostname) ?? <span className="text-text-muted">—</span>}</td>
                     <td className="px-4 py-2 text-text-primary">{ev.service}</td>
                     <td className="px-4 py-2"><EventTypeBadge type={ev.event_type} /></td>
-                    <td className="px-4 py-2 font-mono text-text-secondary">{ev.username ?? <span className="text-text-muted">—</span>}</td>
+                    <td className="px-4 py-2 font-mono text-text-secondary">{anonUsername(ev.username) ?? <span className="text-text-muted">—</span>}</td>
                   </tr>
                 ))}
               </tbody>
@@ -375,20 +376,20 @@ export function LiveEventsPage() {
                         {relativeTime(ev.timestamp)}
                       </td>
                       <td className="px-4 py-2.5 text-text-secondary text-xs truncate max-w-[90px]">
-                        {ev.hostname ?? <span className="text-text-muted">—</span>}
+                        {anonHostname(ev.hostname) ?? <span className="text-text-muted">—</span>}
                       </td>
                       <td className="px-4 py-2.5">
                         <button
                           onClick={() => setSelectedIp(ev.ip)}
                           className="font-mono text-accent hover:underline"
                         >
-                          {ev.ip}
+                          {anonIp(ev.ip)}
                         </button>
                       </td>
                       <td className="px-4 py-2.5 text-text-secondary">{ev.service}</td>
                       <td className="px-4 py-2.5"><EventTypeBadge type={ev.event_type} /></td>
                       <td className="px-4 py-2.5 font-mono text-text-secondary">
-                        {ev.username ?? <span className="text-text-muted">—</span>}
+                        {anonUsername(ev.username) ?? <span className="text-text-muted">—</span>}
                       </td>
                       <td className="px-4 py-2.5 max-w-[150px]">
                         {ev.raw_log ? (
@@ -458,7 +459,7 @@ export function LiveEventsPage() {
                         onClick={() => setSelectedIp(item.ip)}
                         className="font-mono text-sm text-accent hover:underline text-left min-w-0 truncate"
                       >
-                        {item.ip}
+                        {anonIp(item.ip)}
                       </button>
                       <div className="flex gap-0.5 flex-shrink-0">
                         <button

@@ -6,6 +6,7 @@ import apiClient from '@/api/client';
 import { getSocket } from '@/socket/socketClient';
 import { SOCKET_EVENTS } from '@obliview/shared';
 import type { AgentDevice, ApiResponse } from '@obliview/shared';
+import { anonHostname, anonIp } from '@/utils/anonymize';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -101,7 +102,7 @@ function AgentCard({
   failureCount: number;
   onClick: () => void;
 }) {
-  const displayName = device.name ?? device.hostname;
+  const displayName = anonHostname(device.name ?? device.hostname);
   const isOnline = device.wsConnected;
 
   const osLabel = device.osInfo
@@ -134,7 +135,7 @@ function AgentCard({
         {device.hostname !== displayName && (
           <div className="flex items-center gap-1">
             <Server size={10} className="text-text-muted flex-shrink-0" />
-            <span className="truncate">{device.hostname}</span>
+            <span className="truncate">{anonHostname(device.hostname)}</span>
           </div>
         )}
         {osLabel && (
@@ -146,7 +147,7 @@ function AgentCard({
         {device.ip && (
           <div className="flex items-center gap-1">
             <Wifi size={10} className="text-text-muted flex-shrink-0" />
-            <span className="font-mono">{device.ip}</span>
+            <span className="font-mono">{anonIp(device.ip)}</span>
           </div>
         )}
       </div>
@@ -406,7 +407,7 @@ export function DashboardPage() {
                 <tbody className="divide-y divide-border">
                   {recentBans.map(ban => (
                     <tr key={ban.id} className="hover:bg-bg-hover transition-colors">
-                      <td className="px-4 py-2.5 font-mono text-xs text-text-primary">{ban.ip}</td>
+                      <td className="px-4 py-2.5 font-mono text-xs text-text-primary">{anonIp(ban.ip)}</td>
                       <td className="px-4 py-2.5 text-text-secondary truncate max-w-[100px]">
                         {ban.service ?? <span className="text-text-muted">—</span>}
                       </td>
@@ -414,7 +415,7 @@ export function DashboardPage() {
                         {ban.reason ?? <span className="text-text-muted">—</span>}
                       </td>
                       <td className="px-4 py-2.5 text-text-secondary truncate max-w-[100px]">
-                        {ban.agentName ?? <span className="text-text-muted">—</span>}
+                        {ban.agentName ? anonHostname(ban.agentName) : <span className="text-text-muted">—</span>}
                       </td>
                       <td className="px-4 py-2.5 text-text-muted text-xs whitespace-nowrap">
                         <span className="inline-flex items-center gap-1">

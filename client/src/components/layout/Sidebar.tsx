@@ -40,6 +40,7 @@ import { getSocket } from '@/socket/socketClient';
 import type { AgentDevice, MonitorStatus, GroupTreeNode } from '@obliview/shared';
 import { SOCKET_EVENTS } from '@obliview/shared';
 import { groupsApi } from '@/api/groups.api';
+import { anonHostname } from '@/utils/anonymize';
 import toast from 'react-hot-toast';
 
 // ── localStorage helpers ─────────────────────────────────────────────────────
@@ -130,7 +131,7 @@ function DraggableDeviceItem({
         }}
       >
         <AgentStatusBadge status={effectiveStatus} />
-        <span className="truncate flex-1 text-xs">{displayName}</span>
+        <span className="truncate flex-1 text-xs">{anonHostname(displayName)}</span>
       </Link>
     </div>
   );
