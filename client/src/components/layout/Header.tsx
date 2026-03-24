@@ -75,7 +75,7 @@ export function Header() {
         {/* Logo — shown in the Header only when the sidebar is floating. */}
         {sidebarFloating && (
           <Link to="/" className="flex items-center gap-2 shrink-0">
-            <img src="/logo.svg" alt="Obliguard" className="h-10 w-10 rounded-lg" />
+            <img src="/logo.svg" alt="Obliguard" className="h-10 w-auto max-w-[200px] object-contain" />
           </Link>
         )}
 
