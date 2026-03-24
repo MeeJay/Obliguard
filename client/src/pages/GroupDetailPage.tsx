@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { cn } from '@/utils/cn';
+import { anonHostname } from '@/utils/anonymize';
 import { useGroupStore } from '@/store/groupStore';
 import { useAuthStore } from '@/store/authStore';
 import { groupsApi } from '@/api/groups.api';
@@ -583,7 +584,7 @@ export function GroupDetailPage() {
             }
           </div>
           <div>
-            <h1 className="text-2xl font-semibold text-text-primary">{group.name}</h1>
+            <h1 className="text-2xl font-semibold text-text-primary">{anonHostname(group.name)}</h1>
             <div className="flex items-center gap-2 mt-1">
               {isAgentGroup && (
                 <span className="inline-flex items-center gap-1 rounded-full bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-accent">
@@ -662,9 +663,9 @@ export function GroupDetailPage() {
                   {device.status.toUpperCase()}
                 </span>
                 <span className="flex-1 text-sm text-text-primary truncate">
-                  {device.name ?? device.hostname}
+                  {anonHostname(device.name ?? device.hostname)}
                 </span>
-                <span className="text-xs text-text-muted">{device.hostname}</span>
+                <span className="text-xs text-text-muted">{anonHostname(device.hostname)}</span>
               </Link>
             ))}
           </div>

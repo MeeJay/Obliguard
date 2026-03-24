@@ -40,7 +40,7 @@ import { getSocket } from '@/socket/socketClient';
 import type { AgentDevice, MonitorStatus, GroupTreeNode } from '@obliview/shared';
 import { SOCKET_EVENTS } from '@obliview/shared';
 import { groupsApi } from '@/api/groups.api';
-import { anonHostname } from '@/utils/anonymize';
+import { anonHostname, anonUsername } from '@/utils/anonymize';
 import toast from 'react-hot-toast';
 
 // ── localStorage helpers ─────────────────────────────────────────────────────
@@ -216,7 +216,7 @@ function AgentGroupSection({
           )}
         >
           <Server size={13} className="shrink-0 text-text-muted" />
-          <span className="truncate flex-1">{group.name}</span>
+          <span className="truncate flex-1">{anonHostname(group.name)}</span>
           {groupDevices.length > 0 && (
             <span className="text-xs text-text-muted">{groupDevices.length}</span>
           )}
@@ -617,7 +617,7 @@ export function Sidebar() {
           )}
         >
           <UserCircle size={18} />
-          <span className="truncate flex-1">{user?.displayName || (user?.username?.startsWith('og_') ? user.username.slice(3) : user?.username)}</span>
+          <span className="truncate flex-1">{anonUsername(user?.displayName || (user?.username?.startsWith('og_') ? user.username.slice(3) : user?.username))}</span>
         </Link>
         <button
           onClick={() => {

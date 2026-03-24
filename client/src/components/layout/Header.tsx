@@ -8,6 +8,7 @@ import { useSocketStore } from '@/store/socketStore';
 import { appConfigApi } from '@/api/appConfig.api';
 import apiClient from '@/api/client';
 import type { ApiResponse } from '@obliview/shared';
+import { anonUsername } from '@/utils/anonymize';
 import { Button } from '@/components/common/Button';
 import { NotificationCenter } from './NotificationCenter';
 import { TenantSwitcher } from './TenantSwitcher';
@@ -182,7 +183,7 @@ export function Header() {
           <>
             <div className="text-sm">
               <span className="text-text-secondary">{t('header.signedInAs')} </span>
-              <span className="font-medium text-text-primary">{user.username.startsWith('og_') ? user.username.slice(3) : user.username}</span>
+              <span className="font-medium text-text-primary">{anonUsername(user.username.startsWith('og_') ? user.username.slice(3) : user.username)}</span>
               <span className="ml-2 rounded-full bg-bg-tertiary px-2 py-0.5 text-xs text-text-muted">
                 {user.role}
               </span>

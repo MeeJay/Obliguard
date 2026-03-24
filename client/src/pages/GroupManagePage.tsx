@@ -22,6 +22,7 @@ import { SettingsPanel } from '@/components/settings/SettingsPanel';
 import { NotificationBindingsPanel } from '@/components/notifications/NotificationBindingsPanel';
 import { MaintenanceWindowList } from '@/components/maintenance/MaintenanceWindowList';
 import { cn } from '@/utils/cn';
+import { anonHostname } from '@/utils/anonymize';
 import toast from 'react-hot-toast';
 
 interface GroupFormData {
@@ -608,7 +609,7 @@ function DraggableGroupRow({
         ? <Server size={16} className="text-text-muted shrink-0" />
         : <FolderTree size={16} className="text-accent shrink-0" />
       }
-      <span className="flex-1 text-sm text-text-primary">{node.name}</span>
+      <span className="flex-1 text-sm text-text-primary">{anonHostname(node.name)}</span>
       {node.kind === 'agent' && (
         <span className="inline-flex items-center gap-0.5 rounded-full bg-bg-tertiary px-2 py-0.5 text-[10px] font-medium text-text-muted">
           <Server size={9} />

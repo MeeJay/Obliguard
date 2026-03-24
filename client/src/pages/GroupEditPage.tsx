@@ -13,6 +13,7 @@ import { SettingsPanel } from '@/components/settings/SettingsPanel';
 import { NotificationBindingsPanel } from '@/components/notifications/NotificationBindingsPanel';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { cn } from '@/utils/cn';
+import { anonHostname } from '@/utils/anonymize';
 import toast from 'react-hot-toast';
 
 function findNodeById(nodes: GroupTreeNode[], id: number): GroupTreeNode | null {
@@ -180,7 +181,7 @@ export function GroupEditPage() {
         className="inline-flex items-center gap-1 text-sm text-text-secondary hover:text-text-primary mb-4"
       >
         <ArrowLeft size={14} />
-        {t('groups.backToGroup', { name: group.name })}
+        {t('groups.backToGroup', { name: anonHostname(group.name) })}
       </Link>
 
       <div className="flex items-center gap-3 mb-6">
@@ -327,7 +328,7 @@ export function GroupEditPage() {
                     )}
                   >
                     <span className="w-5 shrink-0 text-right text-xs text-text-muted">{idx + 1}</span>
-                    <span className="flex-1 truncate">{sibling.name}</span>
+                    <span className="flex-1 truncate">{anonHostname(sibling.name)}</span>
                     {sibling.id === groupId && (
                       <div className="flex items-center gap-0.5">
                         <button
