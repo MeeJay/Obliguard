@@ -539,7 +539,7 @@ export function EnrollmentPage() {
       <div className="w-full max-w-xl">
         {/* Header */}
         <div className="text-center mb-8">
-          <img src="/logo.webp" alt="Obliview" className="mx-auto h-14 w-14 mb-3" />
+          <img src="/logo.svg" alt="Obliview" className="mx-auto h-14 w-14 mb-3" />
           <h1 className="text-2xl font-bold text-text-primary">{t('enrollment.welcomeTitle', { appName: 'Obliview' })}</h1>
           <p className="text-sm text-text-muted mt-1">{t('enrollment.welcomeSubtitle')}</p>
         </div>
