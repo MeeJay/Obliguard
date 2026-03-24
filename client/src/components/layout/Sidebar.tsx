@@ -497,8 +497,7 @@ export function Sidebar() {
       {/* Logo + float/pin toggle */}
       <div className="flex h-14 shrink-0 items-center justify-between border-b border-border px-4">
         <Link to="/" className="flex items-center gap-2 min-w-0">
-          <img src="/logo.svg" alt="Obliguard" className="h-8 w-8 rounded-lg flex-shrink-0" />
-          <span className="text-lg font-semibold text-text-primary truncate">Obliguard</span>
+          <img src="/logo.svg" alt="Obliguard" className="h-10 w-10 rounded-lg flex-shrink-0" />
         </Link>
         <div className="flex items-center gap-1 flex-shrink-0 ml-2">
           <button
