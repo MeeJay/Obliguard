@@ -25,6 +25,7 @@ import geoRoutes from './geo.routes';
 import obligateCallbackRoutes from './obligateCallback.routes';
 import oblitoolsRoutes from './oblitools.routes';
 import systemRoutes from './system.routes';
+import permissionSetsRoutes from './permissionSets.routes';
 
 const router = Router();
 
@@ -37,6 +38,7 @@ router.use('/system', systemRoutes);         // system info / about (admin only,
 router.use('/profile/2fa', twoFactorRoutes); // must be before /profile
 router.use('/live-alerts', liveAlertRouter);
 router.use('/oblitools', oblitoolsRoutes);   // ObliTools desktop manifest (auth required)
+router.use('/permission-sets', permissionSetsRoutes);
 
 // ── Tenant management ─────────────────────────────────────────────────────────
 router.use('/tenants', tenantRoutes);

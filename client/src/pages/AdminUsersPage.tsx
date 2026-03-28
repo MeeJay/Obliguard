@@ -36,8 +36,9 @@ import { Button } from '@/components/common/Button';
 import { Input } from '@/components/common/Input';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
+import { PermissionSetsTab } from '@/components/PermissionSetsTab';
 
-type Tab = 'users' | 'teams';
+type Tab = 'users' | 'teams' | 'permissionSets';
 type UserFormMode = 'create' | 'edit' | 'password' | null;
 type TeamFormMode = 'create' | 'edit' | null;
 type TenantDraft = Record<number, { isMember: boolean; role: 'admin' | 'member' }>;
@@ -483,6 +484,17 @@ export function AdminUsersPage() {
               <Users size={14} className="inline mr-1.5" />
               {t('users.tabTeams')}
             </button>
+            <button
+              onClick={() => setTab('permissionSets')}
+              className={`flex-1 px-4 py-2 text-sm font-medium rounded-md transition-colors ${
+                tab === 'permissionSets'
+                  ? 'bg-accent text-white'
+                  : 'text-text-muted hover:text-text-primary'
+              }`}
+            >
+              <Shield size={14} className="inline mr-1.5" />
+              {t('users.tabPermissions', 'Permissions')}
+            </button>
           </div>
 
           {/* ── Users Tab ── */}
@@ -752,6 +764,9 @@ export function AdminUsersPage() {
               </div>
             </>
           )}
+
+          {/* ── Permission Sets Tab ── */}
+          {tab === 'permissionSets' && <PermissionSetsTab />}
         </div>
 
         {/* Right panel — Team details */}
