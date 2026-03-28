@@ -581,7 +581,8 @@ export function AdminUsersPage() {
                         <Pencil size={13} />
                       </button>
                     )}
-                    {/* Tenant assignment button */}
+                    {/* Tenant assignment button — hidden for SSO users (managed from Obligate) */}
+                    {user.foreignSource !== 'obligate' && (
                     <button
                       onClick={() => openTenantPanel(user)}
                       className="shrink-0 p-1 text-text-muted hover:text-accent opacity-0 group-hover:opacity-100"
@@ -589,6 +590,7 @@ export function AdminUsersPage() {
                     >
                       <Building2 size={13} />
                     </button>
+                    )}
                     {user.id !== currentUser?.id && user.foreignSource !== 'obligate' && (
                       <button onClick={() => handleDeleteUser(user)}
                         className="shrink-0 p-1 text-text-muted hover:text-status-down opacity-0 group-hover:opacity-100" title={t('common.delete')}>

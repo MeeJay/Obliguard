@@ -14,6 +14,7 @@ import { setAgentServiceIO, agentService } from './services/agent.service';
 import { setLiveAlertIO } from './services/liveAlert.service';
 import { banEngine } from './services/ban.service';
 import { obliguardHub } from './services/obliguardHub.service';
+import { obligateService } from './services/obligate.service';
 
 async function main() {
   // 1. Run pending migrations
@@ -96,6 +97,9 @@ async function main() {
   server.listen(config.port, () => {
     logger.info(`Obliguard server listening on port ${config.port}`);
     logger.info(`Environment: ${config.nodeEnv}`);
+
+    // Sync capability schemas with Obligate (non-blocking)
+    obligateService.syncCapabilitySchemas().catch(() => {});
   });
 
   // 8. ip_events retention job — purge events older than configured days every 6 hours
