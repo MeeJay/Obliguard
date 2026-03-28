@@ -66,6 +66,8 @@ func getListeningPorts() []int {
 		return getListeningPortsWindows()
 	case "darwin":
 		return getListeningPortsDarwin()
+	case "freebsd":
+		return getListeningPortsFreeBSD()
 	default:
 		return nil
 	}
@@ -157,6 +159,42 @@ func parseNetstatDarwin(output string) []int {
 			continue
 		}
 		port := extractPort(fields[3])
+		if port > 0 && !seen[port] {
+			seen[port] = true
+			ports = append(ports, port)
+		}
+	}
+	return ports
+}
+
+func getListeningPortsFreeBSD() []int {
+	// sockstat -4l -P tcp: IPv4, listening, TCP only
+	out, err := exec.Command("sockstat", "-4l", "-P", "tcp").Output()
+	if err != nil {
+		// Fallback to netstat
+		out, err = exec.Command("netstat", "-anp", "tcp").Output()
+		if err != nil {
+			return nil
+		}
+		return parseNetstatDarwin(string(out))
+	}
+	return parseSockstatListening(string(out))
+}
+
+// parseSockstatListening parses sockstat output for listening ports.
+// Format: USER COMMAND PID FD PROTO LOCAL FOREIGN
+func parseSockstatListening(output string) []int {
+	var ports []int
+	seen := map[int]bool{}
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 6 {
+			continue
+		}
+		if fields[4] != "tcp4" && fields[4] != "tcp46" && fields[4] != "tcp6" {
+			continue
+		}
+		port := extractPort(fields[5])
 		if port > 0 && !seen[port] {
 			seen[port] = true
 			ports = append(ports, port)

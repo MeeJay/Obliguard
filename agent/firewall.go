@@ -47,6 +47,15 @@ func DetectFirewall() FirewallManager {
 		}
 		return &NoOpFirewall{}
 
+	case "freebsd":
+		fw := &FreeBSDPFFirewall{}
+		if fw.IsAvailable() {
+			log.Printf("Firewall: using %s", fw.Name())
+			return fw
+		}
+		log.Printf("Firewall: pf not available — bans will not be enforced locally")
+		return &NoOpFirewall{}
+
 	default: // Linux + others
 		candidates := []FirewallManager{
 			&NftablesFirewall{},
@@ -457,6 +466,82 @@ func (f *PFFirewall) GetBannedIPs() ([]string, error) {
 		}
 	}
 	return ips, nil
+}
+
+// ── FreeBSD pf (table-based, OPNsense-friendly) ─────────────────────────────
+//
+// Strategy (OPNsense-compatible):
+//   - All banned IPs are stored in pf table <obliguard_blocklist>.
+//   - Tables are dynamic: entries survive pf config reloads (e.g. when OPNsense
+//     applies changes via configd), so the agent never fights the system config.
+//   - The admin adds one rule to OPNsense's floating rules or /etc/pf.conf:
+//       block in quick from <obliguard_blocklist>
+//       block out quick to <obliguard_blocklist>
+//   - The agent only manages table membership, never touches pf.conf.
+
+const freebsdPFTable = "obliguard_blocklist"
+
+type FreeBSDPFFirewall struct{}
+
+func (f *FreeBSDPFFirewall) Name() string { return "freebsd_pf" }
+
+func (f *FreeBSDPFFirewall) IsAvailable() bool {
+	if _, err := exec.LookPath("pfctl"); err != nil {
+		return false
+	}
+	out, err := exec.Command("pfctl", "-si").Output()
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(out), "Status: Enabled")
+}
+
+func (f *FreeBSDPFFirewall) BanIP(ip string) error {
+	f.ensureTable()
+	return exec.Command("pfctl", "-t", freebsdPFTable, "-T", "add", ip).Run()
+}
+
+func (f *FreeBSDPFFirewall) UnbanIP(ip string) error {
+	return exec.Command("pfctl", "-t", freebsdPFTable, "-T", "delete", ip).Run()
+}
+
+func (f *FreeBSDPFFirewall) GetBannedIPs() ([]string, error) {
+	out, err := exec.Command("pfctl", "-t", freebsdPFTable, "-T", "show").Output()
+	if err != nil {
+		return nil, nil
+	}
+	var ips []string
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			ips = append(ips, line)
+		}
+	}
+	return ips, nil
+}
+
+// ensureTable creates the pf table and block rules if they don't already exist.
+// Uses the "obliguard" anchor so rules survive independently of the main pf.conf.
+// On OPNsense, pf.conf is regenerated on every config change, so the anchor
+// approach ensures our rules persist without fighting the config system.
+func (f *FreeBSDPFFirewall) ensureTable() {
+	// If the table already exists in our anchor, we're good
+	cmd := exec.Command("pfctl", "-a", "obliguard", "-t", freebsdPFTable, "-T", "show")
+	if cmd.Run() == nil {
+		return
+	}
+	// Also check the main ruleset (plain FreeBSD with rules in pf.conf)
+	if exec.Command("pfctl", "-t", freebsdPFTable, "-T", "show").Run() == nil {
+		return
+	}
+	// Load table + block rules into the obliguard anchor
+	rules := fmt.Sprintf("table <%s> persist\nblock in quick from <%s>\nblock out quick to <%s>\n",
+		freebsdPFTable, freebsdPFTable, freebsdPFTable)
+	anchorCmd := exec.Command("pfctl", "-a", "obliguard", "-f", "-")
+	anchorCmd.Stdin = strings.NewReader(rules)
+	if err := anchorCmd.Run(); err != nil {
+		log.Printf("Firewall: pf anchor init warning: %v", err)
+	}
 }
 
 // ── No-op (fallback when no firewall is available) ────────────────────────────

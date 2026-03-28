@@ -1,0 +1,42 @@
+# Dockerfile.crossbuild — Cross-compile Obliguard agent for Linux + FreeBSD.
+#
+# Used by 000-RegularUpdate.bat via the remote Docker daemon (10.0.0.152).
+# Produces static binaries in /out/ that are extracted via `docker cp`.
+#
+# Usage:
+#   docker build -f agent/Dockerfile.crossbuild --build-arg AGENT_VERSION=1.2.3 -t obliguard-agent-xbuild agent/
+#   docker create --name xbuild-tmp obliguard-agent-xbuild
+#   docker cp xbuild-tmp:/out/. agent/dist/
+#   docker rm xbuild-tmp
+
+FROM golang:1.22-alpine AS builder
+
+WORKDIR /app
+
+# Download dependencies first (layer cache)
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+ARG AGENT_VERSION=dev
+ENV CGO_ENABLED=0
+
+# ── Linux amd64 ──────────────────────────────────────────────────────────────
+RUN GOOS=linux GOARCH=amd64 go build \
+      -ldflags="-s -w -X main.agentVersion=${AGENT_VERSION}" \
+      -o /out/obliguard-agent-linux-amd64 .
+
+# ── Linux arm64 ──────────────────────────────────────────────────────────────
+RUN GOOS=linux GOARCH=arm64 go build \
+      -ldflags="-s -w -X main.agentVersion=${AGENT_VERSION}" \
+      -o /out/obliguard-agent-linux-arm64 .
+
+# ── FreeBSD amd64 ────────────────────────────────────────────────────────────
+RUN GOOS=freebsd GOARCH=amd64 go build \
+      -ldflags="-s -w -X main.agentVersion=${AGENT_VERSION}" \
+      -o /out/obliguard-agent-freebsd-amd64 .
+
+# ── Final stage (tiny image with just the binaries) ──────────────────────────
+FROM scratch
+COPY --from=builder /out/ /out/

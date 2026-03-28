@@ -29,6 +29,8 @@ func handleUninstallCommand(cfg *Config) {
 		err = handleLinuxUninstall()
 	case "darwin":
 		err = handleDarwinUninstall()
+	case "freebsd":
+		err = handleFreeBSDUninstall()
 	default:
 		log.Printf("Uninstall: unsupported platform %q — ignoring command", runtime.GOOS)
 		return
@@ -116,6 +118,39 @@ func handleDarwinUninstall() error {
 		"launchctl unload " + plist + " 2>/dev/null || true\n" +
 		"rm -f " + plist + "\n" +
 		"rm -f " + binary + "\n" +
+		// Self-delete
+		"rm -f \"$0\"\n"
+
+	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
+		return fmt.Errorf("write uninstall script: %w", err)
+	}
+
+	return exec.Command("sh", scriptPath).Start()
+}
+
+// ── FreeBSD ──────────────────────────────────────────────────────────────────
+
+// handleFreeBSDUninstall writes a shell script that stops and removes the
+// obliguard-agent rc.d service, its binary, and the rc.d script.
+// Config at /etc/obliguard-agent/ is preserved.
+func handleFreeBSDUninstall() error {
+	scriptPath := "/tmp/obliguard-uninstall.sh"
+	script := "#!/bin/sh\n" +
+		"sleep 2\n" +
+		"service obliguard_agent stop 2>/dev/null || true\n" +
+		"sysrc -x obliguard_agent_enable 2>/dev/null || true\n" +
+		// Flush pf table and anchor
+		"pfctl -t obliguard_blocklist -T flush 2>/dev/null || true\n" +
+		"pfctl -t obliguard_blocklist -T kill 2>/dev/null || true\n" +
+		"pfctl -a obliguard -F all 2>/dev/null || true\n" +
+		// Remove OPNsense hook files if present
+		"rm -f /usr/local/opnsense/scripts/filter/obliguard_reload.sh\n" +
+		"rm -f /usr/local/opnsense/service/conf/actions.d/actions_obliguard.conf\n" +
+		"rm -f /usr/local/etc/pf.opnsense.d/obliguard.conf\n" +
+		// Remove service files
+		"rm -f /usr/local/etc/rc.d/obliguard_agent\n" +
+		"rm -f /usr/local/bin/obliguard-agent\n" +
+		"rm -f /var/run/obliguard_agent.pid\n" +
 		// Self-delete
 		"rm -f \"$0\"\n"
 

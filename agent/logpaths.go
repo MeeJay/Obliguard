@@ -15,6 +15,8 @@ func defaultLogPath(serviceType string) string {
 		return defaultLogPathDarwin(serviceType)
 	case "windows":
 		return defaultLogPathWindows(serviceType)
+	case "freebsd":
+		return defaultLogPathFreeBSD(serviceType)
 	default:
 		return ""
 	}
@@ -86,6 +88,28 @@ func defaultLogPathWindows(serviceType string) string {
 		return `C:\inetpub\logs\LogFiles\W3SVC1\u_ex*.log`
 	case "mysql":
 		return `C:\ProgramData\MySQL\MySQL Server 8.0\Data\*.err`
+	default:
+		return ""
+	}
+}
+
+func defaultLogPathFreeBSD(serviceType string) string {
+	switch serviceType {
+	case "ssh":
+		return firstExisting("/var/log/auth.log", "/var/log/security")
+	case "nginx":
+		return firstExisting("/var/log/nginx/error.log", "/usr/local/var/log/nginx/error.log")
+	case "apache":
+		return firstExisting(
+			"/var/log/httpd-error.log",
+			"/usr/local/var/log/apache24/error.log",
+		)
+	case "ftp":
+		return firstExisting("/var/log/xferlog", "/var/log/vsftpd.log")
+	case "mail":
+		return firstExisting("/var/log/maillog", "/var/log/mail.log")
+	case "mysql":
+		return firstExisting("/var/db/mysql/error.log", "/var/log/mysql/error.log")
 	default:
 		return ""
 	}

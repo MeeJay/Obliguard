@@ -94,6 +94,7 @@ const ALLOWED_AGENT_BINARIES: Record<string, string> = {
   'obliguard-agent-linux-arm64':     'obliguard-agent-linux-arm64',
   'obliguard-agent-darwin-amd64':    'obliguard-agent-darwin-amd64',
   'obliguard-agent-darwin-arm64':    'obliguard-agent-darwin-arm64',
+  'obliguard-agent-freebsd-amd64':  'obliguard-agent-freebsd-amd64',
 };
 
 export function agentDownload(req: Request, res: Response): void {

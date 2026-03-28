@@ -35,6 +35,10 @@ func getOSInfo() OSInfo {
 		d := "Windows"
 		info.Distro = &d
 		info.Release = &rel
+	case "freebsd":
+		distro, release := freebsdOSInfo()
+		info.Distro = &distro
+		info.Release = &release
 	}
 
 	return info
@@ -65,6 +69,18 @@ func darwinRelease() string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+func freebsdOSInfo() (distro, release string) {
+	distro = "FreeBSD"
+	out, err := exec.Command("freebsd-version").Output()
+	if err != nil {
+		out, err = exec.Command("uname", "-r").Output()
+	}
+	if err == nil {
+		release = strings.TrimSpace(string(out))
+	}
+	return
 }
 
 func windowsRelease() string {
