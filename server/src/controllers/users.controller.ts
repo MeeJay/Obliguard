@@ -52,9 +52,17 @@ export const usersController = {
       const id = parseInt(req.params.id, 10);
       const data = req.body as UpdateUserInput;
 
+      // Block role/isActive changes for SSO users — manage from Obligate
+      const targetUser = await userService.getById(id);
+      if (targetUser?.foreignSource === 'obligate') {
+        if (data.role !== undefined || data.isActive !== undefined) {
+          throw new AppError(400, 'Cannot modify SSO user — manage from Obligate');
+        }
+      }
+
       // Block username change for SSO users
       if (data.username !== undefined) {
-        const currentUser = await userService.getById(id);
+        const currentUser = targetUser ?? await userService.getById(id);
         if (currentUser?.foreignSource) {
           throw new AppError(400, 'Cannot change username of an SSO user');
         }
@@ -114,6 +122,12 @@ export const usersController = {
       }
 
       const user = await userService.getById(id);
+
+      // Block deletion of SSO users — manage from Obligate
+      if (user?.foreignSource === 'obligate') {
+        throw new AppError(400, 'Cannot delete SSO user — manage from Obligate');
+      }
+
       if (user?.role === 'admin') {
         const allUsers = await userService.getAll();
         const activeAdmins = allUsers.filter((u) => u.role === 'admin' && u.isActive && u.id !== id);
