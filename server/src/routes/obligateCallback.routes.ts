@@ -75,6 +75,7 @@ router.get('/callback', async (req, res) => {
         });
       } else {
         // Create new local user (foreign_source='obligate', no password)
+        // SSO users skip local enrollment — mark as fully enrolled immediately
         const [newUser] = await db('users')
           .insert({
             username: `og_${assertion.username}`,
@@ -84,6 +85,7 @@ router.get('/callback', async (req, res) => {
             is_active: true,
             foreign_source: 'obligate',
             foreign_id: assertion.obligateUserId,
+            enrollment_version: 999,
           })
           .returning('id') as Array<{ id: number }>;
         localUserId = newUser.id;
