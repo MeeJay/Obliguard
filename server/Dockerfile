@@ -36,7 +36,9 @@ RUN VERSION=$(cat VERSION) && \
     CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 \
         go build -ldflags="-s -w -X main.agentVersion=${VERSION}" -o dist/obliguard-agent-darwin-amd64 . && \
     CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 \
-        go build -ldflags="-s -w -X main.agentVersion=${VERSION}" -o dist/obliguard-agent-darwin-arm64 .
+        go build -ldflags="-s -w -X main.agentVersion=${VERSION}" -o dist/obliguard-agent-darwin-arm64 . && \
+    CGO_ENABLED=0 GOOS=freebsd GOARCH=amd64 \
+        go build -ldflags="-s -w -X main.agentVersion=${VERSION}" -o dist/obliguard-agent-freebsd-amd64 .
 
 # ---- Production stage ----
 FROM node:24-alpine AS production
@@ -64,6 +66,7 @@ COPY --from=go-agent-builder /build/dist/obliguard-agent-linux-amd64   ./agent/d
 COPY --from=go-agent-builder /build/dist/obliguard-agent-linux-arm64   ./agent/dist/
 COPY --from=go-agent-builder /build/dist/obliguard-agent-darwin-amd64  ./agent/dist/
 COPY --from=go-agent-builder /build/dist/obliguard-agent-darwin-arm64  ./agent/dist/
+COPY --from=go-agent-builder /build/dist/obliguard-agent-freebsd-amd64 ./agent/dist/
 
 # Pre-built Windows MSI (build on Windows: cd agent && build-msi.bat)
 # If absent, the /api/agent/installer/windows.msi endpoint returns 404.
