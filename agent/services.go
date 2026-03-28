@@ -26,6 +26,10 @@ var knownServices = []knownService{
 	{"nginx", []int{80, 443, 8080, 8443}},
 	{"apache", []int{80, 443, 8080, 8443}},
 	{"iis", []int{80, 443, 8080}},
+	// OPNsense web UI — only detected on FreeBSD when OPNsense is present.
+	// Ports overlap with nginx/apache but detectServices() deduplicates by
+	// checking isOPNsense() first on FreeBSD so it takes priority.
+	{"opnsense", []int{443, 4443, 8443}},
 }
 
 // ── detectServices scans for listening services ───────────────────────────────
@@ -37,6 +41,16 @@ var knownServices = []knownService{
 func detectServices() []AgentDetectedService {
 	listeningPorts := getListeningPorts()
 	portToService := resolvePortsToServices(listeningPorts)
+
+	// On OPNsense, replace nginx/apache on 443/8443 with opnsense, and
+	// always add the opnsense_filter virtual service (filterlog monitoring).
+	if runtime.GOOS == "freebsd" && isOPNsenseAgent() {
+		for port, svc := range portToService {
+			if (svc == "nginx" || svc == "apache") && (port == 443 || port == 4443 || port == 8443) {
+				portToService[port] = "opnsense"
+			}
+		}
+	}
 
 	seen := map[string]bool{}
 	var services []AgentDetectedService
@@ -54,7 +68,22 @@ func detectServices() []AgentDetectedService {
 		})
 	}
 
+	// OPNsense: always add the filterlog virtual service (no port, monitors pf log)
+	if runtime.GOOS == "freebsd" && isOPNsenseAgent() && !seen["opnsense_filter"] {
+		services = append(services, AgentDetectedService{
+			Type:   "opnsense_filter",
+			Port:   nil,
+			Active: true,
+		})
+	}
+
 	return services
+}
+
+// isOPNsenseAgent returns true if running on an OPNsense system.
+func isOPNsenseAgent() bool {
+	_, err := os.Stat("/usr/local/opnsense/version/core")
+	return err == nil
 }
 
 // getListeningPorts returns TCP ports currently in LISTEN state.

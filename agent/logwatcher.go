@@ -42,14 +42,16 @@ func NewLogWatcher(initialConfigs map[string]AgentServiceConfig) *LogWatcher {
 	}
 
 	lw.parsers = map[string]LogParser{
-		"ssh":    &SSHParser{},
-		"rdp":    &RDPParser{},
-		"nginx":  &NginxParser{},
-		"apache": &ApacheParser{},
-		"iis":    &IISParser{},
-		"ftp":    &FTPParser{},
-		"mail":   &MailParser{},
-		"mysql":  &MySQLParser{},
+		"ssh":            &SSHParser{},
+		"rdp":            &RDPParser{},
+		"nginx":          &NginxParser{},
+		"apache":         &ApacheParser{},
+		"iis":            &IISParser{},
+		"ftp":            &FTPParser{},
+		"mail":           &MailParser{},
+		"mysql":          &MySQLParser{},
+		"opnsense":       &OPNsenseParser{},
+		"opnsense_filter": &OPNsenseFilterParser{},
 	}
 
 	if initialConfigs != nil {
@@ -165,6 +167,9 @@ func (lw *LogWatcher) startWatchers() {
 			if strings.HasPrefix(logPath, "journald:") {
 				unit := strings.TrimPrefix(logPath, "journald:")
 				go lw.tailJournald(logPath, unit, svcKey, cfg)
+			} else if strings.HasPrefix(logPath, "clog:") {
+				clogFile := strings.TrimPrefix(logPath, "clog:")
+				go lw.tailClog(logPath, clogFile, svcKey, cfg)
 			} else {
 				go lw.tailFile(logPath, svcKey, cfg)
 			}
@@ -175,6 +180,9 @@ func (lw *LogWatcher) startWatchers() {
 			if strings.HasPrefix(logPath, "journald:") {
 				unit := strings.TrimPrefix(logPath, "journald:")
 				go lw.collectJournaldSample(logPath, unit)
+			} else if strings.HasPrefix(logPath, "clog:") {
+				clogFile := strings.TrimPrefix(logPath, "clog:")
+				go lw.collectClogSample(logPath, clogFile)
 			} else {
 				go lw.collectSample(logPath)
 			}
@@ -427,6 +435,120 @@ func (lw *LogWatcher) collectJournaldSample(watchKey, unit string) {
 	lw.mu.Unlock()
 }
 
+// tailClog follows an OPNsense/FreeBSD circular log using "clog -f FILE".
+// clog is the BSD circular-log utility; -f follows in real-time like tail -f.
+// watchKey is the "clog:/path" string used as the watchedFiles map key.
+func (lw *LogWatcher) tailClog(watchKey, clogFile, svcKey string, cfg AgentServiceConfig) {
+	log.Printf("LogWatcher: tailing clog %s for %s", clogFile, svcKey)
+
+	parser := lw.getParser(svcKey, cfg.CustomRegex)
+	if parser == nil {
+		log.Printf("LogWatcher: no parser for %s", svcKey)
+		lw.mu.Lock()
+		delete(lw.watchedFiles, watchKey)
+		lw.mu.Unlock()
+		return
+	}
+
+	for {
+		select {
+		case <-lw.stopCh:
+			return
+		default:
+		}
+
+		cmd := exec.Command("clog", "-f", clogFile)
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			log.Printf("LogWatcher: clog pipe error (%s): %v — retrying in 30s", clogFile, err)
+			time.Sleep(30 * time.Second)
+			continue
+		}
+		if err := cmd.Start(); err != nil {
+			log.Printf("LogWatcher: clog start error (%s): %v — retrying in 30s", clogFile, err)
+			time.Sleep(30 * time.Second)
+			continue
+		}
+
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			select {
+			case <-lw.stopCh:
+				_ = cmd.Process.Kill()
+				_ = cmd.Wait()
+				lw.mu.Lock()
+				delete(lw.watchedFiles, watchKey)
+				lw.mu.Unlock()
+				return
+			default:
+			}
+
+			line := scanner.Text()
+			if line == "" {
+				continue
+			}
+
+			lw.mu.Lock()
+			cur, exists := lw.configs[svcKey]
+			lw.mu.Unlock()
+
+			if !exists || !cur.Enabled {
+				_ = cmd.Process.Kill()
+				_ = cmd.Wait()
+				lw.mu.Lock()
+				delete(lw.watchedFiles, watchKey)
+				lw.mu.Unlock()
+				return
+			}
+
+			for _, e := range parser.Parse(line, svcKey) {
+				lw.addEvent(e)
+			}
+		}
+
+		_ = cmd.Wait()
+
+		select {
+		case <-lw.stopCh:
+			lw.mu.Lock()
+			delete(lw.watchedFiles, watchKey)
+			lw.mu.Unlock()
+			return
+		default:
+		}
+
+		log.Printf("LogWatcher: clog (%s) exited — restarting in 5s", clogFile)
+		lw.mu.Lock()
+		delete(lw.watchedFiles, watchKey)
+		lw.mu.Unlock()
+		time.Sleep(5 * time.Second)
+	}
+}
+
+// collectClogSample reads the last 50 lines from a clog circular log file.
+func (lw *LogWatcher) collectClogSample(watchKey, clogFile string) {
+	cmd := exec.Command("clog", clogFile)
+	out, err := cmd.Output()
+	if err != nil {
+		log.Printf("LogWatcher: clog sample error (%s): %v", clogFile, err)
+		return
+	}
+
+	raw := strings.TrimRight(string(out), "\n")
+	if raw == "" {
+		return
+	}
+	allLines := strings.Split(raw, "\n")
+	// Keep last 50
+	if len(allLines) > 50 {
+		allLines = allLines[len(allLines)-50:]
+	}
+
+	lw.mu.Lock()
+	lw.samples[watchKey] = allLines
+	lw.mu.Unlock()
+}
+
 func (lw *LogWatcher) getParser(svcKey string, customRegex *string) LogParser {
 	if customRegex != nil && *customRegex != "" {
 		return &CustomRegexParser{Regex: *customRegex, ServiceKey: svcKey}
@@ -555,6 +677,149 @@ func (p *MySQLParser) Parse(line, svcKey string) []AgentIpEvent {
 		return []AgentIpEvent{makeEvent(m[2], m[1], svcKey, "auth_failure", line)}
 	}
 	return nil
+}
+
+// ── OPNsense Web UI auth parser ──────────────────────────────────────────────
+// Parses /var/log/system.log (clog) for web UI authentication failures/successes.
+// OPNsense log formats:
+//   audit: user "admin" authenticated successfully from: 10.0.0.5
+//   audit: user "admin" authentication failed from: 10.0.0.5
+//   /api/...: Authentication failed for user "admin" [from: 10.0.0.5]
+
+type OPNsenseParser struct{}
+
+var opnAuthFailRe = regexp.MustCompile(
+	`(?:audit|/api\S*): (?:user "([^"]+)" )?[Aa]uthentication failed(?: for user "([^"]+)")? (?:from:|.*\[from:)\s*([\d.]+|[0-9a-f:]+)`)
+var opnAuthSuccessRe = regexp.MustCompile(
+	`audit: user "([^"]+)" authenticated successfully from:\s*([\d.]+|[0-9a-f:]+)`)
+
+func (p *OPNsenseParser) Parse(line, svcKey string) []AgentIpEvent {
+	if m := opnAuthFailRe.FindStringSubmatch(line); m != nil {
+		user := m[1]
+		if user == "" {
+			user = m[2]
+		}
+		ip := m[3]
+		return []AgentIpEvent{makeEvent(ip, user, svcKey, "auth_failure", line)}
+	}
+	if m := opnAuthSuccessRe.FindStringSubmatch(line); m != nil {
+		return []AgentIpEvent{makeEvent(m[2], m[1], svcKey, "auth_success", line)}
+	}
+	return nil
+}
+
+// ── OPNsense filterlog parser (blocked connections + NAT) ───────────────────
+// Parses /var/log/filter.log (clog) for pf filterlog CSV entries.
+// OPNsense filterlog format (comma-separated):
+//   rulenr,subrulenr,anchorname,ridentifier,interface,reason,action,dir,ipver,...
+// For IPv4 (ipver=4):
+//   ...,tos,ecn,ttl,id,offset,flags,proto_id,proto_name,length,src_ip,dst_ip,...
+// For TCP (proto_name=tcp), after dst_ip:
+//   ...,src_port,dst_port,datalen,tcp_flags,...
+//
+// We emit auth_failure for "block" actions (potential attacks) and
+// auth_success for "pass" actions on well-known ports (NATed traffic).
+
+type OPNsenseFilterParser struct{}
+
+func (p *OPNsenseFilterParser) Parse(line, svcKey string) []AgentIpEvent {
+	// filterlog lines look like: "Mar 28 12:00:00 fw filterlog[123]: 5,,,..."
+	// Find the filterlog CSV payload after the syslog prefix.
+	idx := strings.Index(line, "filterlog")
+	if idx < 0 {
+		return nil
+	}
+	colonIdx := strings.Index(line[idx:], ": ")
+	if colonIdx < 0 {
+		return nil
+	}
+	csv := line[idx+colonIdx+2:]
+	fields := strings.Split(csv, ",")
+	if len(fields) < 7 {
+		return nil
+	}
+
+	action := fields[6]  // "block" or "pass"
+	dir := fields[7]     // "in" or "out"
+	if dir != "in" {
+		return nil // Only care about inbound connections
+	}
+
+	// Parse based on IP version
+	ipVer := ""
+	if len(fields) > 8 {
+		ipVer = fields[8]
+	}
+
+	var srcIP, dstIP, protoName, srcPort, dstPort string
+
+	switch ipVer {
+	case "4":
+		// IPv4: fields[9..17] = tos,ecn,ttl,id,offset,flags,proto_id,proto_name,length
+		// fields[18]=src_ip, fields[19]=dst_ip
+		if len(fields) < 20 {
+			return nil
+		}
+		protoName = fields[16]
+		srcIP = fields[18]
+		dstIP = fields[19]
+		if protoName == "tcp" || protoName == "udp" {
+			if len(fields) < 22 {
+				return nil
+			}
+			srcPort = fields[20]
+			dstPort = fields[21]
+		}
+	case "6":
+		// IPv6: fields[9..13] = class,flowlabel,hlim,proto_name,proto_id
+		// fields[14]=length, fields[15]=src_ip, fields[16]=dst_ip
+		if len(fields) < 17 {
+			return nil
+		}
+		protoName = fields[12]
+		srcIP = fields[15]
+		dstIP = fields[16]
+		if protoName == "tcp" || protoName == "udp" {
+			if len(fields) < 19 {
+				return nil
+			}
+			srcPort = fields[17]
+			dstPort = fields[18]
+		}
+	default:
+		return nil
+	}
+
+	_ = dstIP
+	_ = srcPort
+
+	// Determine event type based on action
+	eventType := "auth_failure"
+	if action == "pass" {
+		eventType = "auth_success"
+	} else if action != "block" {
+		return nil
+	}
+
+	// Build a human-readable summary
+	proto := protoName
+	if proto == "" {
+		proto = "unknown"
+	}
+	raw := fmt.Sprintf("pf %s %s %s:%s → %s:%s (%s)",
+		action, dir, srcIP, srcPort, dstIP, dstPort, proto)
+
+	// For "pass" (NAT), map dst_port to a service name if known
+	service := svcKey
+	if dstPort != "" {
+		dPort := 0
+		fmt.Sscanf(dstPort, "%d", &dPort)
+		if svcName, ok := servicePorts[dPort]; ok && action == "pass" {
+			service = svcName
+		}
+	}
+
+	return []AgentIpEvent{makeEvent(srcIP, "", service, eventType, raw)}
 }
 
 // ── Custom regex parser ───────────────────────────────────────────────────────

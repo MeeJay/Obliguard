@@ -96,6 +96,10 @@ func defaultLogPathWindows(serviceType string) string {
 func defaultLogPathFreeBSD(serviceType string) string {
 	switch serviceType {
 	case "ssh":
+		// OPNsense uses clog for auth.log; plain FreeBSD uses regular files.
+		if isClogFile("/var/log/auth.log") {
+			return "clog:/var/log/auth.log"
+		}
 		return firstExisting("/var/log/auth.log", "/var/log/security")
 	case "nginx":
 		return firstExisting("/var/log/nginx/error.log", "/usr/local/var/log/nginx/error.log")
@@ -107,12 +111,44 @@ func defaultLogPathFreeBSD(serviceType string) string {
 	case "ftp":
 		return firstExisting("/var/log/xferlog", "/var/log/vsftpd.log")
 	case "mail":
+		if isClogFile("/var/log/maillog") {
+			return "clog:/var/log/maillog"
+		}
 		return firstExisting("/var/log/maillog", "/var/log/mail.log")
 	case "mysql":
 		return firstExisting("/var/db/mysql/error.log", "/var/log/mysql/error.log")
+	case "opnsense":
+		// OPNsense web UI auth events are in system.log (clog circular log)
+		if isClogFile("/var/log/system.log") {
+			return "clog:/var/log/system.log"
+		}
+		return firstExisting("/var/log/system.log", "/var/log/auth.log")
+	case "opnsense_filter":
+		// OPNsense pf filterlog — blocked connections and NAT pass-throughs
+		if isClogFile("/var/log/filter.log") {
+			return "clog:/var/log/filter.log"
+		}
+		return "/var/log/filter.log"
 	default:
 		return ""
 	}
+}
+
+// isClogFile returns true if the file appears to be a BSD clog (circular log).
+// clog files start with a specific magic header (0x49ee) and cannot be read
+// as plain text — they require the `clog` utility.
+func isClogFile(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	magic := make([]byte, 2)
+	if _, err := f.Read(magic); err != nil {
+		return false
+	}
+	// clog magic: 0x49 0xEE
+	return magic[0] == 0x49 && magic[1] == 0xEE
 }
 
 func firstExisting(paths ...string) string {
