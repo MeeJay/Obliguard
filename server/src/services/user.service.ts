@@ -11,6 +11,7 @@ interface UserRow {
   is_active: boolean;
   created_at: Date;
   updated_at: Date;
+  foreign_source: string | null;
 }
 
 function rowToUser(row: UserRow): User {
@@ -24,6 +25,7 @@ function rowToUser(row: UserRow): User {
     updatedAt: row.updated_at.toISOString(),
     preferredLanguage: 'en',
     enrollmentVersion: 0,
+    foreignSource: row.foreign_source ?? null,
   };
 }
 
@@ -59,11 +61,13 @@ export const userService = {
   },
 
   async update(id: number, data: {
+    username?: string;
     displayName?: string | null;
     role?: UserRole;
     isActive?: boolean;
   }): Promise<User | null> {
     const updateData: Record<string, unknown> = { updated_at: new Date() };
+    if (data.username !== undefined) updateData.username = data.username;
     if (data.displayName !== undefined) updateData.display_name = data.displayName;
     if (data.role !== undefined) updateData.role = data.role;
     if (data.isActive !== undefined) updateData.is_active = data.isActive;

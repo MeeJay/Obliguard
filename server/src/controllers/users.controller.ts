@@ -52,6 +52,14 @@ export const usersController = {
       const id = parseInt(req.params.id, 10);
       const data = req.body as UpdateUserInput;
 
+      // Block username change for SSO users
+      if (data.username !== undefined) {
+        const currentUser = await userService.getById(id);
+        if (currentUser?.foreignSource) {
+          throw new AppError(400, 'Cannot change username of an SSO user');
+        }
+      }
+
       // Prevent demoting the last admin
       if (data.role === 'user' || data.isActive === false) {
         const currentUser = await userService.getById(id);
@@ -80,6 +88,13 @@ export const usersController = {
   async changePassword(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const id = parseInt(req.params.id, 10);
+
+      // Block password change for SSO users
+      const currentUser = await userService.getById(id);
+      if (currentUser?.foreignSource) {
+        throw new AppError(400, 'Cannot change password of an SSO user');
+      }
+
       const data = req.body as ChangePasswordInput;
       const success = await userService.changePassword(id, data.password);
       if (!success) throw new AppError(404, 'User not found');

@@ -502,7 +502,7 @@ export function AdminUsersPage() {
                     {userFormMode === 'create' ? t('users.newUser') : t('users.editUser', { username: editingUser?.username })}
                   </h3>
                   <form onSubmit={userFormMode === 'create' ? handleCreateUser : handleEditUser} className="space-y-3">
-                    <Input label={t('users.usernameLabel')} value={formUsername} onChange={(e) => setFormUsername(e.target.value)} required pattern="[a-zA-Z0-9_.\-]+" />
+                    <Input label={t('users.usernameLabel')} value={formUsername} onChange={(e) => setFormUsername(e.target.value)} required pattern="[a-zA-Z0-9_.\-]+" disabled={userFormMode === 'edit' && !!editingUser?.foreignSource} />
                     <Input label={t('users.displayNameLabel')} value={formDisplayName} onChange={(e) => setFormDisplayName(e.target.value)} />
                     {userFormMode === 'create' && (
                       <Input label={t('users.passwordLabel')} type="password" value={formPassword} onChange={(e) => setFormPassword(e.target.value)} required minLength={6} />
@@ -552,7 +552,7 @@ export function AdminUsersPage() {
                           {user.role === 'admin' ? <><Shield size={10} className="inline mr-0.5" />{t('users.roleAdmin')}</> : t('users.roleUser')}
                         </span>
                         {user.foreignSource === 'obligate' && (
-                          <span className="inline-flex items-center gap-1 rounded-full bg-[#1e1b4b]/60 border border-[#4338ca]/40 px-1.5 py-0.5 text-[10px] font-medium text-[#a5b4fc]">
+                          <span className="inline-flex items-center gap-1 rounded-full bg-[#D3AB52]/15 border border-[#D3AB52]/40 px-1.5 py-0.5 text-[10px] font-medium text-[#D3AB52]">
                             SSO
                           </span>
                         )}
@@ -563,10 +563,12 @@ export function AdminUsersPage() {
                     </div>
                     {user.id !== currentUser?.id && (
                       <>
-                        <button onClick={() => { setEditingUser(user); setFormPassword(''); setUserFormMode('password'); }}
-                          className="shrink-0 p-1 text-text-muted hover:text-accent opacity-0 group-hover:opacity-100" title="Password">
-                          <Key size={13} />
-                        </button>
+                        {!user.foreignSource && (
+                          <button onClick={() => { setEditingUser(user); setFormPassword(''); setUserFormMode('password'); }}
+                            className="shrink-0 p-1 text-text-muted hover:text-accent opacity-0 group-hover:opacity-100" title="Password">
+                            <Key size={13} />
+                          </button>
+                        )}
                         <button onClick={() => handleToggleActive(user)}
                           className="shrink-0 p-1 text-text-muted hover:text-text-primary opacity-0 group-hover:opacity-100" title={user.isActive ? t('common.disable') : t('common.enable')}>
                           {user.isActive ? <UserX size={13} /> : <UserIcon size={13} />}
