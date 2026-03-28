@@ -125,6 +125,10 @@ export const agentApi = {
     return `${window.location.origin}/api/agent/installer/macos?key=${encodeURIComponent(apiKey)}`;
   },
 
+  getInstallerFreeBSDUrl(apiKey: string): string {
+    return `${window.location.origin}/api/agent/installer/freebsd?key=${encodeURIComponent(apiKey)}`;
+  },
+
   getMsiUrl(): string {
     return `${window.location.origin}/api/agent/installer/windows.msi`;
   },

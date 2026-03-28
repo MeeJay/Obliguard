@@ -186,6 +186,28 @@ export function agentInstallerMacos(req: Request, res: Response): void {
   res.send(script);
 }
 
+export function agentInstallerFreeBSD(req: Request, res: Response): void {
+  const apiKey = req.query.key as string | undefined;
+
+  const scriptPath = path.resolve(__dirname, '../../../../agent/installer/install-freebsd.sh');
+  if (!fs.existsSync(scriptPath)) {
+    res.status(404).json({ error: 'FreeBSD installer not available' });
+    return;
+  }
+
+  let script = fs.readFileSync(scriptPath, 'utf-8');
+
+  const serverUrl = `${req.protocol}://${req.get('host')}`;
+  script = script.replace('__SERVER_URL__', serverUrl);
+  if (apiKey) {
+    script = script.replace('__API_KEY__', apiKey);
+  }
+
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.setHeader('Content-Disposition', 'attachment; filename="install-freebsd.sh"');
+  res.send(script);
+}
+
 export function agentInstallerWindowsMsi(_req: Request, res: Response): void {
   const msiPath = path.resolve(__dirname, '../../../../agent/dist/obliguard-agent.msi');
   if (!fs.existsSync(msiPath)) {

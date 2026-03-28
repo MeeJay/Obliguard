@@ -13,6 +13,7 @@ import {
   agentInstallerWindows,
   agentInstallerWindowsMsi,
   agentInstallerMacos,
+  agentInstallerFreeBSD,
   listKeys,
   createKey,
   deleteKey,
@@ -64,6 +65,7 @@ router.get('/desktop-version', desktopVersion);
 router.get('/installer/linux', agentInstallerLinux);
 router.get('/installer/windows', agentInstallerWindows);
 router.get('/installer/macos', agentInstallerMacos);
+router.get('/installer/freebsd', agentInstallerFreeBSD);
 
 // Pre-built Windows MSI (static, SERVERURL + APIKEY passed via msiexec properties)
 router.get('/installer/windows.msi', agentInstallerWindowsMsi);

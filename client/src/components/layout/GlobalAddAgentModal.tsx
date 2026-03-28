@@ -75,10 +75,12 @@ export function GlobalAddAgentModal() {
               const expanded = expandedKeys.has(apiKey.id);
               const linuxCmd = agentApi.getInstallerLinuxUrl(apiKey.key);
               const macosCmd = agentApi.getInstallerMacosUrl(apiKey.key);
+              const freebsdCmd = agentApi.getInstallerFreeBSDUrl(apiKey.key);
               const msiUrl = agentApi.getMsiUrl();
               const origin = window.location.origin;
               const linuxOneliner = `curl -fsSL "${linuxCmd}" | bash`;
               const macosOneliner = `sudo bash -c "$(curl -fsSL '${macosCmd}')"`;
+              const freebsdOneliner = `fetch -qo- "${freebsdCmd}" | sh`;
               const windowsCmd = `$m="$env:TEMP\\obliguard-agent.msi"; Invoke-WebRequest "${msiUrl}" -OutFile $m -UseBasicParsing; Start-Process msiexec -ArgumentList "/i \`"$m\`" SERVERURL=\`"${origin}\`" APIKEY=\`"${apiKey.key}\`" /quiet" -Wait -Verb RunAs; Remove-Item $m`;
 
               return (
@@ -119,6 +121,13 @@ export function GlobalAddAgentModal() {
                         <div className="flex items-start gap-2 rounded-md bg-bg-tertiary p-3">
                           <code className="flex-1 text-xs font-mono text-text-primary break-all leading-relaxed">{macosOneliner}</code>
                           <CopyButton text={macosOneliner} />
+                        </div>
+                      </div>
+                      <div>
+                        <p className="text-xs font-medium text-text-muted uppercase tracking-wide mb-1.5">FreeBSD / OPNsense</p>
+                        <div className="flex items-start gap-2 rounded-md bg-bg-tertiary p-3">
+                          <code className="flex-1 text-xs font-mono text-text-primary break-all leading-relaxed">{freebsdOneliner}</code>
+                          <CopyButton text={freebsdOneliner} />
                         </div>
                       </div>
                       <div>
