@@ -679,34 +679,60 @@ func (p *MySQLParser) Parse(line, svcKey string) []AgentIpEvent {
 	return nil
 }
 
-// ── OPNsense Web UI auth parser ──────────────────────────────────────────────
-// Parses /var/log/system.log (clog) for web UI authentication failures/successes.
-// OPNsense log formats:
-//   audit: user "admin" authenticated successfully from: 10.0.0.5
-//   audit: user "admin" authentication failed from: 10.0.0.5
-//   /api/...: Authentication failed for user "admin" [from: 10.0.0.5]
+// ── OPNsense auth parser (Web UI + SSH) ─────────────────────────────────────
+// Parses /var/log/audit/latest.log for authentication events.
+// This file receives all facility(auth) messages via syslog-ng on OPNsense 22.x+.
+//
+// Failure patterns (from OPNsense's own sshlockout syslog-ng config):
+//   "Web GUI authentication error for 'admin' from 10.0.0.5"
+//   "Authentication error for admin from: 10.0.0.5"
+//   sshd: "Failed password for admin from 10.0.0.5 port 22 ssh2"
+//   sshd: "Invalid user test from 10.0.0.5 port 22"
+//   sshd: "Illegal user test from 10.0.0.5"
+//
+// Success patterns:
+//   "Successful login for user 'admin' from: 10.0.0.5"
+//   "Accepted publickey for admin from 10.0.0.5 port 22 ssh2"
 
 type OPNsenseParser struct{}
 
-var opnAuthFailRe = regexp.MustCompile(
-	`(?:audit|/api\S*): (?:user "([^"]+)" )?[Aa]uthentication failed(?: for user "([^"]+)")? (?:from:|.*\[from:)\s*([\d.]+|[0-9a-f:]+)`)
-var opnAuthSuccessRe = regexp.MustCompile(
-	`audit: user "([^"]+)" authenticated successfully from:\s*([\d.]+|[0-9a-f:]+)`)
+var opnWebFailRe = regexp.MustCompile(
+	`Web GUI authentication error for '([^']*)'.*?from\s+([\d.]+|[0-9a-f:]+)`)
+var opnAuthErrorRe = regexp.MustCompile(
+	`Authentication error for\s+(\S+).*?from:?\s*([\d.]+|[0-9a-f:]+)`)
+var opnSuccessRe = regexp.MustCompile(
+	`Successful login for user '([^']*)'.*?from:?\s*([\d.]+|[0-9a-f:]+)`)
 
 func (p *OPNsenseParser) Parse(line, svcKey string) []AgentIpEvent {
-	if m := opnAuthFailRe.FindStringSubmatch(line); m != nil {
-		user := m[1]
-		if user == "" {
-			user = m[2]
-		}
-		ip := m[3]
-		return []AgentIpEvent{makeEvent(ip, user, svcKey, "auth_failure", line)}
+	// Web GUI failures
+	if m := opnWebFailRe.FindStringSubmatch(line); m != nil {
+		return []AgentIpEvent{makeEvent(m[2], m[1], svcKey, "auth_failure", line)}
 	}
-	if m := opnAuthSuccessRe.FindStringSubmatch(line); m != nil {
+	// General auth error (covers SSH + other PAM failures on OPNsense)
+	if m := opnAuthErrorRe.FindStringSubmatch(line); m != nil {
+		return []AgentIpEvent{makeEvent(m[2], m[1], svcKey, "auth_failure", line)}
+	}
+	// SSH failures — already parsed by SSHParser, but since OPNsense puts
+	// everything in audit/latest.log, the opnsense parser also handles them.
+	if m := sshFailRe.FindStringSubmatch(line); m != nil {
+		return []AgentIpEvent{makeEvent(m[4], m[3], svcKey, "auth_failure", line)}
+	}
+	// Invalid/Illegal user (SSH brute-force with non-existent usernames)
+	if m := opnInvalidUserRe.FindStringSubmatch(line); m != nil {
+		return []AgentIpEvent{makeEvent(m[2], m[1], svcKey, "auth_failure", line)}
+	}
+	// Successes
+	if m := opnSuccessRe.FindStringSubmatch(line); m != nil {
 		return []AgentIpEvent{makeEvent(m[2], m[1], svcKey, "auth_success", line)}
+	}
+	if m := sshAcceptRe.FindStringSubmatch(line); m != nil {
+		return []AgentIpEvent{makeEvent(m[3], m[2], svcKey, "auth_success", line)}
 	}
 	return nil
 }
+
+var opnInvalidUserRe = regexp.MustCompile(
+	`(?:Invalid|Illegal) user\s+(\S+)\s+from\s+([\d.]+|[0-9a-f:]+)`)
 
 // ── OPNsense filterlog parser (blocked connections + NAT) ───────────────────
 // Parses /var/log/filter.log (clog) for pf filterlog CSV entries.

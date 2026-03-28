@@ -96,11 +96,15 @@ func defaultLogPathWindows(serviceType string) string {
 func defaultLogPathFreeBSD(serviceType string) string {
 	switch serviceType {
 	case "ssh":
-		// OPNsense uses clog for auth.log; plain FreeBSD uses regular files.
-		if isClogFile("/var/log/auth.log") {
-			return "clog:/var/log/auth.log"
-		}
-		return firstExisting("/var/log/auth.log", "/var/log/security")
+		return firstExistingFreeBSD(
+			// OPNsense 22.x+ (syslog-ng): SSH goes to audit via facility(auth)
+			"/var/log/audit/latest.log",
+			// OPNsense <22.1 (clog circular log)
+			"/var/log/auth.log",
+			// Plain FreeBSD
+			"/var/log/auth.log",
+			"/var/log/security",
+		)
 	case "nginx":
 		return firstExisting("/var/log/nginx/error.log", "/usr/local/var/log/nginx/error.log")
 	case "apache":
@@ -111,27 +115,51 @@ func defaultLogPathFreeBSD(serviceType string) string {
 	case "ftp":
 		return firstExisting("/var/log/xferlog", "/var/log/vsftpd.log")
 	case "mail":
-		if isClogFile("/var/log/maillog") {
-			return "clog:/var/log/maillog"
-		}
-		return firstExisting("/var/log/maillog", "/var/log/mail.log")
+		return firstExistingFreeBSD(
+			"/var/log/mail/latest.log",
+			"/var/log/maillog",
+			"/var/log/mail.log",
+		)
 	case "mysql":
 		return firstExisting("/var/db/mysql/error.log", "/var/log/mysql/error.log")
 	case "opnsense":
-		// OPNsense web UI auth events are in system.log (clog circular log)
-		if isClogFile("/var/log/system.log") {
-			return "clog:/var/log/system.log"
-		}
-		return firstExisting("/var/log/system.log", "/var/log/auth.log")
+		// OPNsense web UI + SSH auth events (all in audit via facility(auth)):
+		//   22.x–25.x+: /var/log/audit/latest.log (syslog-ng, plain text)
+		//   <22.1:       /var/log/system.log (clog)
+		// Log lines matched: "Web GUI authentication error", "Authentication error for"
+		return firstExistingFreeBSD(
+			"/var/log/audit/latest.log",
+			"/var/log/system.log",
+		)
 	case "opnsense_filter":
-		// OPNsense pf filterlog — blocked connections and NAT pass-throughs
-		if isClogFile("/var/log/filter.log") {
-			return "clog:/var/log/filter.log"
-		}
-		return "/var/log/filter.log"
+		// OPNsense pf filterlog — blocked connections and NAT pass-throughs:
+		//   22.x–25.x+: /var/log/filter/latest.log (syslog-ng, plain text)
+		//   <22.1:       /var/log/filter.log (clog)
+		return firstExistingFreeBSD(
+			"/var/log/filter/latest.log",
+			"/var/log/filter.log",
+		)
 	default:
 		return ""
 	}
+}
+
+// firstExistingFreeBSD returns the first path that exists. If a path is a
+// clog circular log (OPNsense <22.1), it is returned with the "clog:" prefix
+// so the logwatcher uses `clog -f` instead of plain file tailing.
+func firstExistingFreeBSD(paths ...string) string {
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil {
+			if isClogFile(p) {
+				return "clog:" + p
+			}
+			return p
+		}
+	}
+	if len(paths) > 0 {
+		return paths[0]
+	}
+	return ""
 }
 
 // isClogFile returns true if the file appears to be a BSD clog (circular log).
@@ -147,7 +175,6 @@ func isClogFile(path string) bool {
 	if _, err := f.Read(magic); err != nil {
 		return false
 	}
-	// clog magic: 0x49 0xEE
 	return magic[0] == 0x49 && magic[1] == 0xEE
 }
 
