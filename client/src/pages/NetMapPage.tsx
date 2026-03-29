@@ -25,12 +25,10 @@ import {
   IP_TTL, IP_FADE_AGE, IP_TTL_CLEAN, IP_TTL_SUSPICIOUS, IP_TTL_BANNED,
   PEER_LINK_TTL, RING_INNER_R,
   EVENT_COLORS, DANGEROUS_SVCS, PEER_LINK_COLOR, DEVICE_TYPE_COLORS,
-  BADGE_H, BADGE_FONT,
 } from '../netmap/constants';
 import {
   flagEmoji, svcColor, isDangerousSvc, statusColor, agentExclusionR,
-  shouldLabel, ipToInt, matchWhitelist, badgeText, drawBadgeAt,
-  makeOrbitalFields,
+  ipToInt, matchWhitelist, makeOrbitalFields,
 } from '../netmap/helpers';
 import {
   placeIp, distributeIpsAroundAgents, relayoutIps, layoutAgents,
@@ -69,13 +67,14 @@ function ipTtlForStatus(status: string): number {
   return IP_TTL;
 }
 
-/** Compute mockup-style tight orbit radius. */
+/** Compute orbit radius — spread IPs across varied distances from agent. */
 function orbRadius(nodeR: number, slot: number, totalSlots: number): number {
-  const minR = nodeR + 6;
-  const maxLayers = Math.ceil(Math.sqrt(totalSlots * 2));
-  const layer = Math.floor(slot / Math.max(1, Math.ceil(totalSlots / maxLayers)));
-  const layerSpacing = Math.max(2.5, Math.min(4, 60 / Math.max(1, maxLayers)));
-  return minR + layer * layerSpacing;
+  const minR = nodeR + 12;
+  const maxR = nodeR + 12 + Math.min(80, totalSlots * 1.5);
+  if (totalSlots <= 1) return minR + 10;
+  // Distribute across the full range with some randomness per slot
+  const t = slot / (totalSlots - 1);
+  return minR + (maxR - minR) * t;
 }
 
 function hexRgb(h: string): [number, number, number] {
@@ -135,9 +134,16 @@ export function NetMapPage() {
   const [socketOk,      setSocketOk]      = useState(false);
   const [orbitPaused,   setOrbitPaused]   = useState(false);
   const [clickedIp,     setClickedIp]     = useState<IpNode | null>(null);
+  const [threatOnly,    setThreatOnly]    = useState(false);
+  const [searchIp,      setSearchIp]      = useState('');
+  const [searchHit,     setSearchHit]     = useState<string | null>(null);
   const orbitPausedRef  = useRef(false);
-  // Keep ref in sync
+  const threatOnlyRef   = useRef(false);
+  const searchHitRef    = useRef<string | null>(null);
+  // Keep refs in sync
   orbitPausedRef.current = orbitPaused;
+  threatOnlyRef.current = threatOnly;
+  searchHitRef.current = searchHit;
   const [liveLoadingMore, setLiveLoadingMore] = useState(false);
   const [tooltip, setTooltip] = useState<{
     x: number; y: number;
@@ -210,7 +216,7 @@ export function NetMapPage() {
       }
       node.failures   = Math.max(node.failures, failures);
       node.services   = [...new Set([...node.services, ...services])];
-      node.dotR       = 1.2 + Math.min(node.failures / 15, 3);
+      node.dotR       = 2.5 + Math.min(node.failures / 8, 5);
       node.lastSeen   = now;
       node.eventCount += evtCount;
       node.agentWeights[agentId] = (node.agentWeights[agentId] ?? 0) + evtCount;
@@ -229,7 +235,7 @@ export function NetMapPage() {
         agentIds: [agentId],
         agentWeights: { [agentId]: evtCount },
         x: ag.x, y: ag.y,
-        dotR: 1.2 + Math.min(failures / 15, 3),
+        dotR: 2.5 + Math.min(failures / 8, 5),
         color: statusColor(status),
         status, failures, services, eventCount: evtCount,
         lastSeen: now,
@@ -261,9 +267,14 @@ export function NetMapPage() {
   const spawnParticle = useCallback((ipNode: IpNode, agentId: number, color: string) => {
     const ag = agentsRef.current.find(a => a.id === agentId) ?? agentsRef.current[0];
     if (!ag) return;
+    // Use the IP's current orbital position if it has arrived,
+    // otherwise use its spawn position (edge of canvas) so the particle
+    // visibly travels FROM the IP TO the agent.
+    const srcX = ipNode.arriveT >= 1 ? ipNode.x : ipNode.spawnX;
+    const srcY = ipNode.arriveT >= 1 ? ipNode.y : ipNode.spawnY;
     particlesRef.current = [...particlesRef.current.slice(-79), {
       id:    Math.random().toString(36).slice(2),
-      sx: ipNode.x, sy: ipNode.y,
+      sx: srcX, sy: srcY,
       tx: ag.x, ty: ag.y,
       t: 0, speed: 0.4 + Math.random() * 0.35, color,
     }];
@@ -652,7 +663,7 @@ export function NetMapPage() {
           agentIds:     validIds,
           agentWeights: weights,
           x: agArr[0]?.x ?? w / 2, y: agArr[0]?.y ?? h / 2,
-          dotR:         1.2 + Math.min((rep?.failures ?? allFailures) / 15, 3),
+          dotR:         2.5 + Math.min((rep?.failures ?? allFailures) / 8, 5),
           color:        statusColor(status),
           status, failures: rep?.failures ?? allFailures,
           services: allServices, eventCount: totalCount,
@@ -681,7 +692,7 @@ export function NetMapPage() {
           country: rep.country, flag: flagEmoji(rep.country),
           agentIds: [targetId], agentWeights: { [targetId]: 0 },
           x: agentMap.get(targetId)!.x, y: agentMap.get(targetId)!.y,
-          dotR:     1.2 + Math.min(rep.failures / 15, 3),
+          dotR:     2.5 + Math.min(rep.failures / 8, 5),
           color:    statusColor(rep.status),
           status:   rep.status, failures: rep.failures, services: rep.services,
           eventCount: 0, lastSeen: Date.now(), glowUntil: 0,
@@ -709,7 +720,7 @@ export function NetMapPage() {
           country: '??', flag: flagEmoji('??'),
           agentIds: [targetId], agentWeights: { [targetId]: 0 },
           x: agentMap.get(targetId)!.x, y: agentMap.get(targetId)!.y,
-          dotR: 1.5, color: '#22c55e',
+          dotR: 3, color: '#22c55e',
           status: 'whitelisted', failures: 0, services: [],
           eventCount: 0, lastSeen: Date.now(), glowUntil: 0,
           whitelistLabel: wle.label,
@@ -843,7 +854,7 @@ export function NetMapPage() {
       if (!paused) ip.orbitAngle += ip.orbitSpeed;
 
       // Arrival: fly from spawn point toward orbit target
-      if (ip.arriveT < 1) ip.arriveT = Math.min(1, ip.arriveT + 0.012);
+      if (ip.arriveT < 1) ip.arriveT = Math.min(1, ip.arriveT + 0.0025);
 
       if (ip.agentIds.length === 1) {
         const ag = agMapFull.get(ip.agentIds[0]);
@@ -923,9 +934,13 @@ export function NetMapPage() {
       ? agentsRef.current.filter(a => tabFilter.has(a.id))
       : agentsRef.current;
     const agMap   = new Map(agents.map(a => [a.id, a]));
-    const ipNodes = tabFilter
+    let ipNodes = tabFilter
       ? [...ipsRef.current.values()].filter(ip => ip.agentIds.some(id => tabFilter.has(id)))
       : [...ipsRef.current.values()];
+    // Threat-only filter
+    if (threatOnlyRef.current) {
+      ipNodes = ipNodes.filter(ip => ip.status === 'banned' || ip.status === 'suspicious');
+    }
 
     // Precompute per-agent IP groups (for ring drawing, O(n) single pass)
     const ipsByAgent = new Map<number, number>(); // agentId → ip count
@@ -1076,7 +1091,6 @@ export function NetMapPage() {
     }
 
     // ── IP dots ──────────────────────────────────────────────────────────
-    const badges: { txt: string; sx: number; sy: number; r: number; color: string; alpha: number }[] = [];
 
     for (const ip of ipNodes) {
       const dimmed  = selId !== null && !ip.agentIds.includes(selId);
@@ -1142,24 +1156,26 @@ export function NetMapPage() {
       ctx.shadowBlur = 0;
       ctx.restore();
 
-      // IP label — only at high zoom AND for notable IPs
-      if (k > 1.5 && !dimmed && alpha > 0.2 && shouldLabel(ip)) {
+      // IP label — only for IPs with a custom display label
+      if (ip.displayLabel && !dimmed && alpha > 0.2 && k > 0.5) {
         ctx.save();
-        ctx.font = `${Math.round(6 * k)}px "Inconsolata", "JetBrains Mono", monospace`;
-        ctx.fillStyle = `rgba(${bc[0]},${bc[1]},${bc[2]},${alpha * 0.3})`;
+        ctx.font = `500 ${Math.round(7 * Math.min(k, 1.3))}px "Inter", "Segoe UI", ui-sans-serif, sans-serif`;
+        ctx.fillStyle = `rgba(${bc[0]},${bc[1]},${bc[2]},${alpha * 0.6})`;
         ctx.textAlign = 'center';
-        ctx.fillText(anonIp(ip.ip), ip.x, ip.y - ip.dotR - 2 * k);
+        ctx.shadowBlur = 4; ctx.shadowColor = 'rgba(0,0,0,0.8)';
+        ctx.fillText(ip.displayLabel, ip.x, ip.y - ip.dotR - 3 * Math.min(k, 1.3));
         ctx.restore();
       }
 
-      if (!dimmed && shouldLabel(ip)) {
-        const effectiveLabel = ip.displayLabel ?? ip.whitelistLabel ?? null;
-        const badgeTxt = ip.status === 'whitelisted'
-          ? `✓ ${effectiveLabel ?? anonIp(ip.ip)}`
-          : effectiveLabel
-          ? effectiveLabel
-          : badgeText(ip.country, anonIp(ip.ip));
-        badges.push({ txt: badgeTxt, sx: ip.x, sy: ip.y, r: ip.dotR, color: ip.color, alpha: Math.min(0.95, alpha + 0.1) });
+      // Search highlight — pulsing ring on matched IP
+      if (searchHitRef.current === ip.ip) {
+        const sp = (Math.sin(ts / 200) + 1) / 2;
+        ctx.save();
+        ctx.globalAlpha = 0.5 + sp * 0.3;
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 2 / k;
+        ctx.beginPath(); ctx.arc(ip.x, ip.y, ip.dotR + 6 + sp * 4, 0, Math.PI * 2); ctx.stroke();
+        ctx.restore();
       }
     }
 
@@ -1249,43 +1265,6 @@ export function NetMapPage() {
           ctx.font = `500 ${Math.round(7 * Math.min(k, 1.2))}px "Inter", ui-sans-serif, sans-serif`;
           ctx.fillStyle = 'rgba(226,75,74,0.5)';
           ctx.fillText('OFFLINE', sx, sy - effR - 6);
-        }
-      }
-    }
-
-    // ── Smart badge placement ─────────────────────────────────────────────
-    const dotFP = ipNodes.map(ip => ({ x: ip.x, y: ip.y, r: ip.dotR + 2 }));
-    const placedRects: { x: number; y: number; w: number }[] = [];
-
-    const badgeCollides = (rx: number, ry: number, rw: number, ownX: number, ownY: number): boolean => {
-      for (const dot of dotFP) {
-        if (dot.x === ownX && dot.y === ownY) continue;
-        if (dot.x >= rx - dot.r && dot.x <= rx + rw + dot.r &&
-            dot.y >= ry - dot.r && dot.y <= ry + BADGE_H + dot.r) return true;
-      }
-      for (const pr of placedRects) {
-        if (rx < pr.x + pr.w && rx + rw > pr.x &&
-            ry < pr.y + BADGE_H && ry + BADGE_H > pr.y) return true;
-      }
-      return false;
-    };
-
-    ctx.font = BADGE_FONT;
-    for (const b of badges) {
-      const txt = b.txt;
-      const bw  = ctx.measureText(txt).width + 9;
-      const gap = b.r + 4;
-      const candidates: [number, number][] = [
-        [b.sx - bw / 2,   b.sy + gap],
-        [b.sx - bw / 2,   b.sy - gap - BADGE_H],
-        [b.sx + gap,      b.sy - BADGE_H / 2],
-        [b.sx - bw - gap, b.sy - BADGE_H / 2],
-      ];
-      for (const [bx, by] of candidates) {
-        if (!badgeCollides(bx, by, bw, b.sx, b.sy)) {
-          drawBadgeAt(ctx, txt, bx, by, bw, b.color, b.alpha);
-          placedRects.push({ x: bx, y: by, w: bw });
-          break;
         }
       }
     }
@@ -1797,6 +1776,42 @@ export function NetMapPage() {
               <span className="font-mono text-[9px] text-slate-600 tracking-widest">{label}</span>
             </div>
           ))}
+          {/* Search IP */}
+          <form onSubmit={(e) => {
+            e.preventDefault();
+            const q = searchIp.trim();
+            if (!q) { setSearchHit(null); return; }
+            const node = ipsRef.current.get(q);
+            if (node) {
+              setSearchHit(q);
+              transformRef.current = { x: -node.x + sizeRef.current.w / 2, y: -node.y + sizeRef.current.h / 2, k: 2 };
+              setTimeout(() => setSearchHit(null), 4000);
+            } else {
+              toast.error('IP not on map');
+            }
+            setSearchIp('');
+          }} className="ml-2">
+            <input
+              type="text"
+              value={searchIp}
+              onChange={e => setSearchIp(e.target.value)}
+              placeholder="Search IP…"
+              className="w-28 px-2 py-0.5 rounded border border-slate-800 bg-transparent text-[11px] font-mono text-slate-400 placeholder-slate-700 focus:border-cyan-500/40 focus:outline-none"
+            />
+          </form>
+
+          {/* Threat only toggle */}
+          <button
+            onClick={() => setThreatOnly(t => !t)}
+            className={`px-2 py-0.5 rounded text-[10px] font-mono tracking-wider border transition-colors ${
+              threatOnly
+                ? 'bg-red-500/15 text-red-400 border-red-500/30'
+                : 'text-slate-600 border-slate-800 hover:text-slate-400'
+            }`}
+          >
+            {threatOnly ? '⚠ THREATS' : '⚠ ALL'}
+          </button>
+
           <button
             onClick={() => void init()}
             className="ml-1 p-1.5 rounded border border-slate-800 text-slate-600 hover:text-cyan-400 hover:border-cyan-500/30 transition-colors"
