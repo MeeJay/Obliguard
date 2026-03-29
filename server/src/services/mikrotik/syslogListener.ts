@@ -11,7 +11,7 @@
  */
 
 import dgram from 'dgram';
-import { v4 as uuidv4 } from 'uuid';
+import crypto from 'crypto';
 import { config } from '../../config';
 import { db } from '../../db';
 import { logger } from '../../utils/logger';
@@ -112,7 +112,7 @@ export const syslogListener = {
 
         // Build AgentIpEvent
         const event: AgentIpEvent = {
-          id: `${uuidv4()}-${Date.now()}`,
+          id: `${crypto.randomUUID()}-${Date.now()}`,
           ip: parsed.ip,
           username: parsed.username,
           service: parsed.service,

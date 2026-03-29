@@ -6,7 +6,7 @@
  * plus a linked row in `mikrotik_credentials`.
  */
 
-import { v4 as uuidv4 } from 'uuid';
+import crypto from 'crypto';
 import { db } from '../../db';
 import { logger } from '../../utils/logger';
 import { encryptSecret, decryptSecret } from '../../utils/crypto';
@@ -31,7 +31,7 @@ export const mikrotikDeviceService = {
       throw new Error(`Syslog identifier "${data.syslogIdentifier}" is already used by another device`);
     }
 
-    const uuid = uuidv4();
+    const uuid = crypto.randomUUID();
     const now = new Date();
 
     const [device] = await db('agent_devices')

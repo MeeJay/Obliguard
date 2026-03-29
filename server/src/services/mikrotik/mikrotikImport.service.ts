@@ -167,9 +167,9 @@ async function importIPAsBan(
     .first();
   if (existingBan) return;
 
-  // Skip if whitelisted
+  // Skip if whitelisted (use deviceId=0 and empty groupIds since this is a global import)
   const { whitelistService } = await import('../whitelist.service');
-  const isWhitelisted = await whitelistService.isWhitelisted(ip, device.tenantId, null, null);
+  const isWhitelisted = await whitelistService.isWhitelisted(ip, device.deviceId, [], device.tenantId);
   if (isWhitelisted) return;
 
   // Create a global auto-ban
@@ -184,9 +184,9 @@ async function importIPAsBan(
   });
 
   // Also insert an ip_event so it shows up in the event log
-  const { v4: uuidv4 } = await import('uuid');
+  const crypto = await import('crypto');
   await db('ip_events').insert({
-    id: `${uuidv4()}-${Date.now()}`,
+    id: `${crypto.randomUUID()}-${Date.now()}`,
     ip,
     username: '',
     service: `mikrotik_import:${listName}`,
