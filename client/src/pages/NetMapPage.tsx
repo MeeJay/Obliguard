@@ -27,7 +27,7 @@ import {
   EVENT_COLORS, DANGEROUS_SVCS, PEER_LINK_COLOR, DEVICE_TYPE_COLORS,
 } from '../netmap/constants';
 import {
-  flagEmoji, svcColor, isDangerousSvc, statusColor, agentExclusionR,
+  flagEmoji, svcColor, isDangerousSvc, statusColor,
   ipToInt, matchWhitelist, makeOrbitalFields,
 } from '../netmap/helpers';
 import {
@@ -69,15 +69,33 @@ function ipTtlForStatus(status: string): number {
 
 /** Compute orbit radius — spread IPs as an asteroid belt around agent.
  *  Each IP gets its own orbit lane with enough spacing to not overlap. */
+/** How many orbit rings an agent needs for N IPs. ~6 IPs per ring. */
+function orbitRingCount(ipCount: number): number {
+  if (ipCount <= 0) return 0;
+  return Math.max(1, Math.ceil(ipCount / 6));
+}
+
+/** Spacing between orbit rings (px). */
+const ORBIT_RING_GAP = 12;
+
+/** Radius of orbit ring N (0-indexed) around an agent of radius nodeR. */
+function orbitRingRadius(nodeR: number, ringIndex: number): number {
+  return nodeR + 18 + ringIndex * ORBIT_RING_GAP;
+}
+
+/** Total exclusion radius for an agent (outermost ring + margin). */
+function agentOrbitOuterR(nodeR: number, ipCount: number): number {
+  const rings = orbitRingCount(ipCount);
+  if (rings === 0) return nodeR + 10;
+  return orbitRingRadius(nodeR, rings - 1) + 8;
+}
+
 function orbRadius(nodeR: number, slot: number, totalSlots: number): number {
-  // minR must clear the label zone below the agent (~50px below center)
-  const minR = nodeR + 55;
-  // Each IP needs enough radial spacing so dots (up to ~7px radius) don't overlap
-  const spacing = totalSlots < 15 ? 14 : totalSlots < 40 ? 8 : 5;
-  const maxR = Math.min(minR + totalSlots * spacing, minR + 400);
-  if (totalSlots <= 1) return minR + 20;
-  const t = slot / (totalSlots - 1);
-  return minR + (maxR - minR) * Math.sqrt(t);
+  if (totalSlots <= 0) return nodeR + 18;
+  const rings = orbitRingCount(totalSlots);
+  // Assign each slot to a ring (round-robin)
+  const ringIndex = slot % rings;
+  return orbitRingRadius(nodeR, ringIndex);
 }
 
 function hexRgb(h: string): [number, number, number] {
@@ -662,9 +680,9 @@ export function NetMapPage() {
         const allServices = [...new Set([...agentData.values()].flatMap(e => e.services))];
         const totalCount  = [...agentData.values()].reduce((s, e) => s + e.count, 0);
         const status      = rep?.status ?? (allFailures > 0 ? 'suspicious' : 'clean');
-        // Skip clean IPs from history — they only appear via live socket events
+        // Skip clean IPs from history unless they touch multiple agents
         const wlMatch = matchWhitelist(evIp, wlEntries);
-        if (status === 'clean' && !wlMatch) continue;
+        if (status === 'clean' && !wlMatch && validIds.length < 2) continue;
         // Build per-agent weight map
         const weights: Record<number, number> = {};
         for (const id of validIds) weights[id] = agentData.get(id)!.count;
@@ -785,7 +803,7 @@ export function NetMapPage() {
         sim.addNode({
           id: `a:${ag.id}`, x: ag.x, y: ag.y, vx: 0, vy: 0,
           pinned: false, mass: 3.0, kind: 'agent',
-          radius: agentExclusionR([...ipsRef.current.values()].filter(ip => ip.agentIds.length === 1 && ip.agentIds[0] === ag.id).length),
+          radius: agentOrbitOuterR(ag.r, [...ipsRef.current.values()].filter(ip => ip.agentIds.length === 1 && ip.agentIds[0] === ag.id).length),
         });
       }
 
@@ -1083,19 +1101,20 @@ export function NetMapPage() {
       ctx.restore();
     }
 
-    // ── Faint orbit ellipses around agents (mockup v5) ─────────────────
+    // ── Orbit rings around agents (one ring per ~6 IPs) ─────────────────
     for (const ag of agents) {
       const conns = ipsByAgent.get(ag.id) ?? 0;
-      if (conns < 3) continue;
+      if (conns === 0) continue;
       const dimmed = selId !== null && selId !== ag.id;
-      if (dimmed) continue;
-      const maxR = orbRadius(ag.r, conns - 1, conns);
-      const layers = Math.min(8, Math.ceil(Math.sqrt(conns * 2)));
-      for (let i = 0; i < layers; i++) {
-        const r = ag.r + (maxR - ag.r) * (i / layers);
-        ctx.strokeStyle = `rgba(100,160,220,${0.02 + 0.005 * Math.min(conns, 50) / 50})`;
-        ctx.lineWidth = 0.3;
-        ctx.beginPath(); ctx.ellipse(ag.x, ag.y, r, r * 0.7, 0, 0, Math.PI * 2); ctx.stroke();
+      const rings = orbitRingCount(conns);
+      for (let i = 0; i < rings; i++) {
+        const r = orbitRingRadius(ag.r, i);
+        ctx.save();
+        ctx.globalAlpha = dimmed ? 0.04 : 0.10;
+        ctx.strokeStyle = ag.wsConnected ? '#4a8abb' : '#2a3a4a';
+        ctx.lineWidth = 0.5 / k;
+        ctx.beginPath(); ctx.arc(ag.x, ag.y, r, 0, Math.PI * 2); ctx.stroke();
+        ctx.restore();
       }
     }
 
@@ -1146,14 +1165,16 @@ export function NetMapPage() {
         }
       }
 
-      const linkAlpha = (dimmed ? 0.02 : 0.06) * ageFade * ip.arriveT;
+      // Thin line from IP to each connected agent (always visible)
+      const lineCol = ip.status === 'banned' ? '#ef4444' : ip.status === 'suspicious' ? '#f97316' : '#3a6a8a';
+      const lineAlpha = (dimmed ? 0.04 : 0.15) * ageFade * ip.arriveT;
       for (const aid of ip.agentIds) {
         const ag = agMap.get(aid);
         if (!ag) continue;
         ctx.save();
-        ctx.globalAlpha = linkAlpha;
-        ctx.strokeStyle = ip.status === 'banned' ? '#ef4444' : ip.status === 'suspicious' ? '#f97316' : '#3a6a8a';
-        ctx.lineWidth = 0.3 / k;
+        ctx.globalAlpha = lineAlpha;
+        ctx.strokeStyle = lineCol;
+        ctx.lineWidth = 0.6 / k;
         ctx.beginPath(); ctx.moveTo(ip.x, ip.y); ctx.lineTo(ag.x, ag.y); ctx.stroke();
         ctx.restore();
       }
@@ -1254,10 +1275,9 @@ export function NetMapPage() {
       const dimmed   = selId !== null && !isSel;
       const isOnline = agent.wsConnected;
       const conns    = ipsByAgent.get(agent.id) ?? 0;
-      const breathe  = 1 + Math.min(conns * 0.002, 0.06) * Math.sin(ts * 0.003 + agent.phase);
       const col      = agent.deviceColor;
       const rgb      = hexRgb(col);
-      const effR     = agent.r * breathe;
+      const effR     = agent.r;
       const sx       = agent.x, sy = agent.y;
 
       // Heat glow for heavily targeted agents
@@ -1306,27 +1326,30 @@ export function NetMapPage() {
 
       ctx.globalAlpha = 1;
 
-      // Label BELOW agent (mockup style)
+      // Label BELOW outermost orbit ring
       if (k > 0.4) {
-        const fs = Math.round((agent.r >= 15 ? 10 : 8.5) * Math.min(k, 1.3));
+        const outerR = agentOrbitOuterR(agent.r, conns);
+        const labelY = sy + outerR + 6;
+        const kk = Math.min(k, 1.3);
+        const fs = Math.round((agent.r >= 15 ? 10 : 8.5) * kk);
         ctx.font = `500 ${fs}px "Inter", "Segoe UI", ui-sans-serif, sans-serif`;
         ctx.fillStyle = dimmed ? 'rgba(200,220,240,0.2)' : 'rgba(200,220,240,0.8)';
         ctx.textAlign = 'center';
-        ctx.fillText(agent.label, sx, sy + effR + 10 * Math.min(k, 1.3));
+        ctx.fillText(agent.label, sx, labelY);
 
         // IP count + group name
         if (conns > 0 && k > 0.5 && !dimmed) {
           ctx.font = `${Math.round(7.5 * Math.min(k, 1.2))}px "Inconsolata", "JetBrains Mono", monospace`;
           ctx.fillStyle = conns > 50 ? 'rgba(226,75,74,0.55)' : conns > 15 ? 'rgba(245,166,35,0.45)' : 'rgba(93,202,165,0.4)';
-          ctx.fillText(conns + ' IPs', sx, sy + effR + 19 * Math.min(k, 1.3));
+          ctx.fillText(conns + ' IPs', sx, labelY + 9 * kk);
         }
 
         // Group name (subtle)
         if (agent.groupName && k > 0.6 && !dimmed) {
-          const yOff = conns > 0 ? 27 : 19;
+          const gOff = conns > 0 ? 17 : 9;
           ctx.font = `${Math.round(6.5 * Math.min(k, 1.2))}px "Inter", "Segoe UI", ui-sans-serif, sans-serif`;
           ctx.fillStyle = 'rgba(100,140,190,0.28)';
-          ctx.fillText(agent.groupName.toUpperCase(), sx, sy + effR + yOff * Math.min(k, 1.3));
+          ctx.fillText(agent.groupName.toUpperCase(), sx, labelY + gOff * kk);
         }
 
         // Offline label
