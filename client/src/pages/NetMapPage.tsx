@@ -888,7 +888,21 @@ export function NetMapPage() {
       } else if (ip.agentIds.length > 1) {
         // Multi-agent: elliptical orbit around weighted centroid
         const ags = ip.agentIds.map(id => agMapFull.get(id)).filter(Boolean) as AgentNode[];
-        if (ags.length < 2) continue;
+        // Fallback: if only 1 agent resolved, orbit around that agent
+        if (ags.length === 0) continue;
+        if (ags.length === 1) {
+          const ag = ags[0];
+          const orbR = ag.r + 55 + 20;
+          const targetX = ag.x + Math.cos(ip.orbitAngle) * orbR;
+          const targetY = ag.y + Math.sin(ip.orbitAngle) * orbR * ip.orbitEccentricity;
+          if (ip.arriveT < 1) {
+            ip.x = ip.spawnX + (targetX - ip.spawnX) * ip.arriveT;
+            ip.y = ip.spawnY + (targetY - ip.spawnY) * ip.arriveT;
+          } else { ip.x = targetX; ip.y = targetY; }
+          ip.trail.push({ x: ip.x, y: ip.y });
+          if (ip.trail.length > 8) ip.trail.shift();
+          continue;
+        }
         const totalW = ags.reduce((s, ag) => s + (ip.agentWeights[ag.id] ?? 1), 0) || 1;
         let cx = 0, cy = 0;
         for (const ag of ags) { const wt = (ip.agentWeights[ag.id] ?? 1) / totalW; cx += ag.x * wt; cy += ag.y * wt; }
@@ -948,10 +962,12 @@ export function NetMapPage() {
       ? agentsRef.current.filter(a => tabFilter.has(a.id))
       : agentsRef.current;
     const agMap   = new Map(agents.map(a => [a.id, a]));
-    let ipNodes = tabFilter
-      ? [...ipsRef.current.values()].filter(ip => ip.agentIds.some(id => tabFilter.has(id)))
-      : [...ipsRef.current.values()];
-    // Threat-only filter
+    let ipNodes = [...ipsRef.current.values()]
+      // Only show IPs whose agents are visible on the map
+      .filter(ip => ip.agentIds.some(id => agMap.has(id)));
+    if (tabFilter) {
+      ipNodes = ipNodes.filter(ip => ip.agentIds.some(id => tabFilter.has(id)));
+    }
     if (threatOnlyRef.current) {
       ipNodes = ipNodes.filter(ip => ip.status === 'banned' || ip.status === 'suspicious');
     }
