@@ -245,6 +245,10 @@ func applyOGConfig(cfg *Config, lw *LogWatcher, fw FirewallManager, msg *cmdConf
 				log.Printf("Firewall: unbanned %s", ip)
 			}
 		}
+		// Flush buffered changes (Windows: single netsh call for the whole batch)
+		if err := fw.Flush(); err != nil {
+			log.Printf("Firewall flush: %v", err)
+		}
 	}
 
 	// Update log watcher service configs

@@ -948,10 +948,13 @@ function RemoteBlocklistsSection() {
               </button>
               <button onClick={async () => {
                 try {
-                  const apiClient = (await import('../api/client')).default;
-                  await apiClient.post('/remote-blocklists/push-now');
-                  toast.success('Push sent');
-                } catch { toast.error('Push failed'); }
+                  const api = (await import('../api/client')).default;
+                  const res = await api.post<{ message: string }>('/remote-blocklists/push-now');
+                  toast.success(res.data?.message ?? 'Push completed');
+                } catch (err) {
+                  const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error;
+                  toast.error(msg ?? 'Push failed');
+                }
               }} className="px-3 py-1.5 rounded-md text-xs font-medium text-amber-400 border border-amber-500/30 hover:bg-amber-500/10 transition-colors">
                 Push Now
               </button>

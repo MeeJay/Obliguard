@@ -330,30 +330,27 @@ export const remoteBlocklistService = {
 
   // ── Push engine (obli.tools contribution) ────────────────────────────────
 
-  async pushNewBans(): Promise<void> {
+  async pushNewBans(): Promise<string> {
     const pushEnabled = await appConfigService.get('oblitools_push_enabled');
-    if (pushEnabled !== 'true') return;
+    if (pushEnabled !== 'true') return 'Push is disabled. Enable "Share auto-bans" first.';
 
-    // Get the API key from app config
     const apiKey = await appConfigService.get('oblitools_api_key');
-    if (!apiKey) return;
+    if (!apiKey) return 'No API key configured.';
 
     const lastPushStr = await appConfigService.get('oblitools_last_push_at');
     const lastPush = lastPushStr ? new Date(lastPushStr) : new Date(0);
 
-    // Get auto-bans since last push
     const newBans = await db('ip_bans')
       .where('ban_type', 'auto')
       .where('banned_at', '>', lastPush)
       .where('is_active', true)
       .select('ip', 'reason') as { ip: string; reason: string | null }[];
 
-    // Strip CIDR suffix from inet type and filter out local IPs
     const stripCidr = (ip: string) => String(ip).replace(/\/\d+$/, '');
     const publicBans = newBans
       .map(b => ({ ip: stripCidr(String(b.ip)), reason: b.reason }))
       .filter(b => !isRfc1918(b.ip));
-    if (publicBans.length === 0) return;
+    if (publicBans.length === 0) return `No new auto-bans since last push (${lastPushStr ?? 'never'}).`;
 
     const instanceName = (await appConfigService.get('oblitools_instance_name')) || 'obliguard';
 
@@ -374,13 +371,17 @@ export const remoteBlocklistService = {
     });
 
     if (!res.ok) {
-      logger.error(`Push to obli.tools failed: HTTP ${res.status}`);
-      return;
+      const body = await res.text().catch(() => '');
+      const msg = `Push failed: HTTP ${res.status}${body ? ' — ' + body.slice(0, 200) : ''}`;
+      logger.error(msg);
+      throw new Error(msg);
     }
 
     const ack = await res.json() as { accepted?: number; new?: number };
     await appConfigService.set('oblitools_last_push_at', new Date().toISOString());
-    logger.info(`Pushed ${publicBans.length} auto-bans to obli.tools (accepted: ${ack.accepted ?? '?'}, new: ${ack.new ?? '?'})`);
+    const msg = `Pushed ${publicBans.length} IPs — accepted: ${ack.accepted ?? '?'}, new: ${ack.new ?? '?'}`;
+    logger.info(msg);
+    return msg;
   },
 
   // ── Force sync a single blocklist ────────────────────────────────────────

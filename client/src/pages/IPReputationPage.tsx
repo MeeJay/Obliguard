@@ -834,7 +834,7 @@ function ActivityTab({ isAdmin }: ActivityTabProps) {
     if (selectedIps.size === rows.length) setSelectedIps(new Set());
     else setSelectedIps(new Set(rows.map(r => r.ip)));
   };
-  const bulkBan = async () => {
+  const handleBulkBan = async () => {
     if (selectedIps.size === 0) return;
     if (!confirm(`Ban ${selectedIps.size} IPs?`)) return;
     try {
@@ -844,7 +844,7 @@ function ActivityTab({ isAdmin }: ActivityTabProps) {
       load();
     } catch { toast.error('Bulk ban failed'); }
   };
-  const bulkWhitelist = async () => {
+  const handleBulkWhitelist = async () => {
     if (selectedIps.size === 0) return;
     const label = prompt('Label for whitelisted IPs (optional):') ?? '';
     try {
@@ -964,10 +964,10 @@ function ActivityTab({ isAdmin }: ActivityTabProps) {
       {selectedIps.size > 0 && (
         <div className="flex items-center gap-3 mb-3 px-3 py-2 rounded-lg bg-accent/10 border border-accent/20">
           <span className="text-sm font-medium text-accent">{selectedIps.size} selected</span>
-          <Button size="sm" variant="secondary" onClick={bulkBan}>
+          <Button size="sm" variant="secondary" onClick={handleBulkBan}>
             <ShieldOff size={11} className="mr-1" />Ban selected
           </Button>
-          <Button size="sm" variant="secondary" onClick={bulkWhitelist}>
+          <Button size="sm" variant="secondary" onClick={handleBulkWhitelist}>
             <ShieldCheck size={11} className="mr-1" />Whitelist selected
           </Button>
           <button onClick={() => setSelectedIps(new Set())} className="ml-auto text-xs text-text-muted hover:text-text-primary">

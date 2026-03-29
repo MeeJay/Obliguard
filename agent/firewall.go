@@ -19,6 +19,9 @@ type FirewallManager interface {
 	UnbanIP(ip string) error
 	// GetBannedIPs returns the list of IPs currently banned by Obliguard.
 	GetBannedIPs() ([]string, error)
+	// Flush commits any buffered changes to the firewall. No-op on most backends.
+	// Call after a batch of BanIP/UnbanIP to minimize system calls.
+	Flush() error
 	// IsAvailable returns true if this firewall backend is usable.
 	IsAvailable() bool
 	// Name returns the backend identifier string (sent in push body).
@@ -85,7 +88,11 @@ const nftSet      = "obliguard_ips"
 const nftChain    = "blocklist"
 const nftChainOut = "blocklist_out"
 
-type NftablesFirewall struct{ initialized bool }
+type NftablesFirewall struct {
+	initialized bool
+	pendingAdd  []string
+	pendingDel  []string
+}
 
 func (f *NftablesFirewall) Name() string { return "nftables" }
 
@@ -98,8 +105,6 @@ func (f *NftablesFirewall) ensureTable() error {
 	if f.initialized {
 		return nil
 	}
-	// Create table, set, chains, and rules idempotently.
-	// nft 'add' is idempotent — re-adding existing objects is a no-op.
 	cmds := []string{
 		fmt.Sprintf("add table inet %s", nftTable),
 		fmt.Sprintf("add set inet %s %s { type ipv4_addr; }", nftTable, nftSet),
@@ -107,9 +112,8 @@ func (f *NftablesFirewall) ensureTable() error {
 		fmt.Sprintf("add chain inet %s %s { type filter hook output priority -10; policy accept; }", nftTable, nftChainOut),
 	}
 	for _, c := range cmds {
-		exec.Command("nft", strings.Fields(c)...).Run() // ignore errors (already exists)
+		exec.Command("nft", strings.Fields(c)...).Run()
 	}
-	// Add set-matching rules (flush first to avoid duplicates)
 	exec.Command("nft", "flush", "chain", "inet", nftTable, nftChain).Run()
 	exec.Command("nft", "flush", "chain", "inet", nftTable, nftChainOut).Run()
 	ruleIn := fmt.Sprintf("add rule inet %s %s ip saddr @%s drop", nftTable, nftChain, nftSet)
@@ -124,13 +128,41 @@ func (f *NftablesFirewall) BanIP(ip string) error {
 	if err := f.ensureTable(); err != nil {
 		return err
 	}
-	cmd := fmt.Sprintf("add element inet %s %s { %s }", nftTable, nftSet, ip)
-	return exec.Command("nft", strings.Fields(cmd)...).Run()
+	f.pendingAdd = append(f.pendingAdd, ip)
+	return nil
 }
 
 func (f *NftablesFirewall) UnbanIP(ip string) error {
-	cmd := fmt.Sprintf("delete element inet %s %s { %s }", nftTable, nftSet, ip)
-	exec.Command("nft", strings.Fields(cmd)...).Run() // ignore error if not in set
+	f.pendingDel = append(f.pendingDel, ip)
+	return nil
+}
+
+func (f *NftablesFirewall) Flush() error {
+	// Batch add: nft add element inet obliguard obliguard_ips { ip1, ip2, ip3 }
+	if len(f.pendingAdd) > 0 {
+		ipList := strings.Join(f.pendingAdd, ", ")
+		cmd := fmt.Sprintf("add element inet %s %s { %s }", nftTable, nftSet, ipList)
+		if err := exec.Command("nft", strings.Fields(cmd)...).Run(); err != nil {
+			// Fallback: add one by one (some may already exist)
+			for _, ip := range f.pendingAdd {
+				c := fmt.Sprintf("add element inet %s %s { %s }", nftTable, nftSet, ip)
+				exec.Command("nft", strings.Fields(c)...).Run()
+			}
+		}
+		f.pendingAdd = nil
+	}
+	// Batch delete
+	if len(f.pendingDel) > 0 {
+		ipList := strings.Join(f.pendingDel, ", ")
+		cmd := fmt.Sprintf("delete element inet %s %s { %s }", nftTable, nftSet, ipList)
+		if err := exec.Command("nft", strings.Fields(cmd)...).Run(); err != nil {
+			for _, ip := range f.pendingDel {
+				c := fmt.Sprintf("delete element inet %s %s { %s }", nftTable, nftSet, ip)
+				exec.Command("nft", strings.Fields(c)...).Run()
+			}
+		}
+		f.pendingDel = nil
+	}
 	return nil
 }
 
@@ -139,7 +171,6 @@ func (f *NftablesFirewall) GetBannedIPs() ([]string, error) {
 	if err != nil {
 		return nil, nil
 	}
-	// Output format: "elements = { 1.2.3.4, 5.6.7.8 }"
 	var ips []string
 	ipRe := ipPattern()
 	for _, m := range ipRe.FindAllString(string(out), -1) {
@@ -174,6 +205,8 @@ func (f *FirewalldFirewall) UnbanIP(ip string) error {
 	exec.Command("firewall-cmd", "--permanent", fmt.Sprintf("--remove-rich-rule=%s", ruleOut)).Run()
 	return exec.Command("firewall-cmd", "--reload").Run()
 }
+
+func (f *FirewalldFirewall) Flush() error { return nil }
 
 func (f *FirewalldFirewall) GetBannedIPs() ([]string, error) {
 	out, err := exec.Command("firewall-cmd", "--list-rich-rules").Output()
@@ -216,6 +249,8 @@ func (f *UFWFirewall) UnbanIP(ip string) error {
 	return nil
 }
 
+func (f *UFWFirewall) Flush() error { return nil }
+
 func (f *UFWFirewall) GetBannedIPs() ([]string, error) {
 	out, err := exec.Command("ufw", "status", "numbered").Output()
 	if err != nil {
@@ -247,6 +282,8 @@ const iptSetName  = "obliguard"
 type IptablesFirewall struct {
 	initialized bool
 	hasIpset    bool
+	pendingAdd  []string
+	pendingDel  []string
 }
 
 func (f *IptablesFirewall) Name() string { return "iptables" }
@@ -300,7 +337,8 @@ func (f *IptablesFirewall) ensureChain() error {
 func (f *IptablesFirewall) BanIP(ip string) error {
 	_ = f.ensureChain()
 	if f.hasIpset {
-		return exec.Command("ipset", "add", iptSetName, ip, "-exist").Run()
+		f.pendingAdd = append(f.pendingAdd, ip)
+		return nil
 	}
 	exec.Command("iptables", "-A", iptChain, "-s", ip, "-j", "DROP").Run()
 	return exec.Command("iptables", "-A", iptChainOut, "-d", ip, "-j", "DROP").Run()
@@ -308,11 +346,41 @@ func (f *IptablesFirewall) BanIP(ip string) error {
 
 func (f *IptablesFirewall) UnbanIP(ip string) error {
 	if f.hasIpset {
-		exec.Command("ipset", "del", iptSetName, ip, "-exist").Run()
+		f.pendingDel = append(f.pendingDel, ip)
 		return nil
 	}
 	exec.Command("iptables", "-D", iptChain, "-s", ip, "-j", "DROP").Run()
 	exec.Command("iptables", "-D", iptChainOut, "-d", ip, "-j", "DROP").Run()
+	return nil
+}
+
+func (f *IptablesFirewall) Flush() error {
+	if !f.hasIpset {
+		return nil // non-ipset mode applies immediately
+	}
+	// ipset doesn't support batch in a single command, but we can use restore
+	if len(f.pendingAdd) > 0 || len(f.pendingDel) > 0 {
+		var lines []string
+		for _, ip := range f.pendingAdd {
+			lines = append(lines, fmt.Sprintf("add %s %s -exist", iptSetName, ip))
+		}
+		for _, ip := range f.pendingDel {
+			lines = append(lines, fmt.Sprintf("del %s %s -exist", iptSetName, ip))
+		}
+		cmd := exec.Command("ipset", "restore")
+		cmd.Stdin = strings.NewReader(strings.Join(lines, "\n") + "\n")
+		if err := cmd.Run(); err != nil {
+			// Fallback: one by one
+			for _, ip := range f.pendingAdd {
+				exec.Command("ipset", "add", iptSetName, ip, "-exist").Run()
+			}
+			for _, ip := range f.pendingDel {
+				exec.Command("ipset", "del", iptSetName, ip, "-exist").Run()
+			}
+		}
+		f.pendingAdd = nil
+		f.pendingDel = nil
+	}
 	return nil
 }
 
@@ -366,7 +434,10 @@ const winRuleOut = "Obliguard-Block-out"
 const winRulePrefix = "Obliguard-Block-" // kept for legacy cleanup
 
 type WindowsFirewall struct {
-	migrated bool // true after legacy per-IP rules have been consolidated
+	migrated bool
+	// In-memory cache of the current IP set — avoids re-reading netsh on every call
+	cache    map[string]bool
+	dirty    bool // true when cache has changes not yet written to netsh
 }
 
 func (f *WindowsFirewall) Name() string { return "windows" }
@@ -376,16 +447,50 @@ func (f *WindowsFirewall) IsAvailable() bool {
 	return err == nil
 }
 
+// loadCache populates the in-memory set from the actual firewall rules (once).
+func (f *WindowsFirewall) loadCache() {
+	if f.cache != nil {
+		return
+	}
+	f.cache = make(map[string]bool)
+	grouped := f.getGroupedIPs()
+	for _, ip := range grouped {
+		f.cache[ip] = true
+	}
+	legacy := f.getLegacyIPs()
+	for _, ip := range legacy {
+		f.cache[ip] = true
+	}
+}
+
 func (f *WindowsFirewall) BanIP(ip string) error {
 	f.ensureMigrated()
-	current, _ := f.GetBannedIPs()
-	for _, existing := range current {
-		if existing == ip {
-			return nil
-		}
+	f.loadCache()
+	if f.cache[ip] {
+		return nil // already banned
 	}
-	newList := append(current, ip)
-	return f.syncRules(newList)
+	f.cache[ip] = true
+	f.dirty = true
+	return nil
+}
+
+// Flush writes all pending changes to the Windows Firewall in a single operation.
+// Called after a batch of BanIP/UnbanIP calls.
+func (f *WindowsFirewall) Flush() error {
+	if !f.dirty {
+		return nil
+	}
+	f.dirty = false
+	var ips []string
+	for ip := range f.cache {
+		ips = append(ips, ip)
+	}
+	if len(ips) == 0 {
+		exec.Command("netsh", "advfirewall", "firewall", "delete", "rule", "name="+winRuleIn).Run()
+		exec.Command("netsh", "advfirewall", "firewall", "delete", "rule", "name="+winRuleOut).Run()
+		return nil
+	}
+	return f.syncRules(ips)
 }
 
 // ensureMigrated consolidates legacy per-IP rules into the grouped rules on first run.
@@ -432,25 +537,13 @@ func (f *WindowsFirewall) ensureMigrated() {
 
 func (f *WindowsFirewall) UnbanIP(ip string) error {
 	f.ensureMigrated()
-	current := f.getGroupedIPs()
-	var newList []string
-	found := false
-	for _, existing := range current {
-		if existing == ip {
-			found = true
-		} else {
-			newList = append(newList, existing)
-		}
-	}
-	if !found {
-		return nil // IP wasn't in the list
-	}
-	if len(newList) == 0 {
-		exec.Command("netsh", "advfirewall", "firewall", "delete", "rule", "name="+winRuleIn).Run()
-		exec.Command("netsh", "advfirewall", "firewall", "delete", "rule", "name="+winRuleOut).Run()
+	f.loadCache()
+	if !f.cache[ip] {
 		return nil
 	}
-	return f.syncRules(newList)
+	delete(f.cache, ip)
+	f.dirty = true
+	return nil
 }
 
 // syncRules creates or updates the two Obliguard rules with the given IP list.
@@ -505,24 +598,12 @@ func (f *WindowsFirewall) cleanupLegacyRules() {
 
 func (f *WindowsFirewall) GetBannedIPs() ([]string, error) {
 	f.ensureMigrated()
-	grouped := f.getGroupedIPs()
-	legacy := f.getLegacyIPs()
-
-	seen := make(map[string]bool)
-	var all []string
-	for _, ip := range grouped {
-		if !seen[ip] {
-			seen[ip] = true
-			all = append(all, ip)
-		}
+	f.loadCache()
+	var ips []string
+	for ip := range f.cache {
+		ips = append(ips, ip)
 	}
-	for _, ip := range legacy {
-		if !seen[ip] {
-			seen[ip] = true
-			all = append(all, ip)
-		}
-	}
-	return all, nil
+	return ips, nil
 }
 
 // getGroupedIPs reads IPs from the grouped "Obliguard-Block-in" rule.
@@ -610,6 +691,8 @@ func (f *PFFirewall) UnbanIP(ip string) error {
 	return exec.Command("pfctl", "-t", pfTable, "-T", "delete", ip).Run()
 }
 
+func (f *PFFirewall) Flush() error { return nil }
+
 func (f *PFFirewall) GetBannedIPs() ([]string, error) {
 	out, err := exec.Command("pfctl", "-t", pfTable, "-T", "show").Output()
 	if err != nil {
@@ -653,6 +736,8 @@ func (f *FreeBSDPFFirewall) UnbanIP(ip string) error {
 	return exec.Command("pfctl", "-t", freebsdPFTable, "-T", "delete", ip).Run()
 }
 
+func (f *FreeBSDPFFirewall) Flush() error { return nil }
+
 func (f *FreeBSDPFFirewall) GetBannedIPs() ([]string, error) {
 	out, err := exec.Command("pfctl", "-t", freebsdPFTable, "-T", "show").Output()
 	if err != nil {
@@ -693,6 +778,7 @@ func (f *NoOpFirewall) Name() string                    { return "none" }
 func (f *NoOpFirewall) IsAvailable() bool               { return true }
 func (f *NoOpFirewall) BanIP(ip string) error           { return nil }
 func (f *NoOpFirewall) UnbanIP(ip string) error         { return nil }
+func (f *NoOpFirewall) Flush() error                    { return nil }
 func (f *NoOpFirewall) GetBannedIPs() ([]string, error) { return nil, nil }
 
 // ── Shared helper ─────────────────────────────────────────────────────────────

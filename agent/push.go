@@ -153,6 +153,9 @@ func push(cfg *Config, lw *LogWatcher, fw FirewallManager) {
 					log.Printf("Firewall: unbanned %s", ip)
 				}
 			}
+			if err := fw.Flush(); err != nil {
+				log.Printf("Firewall flush: %v", err)
+			}
 		}
 
 		// Forward updated service configs to the log watcher
