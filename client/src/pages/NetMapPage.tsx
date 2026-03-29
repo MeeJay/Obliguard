@@ -777,6 +777,15 @@ export function NetMapPage() {
 
     // ── IP orbital motion ─────────────────────────────────────────────────
     const agMapFull = new Map(agentsRef.current.map(a => [a.id, a]));
+    // Count IPs per agent for orbit scaling
+    const ipsPerAgent = new Map<number, number>();
+    for (const ip of ipsRef.current.values()) {
+      if (ip.agentIds.length === 1) {
+        const aid = ip.agentIds[0];
+        ipsPerAgent.set(aid, (ipsPerAgent.get(aid) ?? 0) + 1);
+      }
+    }
+
     for (const ip of ipsRef.current.values()) {
       ip.orbitAngle += ip.orbitSpeed;
 
@@ -786,7 +795,12 @@ export function NetMapPage() {
       if (ip.agentIds.length === 1) {
         const ag = agMapFull.get(ip.agentIds[0]);
         if (!ag) continue;
-        const orbR = ag.r + 18 + ip.orbitSlot * 10;
+        const totalIps = ipsPerAgent.get(ag.id) ?? 1;
+        // Logarithmic orbit radius: dense packing, max ~120px from agent
+        const maxOrbR = ag.r + Math.min(120, 20 + totalIps * 0.8);
+        const minOrbR = ag.r + 14;
+        const t = totalIps <= 1 ? 0 : ip.orbitSlot / (totalIps - 1);
+        const orbR = minOrbR + (maxOrbR - minOrbR) * Math.sqrt(t);
         const targetX = ag.x + Math.cos(ip.orbitAngle) * orbR;
         const targetY = ag.y + Math.sin(ip.orbitAngle) * orbR * 0.72;
         if (ip.arriveT < 1) {
@@ -797,7 +811,7 @@ export function NetMapPage() {
           ip.y = targetY;
         }
       } else if (ip.agentIds.length > 1) {
-        // Multi-agent: elliptical orbit around midpoint
+        // Multi-agent: elliptical orbit around weighted centroid
         const ags = ip.agentIds.map(id => agMapFull.get(id)).filter(Boolean) as AgentNode[];
         if (ags.length < 2) continue;
         const totalW = ags.reduce((s, ag) => s + (ip.agentWeights[ag.id] ?? 1), 0) || 1;
@@ -806,7 +820,8 @@ export function NetMapPage() {
         const dx = ags[1].x - ags[0].x, dy = ags[1].y - ags[0].y;
         const dist = Math.sqrt(dx * dx + dy * dy) || 80;
         const linkAngle = Math.atan2(dy, dx);
-        const ex = dist * 0.45, ey = Math.max(25, dist * 0.2);
+        // Clamp ellipse to not exceed half the distance between agents
+        const ex = Math.min(dist * 0.35, 60), ey = Math.min(Math.max(15, dist * 0.15), 35);
         const lx = ex * Math.cos(ip.orbitAngle), ly = ey * Math.sin(ip.orbitAngle);
         const cosA = Math.cos(linkAngle), sinA = Math.sin(linkAngle);
         const targetX = cx + lx * cosA - ly * sinA;
@@ -820,9 +835,9 @@ export function NetMapPage() {
         }
       }
 
-      // Trail
+      // Trail (shorter for perf)
       ip.trail.push({ x: ip.x, y: ip.y });
-      if (ip.trail.length > 10) ip.trail.shift();
+      if (ip.trail.length > 8) ip.trail.shift();
     }
 
     // IP + peer link expiry every ~5 s
@@ -972,13 +987,14 @@ export function NetMapPage() {
       const conns  = ipsByAgent.get(ag.id) ?? 0;
       if (conns === 0) continue;
       const dimmed = selId !== null && selId !== ag.id;
-      // Show up to 3 faint orbit lanes
-      const lanes = Math.min(3, Math.ceil(conns / 6));
+      const maxR = ag.r + Math.min(120, 20 + conns * 0.8);
+      // 2–3 faint ellipses at 33%, 66%, 100% of max orbit radius
+      const lanes = conns > 8 ? 3 : conns > 3 ? 2 : 1;
       for (let i = 0; i < lanes; i++) {
-        const r = ag.r + 18 + i * 10 * 3;
+        const r = ag.r + 14 + (maxR - ag.r - 14) * ((i + 1) / lanes);
         ctx.save();
-        ctx.globalAlpha = dimmed ? 0.015 : 0.03 - i * 0.008;
-        ctx.strokeStyle = ag.wsConnected ? 'rgba(80,140,200,0.5)' : '#2a3a4a';
+        ctx.globalAlpha = dimmed ? 0.012 : 0.025 - i * 0.006;
+        ctx.strokeStyle = ag.wsConnected ? 'rgba(70,130,190,0.4)' : '#1e2e3e';
         ctx.lineWidth = 0.3 / k;
         ctx.beginPath(); ctx.ellipse(ag.x, ag.y, r, r * 0.72, 0, 0, Math.PI * 2);
         ctx.stroke(); ctx.restore();

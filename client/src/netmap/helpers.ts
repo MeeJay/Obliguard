@@ -87,7 +87,8 @@ export function makeOrbitalFields(ip: string, canvasW: number, canvasH: number):
 
   return {
     orbitAngle: r1 * Math.PI * 2,
-    orbitSpeed: (0.0008 + r2 * 0.0018) * (r1 < 0.5 ? 1 : -1),
+    // Variable speed: 0.0004–0.0014 rad/frame, random direction
+    orbitSpeed: (0.0004 + r2 * 0.0010) * (r1 < 0.5 ? 1 : -1),
     orbitSlot: 0,
     arriveT: 0,
     spawnX: sx,
