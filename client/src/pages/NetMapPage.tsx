@@ -595,7 +595,7 @@ export function NetMapPage() {
 
       const { w, h } = sizeRef.current;
       const placed = devs.length > 0
-        ? devs.slice(0, 20)
+        ? devs
         : [{ id: -1, hostname: 'Server', name: null, status: 'approved',
              updatedAt: '', wsConnected: true, groupId: null, groupName: null, deviceType: 'agent', osInfo: null, resolvedSettings: { checkIntervalSeconds: 60, maxMissedPushes: 2 } }];
 
