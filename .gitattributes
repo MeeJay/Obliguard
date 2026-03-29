@@ -1,0 +1,2 @@
+*.sh text eol=lf
+agent/installer/* text eol=lf

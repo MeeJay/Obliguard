@@ -838,17 +838,17 @@ function ActivityTab({ isAdmin }: ActivityTabProps) {
 
   return (
     <>
-      {/* Status tabs */}
-      <div className="flex items-center gap-1 border-b border-border mb-5">
+      {/* Status filter pills (service-templates style) */}
+      <div className="flex items-center gap-1 mb-5 rounded-lg bg-bg-secondary p-1 border border-border w-fit">
           {STATUS_FILTERS.map(f => (
             <button
               key={f.key}
               onClick={() => setStatusFilter(f.key)}
               className={cn(
-                'px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors',
+                'px-4 py-1.5 text-sm font-medium rounded-md transition-colors whitespace-nowrap',
                 statusFilter === f.key
-                  ? 'border-accent text-accent'
-                  : 'border-transparent text-text-muted hover:text-text-primary hover:border-border',
+                  ? 'bg-accent text-white'
+                  : 'text-text-muted hover:text-text-primary',
               )}
             >
               {f.label}

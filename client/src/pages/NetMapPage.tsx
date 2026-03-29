@@ -67,14 +67,17 @@ function ipTtlForStatus(status: string): number {
   return IP_TTL;
 }
 
-/** Compute orbit radius — spread IPs across varied distances from agent. */
+/** Compute orbit radius — spread IPs as an asteroid belt around agent.
+ *  Each IP gets its own orbit lane with enough spacing to not overlap. */
 function orbRadius(nodeR: number, slot: number, totalSlots: number): number {
   const minR = nodeR + 38;
-  const maxR = nodeR + 38 + Math.min(80, totalSlots * 1.5);
-  if (totalSlots <= 1) return minR + 10;
-  // Distribute across the full range with some randomness per slot
+  // Each IP needs radial spacing — scales down with more IPs to stay contained
+  const spacing = totalSlots < 20 ? 10 : totalSlots < 50 ? 6 : 4;
+  const maxR = Math.min(minR + totalSlots * spacing, minR + 350);
+  if (totalSlots <= 1) return minR + 15;
   const t = slot / (totalSlots - 1);
-  return minR + (maxR - minR) * t;
+  // sqrt distribution: inner orbits more spaced, outer ones compress slightly
+  return minR + (maxR - minR) * Math.sqrt(t);
 }
 
 function hexRgb(h: string): [number, number, number] {
@@ -1078,7 +1081,7 @@ export function NetMapPage() {
       const fadeStart = ttl * IP_FADE_AGE;
       const ageFade = ageMs < fadeStart ? 1 : Math.max(0, 1 - (ageMs - fadeStart) / (ttl - fadeStart));
 
-      // Draw orbit ellipse path for multi-agent IPs
+      // Draw orbit ellipse path + link lines for multi-agent IPs
       if (ip.agentIds.length > 1 && !dimmed && ageFade > 0.1) {
         const ags = ip.agentIds.map(id => agMap.get(id)).filter(Boolean) as AgentNode[];
         if (ags.length >= 2) {
@@ -1088,16 +1091,31 @@ export function NetMapPage() {
           const dx = ags[1].x - ags[0].x, dy = ags[1].y - ags[0].y;
           const dist = Math.sqrt(dx * dx + dy * dy) || 80;
           const linkAngle = Math.atan2(dy, dx);
-          const ex = Math.min(dist * 0.35, 60), ey = Math.min(Math.max(15, dist * 0.15), 35);
+          const ex = Math.max(dist * 0.35, 30), ey = Math.max(dist * 0.15, 15);
+          const orbitCol = ip.status === 'banned' ? '#ef4444' : ip.status === 'suspicious' ? '#f97316' : '#5a9abb';
+
+          // Orbit ellipse
           ctx.save();
-          ctx.globalAlpha = 0.06 * ageFade;
-          ctx.strokeStyle = ip.status === 'banned' ? '#ef4444' : ip.status === 'suspicious' ? '#f97316' : '#5a8aaa';
-          ctx.lineWidth = 0.4 / k;
-          ctx.setLineDash([2, 4]);
+          ctx.globalAlpha = 0.18 * ageFade;
+          ctx.strokeStyle = orbitCol;
+          ctx.lineWidth = 0.8 / k;
+          ctx.setLineDash([3, 5]);
           ctx.translate(cx, cy); ctx.rotate(linkAngle);
           ctx.beginPath(); ctx.ellipse(0, 0, ex, ey, 0, 0, Math.PI * 2); ctx.stroke();
           ctx.setLineDash([]);
           ctx.restore();
+
+          // Lines from IP to each connected agent
+          for (const ag of ags) {
+            ctx.save();
+            ctx.globalAlpha = 0.12 * ageFade;
+            ctx.strokeStyle = orbitCol;
+            ctx.lineWidth = 0.5 / k;
+            ctx.setLineDash([2, 6]);
+            ctx.beginPath(); ctx.moveTo(ip.x, ip.y); ctx.lineTo(ag.x, ag.y); ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.restore();
+          }
         }
       }
 
