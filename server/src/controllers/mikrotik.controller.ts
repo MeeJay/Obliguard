@@ -102,6 +102,8 @@ export async function debugMikroTikLogs(req: Request, res: Response): Promise<vo
       host: cfg.host, port: cfg.port, useTls: cfg.useTls,
       username: cfg.username, password: cfg.password,
     });
+    // Try to get raw response first for debugging
+    const rawResult = await client.sendCommand(['/log/print']);
     const entries = await client.getLogEntries();
     client.close();
 
@@ -115,7 +117,10 @@ export async function debugMikroTikLogs(req: Request, res: Response): Promise<vo
       parsed: parseMikroTikSyslog(e.message),
     }));
 
-    res.json({ total: entries.length, last20 });
+    // Also show raw API response (first 5 sentences) for debugging
+    const rawSample = rawResult.slice(0, 5).map((s) => s.join(' | '));
+
+    res.json({ total: entries.length, rawSentences: rawSample, last20 });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     res.status(500).json({ error: msg });

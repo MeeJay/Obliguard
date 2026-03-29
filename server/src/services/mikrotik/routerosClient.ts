@@ -326,6 +326,11 @@ export class RouterOSClient {
     return entries;
   }
 
+  /** Send a raw command and return all response sentences (for debugging). */
+  async sendCommand(words: string[]): Promise<string[][]> {
+    return this.sendAndWait(words);
+  }
+
   close(): void {
     this.socket?.destroy();
     this.socket = null;

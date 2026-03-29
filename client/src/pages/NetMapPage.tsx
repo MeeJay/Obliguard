@@ -102,6 +102,8 @@ export function NetMapPage() {
 
   /** Force-directed layout simulation. */
   const simRef = useRef<ForceSimulation | null>(null);
+  /** Stars for animated flickering background. */
+  const starsRef = useRef<{ x: number; y: number; s: number; b: number }[]>([]);
 
   const transformRef = useRef({ x: 0, y: 0, k: 1 });
   const dragRef      = useRef<{ x: number; y: number; startX: number; startY: number } | null>(null);
@@ -163,27 +165,26 @@ export function NetMapPage() {
     const oc = bgRef.current;
     oc.width = w; oc.height = h;
     const ctx = oc.getContext('2d')!;
-    ctx.fillStyle = '#03070d';
+    ctx.fillStyle = '#06090f';
     ctx.fillRect(0, 0, w, h);
-    // Mockup v5: subtle blue/warm nebulae on deep space
-    const nebulae: [number, number, number, string][] = [
-      [w * 0.35, h * 0.25, Math.min(w, h) * 0.50, 'rgba(8,22,45,0.16)'],
-      [w * 0.80, h * 0.50, Math.min(w, h) * 0.25, 'rgba(40,15,8,0.05)'],
-    ];
-    for (const [nx, ny, nr, c] of nebulae) {
-      const g = ctx.createRadialGradient(nx, ny, 0, nx, ny, nr);
-      g.addColorStop(0, c); g.addColorStop(1, 'transparent');
-      ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
-    }
+    // Nebulae (Oblimap style)
+    const neb1 = ctx.createRadialGradient(w * 0.5, h * 0.4, 0, w * 0.5, h * 0.4, w * 0.5);
+    neb1.addColorStop(0, 'rgba(20,40,70,0.15)');
+    neb1.addColorStop(0.5, 'rgba(15,25,50,0.08)');
+    neb1.addColorStop(1, 'transparent');
+    ctx.fillStyle = neb1; ctx.fillRect(0, 0, w, h);
+    const neb2 = ctx.createRadialGradient(w * 0.75, h * 0.6, 0, w * 0.75, h * 0.6, w * 0.35);
+    neb2.addColorStop(0, 'rgba(60,30,20,0.1)');
+    neb2.addColorStop(1, 'transparent');
+    ctx.fillStyle = neb2; ctx.fillRect(0, 0, w, h);
+    // Generate star positions (drawn animated per-frame, not baked into bg)
+    const starData: { x: number; y: number; s: number; b: number }[] = [];
     let s = 123456789;
     const rand = () => { s = (s * 1664525 + 1013904223) & 0xffffffff; return (s >>> 0) / 0xffffffff; };
-    for (let i = 0; i < 350; i++) {
-      const px = rand() * w, py = rand() * h;
-      const sz = rand() * 1 + 0.2;
-      const al = 0.08 + rand() * 0.22;
-      ctx.globalAlpha = al; ctx.fillStyle = 'rgba(120,150,185,1)';
-      ctx.fillRect(px, py, sz, sz);
+    for (let i = 0; i < 300; i++) {
+      starData.push({ x: rand() * w, y: rand() * h, s: rand() * 1.2 + 0.3, b: rand() });
     }
+    starsRef.current = starData;
     ctx.globalAlpha = 1;
   }, []);
 
@@ -668,6 +669,7 @@ export function NetMapPage() {
       for (const [repIp, rep] of repMap) {
         if (cnt >= 250) break;
         if (ipsRef.current.has(repIp)) continue;
+        if (rep.status === 'clean') continue; // clean IPs only via live events
         let targetId = agArr[0]?.id ?? -1, minCnt = Infinity;
         for (const ag of agArr) {
           const c = [...ipsRef.current.values()].filter(n => n.agentIds[0] === ag.id).length;
@@ -904,6 +906,13 @@ export function NetMapPage() {
     const bg = bgRef.current;
     if (bg && bg.width > 0) ctx.drawImage(bg, 0, 0);
 
+    // Animated flickering stars (Oblimap style)
+    for (const star of starsRef.current) {
+      const flicker = 0.6 + 0.4 * Math.sin(ts * 0.002 + star.b * 100);
+      ctx.fillStyle = `rgba(180,200,230,${flicker * 0.5})`;
+      ctx.fillRect(star.x, star.y, star.s, star.s);
+    }
+
     ctx.save();
     const { x, y, k } = transformRef.current;
     ctx.translate(x, y); ctx.scale(k, k);
@@ -1082,7 +1091,7 @@ export function NetMapPage() {
       if (ip.trail.length > 1 && !dimmed && alpha > 0.1) {
         for (let ti = 0; ti < ip.trail.length - 1; ti++) {
           const ta = (ti / ip.trail.length) * alpha * 0.2;
-          ctx.fillStyle = `rgba(${ip.status === 'banned' ? '226,75,74' : ip.status === 'suspicious' ? '249,115,22' : '93,202,165'},${ta})`;
+          ctx.fillStyle = `rgba(${ip.status === 'banned' ? '226,75,74' : ip.status === 'suspicious' ? '249,115,22' : ip.status === 'whitelisted' ? '93,202,165' : '130,160,195'},${ta})`;
           ctx.beginPath(); ctx.arc(ip.trail[ti].x, ip.trail[ti].y, 0.6 / k, 0, Math.PI * 2); ctx.fill();
         }
       }
@@ -1124,16 +1133,17 @@ export function NetMapPage() {
       // IP dot — small and subtle, mockup v5 style
       const bc = ip.status === 'banned' ? [226, 75, 74]
                : ip.status === 'suspicious' ? [249, 168, 37]
-               : [93, 202, 165];
+               : ip.status === 'whitelisted' ? [93, 202, 165]
+               : [130, 160, 195]; // clean = neutral blue-gray
       ctx.save();
-      ctx.shadowBlur = 1.5 * Math.min(k, 2); ctx.shadowColor = `rgba(${bc[0]},${bc[1]},${bc[2]},${alpha * 0.3})`;
-      ctx.fillStyle = `rgba(${bc[0]},${bc[1]},${bc[2]},${alpha * 0.65})`;
+      ctx.shadowBlur = 1.5 * Math.min(k, 2); ctx.shadowColor = `rgba(${bc[0]},${bc[1]},${bc[2]},${alpha * 0.25})`;
+      ctx.fillStyle = `rgba(${bc[0]},${bc[1]},${bc[2]},${alpha * 0.95})`;
       ctx.beginPath(); ctx.arc(ip.x, ip.y, ip.dotR, 0, Math.PI * 2); ctx.fill();
       ctx.shadowBlur = 0;
       ctx.restore();
 
-      // IP label — only at high zoom
-      if (k > 1.5 && !dimmed && alpha > 0.2) {
+      // IP label — only at high zoom AND for notable IPs
+      if (k > 1.5 && !dimmed && alpha > 0.2 && shouldLabel(ip)) {
         ctx.save();
         ctx.font = `${Math.round(6 * k)}px "Inconsolata", "JetBrains Mono", monospace`;
         ctx.fillStyle = `rgba(${bc[0]},${bc[1]},${bc[2]},${alpha * 0.3})`;
@@ -1756,7 +1766,7 @@ export function NetMapPage() {
   // ── JSX ───────────────────────────────────────────────────────────────────
 
   return (
-    <div className="flex flex-col h-[calc(100vh-4rem)] bg-[#03070d] overflow-hidden select-none">
+    <div className="flex flex-col h-[calc(100vh-4rem)] bg-[#06090f] overflow-hidden select-none">
 
       {/* ── Header ──────────────────────────────────────────────────────────── */}
       <div className="flex items-center justify-between px-5 py-2 border-b border-[#110c04] shrink-0 bg-[#070502]">
@@ -2189,15 +2199,19 @@ export function NetMapPage() {
                     >
                       {(ev.service || '?').slice(0, 8).toUpperCase()}
                     </span>
-                    <span
-                      className={`text-[12px] w-[7.5rem] shrink-0 truncate ${
+                    <button
+                      onClick={() => {
+                        const ipNode = ipsRef.current.get(ev.ip);
+                        if (ipNode) setClickedIp(ipNode);
+                      }}
+                      className={`text-[12px] w-[7.5rem] shrink-0 truncate text-left hover:underline cursor-pointer ${
                         isBan ? 'line-through text-red-400/55' : isFailure ? 'text-orange-300/75' : 'text-slate-400'
                       }`}
                     >
                       {anonIp(ev.ip)}
-                    </span>
+                    </button>
                     <span className="text-slate-700 shrink-0 text-[10px]">▸</span>
-                    <span className="text-slate-500 text-[11px] shrink-0 max-w-[6rem] truncate">
+                    <span className="text-slate-500 text-[11px] shrink-0">
                       {anonHostname(ev.agentName || 'Server')}
                     </span>
                     {ev.failures != null && ev.failures > 0 && (
