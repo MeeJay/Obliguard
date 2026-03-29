@@ -23,14 +23,13 @@ import { anonHostname, anonIp } from '../utils/anonymize';
 import type { AgentNode, IpNode, Particle, Ripple, LiveEvent, AgentPeerLink, WlEntry } from '../netmap/types';
 import {
   IP_TTL, IP_FADE_AGE, PEER_LINK_TTL,
-  RING_INNER_R, RING_GAP, PER_RING,
+  RING_INNER_R, RING_GAP, PER_RING, ARC_START, ARC_SPAN,
   EVENT_COLORS, DANGEROUS_SVCS, PEER_LINK_COLOR,
   BADGE_H, BADGE_FONT,
 } from '../netmap/constants';
 import {
   flagEmoji, svcColor, isDangerousSvc, statusColor, agentExclusionR,
   shouldLabel, ipToInt, matchWhitelist, badgeText, drawBadgeAt,
-  convexHull, inflateHull,
 } from '../netmap/helpers';
 import {
   placeIp, distributeIpsAroundAgents, relayoutIps, layoutAgents,
@@ -902,48 +901,7 @@ export function NetMapPage() {
       ctx.restore();
     }
 
-    // ── Cluster hulls (group visualization) ────────────────────────────────
-    const groupAgents = new Map<number, AgentNode[]>();
-    for (const ag of agents) {
-      if (ag.groupId) {
-        if (!groupAgents.has(ag.groupId)) groupAgents.set(ag.groupId, []);
-        groupAgents.get(ag.groupId)!.push(ag);
-      }
-    }
-    const GROUP_HULL_COLORS = ['#22d3ee', '#f97316', '#a855f7', '#22c55e', '#eab308', '#ec4899', '#3b82f6'];
-    let gci = 0;
-    for (const [, gAgents] of groupAgents) {
-      if (gAgents.length < 2) continue;
-      const maxExclR = Math.max(...gAgents.map(a => agentExclusionR(ipsByAgent.get(a.id) ?? 0)));
-      const hull = convexHull(gAgents.map(a => ({ x: a.x, y: a.y })));
-      const inflated = inflateHull(hull, maxExclR + 30);
-      const color = GROUP_HULL_COLORS[gci++ % GROUP_HULL_COLORS.length];
-
-      ctx.save();
-      ctx.globalAlpha = selId !== null ? 0.015 : 0.04;
-      ctx.fillStyle = color;
-      ctx.beginPath();
-      inflated.forEach((p, i) => i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y));
-      ctx.closePath(); ctx.fill();
-
-      ctx.globalAlpha = selId !== null ? 0.03 : 0.08;
-      ctx.strokeStyle = color; ctx.lineWidth = 1 / k;
-      ctx.stroke();
-
-      // Group name label at centroid
-      const cx = gAgents.reduce((s, a) => s + a.x, 0) / gAgents.length;
-      const cy = gAgents.reduce((s, a) => s + a.y, 0) / gAgents.length;
-      const gName = gAgents[0].groupName ?? '';
-      if (gName && k > 0.3) {
-        ctx.globalAlpha = selId !== null ? 0.06 : 0.12;
-        ctx.font = `500 ${Math.round(11 / Math.min(k, 1))}px "Inter", "Segoe UI", ui-sans-serif, sans-serif`;
-        ctx.fillStyle = color; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-        ctx.fillText(gName, cx, cy - maxExclR - 15);
-      }
-      ctx.restore();
-    }
-
-    // ── Orbital rings (faint circles at each ring radius) ────────────────
+    // ── Orbital rings (faint arcs at each ring radius) ─────────────────
     for (const ag of agents) {
       const ipCount  = ipsByAgent.get(ag.id) ?? 0;
       if (ipCount === 0) continue;
@@ -953,11 +911,12 @@ export function NetMapPage() {
       for (let ring = 0; ring < rings; ring++) {
         const r = RING_INNER_R + ring * RING_GAP;
         ctx.save();
-        const baseAlpha = dimmed ? 0.012 : 0.042 - ring * 0.008;
-        ctx.globalAlpha = agOnline ? baseAlpha : baseAlpha * 0.35;
-        ctx.strokeStyle = agOnline ? '#4a8aaa' : '#4a5568';
-        ctx.lineWidth   = 0.6 / k;
-        ctx.beginPath(); ctx.arc(ag.x, ag.y, r, 0, Math.PI * 2);
+        const baseAlpha = dimmed ? 0.008 : 0.030 - ring * 0.005;
+        ctx.globalAlpha = agOnline ? Math.max(baseAlpha, 0.005) : Math.max(baseAlpha * 0.3, 0.003);
+        ctx.strokeStyle = agOnline ? '#5a9abb' : '#3a4858';
+        ctx.lineWidth   = 0.4 / k;
+        // Draw only the 240° arc where IPs sit, not a full circle
+        ctx.beginPath(); ctx.arc(ag.x, ag.y, r, ARC_START, ARC_START + ARC_SPAN);
         ctx.stroke(); ctx.restore();
       }
     }
@@ -1044,28 +1003,34 @@ export function NetMapPage() {
         ctx.restore();
       }
 
+      // IP dot with radial gradient for depth
       ctx.save();
       ctx.globalAlpha = alpha;
-      ctx.shadowBlur  = ip.dotR * 1.8; ctx.shadowColor = ip.color;
-      ctx.fillStyle   = ip.status === 'whitelisted' ? '#22c55e'
+      const baseColor = ip.status === 'whitelisted' ? '#22c55e'
                       : ip.status === 'banned'       ? '#ef4444'
                       : ip.status === 'suspicious'   ? '#f97316'
-                      : '#c2cedd';
-      ctx.beginPath(); ctx.arc(ip.x, ip.y, ip.dotR, 0, Math.PI * 2); ctx.fill();
-      ctx.restore();
-
-      // Whitelisted shield icon
-      if (ip.status === 'whitelisted' && !dimmed && k > 0.5) {
-        ctx.save();
-        ctx.globalAlpha = alpha * 0.6;
-        ctx.fillStyle = '#22c55e';
-        const sx = ip.x - 3, sy = ip.y - 4;
-        ctx.beginPath();
-        ctx.moveTo(sx, sy); ctx.lineTo(sx + 6, sy); ctx.lineTo(sx + 6, sy + 5);
-        ctx.lineTo(sx + 3, sy + 8); ctx.lineTo(sx, sy + 5);
-        ctx.closePath(); ctx.fill();
-        ctx.restore();
+                      : '#93a8c0';
+      if (ip.dotR > 3 && !dimmed) {
+        ctx.shadowBlur = ip.dotR * 2.5; ctx.shadowColor = baseColor;
+        const dg = ctx.createRadialGradient(ip.x - ip.dotR * 0.3, ip.y - ip.dotR * 0.3, 0, ip.x, ip.y, ip.dotR);
+        dg.addColorStop(0, '#ffffff');
+        dg.addColorStop(0.35, baseColor);
+        dg.addColorStop(1, baseColor + '40');
+        ctx.fillStyle = dg;
+      } else {
+        ctx.shadowBlur = ip.dotR * 1.5; ctx.shadowColor = baseColor;
+        ctx.fillStyle = baseColor;
       }
+      ctx.beginPath(); ctx.arc(ip.x, ip.y, ip.dotR, 0, Math.PI * 2); ctx.fill();
+
+      // Thin ring outline for readability
+      if (!dimmed && ip.dotR > 2.5) {
+        ctx.globalAlpha = alpha * 0.4;
+        ctx.strokeStyle = baseColor;
+        ctx.lineWidth = 0.5 / k;
+        ctx.beginPath(); ctx.arc(ip.x, ip.y, ip.dotR + 1.5, 0, Math.PI * 2); ctx.stroke();
+      }
+      ctx.restore();
 
       if (!dimmed && shouldLabel(ip)) {
         const effectiveLabel = ip.displayLabel ?? ip.whitelistLabel ?? null;
@@ -1084,59 +1049,86 @@ export function NetMapPage() {
       const dimmed   = selId !== null && !isSel;
       const isOnline = agent.wsConnected;
       const pulse    = (Math.sin(ts / 1100 + agent.phase) + 1) / 2;
-      const alpha    = dimmed ? 0.22 : 1.0;
+      const alpha    = dimmed ? 0.18 : 1.0;
       const nr       = agent.r;
 
-      // Pulse ring
+      // Outer breathing ring
       ctx.save();
-      ctx.globalAlpha = alpha * (isOnline ? (0.04 + pulse * 0.05) : 0.018);
-      ctx.strokeStyle = isOnline ? '#ddeeff' : '#6b7280';
-      ctx.shadowBlur  = isOnline ? 16 : 4;
-      ctx.shadowColor = isOnline ? '#ddeeff' : '#6b7280';
-      ctx.lineWidth   = 0.7 / k;
-      ctx.beginPath(); ctx.arc(agent.x, agent.y, nr + 20 + (isOnline ? pulse * 5 : 0), 0, Math.PI * 2);
+      ctx.globalAlpha = alpha * (isOnline ? (0.03 + pulse * 0.04) : 0.015);
+      ctx.strokeStyle = isOnline ? '#c8e0ff' : '#4b5563';
+      ctx.shadowBlur  = isOnline ? 20 : 4;
+      ctx.shadowColor = isOnline ? 'rgba(180,210,255,0.5)' : '#4b5563';
+      ctx.lineWidth   = 0.6 / k;
+      ctx.beginPath(); ctx.arc(agent.x, agent.y, nr + 22 + (isOnline ? pulse * 6 : 0), 0, Math.PI * 2);
       ctx.stroke(); ctx.restore();
 
-      // Body gradient
+      // Inner accent ring (selected = bright, otherwise subtle)
+      if (isSel || isOnline) {
+        ctx.save();
+        ctx.globalAlpha = alpha * (isSel ? 0.25 : 0.06);
+        ctx.strokeStyle = isSel ? '#fbbf24' : '#8bb8e0';
+        ctx.lineWidth   = (isSel ? 1.2 : 0.5) / k;
+        ctx.beginPath(); ctx.arc(agent.x, agent.y, nr + 6, 0, Math.PI * 2);
+        ctx.stroke(); ctx.restore();
+      }
+
+      // Core body — two-layer gradient for depth
       ctx.save();
-      ctx.globalAlpha = alpha * (isOnline ? 1.0 : 0.45);
-      ctx.shadowBlur  = isOnline ? 18 : 6;
-      ctx.shadowColor = isOnline ? '#ffffff' : '#475569';
-      const g = ctx.createRadialGradient(agent.x, agent.y, 0, agent.x, agent.y, nr);
+      ctx.globalAlpha = alpha * (isOnline ? 1.0 : 0.40);
+      ctx.shadowBlur  = isOnline ? 22 : 5;
+      ctx.shadowColor = isOnline ? 'rgba(220,240,255,0.7)' : '#475569';
+      const g = ctx.createRadialGradient(
+        agent.x - nr * 0.2, agent.y - nr * 0.2, 0,
+        agent.x, agent.y, nr,
+      );
       if (isOnline) {
         g.addColorStop(0, '#ffffff');
-        g.addColorStop(0.42, 'rgba(220,235,255,0.48)');
-        g.addColorStop(1, 'rgba(200,220,255,0)');
+        g.addColorStop(0.30, 'rgba(200,225,255,0.6)');
+        g.addColorStop(0.70, 'rgba(140,180,220,0.15)');
+        g.addColorStop(1, 'rgba(100,150,200,0)');
       } else {
-        g.addColorStop(0, '#94a3b8');
-        g.addColorStop(0.42, 'rgba(100,116,139,0.38)');
-        g.addColorStop(1, 'rgba(71,85,105,0)');
+        g.addColorStop(0, '#8899aa');
+        g.addColorStop(0.35, 'rgba(80,95,110,0.35)');
+        g.addColorStop(1, 'rgba(55,65,80,0)');
       }
       ctx.fillStyle = g;
       ctx.beginPath(); ctx.arc(agent.x, agent.y, nr, 0, Math.PI * 2); ctx.fill();
       ctx.restore();
 
-      // Label
-      const fs = Math.round(Math.max(9, 12 * Math.min(k, 1.2)));
+      // Label — larger, with text shadow for pop
+      const fs = Math.round(Math.max(10, 13 * Math.min(k, 1.3)));
       ctx.save();
-      ctx.globalAlpha  = alpha * (isOnline ? 0.90 : 0.48);
+      ctx.globalAlpha  = alpha * (isOnline ? 0.92 : 0.45);
       ctx.font         = `600 ${fs}px "Inter", "Segoe UI", ui-sans-serif, sans-serif`;
-      ctx.fillStyle    = isOnline ? (isSel ? '#f0f8ff' : '#ddeeff') : '#64748b';
+      ctx.fillStyle    = isOnline ? (isSel ? '#fef3c7' : '#e0ecfa') : '#64748b';
       ctx.textAlign    = 'center'; ctx.textBaseline = 'bottom';
-      ctx.shadowBlur   = 7; ctx.shadowColor = 'rgba(0,0,0,0.85)';
-      ctx.fillText(agent.label, agent.x, agent.y - nr - 7);
+      ctx.shadowBlur   = 8; ctx.shadowColor = 'rgba(0,0,0,0.9)';
+      ctx.fillText(agent.label, agent.x, agent.y - nr - 10);
       ctx.restore();
+
+      // Group name subtitle (small, under label)
+      if (agent.groupName && isOnline && !dimmed && k > 0.5) {
+        const gfs = Math.round(Math.max(7, 8.5 * Math.min(k, 1.2)));
+        ctx.save();
+        ctx.globalAlpha = 0.30;
+        ctx.font        = `400 ${gfs}px "Inter", "Segoe UI", ui-sans-serif, sans-serif`;
+        ctx.fillStyle   = '#8ba0b8';
+        ctx.textAlign   = 'center'; ctx.textBaseline = 'bottom';
+        ctx.shadowBlur  = 4; ctx.shadowColor = 'rgba(0,0,0,0.8)';
+        ctx.fillText(agent.groupName, agent.x, agent.y - nr - 10 - fs - 1);
+        ctx.restore();
+      }
 
       // Offline badge
       if (!isOnline) {
         const bfs = Math.round(Math.max(7, 9 * Math.min(k, 1.2)));
         ctx.save();
-        ctx.globalAlpha = alpha * 0.55;
+        ctx.globalAlpha = alpha * 0.50;
         ctx.font        = `500 ${bfs}px "Inter", "Segoe UI", ui-sans-serif, sans-serif`;
-        ctx.fillStyle   = '#94a3b8';
+        ctx.fillStyle   = '#78909c';
         ctx.textAlign   = 'center'; ctx.textBaseline = 'top';
-        ctx.shadowBlur  = 0;
-        ctx.fillText('offline', agent.x, agent.y + nr + 5);
+        ctx.shadowBlur  = 4; ctx.shadowColor = 'rgba(0,0,0,0.7)';
+        ctx.fillText('OFFLINE', agent.x, agent.y + nr + 6);
         ctx.restore();
       }
     }
@@ -1600,7 +1592,7 @@ export function NetMapPage() {
     const tr = transformRef.current;
     const wx = (mx - tr.x) / tr.k, wy = (my - tr.y) / tr.k;
     for (const ip of ipsRef.current.values()) {
-      if ((wx - ip.x) ** 2 + (wy - ip.y) ** 2 <= (ip.dotR + 7) ** 2) {
+      if ((wx - ip.x) ** 2 + (wy - ip.y) ** 2 <= (ip.dotR + 12) ** 2) {
         setTooltip({ x: mx, y: my, ip: anonIp(ip.ip), flag: ip.flag, country: ip.country,
           status: ip.status, failures: ip.failures, services: ip.services, color: ip.color });
         return;

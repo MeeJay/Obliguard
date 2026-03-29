@@ -114,16 +114,17 @@ export function distributeIpsAroundAgents(
       cx += ag.x * w; cy += ag.y * w;
     }
     const angle  = ipRand(ip.ip, 1) * Math.PI * 2;
-    const jitter = ipRand(ip.ip, 5) * 18;
-    ip.x = cx + Math.cos(angle) * jitter;
-    ip.y = cy + Math.sin(angle) * jitter;
+    const scatter = 25 + ipRand(ip.ip, 5) * 40;
+    ip.x = cx + Math.cos(angle) * scatter;
+    ip.y = cy + Math.sin(angle) * scatter;
 
+    // Push outside every agent's ring system with generous margin
     for (const ag of ags) {
       const dx = ip.x - ag.x, dy = ip.y - ag.y;
       const d  = Math.sqrt(dx * dx + dy * dy) || 1;
       const er = exclR.get(ag.id) ?? 60;
-      if (d < er) {
-        const push = er - d + 8;
+      if (d < er + 12) {
+        const push = er + 12 - d + 10;
         ip.x += (dx / d) * push;
         ip.y += (dy / d) * push;
       }
@@ -173,13 +174,14 @@ export function relayoutIps(agents: AgentNode[], ips: IpNode[]): void {
     let cx = 0, cy = 0;
     for (const ag of ags) { const w = (ip.agentWeights[ag.id] ?? 1) / totalW; cx += ag.x * w; cy += ag.y * w; }
     const angle = ipRand(ip.ip, 1) * Math.PI * 2;
-    ip.x = cx + Math.cos(angle) * (ipRand(ip.ip, 5) * 18);
-    ip.y = cy + Math.sin(angle) * (ipRand(ip.ip, 5) * 18);
+    const scatter = 25 + ipRand(ip.ip, 5) * 40;
+    ip.x = cx + Math.cos(angle) * scatter;
+    ip.y = cy + Math.sin(angle) * scatter;
     for (const ag of ags) {
       const dx = ip.x - ag.x, dy = ip.y - ag.y;
       const d  = Math.sqrt(dx * dx + dy * dy) || 1;
       const er = exclR.get(ag.id) ?? 60;
-      if (d < er) { const push = er - d + 8; ip.x += (dx / d) * push; ip.y += (dy / d) * push; }
+      if (d < er + 12) { const push = er + 12 - d + 10; ip.x += (dx / d) * push; ip.y += (dy / d) * push; }
     }
   }
 }

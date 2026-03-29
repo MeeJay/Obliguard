@@ -47,7 +47,6 @@ export function AddMikroTikModal({ open, onClose, onCreated }: Props) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [ingestToken, setIngestToken] = useState('');
-  const [createdDeviceId, setCreatedDeviceId] = useState<number | null>(null);
 
   if (!open) return null;
 
@@ -75,7 +74,6 @@ export function AddMikroTikModal({ open, onClose, onCreated }: Props) {
       // Fetch credentials to get the ingest token
       const creds = await mikrotikApi.getCredentials(result.deviceId);
       setIngestToken(creds.ingestToken || '');
-      setCreatedDeviceId(result.deviceId);
       onCreated();
       setStep('commands');
     } catch (err: any) {

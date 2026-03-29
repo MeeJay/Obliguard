@@ -5,9 +5,9 @@ export const IP_FADE_AGE   = 45 * 1000;   // fade starts at 45 s
 export const PEER_LINK_TTL = 120 * 1000;  // 120 s — peer links linger after last event
 
 /** Ring layout constants — shared by layout functions and animate(). */
-export const RING_INNER_R = 42;              // first ring distance from agent centre (px)
-export const RING_GAP     = 7;               // gap between successive rings (px)
-export const PER_RING     = 30;              // max IPs per ring
+export const RING_INNER_R = 52;              // first ring distance from agent centre (px)
+export const RING_GAP     = 14;             // gap between successive rings (px)
+export const PER_RING     = 18;              // max IPs per ring — fewer = more spaced
 export const ARC_START    = -Math.PI / 6;   // 330° — first arc position (bottom-right)
 export const ARC_SPAN     = (4 * Math.PI) / 3; // 240° arc, skipping top 120° (label zone)
 
@@ -29,5 +29,8 @@ export const DANGEROUS_SVCS = new Set(['ssh', 'rdp', 'ftp', 'mysql', 'telnet', '
 export const PEER_LINK_COLOR: Record<'lan' | 'wan', string> = { lan: '#3b82f6', wan: '#f97316' };
 
 /** Badge rendering constants */
-export const BADGE_H    = 13;
-export const BADGE_FONT = '7.5px "Inter", "Segoe UI", ui-sans-serif, sans-serif';
+export const BADGE_H    = 15;
+export const BADGE_FONT = '8.5px "Inter", "Segoe UI", ui-sans-serif, sans-serif';
+
+/** Hit detection padding — extra px around IP dots for easier hover/click */
+export const IP_HIT_PADDING = 10;

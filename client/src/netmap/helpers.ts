@@ -125,16 +125,27 @@ export function drawBadgeAt(
   ctx.save();
   ctx.globalAlpha = alpha;
   ctx.font = BADGE_FONT;
-  ctx.fillStyle = 'rgba(7,5,2,0.90)';
+
+  // Background with subtle gradient
+  ctx.fillStyle = 'rgba(5,3,1,0.88)';
   ctx.beginPath();
-  if (typeof ctx.roundRect === 'function') ctx.roundRect(bx, by, bw, BADGE_H, 3);
+  if (typeof ctx.roundRect === 'function') ctx.roundRect(bx, by, bw, BADGE_H, 4);
   else ctx.rect(bx, by, bw, BADGE_H);
   ctx.fill();
-  ctx.strokeStyle = color + '72';
-  ctx.lineWidth = 0.7;
+
+  // Color accent border
+  ctx.strokeStyle = color + '55';
+  ctx.lineWidth = 0.8;
   ctx.stroke();
-  ctx.fillStyle = '#c8d4df';
+
+  // Left accent bar
+  ctx.fillStyle = color + '90';
+  ctx.fillRect(bx + 1.5, by + 3, 1.5, BADGE_H - 6);
+
+  // Text with slight shadow for contrast
+  ctx.shadowBlur = 3; ctx.shadowColor = 'rgba(0,0,0,0.8)';
+  ctx.fillStyle = '#dbe4ef';
   ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-  ctx.fillText(text, bx + 4, by + BADGE_H / 2);
+  ctx.fillText(text, bx + 7, by + BADGE_H / 2);
   ctx.restore();
 }
