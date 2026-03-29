@@ -1189,8 +1189,8 @@ export function NetMapPage() {
 
     ctx.restore();
 
-    // ── Minimap (every 10 frames) ─────────────────────────────────────────
-    if (frameRef.current % 10 === 0 && agents.length > 2) {
+    // ── Minimap ──────────────────────────────────────────────────────────
+    if (agents.length > 2) {
       const mmW = 150, mmH = 100;
       const mmX = w - mmW - 12, mmY = h - mmH - 12;
 
