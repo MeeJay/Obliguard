@@ -138,11 +138,27 @@ async function pollDevice(device: PollDevice): Promise<void> {
       return;
     }
 
+    logger.info(
+      { deviceId: device.deviceId, newLogs: newEntries.length },
+      'MikroTik log poll: new log entries found',
+    );
+
     // Parse new entries
     const events: AgentIpEvent[] = [];
+    let unmatched = 0;
     for (const entry of newEntries) {
       const parsed = parseMikroTikSyslog(entry.message);
-      if (!parsed) continue;
+      if (!parsed) {
+        unmatched++;
+        // Log first few unmatched for debugging
+        if (unmatched <= 3) {
+          logger.debug(
+            { deviceId: device.deviceId, topics: entry.topics, message: entry.message },
+            'MikroTik log poll: unmatched log entry',
+          );
+        }
+        continue;
+      }
       events.push({
         id: `${crypto.randomUUID()}-${Date.now()}`,
         ip: parsed.ip,
@@ -159,8 +175,13 @@ async function pollDevice(device: PollDevice): Promise<void> {
       const { agentService } = await import('../agent.service');
       await agentService.processEventsFlush(device.deviceId, device.tenantId, events);
       logger.info(
-        { deviceId: device.deviceId, newLogs: newEntries.length, events: events.length },
-        'MikroTik log poll: new events detected',
+        { deviceId: device.deviceId, matched: events.length, unmatched },
+        'MikroTik log poll: events injected',
+      );
+    } else if (newEntries.length > 0) {
+      logger.warn(
+        { deviceId: device.deviceId, newLogs: newEntries.length, unmatched },
+        'MikroTik log poll: new entries found but none matched auth patterns',
       );
     }
 
