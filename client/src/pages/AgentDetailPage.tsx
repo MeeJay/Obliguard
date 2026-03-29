@@ -6,6 +6,7 @@ import {
   Trash2, AlertTriangle,
   ChevronDown, ChevronUp, LayoutGrid, Network, Pencil, ArrowLeftRight,
 } from 'lucide-react';
+import toast from 'react-hot-toast';
 import apiClient from '@/api/client';
 import { agentApi } from '@/api/agent.api';
 import { bansApi } from '@/api/bans.api';
@@ -1139,7 +1140,11 @@ export function AgentDetailPage() {
     setBanningIps(prev => new Set(prev).add(ip));
     try {
       await bansApi.create({ ip, reason: 'Manual ban from agent detail' });
-    } catch { alert(`Failed to ban ${ip}`); } finally {
+      toast.success(`${ip} banned`);
+    } catch (err) {
+      const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error;
+      toast.error(msg || `Failed to ban ${ip}`);
+    } finally {
       setBanningIps(prev => { const s = new Set(prev); s.delete(ip); return s; });
     }
   }, []);

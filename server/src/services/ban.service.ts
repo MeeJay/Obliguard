@@ -114,6 +114,17 @@ class BanService {
       throw new Error('Only platform admins can create non-tenant-scoped bans');
     }
 
+    // Reject if this IP already has an active ban
+    const existing = await db('ip_bans')
+      .where({ ip: data.ip, is_active: true })
+      .where(function () {
+        this.whereNull('expires_at').orWhere('expires_at', '>', new Date());
+      })
+      .first();
+    if (existing) {
+      throw new Error('This IP is already banned');
+    }
+
     const [row] = await db('ip_bans')
       .insert({
         ip: data.ip,

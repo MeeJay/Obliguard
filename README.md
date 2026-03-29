@@ -1,8 +1,22 @@
-# Obliguard
+<p align="center">
+  <img src="client/public/logo.svg" alt="Obliguard" height="80">
+</p>
 
-Self-hosted network intrusion prevention system (IPS) with automated IP banning, real-time threat visualization, and multi-agent firewall enforcement. Detects brute-force attacks across SSH, RDP, Nginx, Apache, and more — then blocks attackers at the firewall level on every agent simultaneously.
+<h3 align="center">Self-hosted Network Intrusion Prevention System</h3>
+
+<p align="center">
+  Automated IP banning, real-time threat visualization, multi-agent firewall enforcement.
+  <br>
+  Part of the <a href="https://obli.tools"><strong>obli.tools</strong></a> ecosystem.
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/dashboard.png" alt="Dashboard" width="100%">
+</p>
 
 ---
+
+Obliguard detects brute-force attacks across SSH, RDP, Nginx, Apache, IIS, FTP, Mail, and MySQL — then blocks attackers at the firewall level on every agent simultaneously.
 
 ## Features at a Glance
 
@@ -21,6 +35,25 @@ Self-hosted network intrusion prevention system (IPS) with automated IP banning,
 - **18 UI languages**
 - **Real-time** — Socket.io live updates, live alert toasts, real-time event streaming
 - **Desktop tray app** — Windows & macOS, multi-tenant tab bar, auto-update
+
+---
+
+## Screenshots
+
+<table>
+  <tr>
+    <td><img src="docs/screenshots/netmap.png" alt="Network Map"><br><sub><b>Network Map</b> — Real-time threat visualization</sub></td>
+    <td><img src="docs/screenshots/ip-reputation.png" alt="IP Reputation"><br><sub><b>IP Reputation</b> — Per-IP intelligence & GeoIP</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/agent-detail.png" alt="Agent Detail"><br><sub><b>Agent Detail</b> — Events, services, firewall state</sub></td>
+    <td><img src="docs/screenshots/service-templates.png" alt="Service Templates"><br><sub><b>Service Templates</b> — Detection rules per service</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/agents.png" alt="Agents"><br><sub><b>Agents</b> — Device management & approval</sub></td>
+    <td><img src="docs/screenshots/dashboard.png" alt="Dashboard"><br><sub><b>Dashboard</b> — Active bans, agents, events</sub></td>
+  </tr>
+</table>
 
 ---
 
@@ -321,6 +354,12 @@ Set `DATABASE_URL` in your `.env` to point at your existing PostgreSQL instance.
 | **Desktop app** | Go (systray) |
 | **Monorepo** | npm workspaces (`shared/`, `server/`, `client/`) |
 
+---
+
 > **An experiment with Claude Code**
 >
 > This project was built as an experiment to see how far Claude Code could be pushed as a development tool. Claude was used as a coding assistant throughout the entire development process.
+
+<p align="center">
+  <a href="https://obli.tools">obli.tools</a>
+</p>

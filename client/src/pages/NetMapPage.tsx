@@ -13,6 +13,7 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { Shield, Ban, Activity, RefreshCw, Zap, X, ExternalLink } from 'lucide-react';
+import toast from 'react-hot-toast';
 import { Link } from 'react-router-dom';
 import { getSocket } from '../socket/socketClient';
 import apiClient from '../api/client';
@@ -641,7 +642,11 @@ export function NetMapPage() {
         ripplesRef.current.push({ id: Math.random().toString(36).slice(2), x: node.x, y: node.y, t: 0 });
       }
       setStats(s => ({ ...s, banned: s.banned + 1 }));
-    } catch (err) { console.error('Quick ban failed:', err); }
+      toast.success(`${ip} banned`);
+    } catch (err) {
+      const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error;
+      toast.error(msg || `Failed to ban ${ip}`);
+    }
     finally { setBanningIp(null); }
   }, []);
 

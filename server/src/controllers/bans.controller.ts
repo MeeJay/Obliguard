@@ -79,8 +79,12 @@ export async function createBan(req: Request, res: Response, next: NextFunction)
     const ban = await banService.create(body, req.session?.userId ?? 0, req.tenantId, isAdmin);
 
     res.status(201).json({ success: true, data: ban });
-  } catch (err) {
-    next(err);
+  } catch (err: unknown) {
+    if (err instanceof Error && err.message === 'This IP is already banned') {
+      next(new AppError(409, err.message));
+    } else {
+      next(err);
+    }
   }
 }
 
