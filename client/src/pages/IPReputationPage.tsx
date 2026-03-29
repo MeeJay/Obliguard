@@ -47,7 +47,7 @@ const PAGE_SIZE = 25;
 
 // ── Page tabs ──────────────────────────────────────────────────────────────────
 
-type PageTab = 'activity' | 'whitelist' | 'bans';
+type PageTab = 'local' | 'remote';
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -838,27 +838,26 @@ function ActivityTab({ isAdmin }: ActivityTabProps) {
 
   return (
     <>
-      {/* Filters row */}
-      <div className="flex items-center gap-3 mb-5 flex-wrap">
-        {/* Status filter pills */}
-        <div className="flex items-center gap-1 rounded-lg bg-bg-secondary p-1 border border-border">
+      {/* Status tabs */}
+      <div className="flex items-center gap-1 border-b border-border mb-5">
           {STATUS_FILTERS.map(f => (
             <button
               key={f.key}
               onClick={() => setStatusFilter(f.key)}
               className={cn(
-                'px-4 py-1.5 text-sm font-medium rounded-md transition-colors',
+                'px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors',
                 statusFilter === f.key
-                  ? 'bg-accent text-white'
-                  : 'text-text-muted hover:text-text-primary',
+                  ? 'border-accent text-accent'
+                  : 'border-transparent text-text-muted hover:text-text-primary hover:border-border',
               )}
             >
               {f.label}
             </button>
           ))}
-        </div>
+      </div>
 
-        {/* Admin-only: tenant selector */}
+      {/* Search + tenant selector + refresh */}
+      <div className="flex items-center gap-3 mb-4 flex-wrap">
         {isAdmin && tenants.length > 0 && (
           <select
             value={selectedTenantId ?? ''}
@@ -871,10 +870,6 @@ function ActivityTab({ isAdmin }: ActivityTabProps) {
             ))}
           </select>
         )}
-      </div>
-
-      {/* Search + refresh */}
-      <div className="flex items-center gap-2 mb-4">
         <div className="relative flex-1 max-w-xs">
           <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted pointer-events-none" />
           <input
@@ -1232,7 +1227,8 @@ function AddWhitelistModal({ onSave, onClose }: AddWhitelistModalProps) {
   );
 }
 
-function WhitelistTab() {
+/** @deprecated Kept for potential future use. Access whitelist via IP drawer instead. */
+export function WhitelistTab() {
   const [entries, setEntries] = useState<IpWhitelist[]>([]);
   const [loading, setLoading] = useState(true);
   const [scopeFilter, setScopeFilter] = useState<WhitelistScope | 'all'>('all');
@@ -1597,7 +1593,8 @@ interface BansTabProps {
   isAdmin: boolean;
 }
 
-function BansTab({ isAdmin }: BansTabProps) {
+/** @deprecated Kept for potential future use. Access bans via IP drawer instead. */
+export function BansTab({ isAdmin }: BansTabProps) {
   const [bans, setBans] = useState<IpBan[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -1955,16 +1952,199 @@ function BansTab({ isAdmin }: BansTabProps) {
 // ── IPReputationPage ───────────────────────────────────────────────────────────
 
 const PAGE_TABS: { key: PageTab; label: string }[] = [
-  { key: 'activity', label: 'Activity' },
-  { key: 'whitelist', label: 'Whitelist' },
-  { key: 'bans', label: 'Bans' },
+  { key: 'local', label: 'Local' },
+  { key: 'remote', label: 'Remote' },
 ];
+
+// ── Remote tab ─────────────────────────────────────────────────────────────────
+
+function RemoteTab() {
+  const [ips, setIps] = useState<import('../api/remoteBlocklist.api').RemoteBlockedIp[]>([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [sources, setSources] = useState<import('../api/remoteBlocklist.api').RemoteBlocklist[]>([]);
+  const [stats, setStats] = useState<import('../api/remoteBlocklist.api').RemoteBlocklistStats | null>(null);
+  const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const [sourceFilter, setSourceFilter] = useState<number | null>(null);
+  const [page, setPage] = useState(0);
+
+  const PAGE_SIZE = 25;
+
+  // Debounce search
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(search), 300);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  // Load sources + stats
+  useEffect(() => {
+    import('../api/remoteBlocklist.api').then(({ remoteBlocklistApi }) => {
+      remoteBlocklistApi.list().then(setSources).catch(() => {});
+      remoteBlocklistApi.stats().then(setStats).catch(() => {});
+    });
+  }, []);
+
+  // Load IPs
+  useEffect(() => {
+    setLoading(true);
+    import('../api/remoteBlocklist.api').then(({ remoteBlocklistApi }) => {
+      remoteBlocklistApi.listIps({
+        blocklistId: sourceFilter ?? undefined,
+        search: debouncedSearch || undefined,
+        limit: PAGE_SIZE,
+        offset: page * PAGE_SIZE,
+      }).then(result => {
+        setIps(result.data);
+        setTotal(result.total);
+      }).catch(() => {
+        setIps([]);
+        setTotal(0);
+      }).finally(() => setLoading(false));
+    });
+  }, [debouncedSearch, sourceFilter, page]);
+
+  const toggleIp = async (id: number, enabled: boolean) => {
+    const { remoteBlocklistApi } = await import('../api/remoteBlocklist.api');
+    await remoteBlocklistApi.toggleIp(id, enabled);
+    setIps(prev => prev.map(ip => ip.id === id ? { ...ip, enabled } : ip));
+  };
+
+  const totalPages = Math.ceil(total / PAGE_SIZE);
+
+  if (sources.length === 0 && !loading && total === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center py-20 text-center">
+        <div className="w-16 h-16 rounded-full bg-bg-secondary border border-border flex items-center justify-center mb-4">
+          <Globe size={28} className="text-text-muted" />
+        </div>
+        <h3 className="text-sm font-medium text-text-secondary mb-1">No Remote Blocklists</h3>
+        <p className="text-xs text-text-muted max-w-sm">
+          Add remote blocklists in Settings to see external threat intelligence here.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      {/* Stats */}
+      {stats && (
+        <div className="flex items-center gap-6 mb-4 text-xs text-text-muted">
+          <span>{stats.total} remote IPs</span>
+          <span>{stats.sources} source(s)</span>
+          {stats.lastSync && <span>Last sync: {formatDateShort(stats.lastSync)}</span>}
+        </div>
+      )}
+
+      {/* Filters */}
+      <div className="flex items-center gap-3 mb-4 flex-wrap">
+        <select
+          value={sourceFilter ?? ''}
+          onChange={e => { setSourceFilter(e.target.value ? Number(e.target.value) : null); setPage(0); }}
+          className="rounded-md border border-border bg-bg-secondary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
+        >
+          <option value="">All Sources</option>
+          {sources.map(s => (
+            <option key={s.id} value={s.id}>{s.name}</option>
+          ))}
+        </select>
+        <div className="relative flex-1 max-w-xs">
+          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted pointer-events-none" />
+          <input
+            type="text"
+            placeholder="Search IP..."
+            value={search}
+            onChange={e => { setSearch(e.target.value); setPage(0); }}
+            className="pl-9 pr-3 py-2 text-sm rounded-md border border-border bg-bg-secondary text-text-primary placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-accent w-full"
+          />
+        </div>
+      </div>
+
+      {/* Table */}
+      <div className="rounded-lg border border-border bg-bg-secondary overflow-hidden">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="bg-bg-tertiary text-text-secondary text-xs uppercase tracking-wider">
+              <th className="text-left px-4 py-3 font-medium">IP</th>
+              <th className="text-left px-4 py-3 font-medium">Reason</th>
+              <th className="text-left px-4 py-3 font-medium">Source</th>
+              <th className="text-right px-4 py-3 font-medium">Reports</th>
+              <th className="text-left px-4 py-3 font-medium">Last seen</th>
+              <th className="text-center px-4 py-3 font-medium">Status</th>
+              <th className="text-right px-4 py-3 font-medium">Actions</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-border">
+            {loading ? (
+              Array.from({ length: 5 }).map((_, i) => (
+                <tr key={i} className="animate-pulse">
+                  {Array.from({ length: 7 }).map((_, j) => (
+                    <td key={j} className="px-4 py-3"><div className="h-4 bg-bg-tertiary rounded w-20" /></td>
+                  ))}
+                </tr>
+              ))
+            ) : ips.length === 0 ? (
+              <tr><td colSpan={7} className="px-4 py-8 text-center text-text-muted">No remote IPs found</td></tr>
+            ) : ips.map(ip => (
+              <tr key={ip.id} className={cn('hover:bg-bg-hover transition-colors', !ip.enabled && 'opacity-50')}>
+                <td className="px-4 py-3 font-mono text-text-primary">{ip.ip}</td>
+                <td className="px-4 py-3 text-text-muted truncate max-w-[180px]">{ip.reason || '—'}</td>
+                <td className="px-4 py-3">
+                  <span className={cn(
+                    'inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium',
+                    ip.sourceType === 'oblitools'
+                      ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
+                      : 'bg-cyan-500/10 text-cyan-400 border border-cyan-500/20',
+                  )}>
+                    {ip.blocklistName}
+                  </span>
+                </td>
+                <td className="px-4 py-3 text-right font-mono text-text-secondary">{ip.reports}</td>
+                <td className="px-4 py-3 text-text-muted">{formatDateShort(ip.lastSeen)}</td>
+                <td className="px-4 py-3 text-center">
+                  {ip.enabled
+                    ? <span className="text-[10px] font-medium text-status-up">ACTIVE</span>
+                    : <span className="text-[10px] font-medium text-text-muted">DISABLED</span>}
+                </td>
+                <td className="px-4 py-3 text-right">
+                  <button
+                    onClick={() => void toggleIp(ip.id, !ip.enabled)}
+                    className="p-1 rounded text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors"
+                    title={ip.enabled ? 'Disable' : 'Enable'}
+                  >
+                    {ip.enabled ? <EyeOff size={14} /> : <Eye size={14} />}
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Pagination */}
+      {totalPages > 1 && (
+        <div className="flex items-center justify-between mt-4 text-sm text-text-muted">
+          <button onClick={() => setPage(p => Math.max(0, p - 1))} disabled={page === 0}
+            className="px-3 py-1.5 rounded border border-border hover:bg-bg-hover disabled:opacity-40 transition-colors">
+            Previous
+          </button>
+          <span>{page + 1} / {totalPages}</span>
+          <button onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))} disabled={page >= totalPages - 1}
+            className="px-3 py-1.5 rounded border border-border hover:bg-bg-hover disabled:opacity-40 transition-colors">
+            Next
+          </button>
+        </div>
+      )}
+    </>
+  );
+}
 
 export function IPReputationPage() {
   const { user } = useAuthStore();
   const isAdmin = user?.role === 'admin';
 
-  const [activeTab, setActiveTab] = useState<PageTab>('activity');
+  const [activeTab, setActiveTab] = useState<PageTab>('local');
 
   return (
     <div className="p-6">
@@ -1993,9 +2173,8 @@ export function IPReputationPage() {
       </div>
 
       {/* Tab content */}
-      {activeTab === 'activity' && <ActivityTab isAdmin={isAdmin} />}
-      {activeTab === 'whitelist' && <WhitelistTab />}
-      {activeTab === 'bans' && <BansTab isAdmin={isAdmin} />}
+      {activeTab === 'local' && <ActivityTab isAdmin={isAdmin} />}
+      {activeTab === 'remote' && <RemoteTab />}
     </div>
   );
 }

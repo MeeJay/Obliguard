@@ -69,8 +69,8 @@ function ipTtlForStatus(status: string): number {
 
 /** Compute orbit radius — spread IPs across varied distances from agent. */
 function orbRadius(nodeR: number, slot: number, totalSlots: number): number {
-  const minR = nodeR + 12;
-  const maxR = nodeR + 12 + Math.min(80, totalSlots * 1.5);
+  const minR = nodeR + 38;
+  const maxR = nodeR + 38 + Math.min(80, totalSlots * 1.5);
   if (totalSlots <= 1) return minR + 10;
   // Distribute across the full range with some randomness per slot
   const t = slot / (totalSlots - 1);
@@ -862,7 +862,7 @@ export function NetMapPage() {
         const totalIps = ipsPerAgent.get(ag.id) ?? 1;
         const orbR = orbRadius(ag.r, ip.orbitSlot, totalIps);
         const targetX = ag.x + Math.cos(ip.orbitAngle) * orbR;
-        const targetY = ag.y + Math.sin(ip.orbitAngle) * orbR * 0.72;
+        const targetY = ag.y + Math.sin(ip.orbitAngle) * orbR * ip.orbitEccentricity;
         if (ip.arriveT < 1) {
           ip.x = ip.spawnX + (targetX - ip.spawnX) * ip.arriveT;
           ip.y = ip.spawnY + (targetY - ip.spawnY) * ip.arriveT;
@@ -1005,10 +1005,10 @@ export function NetMapPage() {
       const glow     = now < link.glowUntil;
 
       ctx.save();
-      const linkThickness = Math.min(1 + Math.log2(1 + link.count) * 0.6, 4);
-      ctx.globalAlpha = (selId !== null ? 0.30 : (isRecent ? 0.80 : 0.35)) * ageFade;
+      const linkThickness = Math.min(0.4 + Math.log2(1 + link.count) * 0.25, 1.5);
+      ctx.globalAlpha = (selId !== null ? 0.20 : (isRecent ? 0.50 : 0.20)) * ageFade;
       ctx.strokeStyle = color;
-      ctx.lineWidth   = (isRecent ? linkThickness * 1.2 : linkThickness * 0.7) / k;
+      ctx.lineWidth   = (isRecent ? linkThickness * 1.1 : linkThickness * 0.6) / k;
       if (isRecent) {
         ctx.setLineDash([5, 8]);
         ctx.lineDashOffset = -(ts / 40) % 13; // animated dash flows src → tgt
@@ -1069,7 +1069,7 @@ export function NetMapPage() {
       }
     }
 
-    // ── IP thin link lines to agents ──────────────────────────────────────
+    // ── IP orbit paths + link lines to agents ──────────────────────────────
     for (const ip of ipNodes) {
       if (ip.arriveT < 0.5) continue;
       const dimmed = selId !== null && !ip.agentIds.includes(selId);
@@ -1077,6 +1077,30 @@ export function NetMapPage() {
       const ageMs = now - ip.lastSeen;
       const fadeStart = ttl * IP_FADE_AGE;
       const ageFade = ageMs < fadeStart ? 1 : Math.max(0, 1 - (ageMs - fadeStart) / (ttl - fadeStart));
+
+      // Draw orbit ellipse path for multi-agent IPs
+      if (ip.agentIds.length > 1 && !dimmed && ageFade > 0.1) {
+        const ags = ip.agentIds.map(id => agMap.get(id)).filter(Boolean) as AgentNode[];
+        if (ags.length >= 2) {
+          const totalW = ags.reduce((s, ag) => s + (ip.agentWeights[ag.id] ?? 1), 0) || 1;
+          let cx = 0, cy = 0;
+          for (const ag of ags) { const wt = (ip.agentWeights[ag.id] ?? 1) / totalW; cx += ag.x * wt; cy += ag.y * wt; }
+          const dx = ags[1].x - ags[0].x, dy = ags[1].y - ags[0].y;
+          const dist = Math.sqrt(dx * dx + dy * dy) || 80;
+          const linkAngle = Math.atan2(dy, dx);
+          const ex = Math.min(dist * 0.35, 60), ey = Math.min(Math.max(15, dist * 0.15), 35);
+          ctx.save();
+          ctx.globalAlpha = 0.06 * ageFade;
+          ctx.strokeStyle = ip.status === 'banned' ? '#ef4444' : ip.status === 'suspicious' ? '#f97316' : '#5a8aaa';
+          ctx.lineWidth = 0.4 / k;
+          ctx.setLineDash([2, 4]);
+          ctx.translate(cx, cy); ctx.rotate(linkAngle);
+          ctx.beginPath(); ctx.ellipse(0, 0, ex, ey, 0, 0, Math.PI * 2); ctx.stroke();
+          ctx.setLineDash([]);
+          ctx.restore();
+        }
+      }
+
       const linkAlpha = (dimmed ? 0.02 : 0.06) * ageFade * ip.arriveT;
       for (const aid of ip.agentIds) {
         const ag = agMap.get(aid);
@@ -1293,15 +1317,11 @@ export function NetMapPage() {
       const mmW = 150, mmH = 100;
       const mmX = w - mmW - 12, mmY = h - mmH - 12;
 
-      // Compute world bounds from all nodes
+      // Compute world bounds from agents only
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
       for (const ag of agents) {
         minX = Math.min(minX, ag.x); minY = Math.min(minY, ag.y);
         maxX = Math.max(maxX, ag.x); maxY = Math.max(maxY, ag.y);
-      }
-      for (const ip of ipNodes) {
-        minX = Math.min(minX, ip.x); minY = Math.min(minY, ip.y);
-        maxX = Math.max(maxX, ip.x); maxY = Math.max(maxY, ip.y);
       }
       const pad = 40;
       minX -= pad; minY -= pad; maxX += pad; maxY += pad;
@@ -1318,14 +1338,7 @@ export function NetMapPage() {
       ctx.fillRect(mmX, mmY, mmW, mmH);
       ctx.strokeRect(mmX, mmY, mmW, mmH);
 
-      // IP dots (1px)
-      for (const ip of ipNodes) {
-        ctx.fillStyle = ip.color;
-        ctx.globalAlpha = 0.5;
-        ctx.fillRect(toMmX(ip.x), toMmY(ip.y), 1, 1);
-      }
-
-      // Agent dots (3px)
+      // Agent dots only (no IPs on minimap)
       for (const ag of agents) {
         ctx.globalAlpha = 0.9;
         ctx.fillStyle = ag.wsConnected ? '#22d3ee' : '#64748b';
@@ -2092,6 +2105,58 @@ export function NetMapPage() {
           {orbitPaused ? '▶ RESUME' : '❚❚ PAUSE'}
         </button>
 
+        {/* ── Agent side panel (on click) ────────────────────────────────────── */}
+        {selectedAgent && !clickedIp && (
+          <div className="absolute top-0 right-0 z-30 w-72 h-full bg-[rgba(5,12,22,0.95)] border-l border-[rgba(90,138,181,0.2)] p-4 overflow-y-auto">
+            <div className="flex items-center justify-between mb-4">
+              <span className="font-mono text-xs text-slate-500 uppercase tracking-widest">Agent Detail</span>
+              <button onClick={() => { selectedRef.current = null; setSelectedAgent(null); }} className="text-slate-500 hover:text-white text-lg leading-none">&times;</button>
+            </div>
+            <div className="font-mono text-sm font-semibold mb-1" style={{ color: selectedAgent.deviceColor }}>
+              {selectedAgent.label}
+            </div>
+            <div className="text-[10px] uppercase tracking-wider mb-4" style={{ color: selectedAgent.wsConnected ? '#5DCAA5' : '#E24B4A' }}>
+              {selectedAgent.wsConnected ? 'ONLINE' : 'OFFLINE'} · {selectedAgent.deviceType}
+            </div>
+            <div className="space-y-2 text-xs mb-4">
+              {[
+                { label: 'Group', value: selectedAgent.groupName ?? '—' },
+                { label: 'Events', value: String(selectedAgent.eventCount) },
+                { label: 'Orbiting IPs', value: String([...ipsRef.current.values()].filter(n => n.agentIds.includes(selectedAgent.id)).length) },
+              ].map(r => (
+                <div key={r.label} className="flex justify-between">
+                  <span className="text-slate-500">{r.label}</span>
+                  <span className="text-slate-300 font-mono">{r.value}</span>
+                </div>
+              ))}
+            </div>
+            {/* Recent IPs */}
+            <div className="mb-4">
+              <div className="text-[9px] text-slate-600 uppercase tracking-widest mb-2">Recent IPs</div>
+              <div className="space-y-1 max-h-48 overflow-y-auto">
+                {[...ipsRef.current.values()]
+                  .filter(n => n.agentIds.includes(selectedAgent.id))
+                  .sort((a, b) => b.lastSeen - a.lastSeen)
+                  .slice(0, 15)
+                  .map(n => (
+                    <button key={n.key} onClick={() => setClickedIp(n)}
+                      className="flex items-center gap-2 w-full text-left py-0.5 hover:bg-white/5 rounded px-1 transition-colors">
+                      <div className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: n.status === 'banned' ? '#ef4444' : n.status === 'suspicious' ? '#f59e0b' : '#82a0c3' }} />
+                      <span className="font-mono text-[10px] text-slate-400 truncate">{anonIp(n.ip)}</span>
+                      <span className="ml-auto font-mono text-[9px] text-slate-600">{n.failures > 0 ? `${n.failures}×` : ''}</span>
+                    </button>
+                  ))}
+              </div>
+            </div>
+            <div className="space-y-1.5">
+              <Link to={`/agents/${selectedAgent.id}`} onClick={() => { selectedRef.current = null; setSelectedAgent(null); }}
+                className="block w-full px-3 py-1.5 rounded text-xs font-medium text-cyan-400 border border-cyan-500/25 hover:bg-cyan-500/10 text-center transition-colors">
+                View Agent Page
+              </Link>
+            </div>
+          </div>
+        )}
+
         {/* ── IP side panel (on click) ──────────────────────────────────────── */}
         {clickedIp && (
           <div className="absolute top-0 right-0 z-30 w-72 h-full bg-[rgba(5,12,22,0.95)] border-l border-[rgba(90,138,181,0.2)] p-4 overflow-y-auto">
@@ -2105,18 +2170,59 @@ export function NetMapPage() {
             <div className="text-[10px] uppercase tracking-wider mb-4" style={{ color: clickedIp.status === 'banned' ? '#E24B4A' : clickedIp.status === 'suspicious' ? '#F5A623' : '#5DCAA5' }}>
               {clickedIp.status}
             </div>
-            <div className="space-y-2 text-xs mb-5">
+            <div className="space-y-2 text-xs mb-4">
               {[
                 { label: 'Country', value: clickedIp.country },
                 { label: 'Failures', value: String(clickedIp.failures) },
                 { label: 'Events', value: String(clickedIp.eventCount) },
-                { label: 'Services', value: clickedIp.services.join(', ') || '—' },
               ].map(r => (
                 <div key={r.label} className="flex justify-between">
                   <span className="text-slate-500">{r.label}</span>
                   <span className="text-slate-300 font-mono">{r.value}</span>
                 </div>
               ))}
+            </div>
+            {/* Per-agent per-service breakdown */}
+            <div className="mb-4">
+              <div className="text-[9px] text-slate-600 uppercase tracking-widest mb-2">Connections</div>
+              <div className="space-y-1 max-h-40 overflow-y-auto">
+                {(() => {
+                  // Build breakdown: for each agent this IP touched, count per service
+                  const lines: { agentName: string; service: string; count: number }[] = [];
+                  for (const aid of clickedIp.agentIds) {
+                    const ag = agentsRef.current.find(a => a.id === aid);
+                    const agName = ag?.label ?? `Agent #${aid}`;
+                    // Count from live events matching this IP + agent
+                    const svcCounts = new Map<string, number>();
+                    for (const ev of liveEvents) {
+                      if (ev.ip === anonIp(clickedIp.ip) && ev.agentName === agName) {
+                        const svc = ev.service || 'unknown';
+                        svcCounts.set(svc, (svcCounts.get(svc) ?? 0) + 1);
+                      }
+                    }
+                    // Fallback: if no live events matched, show services from IP node
+                    if (svcCounts.size === 0) {
+                      for (const svc of clickedIp.services) {
+                        svcCounts.set(svc, clickedIp.agentWeights[aid] ?? 1);
+                      }
+                    }
+                    for (const [svc, cnt] of svcCounts) {
+                      lines.push({ agentName: agName, service: svc, count: cnt });
+                    }
+                  }
+                  if (lines.length === 0) {
+                    return <div className="text-slate-600 text-[11px]">No connection data</div>;
+                  }
+                  return lines.sort((a, b) => b.count - a.count).map((l, i) => (
+                    <div key={i} className="flex items-center gap-2 text-[11px] font-mono">
+                      <span className="text-amber-400/70 min-w-[2.5rem] text-right">{l.count}×</span>
+                      <span className="text-cyan-400/80 uppercase text-[10px]">{l.service}</span>
+                      <span className="text-slate-600">→</span>
+                      <span className="text-slate-400 truncate">{l.agentName}</span>
+                    </div>
+                  ));
+                })()}
+              </div>
             </div>
             <div className="space-y-1.5">
               <button onClick={() => { void quickBan(clickedIp.ip); setClickedIp(null); }}

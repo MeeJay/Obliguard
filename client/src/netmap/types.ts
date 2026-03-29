@@ -54,6 +54,8 @@ export interface IpNode {
   spawnY: number;
   /** Trail of recent positions for comet tail effect. */
   trail: { x: number; y: number }[];
+  /** Per-IP ellipse eccentricity (0.55–0.85) for asteroid belt spread. */
+  orbitEccentricity: number;
 }
 
 export interface Particle {

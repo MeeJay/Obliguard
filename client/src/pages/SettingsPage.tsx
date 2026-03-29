@@ -1,5 +1,5 @@
-import { useState, useEffect, type FormEvent } from 'react';
-import { Shield, Server, Plus, Pencil, Trash2, Wifi, Eye, EyeOff, ArrowLeftRight, Info, Cpu, HardDrive, Database, Clock } from 'lucide-react';
+import { useState, useEffect, useCallback, type FormEvent } from 'react';
+import { Shield, Server, Plus, Pencil, Trash2, Wifi, Eye, EyeOff, ArrowLeftRight, Info, Cpu, HardDrive, Database, Clock, Globe, RefreshCw } from 'lucide-react';
 import { SettingsPanel } from '@/components/settings/SettingsPanel';
 import { NotificationTypesPanel } from '@/components/agent/NotificationTypesPanel';
 import { useAuthStore } from '@/store/authStore';
@@ -445,6 +445,9 @@ export function SettingsPage() {
             )}
           </div>
 
+          {/* ── Remote Blocklists ── */}
+          <RemoteBlocklistsSection />
+
           {/* ── Obligate SSO Gateway ── */}
           <div>
             <div className="flex items-center gap-2 mb-4">
@@ -695,6 +698,255 @@ export function SettingsPage() {
                 </Button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Remote Blocklists Section ────────────────────────────────────────────────
+
+function RemoteBlocklistsSection() {
+  const [lists, setLists] = useState<import('../api/remoteBlocklist.api').RemoteBlocklist[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [showAdd, setShowAdd] = useState(false);
+  const [formName, setFormName] = useState('');
+  const [formType, setFormType] = useState<'url' | 'oblitools'>('url');
+  const [formUrl, setFormUrl] = useState('');
+  const [formApiKey, setFormApiKey] = useState('');
+  const [formInterval, setFormInterval] = useState(600);
+  const [pushEnabled, setPushEnabled] = useState(false);
+  const [instanceName, setInstanceName] = useState('');
+  const [lastPush, setLastPush] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    const { remoteBlocklistApi } = await import('../api/remoteBlocklist.api');
+    const data = await remoteBlocklistApi.list();
+    setLists(data);
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    void load();
+    import('../api/client').then(({ default: apiClient }) => {
+      apiClient.get('/admin/config').then((res: { data: { data: Record<string, string | null> } }) => {
+        const cfg = res.data?.data ?? {};
+        setPushEnabled(cfg.oblitools_push_enabled === 'true');
+        setInstanceName(cfg.oblitools_instance_name ?? '');
+        setLastPush(cfg.oblitools_last_push_at ?? null);
+      }).catch(() => {});
+    });
+  }, [load]);
+
+  const handleAdd = async () => {
+    const { remoteBlocklistApi } = await import('../api/remoteBlocklist.api');
+    try {
+      const url = formType === 'oblitools'
+        ? 'https://guard.obli.tools/blocklist/api/blocklist'
+        : formUrl;
+      await remoteBlocklistApi.create({
+        name: formName || (formType === 'oblitools' ? 'Obli.tools Global' : formUrl),
+        sourceType: formType,
+        url,
+        apiKey: formApiKey || undefined,
+        syncInterval: formInterval,
+      });
+      toast.success('Blocklist added');
+      setShowAdd(false);
+      setFormName(''); setFormUrl(''); setFormApiKey(''); setFormType('url');
+      void load();
+    } catch { toast.error('Failed to add blocklist'); }
+  };
+
+  const handleDelete = async (id: number) => {
+    if (!confirm('Delete this blocklist and all its imported IPs?')) return;
+    const { remoteBlocklistApi } = await import('../api/remoteBlocklist.api');
+    await remoteBlocklistApi.delete(id);
+    toast.success('Blocklist deleted');
+    void load();
+  };
+
+  const handleSync = async (id: number) => {
+    const { remoteBlocklistApi } = await import('../api/remoteBlocklist.api');
+    try {
+      await remoteBlocklistApi.forceSync(id);
+      toast.success('Sync completed');
+      void load();
+    } catch { toast.error('Sync failed'); }
+  };
+
+  const handleToggle = async (id: number, enabled: boolean) => {
+    const { remoteBlocklistApi } = await import('../api/remoteBlocklist.api');
+    await remoteBlocklistApi.update(id, { enabled });
+    void load();
+  };
+
+  const savePushConfig = async () => {
+    try {
+      const apiClient = (await import('../api/client')).default;
+      await apiClient.put('/admin/config/oblitools_push_enabled', { value: pushEnabled ? 'true' : 'false' });
+      await apiClient.put('/admin/config/oblitools_instance_name', { value: instanceName });
+      toast.success('Push settings saved');
+    } catch { toast.error('Failed to save'); }
+  };
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-2">
+          <Globe size={16} className="text-text-muted" />
+          <h2 className="text-lg font-semibold text-text-primary">Remote Blocklists</h2>
+        </div>
+        <button onClick={() => setShowAdd(true)} className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium bg-accent text-white hover:bg-accent-hover transition-colors">
+          <Plus size={14} /> Add Blocklist
+        </button>
+      </div>
+
+      <div className="rounded-lg border border-border bg-bg-secondary overflow-hidden mb-4">
+        {loading ? (
+          <div className="p-4 text-sm text-text-muted">Loading...</div>
+        ) : lists.length === 0 ? (
+          <div className="p-6 text-center text-sm text-text-muted">No remote blocklists configured</div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="bg-bg-tertiary text-text-secondary text-xs uppercase tracking-wider">
+                <th className="text-left px-4 py-2.5 font-medium">Name</th>
+                <th className="text-left px-4 py-2.5 font-medium">Type</th>
+                <th className="text-right px-4 py-2.5 font-medium">IPs</th>
+                <th className="text-left px-4 py-2.5 font-medium">Last sync</th>
+                <th className="text-center px-4 py-2.5 font-medium">Enabled</th>
+                <th className="text-right px-4 py-2.5 font-medium">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border">
+              {lists.map(l => (
+                <tr key={l.id} className="hover:bg-bg-hover transition-colors">
+                  <td className="px-4 py-2.5 text-text-primary font-medium">{l.name}</td>
+                  <td className="px-4 py-2.5">
+                    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium ${
+                      l.sourceType === 'oblitools'
+                        ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
+                        : 'bg-cyan-500/10 text-cyan-400 border border-cyan-500/20'
+                    }`}>
+                      {l.sourceType === 'oblitools' ? 'Obli.tools' : 'URL'}
+                    </span>
+                  </td>
+                  <td className="px-4 py-2.5 text-right font-mono text-text-secondary">{l.lastSyncCount}</td>
+                  <td className="px-4 py-2.5 text-text-muted text-xs">{l.lastSyncAt ? new Date(l.lastSyncAt).toLocaleString() : '—'}</td>
+                  <td className="px-4 py-2.5 text-center">
+                    <button onClick={() => void handleToggle(l.id, !l.enabled)}
+                      className={`w-8 h-4 rounded-full transition-colors ${l.enabled ? 'bg-accent' : 'bg-bg-tertiary'}`}
+                      role="switch" aria-checked={l.enabled}>
+                      <span className={`block w-3 h-3 rounded-full bg-white transition-transform ${l.enabled ? 'translate-x-4' : 'translate-x-0.5'}`} />
+                    </button>
+                  </td>
+                  <td className="px-4 py-2.5 text-right">
+                    <div className="flex items-center gap-1 justify-end">
+                      <button onClick={() => void handleSync(l.id)} className="p-1 rounded text-text-muted hover:text-accent transition-colors" title="Force sync">
+                        <RefreshCw size={13} />
+                      </button>
+                      <button onClick={() => void handleDelete(l.id)} className="p-1 rounded text-text-muted hover:text-status-down transition-colors" title="Delete">
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {/* Obli.tools Contribution */}
+      <div className="rounded-lg border border-border bg-bg-secondary p-5 space-y-4">
+        <div className="flex items-center gap-2 mb-2">
+          <Shield size={16} className="text-amber-400" />
+          <h3 className="text-sm font-semibold text-text-primary">Obli.tools Contribution</h3>
+        </div>
+        <p className="text-xs text-text-muted">
+          Share your auto-banned IPs with the Obli.tools community blocklist. Only non-local auto-banned IPs are shared. Manual bans are never sent.
+        </p>
+        <div className="flex items-center gap-3">
+          <button onClick={() => setPushEnabled(!pushEnabled)}
+            className={`w-10 h-5 rounded-full transition-colors ${pushEnabled ? 'bg-accent' : 'bg-bg-tertiary border border-border'}`}
+            role="switch" aria-checked={pushEnabled}>
+            <span className={`block w-4 h-4 rounded-full bg-white transition-transform ${pushEnabled ? 'translate-x-5' : 'translate-x-0.5'}`} />
+          </button>
+          <span className="text-sm text-text-secondary">Share auto-bans with Obli.tools</span>
+        </div>
+        {pushEnabled && (
+          <div className="space-y-3 pt-2">
+            <div>
+              <label className="block text-xs font-medium text-text-secondary mb-1">Instance name</label>
+              <input type="text" value={instanceName} onChange={e => setInstanceName(e.target.value)}
+                placeholder="prod-obliguard-01"
+                className="w-full max-w-xs px-3 py-1.5 rounded-md border border-border bg-bg-tertiary text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent" />
+            </div>
+            <button onClick={() => void savePushConfig()} className="px-3 py-1.5 rounded-md text-xs font-medium bg-accent text-white hover:bg-accent-hover transition-colors">
+              Save
+            </button>
+            {lastPush && <p className="text-xs text-text-muted">Last push: {new Date(lastPush).toLocaleString()}</p>}
+          </div>
+        )}
+      </div>
+
+      {/* Add modal */}
+      {showAdd && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm" onClick={() => setShowAdd(false)}>
+          <div className="bg-bg-primary border border-border rounded-lg p-6 w-full max-w-md" onClick={e => e.stopPropagation()}>
+            <h3 className="text-base font-semibold text-text-primary mb-4">Add Remote Blocklist</h3>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-text-secondary mb-1">Type</label>
+                <select value={formType} onChange={e => setFormType(e.target.value as 'url' | 'oblitools')}
+                  className="w-full px-3 py-2 rounded-md border border-border bg-bg-secondary text-sm text-text-primary">
+                  <option value="url">Custom URL</option>
+                  <option value="oblitools">Obli.tools Global</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-text-secondary mb-1">Name</label>
+                <input type="text" value={formName} onChange={e => setFormName(e.target.value)}
+                  placeholder={formType === 'oblitools' ? 'Obli.tools Global' : 'My blocklist'}
+                  className="w-full px-3 py-2 rounded-md border border-border bg-bg-secondary text-sm text-text-primary" />
+              </div>
+              {formType === 'url' && (
+                <div>
+                  <label className="block text-sm font-medium text-text-secondary mb-1">URL</label>
+                  <input type="url" value={formUrl} onChange={e => setFormUrl(e.target.value)}
+                    placeholder="https://example.com/blocklist.txt"
+                    className="w-full px-3 py-2 rounded-md border border-border bg-bg-secondary text-sm text-text-primary" />
+                </div>
+              )}
+              <div>
+                <label className="block text-sm font-medium text-text-secondary mb-1">API Key {formType === 'url' && '(optional)'}</label>
+                <input type="password" value={formApiKey} onChange={e => setFormApiKey(e.target.value)}
+                  placeholder={formType === 'oblitools' ? 'oblg_xxxxxxxxxxxx' : 'Optional Bearer token'}
+                  className="w-full px-3 py-2 rounded-md border border-border bg-bg-secondary text-sm text-text-primary" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-text-secondary mb-1">Sync interval</label>
+                <select value={formInterval} onChange={e => setFormInterval(Number(e.target.value))}
+                  className="w-full px-3 py-2 rounded-md border border-border bg-bg-secondary text-sm text-text-primary">
+                  <option value={300}>5 minutes</option>
+                  <option value={600}>10 minutes</option>
+                  <option value={1800}>30 minutes</option>
+                  <option value={3600}>1 hour</option>
+                </select>
+              </div>
+            </div>
+            <div className="flex gap-2 mt-5">
+              <button onClick={() => void handleAdd()}
+                className="px-4 py-2 rounded-md text-sm font-medium bg-accent text-white hover:bg-accent-hover transition-colors">
+                Add
+              </button>
+              <button onClick={() => setShowAdd(false)}
+                className="px-4 py-2 rounded-md text-sm text-text-muted hover:text-text-primary transition-colors">
+                Cancel
+              </button>
+            </div>
           </div>
         </div>
       )}

@@ -148,12 +148,24 @@ async function main() {
     }
   }, 5 * 60 * 1000);
 
-  // 11. Graceful shutdown
+  // 11. Remote blocklist sync — every 10 minutes
+  const { remoteBlocklistService } = await import('./services/remoteBlocklist.service');
+  const remoteBlocklistTimer = setInterval(async () => {
+    try {
+      await remoteBlocklistService.syncAll();
+      await remoteBlocklistService.pushNewBans();
+    } catch (err) {
+      logger.error(err, 'Remote blocklist sync failed');
+    }
+  }, 10 * 60 * 1000);
+
+  // 12. Graceful shutdown
   const shutdown = async (signal: string) => {
     logger.info(`Received ${signal}, shutting down...`);
     clearInterval(retentionTimer);
     clearInterval(agentCleanupTimer);
     clearInterval(banExpiryTimer);
+    clearInterval(remoteBlocklistTimer);
     banEngine.stop();
     agentWss.close();
     server.close();

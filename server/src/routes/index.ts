@@ -27,6 +27,7 @@ import oblitoolsRoutes from './oblitools.routes';
 import systemRoutes from './system.routes';
 import permissionSetsRoutes from './permissionSets.routes';
 import mikrotikRoutes from './mikrotik.routes';
+import remoteBlocklistRoutes from './remoteBlocklist.routes';
 
 const router = Router();
 
@@ -68,6 +69,7 @@ tenantRouter.use('/ip-reputation', ipReputationRoutes);
 tenantRouter.use('/service-templates', serviceTemplatesRoutes);
 tenantRouter.use('/geo', geoRoutes);
 tenantRouter.use('/mikrotik', mikrotikRoutes);
+tenantRouter.use('/remote-blocklists', remoteBlocklistRoutes);
 
 router.use('/', tenantRouter);
 

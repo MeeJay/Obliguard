@@ -75,6 +75,7 @@ export function matchWhitelist(ip: string, entries: WlEntry[]): WlEntry | null {
 export function makeOrbitalFields(ip: string, canvasW: number, canvasH: number): {
   orbitAngle: number; orbitSpeed: number; orbitSlot: number;
   arriveT: number; spawnX: number; spawnY: number; trail: { x: number; y: number }[];
+  orbitEccentricity: number;
 } {
   const r1 = ipRand(ip, 42);
   const r2 = ipRand(ip, 77);
@@ -85,15 +86,18 @@ export function makeOrbitalFields(ip: string, canvasW: number, canvasH: number):
   else if (edge < 0.75) { sx = -30; sy = r1 * canvasH * 0.6; }
   else { sx = canvasW * 0.2 + r1 * canvasW * 0.6; sy = -30; }
 
+  // Per-IP orbital eccentricity (0.55–0.85) for asteroid belt spread
+  const r3 = ipRand(ip, 31);
   return {
     orbitAngle: r1 * Math.PI * 2,
-    // Variable speed: 0.0004–0.0014 rad/frame, random direction
-    orbitSpeed: (0.0004 + r2 * 0.0010) * (r1 < 0.5 ? 1 : -1),
+    // Variable speed: 0.0003–0.0012 rad/frame, random direction
+    orbitSpeed: (0.0003 + r2 * 0.0009) * (r1 < 0.5 ? 1 : -1),
     orbitSlot: 0,
     arriveT: 0,
     spawnX: sx,
     spawnY: sy,
     trail: [],
+    orbitEccentricity: 0.55 + r3 * 0.30,
   };
 }
 
