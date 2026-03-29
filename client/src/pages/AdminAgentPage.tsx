@@ -1206,7 +1206,7 @@ export function AdminAgentPage() {
       <AddMikroTikModal
         open={showAddMikroTik}
         onClose={() => setShowAddMikroTik(false)}
-        onCreated={() => { fetchDevices(); toast.success('MikroTik device created'); }}
+        onCreated={() => { loadAll(); toast.success('MikroTik device created'); }}
       />
     </div>
   );
