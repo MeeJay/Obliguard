@@ -20,424 +20,24 @@ import apiClient from '../api/client';
 import { ipLabelsApi } from '../api/ipLabels.api';
 import { anonHostname, anonIp } from '../utils/anonymize';
 
-// ── Types ──────────────────────────────────────────────────────────────────────
+import type { AgentNode, IpNode, Particle, Ripple, LiveEvent, AgentPeerLink, WlEntry } from '../netmap/types';
+import {
+  IP_TTL, IP_FADE_AGE, PEER_LINK_TTL,
+  RING_INNER_R, RING_GAP, PER_RING,
+  EVENT_COLORS, DANGEROUS_SVCS, PEER_LINK_COLOR,
+  BADGE_H, BADGE_FONT,
+} from '../netmap/constants';
+import {
+  flagEmoji, svcColor, isDangerousSvc, statusColor, agentExclusionR,
+  shouldLabel, ipToInt, matchWhitelist, badgeText, drawBadgeAt,
+  convexHull, inflateHull,
+} from '../netmap/helpers';
+import {
+  placeIp, distributeIpsAroundAgents, relayoutIps, layoutAgents,
+} from '../netmap/layout';
+import { ForceSimulation } from '../netmap/physics';
+import { useNetMapTabStore } from '../netmap/tabStore';
 
-interface AgentNode {
-  id: number;
-  label: string;
-  x: number; y: number;
-  r: number;
-  eventCount: number;
-  phase: number;
-  lastPushAt: number;     // epoch ms of last heartbeat/push
-  checkIntervalMs: number; // push interval in ms
-  maxMissedPushes: number; // offline after checkIntervalMs * maxMissedPushes without a push
-  wsConnected: boolean;   // true when agent has active WS connection
-}
-
-interface IpNode {
-  key: string;
-  ip: string;
-  country: string;
-  flag: string;
-  agentIds: number[];
-  /** Per-agent contact count — used for weighted centroid on multi-agent IPs. */
-  agentWeights: Record<number, number>;
-  x: number; y: number;
-  dotR: number;
-  color: string;
-  status: string;
-  failures: number;
-  services: string[];
-  eventCount: number;
-  lastSeen: number;
-  glowUntil: number;
-  whitelistLabel?: string | null;
-  /** Custom display label from ip_display_names — shown for any status. */
-  displayLabel?: string | null;
-}
-
-interface Particle {
-  id: string;
-  sx: number; sy: number;
-  tx: number; ty: number;
-  t: number; speed: number; color: string;
-}
-
-/** Expanding ring shockwave emitted on a ban event. */
-interface Ripple {
-  id: string;
-  x: number; y: number;
-  t: number;
-}
-
-interface LiveEvent {
-  id: string; ip: string; service: string; country: string;
-  agentName: string;
-  time: Date; color: string;
-  eventType: 'auth_success' | 'auth_failure' | 'ban';
-  failures?: number;
-}
-
-/**
- * Directed edge between two agent nodes.
- * Created when ip_events.source_agent_id is set (peer IP matched another agent).
- */
-interface AgentPeerLink {
-  key: string;       // "sourceId->targetId"
-  sourceId: number;
-  targetId: number;
-  type: 'lan' | 'wan';
-  services: string[];
-  count: number;
-  lastSeen: number;
-  glowUntil: number;
-}
-
-// ── Constants ──────────────────────────────────────────────────────────────────
-
-const IP_TTL        = 90 * 1000;   // 90 s — IPs fade then disappear if no fresh event
-const IP_FADE_AGE   = 45 * 1000;   // fade starts at 45 s
-const PEER_LINK_TTL = 120 * 1000;  // 120 s — peer links linger after last event
-
-/** Ring layout constants — shared by distributeIpsAroundAgents() and animate(). */
-const RING_INNER_R = 42;              // first ring distance from agent centre (px)
-const RING_GAP     = 7;               // gap between successive rings (px) — ~0.2 dot gap
-const PER_RING     = 30;              // max IPs per ring
-const ARC_START    = -Math.PI / 6;   // 330° — first arc position (bottom-right)
-const ARC_SPAN     = (4 * Math.PI) / 3; // 240° arc, skipping top 120° (label zone)
-
-const EVENT_COLORS = {
-  auth_success: '#22d3ee',
-  auth_failure: '#f97316',
-  ban:          '#ef4444',
-} as const;
-
-const SVC_COLORS: Record<string, string> = {
-  ssh: '#f97316', rdp: '#a855f7', ftp: '#eab308',
-  mail: '#06b6d4', mysql: '#ec4899', nginx: '#22c55e',
-  apache: '#22c55e', iis: '#3b82f6',
-};
-
-const DANGEROUS_SVCS = new Set(['ssh', 'rdp', 'ftp', 'mysql', 'telnet', 'smb', 'vnc']);
-
-/** Colors used for peer link edges: LAN = subdued blue, WAN = amber/orange */
-const PEER_LINK_COLOR: Record<'lan' | 'wan', string> = { lan: '#3b82f6', wan: '#f97316' };
-
-// ── Pure helpers ───────────────────────────────────────────────────────────────
-
-function flagEmoji(code: string): string {
-  if (!code || code.length !== 2) return '🌐';
-  return Array.from(code.toUpperCase())
-    .map(c => String.fromCodePoint(c.codePointAt(0)! + 127397))
-    .join('');
-}
-
-function svcColor(s: string): string {
-  const lc = (s ?? '').toLowerCase();
-  for (const [k, v] of Object.entries(SVC_COLORS)) if (lc.includes(k)) return v;
-  return '#f43f5e';
-}
-
-function isDangerousSvc(s: string): boolean {
-  return DANGEROUS_SVCS.has((s ?? '').toLowerCase().split('/')[0]);
-}
-
-function statusColor(st: string): string {
-  if (st === 'banned')      return '#ef4444';
-  if (st === 'suspicious')  return '#f97316';
-  if (st === 'whitelisted') return '#22c55e';
-  return '#475569';
-}
-
-/** Seeded pseudo-random 0–1 from an IP string + salt integer. */
-function ipRand(ip: string, salt: number): number {
-  const seed = (ip.split('.').reduce((a, b) => a + Number(b), 0) * 31 + salt) >>> 0;
-  return ((seed * 16807) % 2147483647) / 2147483647;
-}
-
-/** Exclusion radius for an agent given how many single-agent IPs it has. */
-function agentExclusionR(ipCount: number): number {
-  const rings = Math.max(1, Math.ceil(ipCount / PER_RING));
-  return RING_INNER_R + (rings - 1) * RING_GAP + 18;
-}
-
-/**
- * Place a single new IP (live socket event) in the 240° arc around its agent.
- * Uses the innermost ring radius for simplicity — batch layout handles ordering.
- */
-function placeIp(ip: IpNode, agentMap: Map<number, AgentNode>) {
-  const ags = ip.agentIds.map(id => agentMap.get(id)).filter(Boolean) as AgentNode[];
-  if (!ags.length) return;
-
-  if (ags.length > 1) {
-    // Multi-agent: simple centroid + scatter (good enough for live events)
-    const cx = ags.reduce((s, a) => s + a.x, 0) / ags.length;
-    const cy = ags.reduce((s, a) => s + a.y, 0) / ags.length;
-    const angle = ipRand(ip.ip, 1) * Math.PI * 2;
-    ip.x = cx + Math.cos(angle) * (12 + ipRand(ip.ip, 5) * 22);
-    ip.y = cy + Math.sin(angle) * (12 + ipRand(ip.ip, 5) * 22);
-    return;
-  }
-
-  const ag    = ags[0];
-  const angle = ARC_START + ipRand(ip.ip, 1) * ARC_SPAN;
-  const dist  = RING_INNER_R + ipRand(ip.ip, 3) * RING_GAP * 1.5;
-  ip.x = ag.x + Math.cos(angle) * dist;
-  ip.y = ag.y + Math.sin(angle) * dist;
-}
-
-/**
- * Batch layout: distribute all IPs around agents.
- *
- * 1. Sort each agent's IPs by activity DESC so the most active are innermost.
- * 2. Run an agent repulsion pass so ring systems don't overlap.
- * 3. Place IPs in concentric 240° arcs with small deterministic jitter.
- * 4. Multi-agent IPs: weighted centroid, pushed outside every agent's rings.
- */
-function distributeIpsAroundAgents(
-  agents: AgentNode[],
-  ips: IpNode[],
-  canvasW: number,
-  canvasH: number,
-) {
-  const agentMap = new Map(agents.map(a => [a.id, a]));
-  const margin   = 60;
-
-  // Group single-agent IPs by agent, sorted most active → innermost
-  const byAgent = new Map<number, IpNode[]>();
-  for (const ip of ips) {
-    if (ip.agentIds.length !== 1) continue;
-    const aid = ip.agentIds[0];
-    if (!byAgent.has(aid)) byAgent.set(aid, []);
-    byAgent.get(aid)!.push(ip);
-  }
-  for (const group of byAgent.values()) {
-    group.sort((a, b) =>
-      b.eventCount - a.eventCount || b.failures - a.failures,
-    );
-  }
-
-  // Compute exclusion radius per agent
-  const exclR = new Map<number, number>();
-  for (const ag of agents) {
-    exclR.set(ag.id, agentExclusionR((byAgent.get(ag.id) ?? []).length));
-  }
-
-  // ── Agent repulsion pass ────────────────────────────────────────────────
-  // Push agents apart until no two ring systems overlap.
-  for (let iter = 0; iter < 120; iter++) {
-    const alpha = 1 - iter / 120;
-    for (let i = 0; i < agents.length; i++) {
-      for (let j = i + 1; j < agents.length; j++) {
-        const a = agents[i], b = agents[j];
-        const minD = (exclR.get(a.id) ?? 60) + (exclR.get(b.id) ?? 60) + 28;
-        const dx = b.x - a.x, dy = b.y - a.y;
-        const d  = Math.sqrt(dx * dx + dy * dy) || 1;
-        if (d < minD) {
-          const push = (minD - d) / 2 * alpha * 0.6;
-          const nx = dx / d, ny = dy / d;
-          a.x -= nx * push; a.y -= ny * push;
-          b.x += nx * push; b.y += ny * push;
-        }
-      }
-      // Re-clamp to canvas
-      agents[i].x = Math.max(margin, Math.min(canvasW - margin, agents[i].x));
-      agents[i].y = Math.max(margin, Math.min(canvasH - margin, agents[i].y));
-    }
-  }
-
-  // ── Place single-agent IPs in arcs ─────────────────────────────────────
-  for (const ag of agents) {
-    const group = byAgent.get(ag.id) ?? [];
-    group.forEach((ip, idx) => {
-      const ring        = Math.floor(idx / PER_RING);
-      const posInRing   = idx % PER_RING;
-      const countInRing = Math.min(PER_RING, group.length - ring * PER_RING);
-      const angleStep   = countInRing <= 1 ? 0 : ARC_SPAN / (countInRing - 1);
-      const baseAngle   = ARC_START + posInRing * angleStep;
-      // Tiny deterministic jitter — keeps it organic, avoids perfect grid
-      const jA = (ipRand(ip.ip, 97) - 0.5) * Math.min(angleStep * 0.30, 0.10);
-      const jR = (ipRand(ip.ip, 83) - 0.5) * 2;
-      const r  = RING_INNER_R + ring * RING_GAP + jR;
-      ip.x = ag.x + Math.cos(baseAngle + jA) * r;
-      ip.y = ag.y + Math.sin(baseAngle + jA) * r;
-    });
-  }
-
-  // ── Multi-agent IPs: weighted centroid, pushed outside all rings ────────
-  for (const ip of ips) {
-    if (ip.agentIds.length < 2) continue;
-    const ags = ip.agentIds.map(id => agentMap.get(id)).filter(Boolean) as AgentNode[];
-    const totalW = ags.reduce((s, ag) => s + (ip.agentWeights[ag.id] ?? 1), 0) || ags.length;
-    let cx = 0, cy = 0;
-    for (const ag of ags) {
-      const w = (ip.agentWeights[ag.id] ?? 1) / totalW;
-      cx += ag.x * w; cy += ag.y * w;
-    }
-    const angle  = ipRand(ip.ip, 1) * Math.PI * 2;
-    const jitter = ipRand(ip.ip, 5) * 18;
-    ip.x = cx + Math.cos(angle) * jitter;
-    ip.y = cy + Math.sin(angle) * jitter;
-
-    // Push out of every agent's ring system
-    for (const ag of ags) {
-      const dx = ip.x - ag.x, dy = ip.y - ag.y;
-      const d  = Math.sqrt(dx * dx + dy * dy) || 1;
-      const er = exclR.get(ag.id) ?? 60;
-      if (d < er) {
-        const push = er - d + 8;
-        ip.x += (dx / d) * push;
-        ip.y += (dy / d) * push;
-      }
-    }
-  }
-}
-
-/**
- * Re-place IPs around agents WITHOUT moving agents — called on dynamic additions.
- * Same arc/ring logic as distributeIpsAroundAgents but skips the agent repulsion pass.
- */
-function relayoutIps(agents: AgentNode[], ips: IpNode[]): void {
-  const agentMap = new Map(agents.map(a => [a.id, a]));
-  const byAgent  = new Map<number, IpNode[]>();
-  for (const ip of ips) {
-    if (ip.agentIds.length !== 1) continue;
-    const aid = ip.agentIds[0];
-    if (!byAgent.has(aid)) byAgent.set(aid, []);
-    byAgent.get(aid)!.push(ip);
-  }
-  for (const group of byAgent.values()) {
-    group.sort((a, b) => b.eventCount - a.eventCount || b.failures - a.failures);
-  }
-  const exclR = new Map<number, number>();
-  for (const ag of agents) exclR.set(ag.id, agentExclusionR((byAgent.get(ag.id) ?? []).length));
-
-  for (const ag of agents) {
-    const group = byAgent.get(ag.id) ?? [];
-    group.forEach((ip, idx) => {
-      const ring        = Math.floor(idx / PER_RING);
-      const posInRing   = idx % PER_RING;
-      const countInRing = Math.min(PER_RING, group.length - ring * PER_RING);
-      const angleStep   = countInRing <= 1 ? 0 : ARC_SPAN / (countInRing - 1);
-      const baseAngle   = ARC_START + posInRing * angleStep;
-      const jA = (ipRand(ip.ip, 97) - 0.5) * Math.min(angleStep * 0.30, 0.10);
-      const jR = (ipRand(ip.ip, 83) - 0.5) * 2;
-      const r  = RING_INNER_R + ring * RING_GAP + jR;
-      ip.x = ag.x + Math.cos(baseAngle + jA) * r;
-      ip.y = ag.y + Math.sin(baseAngle + jA) * r;
-    });
-  }
-  // Multi-agent IPs: weighted centroid, pushed outside rings
-  for (const ip of ips) {
-    if (ip.agentIds.length < 2) continue;
-    const ags    = ip.agentIds.map(id => agentMap.get(id)).filter(Boolean) as AgentNode[];
-    const totalW = ags.reduce((s, ag) => s + (ip.agentWeights[ag.id] ?? 1), 0) || ags.length;
-    let cx = 0, cy = 0;
-    for (const ag of ags) { const w = (ip.agentWeights[ag.id] ?? 1) / totalW; cx += ag.x * w; cy += ag.y * w; }
-    const angle = ipRand(ip.ip, 1) * Math.PI * 2;
-    ip.x = cx + Math.cos(angle) * (ipRand(ip.ip, 5) * 18);
-    ip.y = cy + Math.sin(angle) * (ipRand(ip.ip, 5) * 18);
-    for (const ag of ags) {
-      const dx = ip.x - ag.x, dy = ip.y - ag.y;
-      const d  = Math.sqrt(dx * dx + dy * dy) || 1;
-      const er = exclR.get(ag.id) ?? 60;
-      if (d < er) { const push = er - d + 8; ip.x += (dx / d) * push; ip.y += (dy / d) * push; }
-    }
-  }
-}
-
-/** Spring relaxation — agents start near centre before ring-repulsion runs. */
-function layoutAgents(agents: AgentNode[], w: number, h: number) {
-  const n = agents.length;
-  if (n === 0) return;
-  if (n === 1) { agents[0].x = w / 2; agents[0].y = h / 2; return; }
-  const initR = Math.min(w, h) * 0.18;
-  agents.forEach((ag, i) => {
-    const angle = (i / n) * Math.PI * 2 - Math.PI / 2;
-    const seed  = ag.id > 0 ? ag.id : i + 1;
-    ag.x = w / 2 + Math.cos(angle) * initR + ((seed * 1327) % 30) - 15;
-    ag.y = h / 2 + Math.sin(angle) * initR + ((seed * 2417) % 30) - 15;
-  });
-  // Light spring to keep agents near centre
-  for (let iter = 0; iter < 80; iter++) {
-    const alpha = 1 - iter / 80;
-    for (let i = 0; i < n; i++) {
-      agents[i].x += (w / 2 - agents[i].x) * 0.015 * alpha;
-      agents[i].y += (h / 2 - agents[i].y) * 0.015 * alpha;
-    }
-  }
-}
-
-/** Only show a badge for notable IPs. */
-function shouldLabel(ip: IpNode): boolean {
-  return ip.status === 'banned' || ip.status === 'whitelisted' || ip.failures > 2 || ip.eventCount >= 8 || ip.agentIds.length > 1;
-}
-
-// ── CIDR helpers ──────────────────────────────────────────────────────────────
-
-/** Convert IPv4 dotted-decimal to unsigned 32-bit int. Returns -1 on failure. */
-function ipToInt(ip: string): number {
-  const parts = ip.split('.');
-  if (parts.length !== 4) return -1;
-  let n = 0;
-  for (const p of parts) {
-    const b = parseInt(p, 10);
-    if (isNaN(b) || b < 0 || b > 255) return -1;
-    n = (n << 8) | b;
-  }
-  return n >>> 0;
-}
-
-interface WlEntry {
-  networkInt: number;
-  mask: number;
-  label: string | null;
-  /** The plain IP string for single-host (/32 or no prefix) entries, null for broader CIDRs. */
-  plainIp: string | null;
-}
-
-/** Returns the first whitelist entry whose CIDR contains the given IPv4 address, or null. */
-function matchWhitelist(ip: string, entries: WlEntry[]): WlEntry | null {
-  const ipInt = ipToInt(ip);
-  if (ipInt < 0) return null;
-  for (const e of entries) {
-    if ((ipInt & e.mask) === (e.networkInt & e.mask)) return e;
-  }
-  return null;
-}
-
-// ── Badge helpers ─────────────────────────────────────────────────────────────
-
-const BADGE_H    = 13;
-const BADGE_FONT = '7.5px "Inter", "Segoe UI", ui-sans-serif, sans-serif';
-
-function badgeText(countryCode: string, ipStr: string): string {
-  const cc = countryCode && countryCode.length === 2 && countryCode !== '??' ? countryCode : '??';
-  return `${cc} · ${ipStr}`;
-}
-
-function drawBadgeAt(
-  ctx: CanvasRenderingContext2D,
-  text: string, bx: number, by: number, bw: number,
-  color: string, alpha: number,
-) {
-  ctx.save();
-  ctx.globalAlpha = alpha;
-  ctx.font = BADGE_FONT;
-  ctx.fillStyle = 'rgba(7,5,2,0.90)';
-  ctx.beginPath();
-  if (typeof ctx.roundRect === 'function') ctx.roundRect(bx, by, bw, BADGE_H, 3);
-  else ctx.rect(bx, by, bw, BADGE_H);
-  ctx.fill();
-  ctx.strokeStyle = color + '72';
-  ctx.lineWidth = 0.7;
-  ctx.stroke();
-  ctx.fillStyle = '#c8d4df';
-  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-  ctx.fillText(text, bx + 4, by + BADGE_H / 2);
-  ctx.restore();
-}
 
 // ── Component ──────────────────────────────────────────────────────────────────
 
@@ -455,6 +55,9 @@ export function NetMapPage() {
   const ripplesRef   = useRef<Ripple[]>([]);
   /** Directed peer links between agent nodes (sourceId → targetId). */
   const agentLinksRef = useRef<Map<string, AgentPeerLink>>(new Map());
+
+  /** Force-directed layout simulation. */
+  const simRef = useRef<ForceSimulation | null>(null);
 
   const transformRef = useRef({ x: 0, y: 0, k: 1 });
   const dragRef      = useRef<{ x: number; y: number; startX: number; startY: number } | null>(null);
@@ -490,6 +93,19 @@ export function NetMapPage() {
     ip: string; flag: string; country: string;
     status: string; failures: number; services: string[]; color: string;
   } | null>(null);
+
+  // ── Tab store ──────────────────────────────────────────────────────────────
+  const { tabs, activeTabId, load: loadTabs, setActiveTab, addTab, updateTab, deleteTab } = useNetMapTabStore();
+  const [showTabModal, setShowTabModal] = useState(false);
+  const [tabFormName, setTabFormName] = useState('');
+  const [tabFormAgentIds, setTabFormAgentIds] = useState<Set<number>>(new Set());
+  const [editingTabId, setEditingTabId] = useState<string | null>(null);
+
+  useEffect(() => { void loadTabs(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const activeTab = tabs.find(t => t.id === activeTabId) ?? null;
+  const visibleAgentIdsRef = useRef<Set<number> | null>(null);
+  visibleAgentIdsRef.current = activeTab ? new Set(activeTab.agentIds) : null;
 
   // ── Background ────────────────────────────────────────────────────────────
 
@@ -575,6 +191,20 @@ export function NetMapPage() {
       placeIp(node, agentMap);
       map.set(ip, node);
       setIpCount(map.size);
+
+      // Add to force simulation
+      const sim = simRef.current;
+      if (sim) {
+        sim.addNode({
+          id: `ip:${ip}`, x: node.x, y: node.y, vx: 0, vy: 0,
+          pinned: false, mass: 0.5, kind: 'ip', radius: 0,
+        });
+        sim.upsertLink({
+          sourceId: `ip:${ip}`, targetId: `a:${agentId}`,
+          strength: 0.25, idealLength: RING_INNER_R + 10,
+        });
+        sim.reheat(0.15);
+      }
     }
   }, []);
 
@@ -613,7 +243,8 @@ export function NetMapPage() {
     const key = `${sourceId}->${targetId}`;
     const now = Date.now();
     const map = agentLinksRef.current;
-    if (map.has(key)) {
+    const isNew = !map.has(key);
+    if (!isNew) {
       const link = map.get(key)!;
       link.count++;
       link.lastSeen  = now;
@@ -625,6 +256,19 @@ export function NetMapPage() {
         services: service ? [service] : [],
         count: 1, lastSeen: now, glowUntil: now + 2500,
       });
+    }
+
+    // Update force simulation spring between agents
+    const sim = simRef.current;
+    if (sim) {
+      const count = map.get(key)?.count ?? 1;
+      sim.upsertLink({
+        sourceId: `a:${sourceId}`, targetId: `a:${targetId}`,
+        strength: 0.04 * Math.log2(1 + count),
+        idealLength: Math.max(60, 120 - Math.min(count * 2, 60)),
+      });
+      if (isNew) sim.reheat(0.8);
+      else sim.reheat(0.1);
     }
   }, []);
 
@@ -805,7 +449,7 @@ export function NetMapPage() {
 
     try {
       const [devRes, evRes, banRes] = await Promise.all([
-        apiClient.get<{ data: { id: number; hostname: string; name: string | null; status: string; updatedAt: string; wsConnected: boolean; resolvedSettings: { checkIntervalSeconds: number; maxMissedPushes: number } }[] }>('/agent/devices'),
+        apiClient.get<{ data: { id: number; hostname: string; name: string | null; status: string; updatedAt: string; wsConnected: boolean; groupId: number | null; groupName: string | null; resolvedSettings: { checkIntervalSeconds: number; maxMissedPushes: number } }[] }>('/agent/devices'),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         apiClient.get<{ data: any[] }>('/ip-events', { params: { pageSize: 500 } })
           .catch(() => ({ data: { data: [] } })),
@@ -864,7 +508,7 @@ export function NetMapPage() {
       const placed = devs.length > 0
         ? devs.slice(0, 20)
         : [{ id: -1, hostname: 'Server', name: null, status: 'approved',
-             updatedAt: '', wsConnected: true, resolvedSettings: { checkIntervalSeconds: 60, maxMissedPushes: 2 } }];
+             updatedAt: '', wsConnected: true, groupId: null, groupName: null, resolvedSettings: { checkIntervalSeconds: 60, maxMissedPushes: 2 } }];
 
       agentsRef.current = placed.map(d => {
         const lastPushAt      = d.updatedAt ? new Date(d.updatedAt).getTime() : 0;
@@ -881,6 +525,8 @@ export function NetMapPage() {
           checkIntervalMs,
           maxMissedPushes,
           wsConnected:     d.wsConnected,
+          groupId:         d.groupId ?? null,
+          groupName:       d.groupName ?? null,
         };
       });
       layoutAgents(agentsRef.current, w, h);
@@ -1028,9 +674,55 @@ export function NetMapPage() {
         if (!node.displayLabel) node.displayLabel = displayNameMap.get(node.ip) ?? null;
       }
 
-      // Batch layout with repulsion
+      // Batch layout with repulsion (initial geometric placement)
       distributeIpsAroundAgents(agentsRef.current, [...ipsRef.current.values()], w, h);
       setIpCount(ipsRef.current.size);
+
+      // ── Initialize force simulation with current positions ──────────────
+      const sim = new ForceSimulation({ width: w, height: h });
+      simRef.current = sim;
+
+      // Add agent nodes
+      for (const ag of agentsRef.current) {
+        sim.addNode({
+          id: `a:${ag.id}`, x: ag.x, y: ag.y, vx: 0, vy: 0,
+          pinned: false, mass: 3.0, kind: 'agent',
+          radius: agentExclusionR([...ipsRef.current.values()].filter(ip => ip.agentIds.length === 1 && ip.agentIds[0] === ag.id).length),
+        });
+      }
+
+      // Add IP nodes
+      for (const ip of ipsRef.current.values()) {
+        sim.addNode({
+          id: `ip:${ip.ip}`, x: ip.x, y: ip.y, vx: 0, vy: 0,
+          pinned: false, mass: 0.5, kind: 'ip', radius: 0,
+        });
+        // Spring links from IP to each connected agent
+        for (const aid of ip.agentIds) {
+          const weight = ip.agentWeights[aid] ?? 1;
+          const totalWeight = ip.agentIds.reduce((s, id) => s + (ip.agentWeights[id] ?? 1), 0) || 1;
+          const ag = agentMap.get(aid);
+          if (!ag) continue;
+          const dist = Math.sqrt((ip.x - ag.x) ** 2 + (ip.y - ag.y) ** 2) || RING_INNER_R;
+          sim.upsertLink({
+            sourceId: `ip:${ip.ip}`, targetId: `a:${aid}`,
+            strength: 0.25 * (weight / totalWeight),
+            idealLength: dist,
+          });
+        }
+      }
+
+      // Add peer link springs (agent ↔ agent attraction)
+      for (const pl of agentLinksRef.current.values()) {
+        sim.upsertLink({
+          sourceId: `a:${pl.sourceId}`, targetId: `a:${pl.targetId}`,
+          strength: 0.04 * Math.log2(1 + pl.count),
+          idealLength: Math.max(60, 120 - Math.min(pl.count * 2, 60)),
+        });
+      }
+
+      // Let simulation settle with initial layout (don't animate from scratch)
+      sim.alpha = 0.3;
     } catch (err) {
       console.error('NetMap init error:', err);
     }
@@ -1052,6 +744,21 @@ export function NetMapPage() {
     frameRef.current = (frameRef.current + 1) % 300;
 
     const now = Date.now(); // hoisted — used for age/fade throughout the frame
+
+    // ── Force simulation tick ───────────────────────────────────────────────
+    const sim = simRef.current;
+    if (sim && sim.isActive) {
+      sim.tick(3);
+      // Copy simulation positions back to agent/IP refs
+      for (const ag of agentsRef.current) {
+        const sn = sim.getNode(`a:${ag.id}`);
+        if (sn) { ag.x = sn.x; ag.y = sn.y; }
+      }
+      for (const ip of ipsRef.current.values()) {
+        const sn = sim.getNode(`ip:${ip.ip}`);
+        if (sn) { ip.x = sn.x; ip.y = sn.y; }
+      }
+    }
 
     // IP + peer link expiry every ~5 s
     if (frameRef.current === 0) {
@@ -1075,9 +782,14 @@ export function NetMapPage() {
     ctx.translate(x, y); ctx.scale(k, k);
 
     const selId   = selectedRef.current;
-    const agents  = agentsRef.current;
+    const tabFilter = visibleAgentIdsRef.current;
+    const agents  = tabFilter
+      ? agentsRef.current.filter(a => tabFilter.has(a.id))
+      : agentsRef.current;
     const agMap   = new Map(agents.map(a => [a.id, a]));
-    const ipNodes = [...ipsRef.current.values()];
+    const ipNodes = tabFilter
+      ? [...ipsRef.current.values()].filter(ip => ip.agentIds.some(id => tabFilter.has(id)))
+      : [...ipsRef.current.values()];
 
     // Precompute per-agent IP groups (for ring drawing, O(n) single pass)
     const ipsByAgent = new Map<number, number>(); // agentId → ip count
@@ -1142,9 +854,10 @@ export function NetMapPage() {
       const glow     = now < link.glowUntil;
 
       ctx.save();
+      const linkThickness = Math.min(1 + Math.log2(1 + link.count) * 0.6, 4);
       ctx.globalAlpha = (selId !== null ? 0.30 : (isRecent ? 0.80 : 0.35)) * ageFade;
       ctx.strokeStyle = color;
-      ctx.lineWidth   = (isRecent ? 2.0 : 1.1) / k;
+      ctx.lineWidth   = (isRecent ? linkThickness * 1.2 : linkThickness * 0.7) / k;
       if (isRecent) {
         ctx.setLineDash([5, 8]);
         ctx.lineDashOffset = -(ts / 40) % 13; // animated dash flows src → tgt
@@ -1178,6 +891,54 @@ export function NetMapPage() {
         ctx.textAlign     = 'center'; ctx.textBaseline = 'middle';
         ctx.shadowBlur    = 5; ctx.shadowColor = 'rgba(0,0,0,0.9)';
         ctx.fillText(link.type.toUpperCase(), mx, my - 8);
+        // Event count badge
+        if (link.count > 1) {
+          const cfs = Math.round(Math.max(6, 7.5 * Math.min(k, 1.2)));
+          ctx.font      = `500 ${cfs}px "Inter", "Segoe UI", ui-sans-serif, sans-serif`;
+          ctx.fillStyle = 'rgba(200,200,200,0.5)';
+          ctx.fillText(`${link.count}×`, mx, my + 4);
+        }
+      }
+      ctx.restore();
+    }
+
+    // ── Cluster hulls (group visualization) ────────────────────────────────
+    const groupAgents = new Map<number, AgentNode[]>();
+    for (const ag of agents) {
+      if (ag.groupId) {
+        if (!groupAgents.has(ag.groupId)) groupAgents.set(ag.groupId, []);
+        groupAgents.get(ag.groupId)!.push(ag);
+      }
+    }
+    const GROUP_HULL_COLORS = ['#22d3ee', '#f97316', '#a855f7', '#22c55e', '#eab308', '#ec4899', '#3b82f6'];
+    let gci = 0;
+    for (const [, gAgents] of groupAgents) {
+      if (gAgents.length < 2) continue;
+      const maxExclR = Math.max(...gAgents.map(a => agentExclusionR(ipsByAgent.get(a.id) ?? 0)));
+      const hull = convexHull(gAgents.map(a => ({ x: a.x, y: a.y })));
+      const inflated = inflateHull(hull, maxExclR + 30);
+      const color = GROUP_HULL_COLORS[gci++ % GROUP_HULL_COLORS.length];
+
+      ctx.save();
+      ctx.globalAlpha = selId !== null ? 0.015 : 0.04;
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      inflated.forEach((p, i) => i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y));
+      ctx.closePath(); ctx.fill();
+
+      ctx.globalAlpha = selId !== null ? 0.03 : 0.08;
+      ctx.strokeStyle = color; ctx.lineWidth = 1 / k;
+      ctx.stroke();
+
+      // Group name label at centroid
+      const cx = gAgents.reduce((s, a) => s + a.x, 0) / gAgents.length;
+      const cy = gAgents.reduce((s, a) => s + a.y, 0) / gAgents.length;
+      const gName = gAgents[0].groupName ?? '';
+      if (gName && k > 0.3) {
+        ctx.globalAlpha = selId !== null ? 0.06 : 0.12;
+        ctx.font = `500 ${Math.round(11 / Math.min(k, 1))}px "Inter", "Segoe UI", ui-sans-serif, sans-serif`;
+        ctx.fillStyle = color; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText(gName, cx, cy - maxExclR - 15);
       }
       ctx.restore();
     }
@@ -1249,6 +1010,30 @@ export function NetMapPage() {
       const ageFade = ageSec < IP_FADE_AGE / 1000 ? 1 : Math.max(0, 1 - (ageSec - IP_FADE_AGE / 1000) / 45);
       const alpha   = (dimmed ? 0.10 : 0.85) * ageFade;
 
+      // Persistent banned pulse (slow throb)
+      if (ip.status === 'banned' && !dimmed) {
+        const pulse = (Math.sin(ts / 800) + 1) / 2;
+        ctx.save();
+        ctx.globalAlpha = 0.08 + 0.10 * pulse;
+        ctx.shadowBlur  = ip.dotR * 4; ctx.shadowColor = '#ef4444';
+        ctx.fillStyle   = '#ef444430';
+        ctx.beginPath(); ctx.arc(ip.x, ip.y, ip.dotR * 2.5 + pulse * 3, 0, Math.PI * 2); ctx.fill();
+        ctx.restore();
+      }
+
+      // Suspicious high-failure ripple (every ~3s)
+      if (ip.status === 'suspicious' && ip.failures > 10 && !dimmed) {
+        const cycle = (ts % 3000) / 3000;
+        if (cycle < 0.4) {
+          const t = cycle / 0.4;
+          ctx.save();
+          ctx.globalAlpha = (1 - t) * 0.15;
+          ctx.strokeStyle = '#f97316'; ctx.lineWidth = 0.8 / k;
+          ctx.beginPath(); ctx.arc(ip.x, ip.y, ip.dotR + t * 15, 0, Math.PI * 2); ctx.stroke();
+          ctx.restore();
+        }
+      }
+
       if (glow && !dimmed) {
         const pulse = (Math.sin(ts / 220) + 1) / 2;
         ctx.save();
@@ -1268,6 +1053,19 @@ export function NetMapPage() {
                       : '#c2cedd';
       ctx.beginPath(); ctx.arc(ip.x, ip.y, ip.dotR, 0, Math.PI * 2); ctx.fill();
       ctx.restore();
+
+      // Whitelisted shield icon
+      if (ip.status === 'whitelisted' && !dimmed && k > 0.5) {
+        ctx.save();
+        ctx.globalAlpha = alpha * 0.6;
+        ctx.fillStyle = '#22c55e';
+        const sx = ip.x - 3, sy = ip.y - 4;
+        ctx.beginPath();
+        ctx.moveTo(sx, sy); ctx.lineTo(sx + 6, sy); ctx.lineTo(sx + 6, sy + 5);
+        ctx.lineTo(sx + 3, sy + 8); ctx.lineTo(sx, sy + 5);
+        ctx.closePath(); ctx.fill();
+        ctx.restore();
+      }
 
       if (!dimmed && shouldLabel(ip)) {
         const effectiveLabel = ip.displayLabel ?? ip.whitelistLabel ?? null;
@@ -1398,6 +1196,64 @@ export function NetMapPage() {
     particlesRef.current = alive;
 
     ctx.restore();
+
+    // ── Minimap (every 10 frames) ─────────────────────────────────────────
+    if (frameRef.current % 10 === 0 && agents.length > 2) {
+      const mmW = 150, mmH = 100;
+      const mmX = w - mmW - 12, mmY = h - mmH - 12;
+
+      // Compute world bounds from all nodes
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const ag of agents) {
+        minX = Math.min(minX, ag.x); minY = Math.min(minY, ag.y);
+        maxX = Math.max(maxX, ag.x); maxY = Math.max(maxY, ag.y);
+      }
+      for (const ip of ipNodes) {
+        minX = Math.min(minX, ip.x); minY = Math.min(minY, ip.y);
+        maxX = Math.max(maxX, ip.x); maxY = Math.max(maxY, ip.y);
+      }
+      const pad = 40;
+      minX -= pad; minY -= pad; maxX += pad; maxY += pad;
+      const wRange = maxX - minX || 1, hRange = maxY - minY || 1;
+      const mmScale = Math.min(mmW / wRange, mmH / hRange);
+      const toMmX = (px: number) => mmX + (px - minX) * mmScale;
+      const toMmY = (py: number) => mmY + (py - minY) * mmScale;
+
+      // Background
+      ctx.save();
+      ctx.fillStyle = 'rgba(3,2,2,0.75)';
+      ctx.strokeStyle = 'rgba(80,60,30,0.3)';
+      ctx.lineWidth = 1;
+      ctx.fillRect(mmX, mmY, mmW, mmH);
+      ctx.strokeRect(mmX, mmY, mmW, mmH);
+
+      // IP dots (1px)
+      for (const ip of ipNodes) {
+        ctx.fillStyle = ip.color;
+        ctx.globalAlpha = 0.5;
+        ctx.fillRect(toMmX(ip.x), toMmY(ip.y), 1, 1);
+      }
+
+      // Agent dots (3px)
+      for (const ag of agents) {
+        ctx.globalAlpha = 0.9;
+        ctx.fillStyle = ag.wsConnected ? '#22d3ee' : '#64748b';
+        ctx.beginPath(); ctx.arc(toMmX(ag.x), toMmY(ag.y), 2.5, 0, Math.PI * 2); ctx.fill();
+      }
+
+      // Viewport rectangle
+      const vpLeft   = (-x / k - minX) * mmScale;
+      const vpTop    = (-y / k - minY) * mmScale;
+      const vpWidth  = (w / k) * mmScale;
+      const vpHeight = (h / k) * mmScale;
+      ctx.globalAlpha = 0.5;
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(mmX + vpLeft, mmY + vpTop, vpWidth, vpHeight);
+
+      ctx.restore();
+    }
+
     rafRef.current = requestAnimationFrame(animate);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1440,6 +1296,19 @@ export function NetMapPage() {
         const c = canvasRef.current;
         if (c) { c.width = w; c.height = h; }
         drawBg(w, h);
+        // Update simulation bounds and sync positions
+        if (simRef.current) {
+          simRef.current.setBounds(w, h);
+          for (const ag of agentsRef.current) {
+            const sn = simRef.current.getNode(`a:${ag.id}`);
+            if (sn) { sn.x = ag.x; sn.y = ag.y; }
+          }
+          for (const ip of ipsRef.current.values()) {
+            const sn = simRef.current.getNode(`ip:${ip.ip}`);
+            if (sn) { sn.x = ip.x; sn.y = ip.y; }
+          }
+          simRef.current.reheat(0.3);
+        }
       }, 250);
     });
     obs.observe(el);
@@ -1814,6 +1683,137 @@ export function NetMapPage() {
           </button>
         </div>
       </div>
+
+      {/* ── Tab bar ──────────────────────────────────────────────────────────── */}
+      {(tabs.length > 0 || activeTabId !== null) ? (
+        <div className="flex items-center gap-1 px-4 py-1.5 border-b border-[#110c04] bg-[#050302] shrink-0 overflow-x-auto">
+          <button
+            onClick={() => setActiveTab(null)}
+            className={`px-3 py-1 rounded text-[11px] font-mono tracking-wide transition-colors ${
+              !activeTabId
+                ? 'bg-cyan-500/15 text-cyan-400 border border-cyan-500/30'
+                : 'text-slate-600 hover:text-slate-400 border border-transparent'
+            }`}
+          >
+            All
+          </button>
+          {[...tabs].sort((a, b) => a.sortOrder - b.sortOrder).map(tab => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setEditingTabId(tab.id);
+                setTabFormName(tab.name);
+                setTabFormAgentIds(new Set(tab.agentIds));
+                setShowTabModal(true);
+              }}
+              className={`px-3 py-1 rounded text-[11px] font-mono tracking-wide transition-colors ${
+                activeTabId === tab.id
+                  ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
+                  : 'text-slate-600 hover:text-slate-400 border border-transparent'
+              }`}
+            >
+              {tab.name}
+              <span className="ml-1.5 text-[9px] text-slate-700">{tab.agentIds.length}</span>
+            </button>
+          ))}
+          <button
+            onClick={() => {
+              setEditingTabId(null);
+              setTabFormName('');
+              setTabFormAgentIds(new Set());
+              setShowTabModal(true);
+            }}
+            className="px-2 py-1 rounded text-[11px] font-mono text-slate-700 hover:text-cyan-400 border border-transparent hover:border-cyan-500/20 transition-colors"
+            title="New tab"
+          >
+            +
+          </button>
+        </div>
+      ) : (
+        <div className="flex items-center px-4 py-1.5 border-b border-[#110c04] bg-[#050302] shrink-0">
+          <button
+            onClick={() => {
+              setEditingTabId(null);
+              setTabFormName('');
+              setTabFormAgentIds(new Set());
+              setShowTabModal(true);
+            }}
+            className="px-3 py-1 rounded text-[11px] font-mono text-slate-700 hover:text-cyan-400 border border-dashed border-slate-800 hover:border-cyan-500/20 transition-colors"
+          >
+            + Create view
+          </button>
+        </div>
+      )}
+
+      {/* ── Tab create/edit modal ──────────────────────────────────────────── */}
+      {showTabModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => setShowTabModal(false)}>
+          <div className="bg-[#0a0806] border border-[#1a1408] rounded-lg p-5 w-80 max-h-[70vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+            <h3 className="text-sm font-semibold text-slate-300 mb-3">
+              {editingTabId ? 'Edit View' : 'New View'}
+            </h3>
+            <input
+              type="text"
+              value={tabFormName}
+              onChange={e => setTabFormName(e.target.value)}
+              placeholder="View name"
+              className="w-full px-3 py-1.5 rounded border border-[#1a1408] bg-[#050302] text-sm text-slate-300 placeholder-slate-700 focus:border-cyan-500/30 focus:outline-none mb-3"
+              autoFocus
+            />
+            <div className="text-[10px] text-slate-600 uppercase tracking-widest mb-2">Agents</div>
+            <div className="space-y-1 max-h-48 overflow-y-auto">
+              {agentsRef.current.map(ag => (
+                <label key={ag.id} className="flex items-center gap-2 text-xs text-slate-400 hover:text-slate-200 cursor-pointer py-0.5">
+                  <input
+                    type="checkbox"
+                    checked={tabFormAgentIds.has(ag.id)}
+                    onChange={() => {
+                      const next = new Set(tabFormAgentIds);
+                      if (next.has(ag.id)) next.delete(ag.id); else next.add(ag.id);
+                      setTabFormAgentIds(next);
+                    }}
+                    className="accent-cyan-500"
+                  />
+                  {ag.label}
+                </label>
+              ))}
+            </div>
+            <div className="flex gap-2 mt-4">
+              <button
+                onClick={() => {
+                  if (!tabFormName.trim() || tabFormAgentIds.size === 0) return;
+                  if (editingTabId) {
+                    updateTab(editingTabId, { name: tabFormName.trim(), agentIds: [...tabFormAgentIds] });
+                  } else {
+                    addTab({ name: tabFormName.trim(), agentIds: [...tabFormAgentIds] });
+                  }
+                  setShowTabModal(false);
+                }}
+                disabled={!tabFormName.trim() || tabFormAgentIds.size === 0}
+                className="px-3 py-1.5 rounded text-xs font-medium bg-cyan-500/20 text-cyan-400 border border-cyan-500/30 hover:bg-cyan-500/30 disabled:opacity-40 transition-colors"
+              >
+                {editingTabId ? 'Save' : 'Create'}
+              </button>
+              {editingTabId && (
+                <button
+                  onClick={() => { deleteTab(editingTabId); setShowTabModal(false); }}
+                  className="px-3 py-1.5 rounded text-xs font-medium text-red-400 border border-red-500/20 hover:bg-red-500/10 transition-colors"
+                >
+                  Delete
+                </button>
+              )}
+              <button
+                onClick={() => setShowTabModal(false)}
+                className="px-3 py-1.5 rounded text-xs text-slate-500 hover:text-slate-300 transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Canvas area ─────────────────────────────────────────────────────── */}
       <div

@@ -554,6 +554,13 @@ export interface AgentDevice {
   wsConnected: boolean;
   /** Device type: 'agent' for Go agent binary, 'mikrotik' for remote MikroTik devices. */
   deviceType: 'agent' | 'mikrotik';
+  /**
+   * MikroTik connectivity status (only set when deviceType='mikrotik'):
+   *   - 'online':        syslog received recently OR API test succeeded recently
+   *   - 'offline':       was online before but syslog/API went silent
+   *   - 'misconfigured': never received any syslog AND never had a successful API connection
+   */
+  mikrotikStatus?: 'online' | 'offline' | 'misconfigured';
 }
 
 // ============================================

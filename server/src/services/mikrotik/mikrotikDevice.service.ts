@@ -158,6 +158,10 @@ export const mikrotikDeviceService = {
         last_api_error: null,
       });
 
+      // Mark device as seen so it shows online in the UI
+      const { markMikrotikSeen } = await import('../agent.service');
+      markMikrotikSeen(deviceId);
+
       return { success: true, identity };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

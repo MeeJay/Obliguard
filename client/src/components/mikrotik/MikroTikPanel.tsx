@@ -6,9 +6,10 @@ import type { MikroTikCredentials } from '@obliview/shared';
 
 interface Props {
   deviceId: number;
+  mikrotikStatus?: 'online' | 'offline' | 'misconfigured';
 }
 
-export function MikroTikPanel({ deviceId }: Props) {
+export function MikroTikPanel({ deviceId, mikrotikStatus }: Props) {
   const [creds, setCreds] = useState<MikroTikCredentials | null>(null);
   const [loading, setLoading] = useState(true);
   const [testing, setTesting] = useState(false);
@@ -109,7 +110,12 @@ export function MikroTikPanel({ deviceId }: Props) {
 
   const inputCls = 'w-full rounded-md border border-border bg-bg-tertiary px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50';
   const labelCls = 'block text-[11px] font-medium text-text-muted mb-0.5';
-  const isOnline = creds.lastSyslogAt && (Date.now() - new Date(creds.lastSyslogAt).getTime()) < 5 * 60 * 1000;
+
+  const statusInfo = mikrotikStatus === 'online'
+    ? { icon: <Wifi size={12} className="text-status-up" />, label: 'Online', cls: 'text-status-up' }
+    : mikrotikStatus === 'misconfigured'
+    ? { icon: <WifiOff size={12} className="text-yellow-400" />, label: 'Misconfigured', cls: 'text-yellow-400' }
+    : { icon: <WifiOff size={12} className="text-status-down" />, label: 'Offline', cls: 'text-status-down' };
 
   return (
     <div className="rounded-lg border border-border bg-bg-secondary">
@@ -117,9 +123,9 @@ export function MikroTikPanel({ deviceId }: Props) {
         <div className="flex items-center gap-2">
           <Router size={16} className="text-accent" />
           <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide">MikroTik Configuration</h2>
-          <span className="flex items-center gap-1 text-[11px] text-text-muted">
-            {isOnline ? <Wifi size={12} className="text-status-up" /> : <WifiOff size={12} className="text-status-down" />}
-            {isOnline ? 'Syslog active' : 'No syslog'}
+          <span className={`flex items-center gap-1 text-[11px] ${statusInfo.cls}`}>
+            {statusInfo.icon}
+            {statusInfo.label}
           </span>
         </div>
         <div className="flex items-center gap-2">
@@ -137,6 +143,14 @@ export function MikroTikPanel({ deviceId }: Props) {
       </div>
 
       <div className="p-4 space-y-3">
+        {mikrotikStatus === 'misconfigured' && (
+          <div className="rounded-md bg-yellow-500/10 border border-yellow-500/20 px-3 py-2 text-xs text-yellow-400">
+            <strong>Misconfigured</strong> — No syslog received and no successful API connection yet.
+            Make sure the MikroTik is configured to send syslog to this server and the API port is accessible.
+            Use "Test Connection" below to verify API access.
+          </div>
+        )}
+
         {/* API Connection */}
         <div className="grid grid-cols-4 gap-3">
           <div className="col-span-2">

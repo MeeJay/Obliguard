@@ -824,7 +824,7 @@ function LocalTemplateModal({
 
 // ── TemplatesSection ──────────────────────────────────────────────────────────
 
-function TemplatesSection({ deviceId, deviceType }: { deviceId: number; deviceType?: 'agent' | 'mikrotik' }) {
+function TemplatesSection({ deviceId, deviceType, mikrotikStatus }: { deviceId: number; deviceType?: 'agent' | 'mikrotik'; mikrotikStatus?: 'online' | 'offline' | 'misconfigured' }) {
   const [localTemplates, setLocalTemplates] = useState<ServiceTemplate[]>([]);
   const [localLoading,   setLocalLoading]   = useState(true);
   const [localExpanded,  setLocalExpanded]  = useState(true);
@@ -863,7 +863,7 @@ function TemplatesSection({ deviceId, deviceType }: { deviceId: number; deviceTy
       {/* MikroTik configuration panel (only for MikroTik devices) */}
       {deviceType === 'mikrotik' && (
         <div className="mb-4">
-          <MikroTikPanel deviceId={deviceId} />
+          <MikroTikPanel deviceId={deviceId} mikrotikStatus={mikrotikStatus} />
         </div>
       )}
 
@@ -1479,7 +1479,7 @@ export function AgentDetailPage() {
               </div>
 
               {/* Templates section */}
-              <TemplatesSection deviceId={devId!} deviceType={device.deviceType} />
+              <TemplatesSection deviceId={devId!} deviceType={device.deviceType} mikrotikStatus={device.mikrotikStatus} />
 
               {/* Notification Types — per-agent overrides */}
               <NotificationTypesPanel

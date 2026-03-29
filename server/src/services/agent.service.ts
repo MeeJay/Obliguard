@@ -32,19 +32,35 @@ import { serviceTemplateService } from './serviceTemplate.service';
 
 // ── MikroTik online detection ────────────────────────────────
 // A MikroTik device is considered online if we received a syslog packet
-// within the last 5 minutes.
+// or had a successful API connection within the last 5 minutes.
 const MIKROTIK_ONLINE_TIMEOUT_MS = 5 * 60 * 1000;
 const mikrotikLastSeen = new Map<number, number>(); // deviceId → timestamp ms
+// Track whether a device has EVER been seen (syslog or API)
+const mikrotikEverSeen = new Set<number>();
 
-/** Mark a MikroTik device as seen (called from syslog listener). */
+/** Mark a MikroTik device as seen (called from syslog listener and API test). */
 export function markMikrotikSeen(deviceId: number): void {
   mikrotikLastSeen.set(deviceId, Date.now());
+  mikrotikEverSeen.add(deviceId);
 }
 
 function isMikrotikOnline(deviceId: number): boolean {
   const last = mikrotikLastSeen.get(deviceId);
   if (!last) return false;
   return (Date.now() - last) < MIKROTIK_ONLINE_TIMEOUT_MS;
+}
+
+function getMikrotikStatus(deviceId: number, dbLastSyslog?: Date | null, dbLastApi?: Date | null): 'online' | 'offline' | 'misconfigured' {
+  // Check in-memory first (most recent)
+  if (isMikrotikOnline(deviceId)) return 'online';
+
+  // Misconfigured = syslog never received OR API never succeeded
+  const everSyslog = mikrotikEverSeen.has(deviceId) || !!dbLastSyslog;
+  const everApi = !!dbLastApi;
+  if (!everSyslog || !everApi) return 'misconfigured';
+
+  // Both worked at some point but not recently → offline
+  return 'offline';
 }
 
 // ── RFC-1918 helper ─────────────────────────────────────────
@@ -121,6 +137,9 @@ interface AgentDeviceRow {
   wan_matching_enabled: boolean;
   // migration 017 (MikroTik)
   device_type: string;
+  // Joined from mikrotik_credentials (nullable — only present for MikroTik devices)
+  mt_last_syslog_at?: Date | null;
+  mt_last_api_connected_at?: Date | null;
 }
 
 function rowToApiKey(row: AgentApiKeyRow): AgentApiKey {
@@ -206,6 +225,9 @@ function rowToDevice(
       ? isMikrotikOnline(row.id)
       : obliguardHub.isConnected(row.uuid),
     deviceType: (row.device_type as 'agent' | 'mikrotik') ?? 'agent',
+    ...(row.device_type === 'mikrotik' ? {
+      mikrotikStatus: getMikrotikStatus(row.id, row.mt_last_syslog_at, row.mt_last_api_connected_at),
+    } : {}),
   };
 }
 
@@ -268,15 +290,19 @@ export const agentService = {
       (async () => {
         const query = db('agent_devices as d')
           .leftJoin('monitor_groups as g', 'g.id', 'd.group_id')
+          .leftJoin('mikrotik_credentials as mt', 'mt.device_id', 'd.id')
           .where({ 'd.tenant_id': tenantId })
           .select(
             'd.*',
             db.raw('g.agent_group_config as _group_agent_config'),
             db.raw('g.agent_thresholds as _group_agent_thresholds'),
+            db.raw('g.name as _group_name'),
+            db.raw('mt.last_syslog_at as mt_last_syslog_at'),
+            db.raw('mt.last_api_connected_at as mt_last_api_connected_at'),
           )
           .orderBy('d.created_at', 'desc');
         if (status) query.where({ 'd.status': status });
-        return query as Promise<(AgentDeviceRow & { _group_agent_config: unknown; _group_agent_thresholds: unknown })[]>;
+        return query as Promise<(AgentDeviceRow & { _group_agent_config: unknown; _group_agent_thresholds: unknown; _group_name: string | null })[]>;
       })(),
       appConfigService.getAgentGlobal(),
     ]);
@@ -291,12 +317,22 @@ export const agentService = {
           ? JSON.parse(r._group_agent_thresholds)
           : r._group_agent_thresholds) as AgentThresholds
         : null;
-      return rowToDevice(r, gc, gt, globalConfig);
+      const dev = rowToDevice(r, gc, gt, globalConfig);
+      (dev as AgentDevice & { groupName?: string | null }).groupName = r._group_name ?? null;
+      return dev;
     });
   },
 
   async getDeviceById(id: number): Promise<AgentDevice | null> {
-    const row = await db('agent_devices').where({ id }).first() as AgentDeviceRow | undefined;
+    const row = await db('agent_devices as d')
+      .leftJoin('mikrotik_credentials as mt', 'mt.device_id', 'd.id')
+      .where({ 'd.id': id })
+      .select(
+        'd.*',
+        db.raw('mt.last_syslog_at as mt_last_syslog_at'),
+        db.raw('mt.last_api_connected_at as mt_last_api_connected_at'),
+      )
+      .first() as AgentDeviceRow | undefined;
     if (!row) return null;
     const [groupConfig, groupThresholds, globalConfig] = await Promise.all([
       row.group_id ? getGroupAgentConfig(row.group_id) : null,
