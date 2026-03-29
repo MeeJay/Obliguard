@@ -638,6 +638,9 @@ export function NetMapPage() {
         const allServices = [...new Set([...agentData.values()].flatMap(e => e.services))];
         const totalCount  = [...agentData.values()].reduce((s, e) => s + e.count, 0);
         const status      = rep?.status ?? (allFailures > 0 ? 'suspicious' : 'clean');
+        // Skip clean IPs from history — they only appear via live socket events
+        const wlMatch = matchWhitelist(evIp, wlEntries);
+        if (status === 'clean' && !wlMatch) continue;
         // Build per-agent weight map
         const weights: Record<number, number> = {};
         for (const id of validIds) weights[id] = agentData.get(id)!.count;
