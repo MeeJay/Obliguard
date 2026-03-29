@@ -11,5 +11,6 @@ router.post('/:id/sync',  remoteBlocklistController.forceSync);
 router.get('/ips',         remoteBlocklistController.listIps);
 router.put('/ips/:id/toggle', remoteBlocklistController.toggleIp);
 router.get('/stats',       remoteBlocklistController.stats);
+router.post('/push-now',   remoteBlocklistController.forcePush);
 
 export default router;

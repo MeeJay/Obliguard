@@ -105,21 +105,10 @@ async function pollDevice(device: ImportDevice): Promise<void> {
       const currentSet = new Set(currentIPs);
 
       const previousSet = knownIPs.get(key);
-      if (!previousSet) {
-        // First poll — seed the cache, don't import existing entries
-        // (avoid importing the entire existing blacklist on first startup)
-        knownIPs.set(key, currentSet);
-        logger.info(
-          { deviceId: device.deviceId, list: listName, count: currentSet.size },
-          'MikroTik import: seeded cache (first poll, no import)',
-        );
-        continue;
-      }
-
-      // Find newly added IPs
+      // Find IPs not yet seen (on first poll, imports ALL existing entries)
       const newIPs: string[] = [];
       for (const ip of currentSet) {
-        if (!previousSet.has(ip)) {
+        if (!previousSet || !previousSet.has(ip)) {
           newIPs.push(ip);
         }
       }
@@ -134,10 +123,8 @@ async function pollDevice(device: ImportDevice): Promise<void> {
         'MikroTik import: new IPs detected in address-list',
       );
 
-      // Import each new IP as a global auto-ban
-      for (const ip of newIPs) {
-        await importIPAsBan(ip, listName, device);
-      }
+      // Batch import as global auto-bans
+      await batchImportIPs(newIPs, listName, device);
     }
 
     // Update last connected timestamp
@@ -156,58 +143,93 @@ async function pollDevice(device: ImportDevice): Promise<void> {
   }
 }
 
-async function importIPAsBan(
-  ip: string,
+/**
+ * Batch import IPs as global auto-bans.
+ * Optimized for large imports (30K+ IPs): filters already-banned in bulk,
+ * batch-inserts bans and events in chunks of 500.
+ */
+async function batchImportIPs(
+  ips: string[],
   listName: string,
   device: ImportDevice,
 ): Promise<void> {
-  // Skip if already actively banned
-  const existingBan = await db('ip_bans')
-    .where({ ip, is_active: true })
-    .first();
-  if (existingBan) return;
+  if (ips.length === 0) return;
 
-  // Skip if whitelisted (use deviceId=0 and empty groupIds since this is a global import)
-  const { whitelistService } = await import('../whitelist.service');
-  const isWhitelisted = await whitelistService.isWhitelisted(ip, device.deviceId, [], device.tenantId);
-  if (isWhitelisted) return;
-
-  // Create a global auto-ban
   const reason = `MikroTik import: detected in "${listName}" address-list`;
-  await db('ip_bans').insert({
-    ip,
-    scope: 'global',
-    ban_type: 'auto',
-    origin_tenant_id: device.tenantId,
-    reason,
-    is_active: true,
-  });
+  const CHUNK_SIZE = 500;
 
-  // Also insert an ip_event so it shows up in the event log
-  const crypto = await import('crypto');
-  await db('ip_events').insert({
-    id: `${crypto.randomUUID()}-${Date.now()}`,
-    ip,
-    username: '',
-    service: `mikrotik_import:${listName}`,
-    event_type: 'auth_failure',
-    raw_log: reason,
-    device_id: device.deviceId,
-    tenant_id: device.tenantId,
-    source_ip_type: 'public',
-    timestamp: new Date(),
-  });
+  // 1. Filter out IPs that are already actively banned (bulk query)
+  const alreadyBanned = new Set<string>();
+  for (let i = 0; i < ips.length; i += CHUNK_SIZE) {
+    const chunk = ips.slice(i, i + CHUNK_SIZE);
+    const rows = await db('ip_bans')
+      .whereIn('ip', chunk)
+      .where('is_active', true)
+      .select('ip');
+    for (const r of rows) alreadyBanned.add(r.ip);
+  }
 
-  // Ensure IP reputation entry exists
-  try {
-    const { ipReputationService } = await import('../ipReputation.service');
-    await ipReputationService.ensureExists(ip);
-  } catch { /* non-fatal */ }
+  const toImport = ips.filter((ip) => !alreadyBanned.has(ip));
+  if (toImport.length === 0) {
+    logger.info(
+      { deviceId: device.deviceId, list: listName, total: ips.length, skipped: ips.length },
+      'MikroTik import: all IPs already banned',
+    );
+    return;
+  }
 
-  logger.info({ ip, list: listName, deviceId: device.deviceId }, 'MikroTik import: created auto-ban');
+  // 2. Batch insert bans
+  const now = new Date();
+  for (let i = 0; i < toImport.length; i += CHUNK_SIZE) {
+    const chunk = toImport.slice(i, i + CHUNK_SIZE);
 
-  // Propagate ban to all MikroTik devices (so the IP is blocked everywhere)
-  await mikrotikBanSync.pushBanToAll(ip, 'ban').catch(() => {});
+    const banRows = chunk.map((ip) => ({
+      ip,
+      scope: 'global',
+      ban_type: 'auto',
+      origin_tenant_id: device.tenantId,
+      reason,
+      is_active: true,
+      banned_at: now,
+    }));
+
+    // Use onConflict to skip IPs that got banned between our check and insert
+    await db('ip_bans').insert(banRows).onConflict(['ip', 'is_active']).ignore().catch(() => {
+      // Fallback: insert one by one if bulk fails (e.g., no unique constraint)
+      return Promise.allSettled(banRows.map((r) => db('ip_bans').insert(r).catch(() => {})));
+    });
+
+    // 3. Batch insert events
+    const crypto = await import('crypto');
+    const eventRows = chunk.map((ip) => ({
+      id: `${crypto.randomUUID()}-${Date.now()}`,
+      ip,
+      username: '',
+      service: `mikrotik_import:${listName}`,
+      event_type: 'auth_failure',
+      raw_log: reason,
+      device_id: device.deviceId,
+      tenant_id: device.tenantId,
+      source_ip_type: 'public',
+      timestamp: now,
+    }));
+    await db('ip_events').insert(eventRows).catch(() => {});
+
+    if (i % 5000 === 0 && i > 0) {
+      logger.info(
+        { deviceId: device.deviceId, list: listName, progress: `${i}/${toImport.length}` },
+        'MikroTik import: batch progress',
+      );
+    }
+  }
+
+  logger.info(
+    { deviceId: device.deviceId, list: listName, imported: toImport.length, skipped: alreadyBanned.size },
+    'MikroTik import: batch complete',
+  );
+
+  // 4. Propagate to all MikroTik devices (fire-and-forget, done by ban engine on next cycle)
+  // Don't push 30K individual bans — the ban engine's delta sync handles this.
 }
 
 async function runPollCycle(): Promise<void> {

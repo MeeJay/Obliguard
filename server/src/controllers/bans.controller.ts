@@ -13,6 +13,29 @@ export interface CreateBanRequest {
   expiresAt?: string | null;
 }
 
+export async function getBanById(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const row = await db('ip_bans').where({ id }).first();
+    if (!row) throw new AppError(404, 'Ban not found');
+    res.json({
+      success: true,
+      data: {
+        id: row.id,
+        ip: row.ip,
+        banType: row.ban_type,
+        reason: row.reason,
+        scope: row.scope,
+        scopeId: row.scope_id,
+        bannedByUserId: row.banned_by_user_id,
+        bannedAt: row.banned_at,
+        expiresAt: row.expires_at,
+        isActive: row.is_active,
+      },
+    });
+  } catch (err) { next(err); }
+}
+
 export async function getBanStats(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const isAdmin = req.session?.role === 'admin';

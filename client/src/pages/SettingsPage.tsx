@@ -899,9 +899,20 @@ function RemoteBlocklistsSection() {
                 className="w-full max-w-xs px-3 py-1.5 rounded-md border border-border bg-bg-tertiary text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent" />
               <p className="text-[10px] text-text-muted mt-1">Bearer token for guard.obli.tools</p>
             </div>
-            <button onClick={() => void savePushConfig()} className="px-3 py-1.5 rounded-md text-xs font-medium bg-accent text-white hover:bg-accent-hover transition-colors">
-              Save
-            </button>
+            <div className="flex items-center gap-2">
+              <button onClick={() => void savePushConfig()} className="px-3 py-1.5 rounded-md text-xs font-medium bg-accent text-white hover:bg-accent-hover transition-colors">
+                Save
+              </button>
+              <button onClick={async () => {
+                try {
+                  const apiClient = (await import('../api/client')).default;
+                  await apiClient.post('/remote-blocklists/push-now');
+                  toast.success('Push sent');
+                } catch { toast.error('Push failed'); }
+              }} className="px-3 py-1.5 rounded-md text-xs font-medium text-amber-400 border border-amber-500/30 hover:bg-amber-500/10 transition-colors">
+                Push Now
+              </button>
+            </div>
             {lastPush && <p className="text-xs text-text-muted">Last push: {new Date(lastPush).toLocaleString()}</p>}
           </div>
         )}

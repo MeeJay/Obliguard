@@ -237,6 +237,15 @@ function IPDetailDrawer({ ip, onClose, onBan, onWhitelist, onLiftBan, onClear, o
   const [showWhitelistForm, setShowWhitelistForm] = useState(false);
   const [showRenameForm, setShowRenameForm] = useState(false);
   const [renameValue, setRenameValue] = useState(currentLabel ?? '');
+  const [banInfo, setBanInfo] = useState<{ banType?: string; reason?: string; bannedByUserId?: number | null; scope?: string } | null>(null);
+
+  // Fetch ban details if IP is banned
+  useEffect(() => {
+    if (ip.status !== 'banned' || !ip.activeBanId) return;
+    apiClient.get<{ data: { banType?: string; reason?: string; bannedByUserId?: number | null; scope?: string } }>(`/bans/${ip.activeBanId}`)
+      .then(res => setBanInfo(res.data?.data ?? null))
+      .catch(() => {});
+  }, [ip.status, ip.activeBanId]);
 
   const loadEvents = useCallback(async () => {
     setLoadingEvents(true);
@@ -314,7 +323,18 @@ function IPDetailDrawer({ ip, onClose, onBan, onWhitelist, onLiftBan, onClear, o
               <span className="text-lg font-mono font-semibold text-text-primary">{anonIp(ip.ip)}</span>
               <CopyButton text={ip.ip} />
               <StatusBadge status={ip.status} />
+              {banInfo && (
+                <span className={cn(
+                  'inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium',
+                  banInfo.banType === 'auto' ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20' : 'bg-blue-500/10 text-blue-400 border border-blue-500/20',
+                )}>
+                  {banInfo.banType === 'auto' ? 'Auto-ban' : 'Manual'}
+                </span>
+              )}
             </div>
+            {banInfo?.reason && (
+              <p className="text-xs text-text-muted mt-1">{banInfo.reason}</p>
+            )}
             {currentLabel && (
               <div className="flex items-center gap-1.5 mt-1">
                 <Tag size={11} className="text-accent shrink-0" />
@@ -2154,17 +2174,17 @@ export function IPReputationPage() {
         <p className="text-sm text-text-muted mt-0.5">Monitor and manage IP reputation across all agents</p>
       </div>
 
-      {/* Tab bar */}
-      <div className="flex items-center gap-1 mb-6 border-b border-border">
+      {/* Tab bar (pill style, same as sub-filters) */}
+      <div className="flex items-center gap-1 mb-6 rounded-lg bg-bg-secondary p-1 border border-border w-fit">
         {PAGE_TABS.map(tab => (
           <button
             key={tab.key}
             onClick={() => setActiveTab(tab.key)}
             className={cn(
-              'px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors',
+              'px-4 py-1.5 text-sm font-medium rounded-md transition-colors whitespace-nowrap',
               activeTab === tab.key
-                ? 'border-accent text-accent'
-                : 'border-transparent text-text-muted hover:text-text-primary hover:border-border',
+                ? 'bg-accent text-white'
+                : 'text-text-muted hover:text-text-primary',
             )}
           >
             {tab.label}

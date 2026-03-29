@@ -70,13 +70,13 @@ function ipTtlForStatus(status: string): number {
 /** Compute orbit radius — spread IPs as an asteroid belt around agent.
  *  Each IP gets its own orbit lane with enough spacing to not overlap. */
 function orbRadius(nodeR: number, slot: number, totalSlots: number): number {
-  const minR = nodeR + 38;
-  // Each IP needs radial spacing — scales down with more IPs to stay contained
-  const spacing = totalSlots < 20 ? 10 : totalSlots < 50 ? 6 : 4;
-  const maxR = Math.min(minR + totalSlots * spacing, minR + 350);
-  if (totalSlots <= 1) return minR + 15;
+  // minR must clear the label zone below the agent (~50px below center)
+  const minR = nodeR + 55;
+  // Each IP needs enough radial spacing so dots (up to ~7px radius) don't overlap
+  const spacing = totalSlots < 15 ? 14 : totalSlots < 40 ? 8 : 5;
+  const maxR = Math.min(minR + totalSlots * spacing, minR + 400);
+  if (totalSlots <= 1) return minR + 20;
   const t = slot / (totalSlots - 1);
-  // sqrt distribution: inner orbits more spaced, outer ones compress slightly
   return minR + (maxR - minR) * Math.sqrt(t);
 }
 
@@ -106,6 +106,8 @@ export function NetMapPage() {
   const simRef = useRef<ForceSimulation | null>(null);
   /** Stars for animated flickering background. */
   const starsRef = useRef<{ x: number; y: number; s: number; b: number }[]>([]);
+  /** Per-agent orbit slot counter for golden-angle distribution. */
+  const slotCountersRef = useRef(new Map<number, number>());
 
   const transformRef = useRef({ x: 0, y: 0, k: 1 });
   const dragRef      = useRef<{ x: number; y: number; startX: number; startY: number } | null>(null);
@@ -245,6 +247,13 @@ export function NetMapPage() {
         glowUntil: glow ? now + 2500 : 0,
         ...makeOrbitalFields(ip, cW, cH),
       };
+      // Assign orbit slot with golden angle spacing
+      const slotMap = slotCountersRef.current;
+      const slot = slotMap.get(agentId) ?? 0;
+      node.orbitSlot = slot;
+      node.orbitAngle = slot * 2.399963;
+      slotMap.set(agentId, slot + 1);
+
       placeIp(node, agentMap);
       map.set(ip, node);
       setIpCount(map.size);
@@ -748,14 +757,17 @@ export function NetMapPage() {
       // Batch layout with repulsion (initial geometric placement)
       distributeIpsAroundAgents(agentsRef.current, [...ipsRef.current.values()], w, h);
 
-      // Assign orbit slots per agent — sequential so they don't overlap
-      const slotCounters = new Map<number, number>();
+      // Assign orbit slots per agent — golden angle spacing to avoid clustering
+      const GOLDEN_ANGLE = 2.399963; // ~137.5° in radians — optimal uniform distribution
+      slotCountersRef.current = new Map();
+      const slotCounters = slotCountersRef.current;
       for (const ip of ipsRef.current.values()) {
         if (ip.agentIds.length === 1) {
           const aid = ip.agentIds[0];
           const slot = slotCounters.get(aid) ?? 0;
           ip.orbitSlot = slot;
-          ip.arriveT = 1; // already on screen from init
+          ip.orbitAngle = slot * GOLDEN_ANGLE; // evenly spaced initial angles
+          ip.arriveT = 1;
           slotCounters.set(aid, slot + 1);
         } else {
           ip.orbitSlot = 0;
@@ -883,8 +895,7 @@ export function NetMapPage() {
         const dx = ags[1].x - ags[0].x, dy = ags[1].y - ags[0].y;
         const dist = Math.sqrt(dx * dx + dy * dy) || 80;
         const linkAngle = Math.atan2(dy, dx);
-        // Clamp ellipse to not exceed half the distance between agents
-        const ex = Math.min(dist * 0.35, 60), ey = Math.min(Math.max(15, dist * 0.15), 35);
+        const ex = Math.max(dist * 0.35, 30), ey = Math.max(dist * 0.15, 15);
         const lx = ex * Math.cos(ip.orbitAngle), ly = ey * Math.sin(ip.orbitAngle);
         const cosA = Math.cos(linkAngle), sinA = Math.sin(linkAngle);
         const targetX = cx + lx * cosA - ly * sinA;
@@ -2125,7 +2136,7 @@ export function NetMapPage() {
 
         {/* ── Agent side panel (on click) ────────────────────────────────────── */}
         {selectedAgent && !clickedIp && (
-          <div className="absolute top-0 right-0 z-30 w-72 h-full bg-[rgba(5,12,22,0.95)] border-l border-[rgba(90,138,181,0.2)] p-4 overflow-y-auto">
+          <div className="absolute top-0 right-0 z-30 w-72 h-full bg-[rgba(5,12,22,0.95)] border-l border-[rgba(90,138,181,0.2)] p-4 overflow-y-auto overscroll-contain" onWheel={e => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-4">
               <span className="font-mono text-xs text-slate-500 uppercase tracking-widest">Agent Detail</span>
               <button onClick={() => { selectedRef.current = null; setSelectedAgent(null); }} className="text-slate-500 hover:text-white text-lg leading-none">&times;</button>
@@ -2177,7 +2188,7 @@ export function NetMapPage() {
 
         {/* ── IP side panel (on click) ──────────────────────────────────────── */}
         {clickedIp && (
-          <div className="absolute top-0 right-0 z-30 w-72 h-full bg-[rgba(5,12,22,0.95)] border-l border-[rgba(90,138,181,0.2)] p-4 overflow-y-auto">
+          <div className="absolute top-0 right-0 z-30 w-72 h-full bg-[rgba(5,12,22,0.95)] border-l border-[rgba(90,138,181,0.2)] p-4 overflow-y-auto overscroll-contain" onWheel={e => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-4">
               <span className="font-mono text-xs text-slate-500 uppercase tracking-widest">IP Detail</span>
               <button onClick={() => setClickedIp(null)} className="text-slate-500 hover:text-white text-lg leading-none">&times;</button>

@@ -348,8 +348,11 @@ export const remoteBlocklistService = {
       .where('is_active', true)
       .select('ip', 'reason') as { ip: string; reason: string | null }[];
 
-    // Filter out local IPs
-    const publicBans = newBans.filter(b => !isRfc1918(String(b.ip)));
+    // Strip CIDR suffix from inet type and filter out local IPs
+    const stripCidr = (ip: string) => String(ip).replace(/\/\d+$/, '');
+    const publicBans = newBans
+      .map(b => ({ ip: stripCidr(String(b.ip)), reason: b.reason }))
+      .filter(b => !isRfc1918(b.ip));
     if (publicBans.length === 0) return;
 
     const instanceName = (await appConfigService.get('oblitools_instance_name')) || 'obliguard';
@@ -363,7 +366,7 @@ export const remoteBlocklistService = {
       body: JSON.stringify({
         instance: instanceName,
         ips: publicBans.map(b => ({
-          ip: String(b.ip),
+          ip: b.ip,
           reason: b.reason ?? 'auto_ban',
         })),
       }),

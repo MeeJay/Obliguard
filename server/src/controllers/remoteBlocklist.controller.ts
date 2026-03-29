@@ -79,4 +79,11 @@ export const remoteBlocklistController = {
       res.json({ success: true, data });
     } catch (err) { next(err); }
   },
+
+  async forcePush(_req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      await remoteBlocklistService.pushNewBans();
+      res.json({ success: true, message: 'Push completed' });
+    } catch (err) { next(err); }
+  },
 };
