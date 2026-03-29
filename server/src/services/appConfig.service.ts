@@ -34,6 +34,10 @@ export const appConfigService = {
       otp_smtp_server_id: map['otp_smtp_server_id'] ? parseInt(map['otp_smtp_server_id'], 10) : null,
       obligate_url:     parseUrl(OBLIGATE_CONFIG_KEY),
       obligate_enabled: map['obligate_enabled'] === 'true',
+      oblitools_push_enabled:  map['oblitools_push_enabled'] ?? null,
+      oblitools_instance_name: map['oblitools_instance_name'] ?? null,
+      oblitools_api_key:       map['oblitools_api_key'] ? '••••••••' : null, // never expose raw key
+      oblitools_last_push_at:  map['oblitools_last_push_at'] ?? null,
     };
   },
 

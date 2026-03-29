@@ -334,11 +334,9 @@ export const remoteBlocklistService = {
     const pushEnabled = await appConfigService.get('oblitools_push_enabled');
     if (pushEnabled !== 'true') return;
 
-    // Find the obli.tools blocklist to get the API key
-    const oblList = await db<BlocklistRow>('remote_blocklists')
-      .where({ source_type: 'oblitools' })
-      .first();
-    if (!oblList?.api_key) return;
+    // Get the API key from app config
+    const apiKey = await appConfigService.get('oblitools_api_key');
+    if (!apiKey) return;
 
     const lastPushStr = await appConfigService.get('oblitools_last_push_at');
     const lastPush = lastPushStr ? new Date(lastPushStr) : new Date(0);
@@ -356,12 +354,10 @@ export const remoteBlocklistService = {
 
     const instanceName = (await appConfigService.get('oblitools_instance_name')) || 'obliguard';
 
-    const pushUrl = oblList.url.replace(/\/blocklist\/api\/blocklist$/, '/blocklist/api/push');
-
-    const res = await fetch(pushUrl, {
+    const res = await fetch('https://guard.obli.tools/blocklist/api/push', {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${oblList.api_key}`,
+        'Authorization': `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({

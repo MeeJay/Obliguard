@@ -271,6 +271,10 @@ export interface AppConfig {
   otp_smtp_server_id: number | null;
   obligate_url: string | null;
   obligate_enabled: boolean;
+  oblitools_push_enabled: string | null;
+  oblitools_instance_name: string | null;
+  oblitools_api_key: string | null;
+  oblitools_last_push_at: string | null;
 }
 
 /**

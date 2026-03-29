@@ -718,6 +718,7 @@ function RemoteBlocklistsSection() {
   const [formInterval, setFormInterval] = useState(600);
   const [pushEnabled, setPushEnabled] = useState(false);
   const [instanceName, setInstanceName] = useState('');
+  const [pushApiKey, setPushApiKey] = useState('');
   const [lastPush, setLastPush] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -734,6 +735,7 @@ function RemoteBlocklistsSection() {
         const cfg = res.data?.data ?? {};
         setPushEnabled(cfg.oblitools_push_enabled === 'true');
         setInstanceName(cfg.oblitools_instance_name ?? '');
+        setPushApiKey(cfg.oblitools_api_key ? '••••••••' : '');
         setLastPush(cfg.oblitools_last_push_at ?? null);
       }).catch(() => {});
     });
@@ -787,6 +789,10 @@ function RemoteBlocklistsSection() {
       const apiClient = (await import('../api/client')).default;
       await apiClient.put('/admin/config/oblitools_push_enabled', { value: pushEnabled ? 'true' : 'false' });
       await apiClient.put('/admin/config/oblitools_instance_name', { value: instanceName });
+      // Only save API key if user typed a new one (not the masked placeholder)
+      if (pushApiKey && !pushApiKey.startsWith('••')) {
+        await apiClient.put('/admin/config/oblitools_api_key', { value: pushApiKey });
+      }
       toast.success('Push settings saved');
     } catch { toast.error('Failed to save'); }
   };
@@ -883,6 +889,15 @@ function RemoteBlocklistsSection() {
               <input type="text" value={instanceName} onChange={e => setInstanceName(e.target.value)}
                 placeholder="prod-obliguard-01"
                 className="w-full max-w-xs px-3 py-1.5 rounded-md border border-border bg-bg-tertiary text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent" />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-text-secondary mb-1">API Key</label>
+              <input type="password" value={pushApiKey}
+                onChange={e => setPushApiKey(e.target.value)}
+                onFocus={() => { if (pushApiKey.startsWith('••')) setPushApiKey(''); }}
+                placeholder="oblg_xxxxxxxxxxxx"
+                className="w-full max-w-xs px-3 py-1.5 rounded-md border border-border bg-bg-tertiary text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent" />
+              <p className="text-[10px] text-text-muted mt-1">Bearer token for guard.obli.tools</p>
             </div>
             <button onClick={() => void savePushConfig()} className="px-3 py-1.5 rounded-md text-xs font-medium bg-accent text-white hover:bg-accent-hover transition-colors">
               Save

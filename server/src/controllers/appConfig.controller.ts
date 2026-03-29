@@ -5,6 +5,7 @@ import { AppError } from '../middleware/errorHandler';
 const ALLOWED_KEYS = [
   'allow_2fa', 'force_2fa', 'otp_smtp_server_id',
   'obligate_enabled',
+  'oblitools_push_enabled', 'oblitools_instance_name', 'oblitools_api_key',
 ] as const;
 
 export const appConfigController = {
