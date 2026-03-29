@@ -70,6 +70,11 @@ router.get('/installer/freebsd', agentInstallerFreeBSD);
 // Pre-built Windows MSI (static, SERVERURL + APIKEY passed via msiexec properties)
 router.get('/installer/windows.msi', agentInstallerWindowsMsi);
 
+// MikroTik HTTP syslog ingestion (authenticated via per-device ingest token, no session needed)
+import { ingestMikroTikSyslog } from '../controllers/mikrotik.controller';
+import express from 'express';
+router.post('/mikrotik/ingest', express.text({ type: '*/*', limit: '1mb' }), ingestMikroTikSyslog);
+
 // ── Admin routes (session auth + admin role + tenant required) ────────────────
 
 router.get('/keys', requireAuth, requireRole('admin'), requireTenant, listKeys);

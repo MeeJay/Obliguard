@@ -46,11 +46,12 @@ export function AddMikroTikModal({ open, onClose, onCreated }: Props) {
   const [importAddressLists, setImportAddressLists] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [ingestToken, setIngestToken] = useState('');
+  const [createdDeviceId, setCreatedDeviceId] = useState<number | null>(null);
 
   if (!open) return null;
 
-  const serverHost = window.location.hostname;
-  const syslogPort = '5514';
+  const serverUrl = window.location.origin;
   const effectiveSyslogId = syslogIdentifier || apiHost;
   const effectiveListName = addressListName || 'obliguard_blocklist';
 
@@ -59,7 +60,7 @@ export function AddMikroTikModal({ open, onClose, onCreated }: Props) {
     setLoading(true);
     setError('');
     try {
-      await mikrotikApi.createDevice({
+      const result = await mikrotikApi.createDevice({
         name,
         hostname,
         apiHost,
@@ -71,6 +72,10 @@ export function AddMikroTikModal({ open, onClose, onCreated }: Props) {
         addressListName: effectiveListName,
         importAddressLists: importAddressLists || undefined,
       });
+      // Fetch credentials to get the ingest token
+      const creds = await mikrotikApi.getCredentials(result.deviceId);
+      setIngestToken(creds.ingestToken || '');
+      setCreatedDeviceId(result.deviceId);
       onCreated();
       setStep('commands');
     } catch (err: any) {
@@ -98,8 +103,26 @@ export function AddMikroTikModal({ open, onClose, onCreated }: Props) {
     ? `/ip service set api-ssl disabled=no port=${apiPort}`
     : `/ip service set api disabled=no port=${apiPort}`;
 
-  const cmdSyslog = `/system logging action set remote address=${serverHost} remote-port=${syslogPort} bsd-syslog=yes
-/system logging add topics=critical,error,warning,info action=remote`;
+  const ingestUrl = `${serverUrl}/api/agent/mikrotik/ingest`;
+  const tokenDisplay = ingestToken || '<token>';
+
+  // Script that reads new log entries and POSTs them to Obliguard via HTTP
+  const cmdLogScript = `:global obliguardLastLog
+/system script add name=obliguard-log-push source={
+  :local lines ""
+  :foreach entry in=[/log find where topics~"error" || topics~"critical" || topics~"warning"] do={
+    :local msg [/log get \$entry message]
+    :if ([:len \$lines] < 4000) do={
+      :set lines ("\$lines\\n\$msg")
+    }
+  }
+  :if ([:len \$lines] > 0) do={
+    /tool fetch url="${ingestUrl}?token=${tokenDisplay}" \\
+      http-method=post http-data=\$lines keep-result=no
+  }
+}
+/system scheduler add name=obliguard-log-push interval=30s \\
+  on-event="/system script run obliguard-log-push"`;
 
   const cmdFirewallRule = `/ip firewall filter add chain=input action=drop src-address-list=${effectiveListName} comment="Obliguard blocklist" place-before=0`;
 
@@ -164,15 +187,6 @@ export function AddMikroTikModal({ open, onClose, onCreated }: Props) {
             </div>
 
             <div className="border-t border-border pt-3">
-              <p className="text-xs font-semibold text-text-secondary uppercase tracking-wide mb-2">Syslog</p>
-              <div>
-                <label className={labelCls}>Syslog Source IP</label>
-                <input className={inputCls} value={syslogIdentifier} onChange={e => setSyslogIdentifier(e.target.value)} placeholder="Same as API Host if empty" />
-                <p className="text-[10px] text-text-muted mt-0.5">IP from which the MikroTik sends syslog. Used to route incoming packets to this device.</p>
-              </div>
-            </div>
-
-            <div className="border-t border-border pt-3">
               <p className="text-xs font-semibold text-text-secondary uppercase tracking-wide mb-2">Address Lists</p>
               <div className="grid grid-cols-2 gap-3">
                 <div>
@@ -213,12 +227,23 @@ export function AddMikroTikModal({ open, onClose, onCreated }: Props) {
               <CopyBlock code={cmdEnableApi} />
             </div>
 
-            {/* 2. Syslog export */}
+            {/* 2. Log push via HTTP */}
             <div>
               <p className="text-xs font-semibold text-text-secondary uppercase tracking-wide mb-1.5">
-                2. Configure syslog export to Obliguard
+                2. Configure log forwarding to Obliguard (HTTP)
               </p>
-              <CopyBlock code={cmdSyslog} />
+              <p className="text-[11px] text-text-muted mb-1.5">
+                Creates a script + scheduler that POSTs log entries to Obliguard every 30s via HTTP.
+                Works behind reverse proxies (no UDP syslog needed).
+              </p>
+              <CopyBlock code={cmdLogScript} />
+              <div className="mt-2 rounded-md bg-bg-tertiary px-3 py-2">
+                <p className="text-[10px] text-text-muted font-medium uppercase mb-1">Ingest Token</p>
+                <div className="flex items-center gap-2">
+                  <code className="text-xs font-mono text-accent break-all">{ingestToken || 'Loading...'}</code>
+                  {ingestToken && <CopyBlock code={ingestToken} />}
+                </div>
+              </div>
             </div>
 
             {/* 3. Firewall drop rule */}

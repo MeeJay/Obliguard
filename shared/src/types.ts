@@ -580,6 +580,8 @@ export interface MikroTikCredentials {
   addressListName: string;
   /** Comma-separated address-list names to IMPORT from (e.g. "blacklist,honeypot"). Null = disabled. */
   importAddressLists: string | null;
+  /** Unique token for HTTP syslog ingestion (used when UDP syslog is not available). */
+  ingestToken: string | null;
   lastApiConnectedAt: string | null;
   lastApiError: string | null;
   lastSyslogAt: string | null;

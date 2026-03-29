@@ -29,6 +29,4 @@ export const config = {
   // App URL — used in password reset emails
   appUrl: process.env.APP_URL || 'http://localhost:5173',
 
-  // MikroTik syslog listener
-  syslogPort: parseInt(process.env.SYSLOG_PORT || '5514', 10),
 };

@@ -93,9 +93,7 @@ async function main() {
   // 6. Start BanEngine — evaluates IP thresholds and enforces bans every 30s
   banEngine.start();
 
-  // 7. Start MikroTik syslog listener (UDP) + address-list import poller
-  const { syslogListener } = await import('./services/mikrotik/syslogListener');
-  syslogListener.start();
+  // 7. Start MikroTik address-list import poller
   const { mikrotikImport } = await import('./services/mikrotik/mikrotikImport.service');
   mikrotikImport.start();
 

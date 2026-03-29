@@ -11,7 +11,6 @@ import { db } from '../../db';
 import { logger } from '../../utils/logger';
 import { encryptSecret, decryptSecret } from '../../utils/crypto';
 import { createRouterOSClient } from './routerosClient';
-import { syslogListener } from './syslogListener';
 import type { CreateMikroTikDeviceRequest, UpdateMikroTikCredentialsRequest, MikroTikCredentials } from '@obliview/shared';
 
 export const mikrotikDeviceService = {
@@ -66,11 +65,12 @@ export const mikrotikDeviceService = {
       syslog_identifier: data.syslogIdentifier,
       address_list_name: data.addressListName ?? 'obliguard_blocklist',
       import_address_lists: data.importAddressLists ?? null,
+      ingest_token: crypto.randomBytes(32).toString('hex'),
       created_at: now,
       updated_at: now,
     });
 
-    syslogListener.invalidateCache();
+
     logger.info({ deviceId, hostname: data.hostname, syslogId: data.syslogIdentifier }, 'MikroTik device created');
 
     return { deviceId, uuid };
@@ -92,6 +92,7 @@ export const mikrotikDeviceService = {
       syslogIdentifier: row.syslog_identifier,
       addressListName: row.address_list_name,
       importAddressLists: row.import_address_lists ?? null,
+      ingestToken: row.ingest_token ?? null,
       lastApiConnectedAt: row.last_api_connected_at?.toISOString() ?? null,
       lastApiError: row.last_api_error,
       lastSyslogAt: row.last_syslog_at?.toISOString() ?? null,
@@ -125,7 +126,7 @@ export const mikrotikDeviceService = {
     if (data.importAddressLists !== undefined) updates.import_address_lists = data.importAddressLists;
 
     await db('mikrotik_credentials').where('device_id', deviceId).update(updates);
-    syslogListener.invalidateCache();
+
   },
 
   /**
