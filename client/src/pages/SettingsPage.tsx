@@ -612,6 +612,49 @@ export function SettingsPage() {
         </>
       )}
 
+      {/* ── Danger Zone ── */}
+      {admin && (
+        <div>
+          <h2 className="text-lg font-semibold text-status-down mb-4">Danger Zone</h2>
+          <div className="rounded-lg border border-status-down/30 bg-status-down/5 p-5 space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium text-text-primary">Wipe all banned IPs</p>
+                <p className="text-xs text-text-muted">Lift all active bans. Agents will unblock all IPs on next sync.</p>
+              </div>
+              <button onClick={async () => {
+                if (!confirm('Lift ALL active bans? All agents will unblock all IPs.')) return;
+                try {
+                  const api = (await import('../api/client')).default;
+                  await api.post('/bans/wipe-bans');
+                  toast.success('All bans lifted');
+                } catch { toast.error('Failed'); }
+              }} className="px-4 py-2 rounded-md text-sm font-medium text-status-down border border-status-down/40 hover:bg-status-down/10 transition-colors whitespace-nowrap">
+                Wipe all bans
+              </button>
+            </div>
+            <div className="border-t border-status-down/20" />
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium text-text-primary">Wipe all IP data</p>
+                <p className="text-xs text-text-muted">Delete all IP reputation entries and events. Cannot be undone.</p>
+              </div>
+              <button onClick={async () => {
+                if (!confirm('DELETE all IP reputation data and events? This cannot be undone.')) return;
+                if (!confirm('Are you really sure? All IP history will be permanently lost.')) return;
+                try {
+                  const api = (await import('../api/client')).default;
+                  await api.post('/bans/wipe-reputation');
+                  toast.success('IP data wiped');
+                } catch { toast.error('Failed'); }
+              }} className="px-4 py-2 rounded-md text-sm font-medium text-white bg-status-down hover:bg-status-down/80 transition-colors whitespace-nowrap">
+                Wipe all IPs
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {smtpMode && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
           <div className="bg-bg-secondary rounded-xl shadow-2xl border border-border w-full max-w-md">

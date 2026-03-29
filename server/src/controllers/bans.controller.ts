@@ -36,6 +36,52 @@ export async function getBanById(req: Request, res: Response, next: NextFunction
   } catch (err) { next(err); }
 }
 
+export async function wipeAllBans(_req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    // Mark all active bans as inactive (not delete) so agents receive the "remove" delta
+    const count = await db('ip_bans').where({ is_active: true }).update({ is_active: false });
+    res.json({ success: true, message: `Lifted ${count} active bans` });
+  } catch (err) { next(err); }
+}
+
+export async function wipeAllReputation(_req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const evCount = await db('ip_events').del();
+    const repCount = await db('ip_reputation').del();
+    res.json({ success: true, message: `Deleted ${repCount} reputation entries and ${evCount} events` });
+  } catch (err) { next(err); }
+}
+
+export async function bulkBan(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { ips } = req.body as { ips: string[] };
+    if (!Array.isArray(ips) || ips.length === 0) throw new AppError(400, 'ips array required');
+    let created = 0;
+    for (const ip of ips) {
+      const existing = await db('ip_bans').where({ ip, is_active: true }).first();
+      if (existing) continue;
+      await db('ip_bans').insert({ ip, ban_type: 'manual', scope: 'global', is_active: true, banned_by_user_id: req.session?.userId });
+      created++;
+    }
+    res.json({ success: true, created });
+  } catch (err) { next(err); }
+}
+
+export async function bulkWhitelist(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { ips, label } = req.body as { ips: string[]; label?: string };
+    if (!Array.isArray(ips) || ips.length === 0) throw new AppError(400, 'ips array required');
+    let created = 0;
+    for (const ip of ips) {
+      const existing = await db('ip_whitelist').where({ ip }).first();
+      if (existing) continue;
+      await db('ip_whitelist').insert({ ip, label: label || null, scope: 'global', created_by: req.session?.userId, tenant_id: req.tenantId });
+      created++;
+    }
+    res.json({ success: true, created });
+  } catch (err) { next(err); }
+}
+
 export async function getBanStats(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const isAdmin = req.session?.role === 'admin';

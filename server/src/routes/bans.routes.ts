@@ -10,12 +10,20 @@ import {
   excludeBan,
   removeExclusion,
   getBanStats,
+  wipeAllBans,
+  wipeAllReputation,
+  bulkBan,
+  bulkWhitelist,
 } from '../controllers/bans.controller';
 
 const router = Router();
 
-// ⚠️ /stats must be before /:id
+// ⚠️ /stats and /wipe-* must be before /:id
 router.get('/stats', requireAuth, getBanStats);
+router.post('/wipe-bans', requireAuth, requireRole('admin'), wipeAllBans);
+router.post('/wipe-reputation', requireAuth, requireRole('admin'), wipeAllReputation);
+router.post('/bulk-ban', requireAuth, requireRole('admin'), bulkBan);
+router.post('/bulk-whitelist', requireAuth, requireRole('admin'), bulkWhitelist);
 router.get('/', requireAuth, listBans);
 router.get('/:id', requireAuth, getBanById);
 router.post('/', requireAuth, requireRole('admin'), createBan);

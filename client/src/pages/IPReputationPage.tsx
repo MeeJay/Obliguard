@@ -804,6 +804,57 @@ function ActivityTab({ isAdmin }: ActivityTabProps) {
     }
   };
 
+  const handleUnwhitelist = async (ipAddr: string) => {
+    try {
+      // Find the whitelist entry by IP to get its ID
+      const wlRes = await apiClient.get<{ data: { id: number; ip: string }[] }>('/whitelist');
+      const entry = (wlRes.data?.data ?? []).find(w => w.ip === ipAddr || w.ip === ipAddr + '/32');
+      if (!entry) { toast.error('Whitelist entry not found'); return; }
+      await apiClient.delete(`/whitelist/${entry.id}`);
+      toast.success(`${ipAddr} removed from whitelist`);
+      setRows(prev => prev.map(r => r.ip === ipAddr ? { ...r, status: 'clean' } : r));
+      if (selectedIp?.ip === ipAddr) {
+        setSelectedIp(prev => prev ? { ...prev, status: 'clean' } : prev);
+      }
+    } catch {
+      toast.error('Failed to remove from whitelist');
+    }
+  };
+
+  // ── Bulk selection ──────────────────────────────────────────────────────
+  const [selectedIps, setSelectedIps] = useState<Set<string>>(new Set());
+  const toggleSelectIp = (ip: string) => {
+    setSelectedIps(prev => {
+      const next = new Set(prev);
+      if (next.has(ip)) next.delete(ip); else next.add(ip);
+      return next;
+    });
+  };
+  const toggleSelectAll = () => {
+    if (selectedIps.size === rows.length) setSelectedIps(new Set());
+    else setSelectedIps(new Set(rows.map(r => r.ip)));
+  };
+  const bulkBan = async () => {
+    if (selectedIps.size === 0) return;
+    if (!confirm(`Ban ${selectedIps.size} IPs?`)) return;
+    try {
+      await apiClient.post('/bans/bulk-ban', { ips: [...selectedIps] });
+      toast.success(`${selectedIps.size} IPs banned`);
+      setSelectedIps(new Set());
+      load();
+    } catch { toast.error('Bulk ban failed'); }
+  };
+  const bulkWhitelist = async () => {
+    if (selectedIps.size === 0) return;
+    const label = prompt('Label for whitelisted IPs (optional):') ?? '';
+    try {
+      await apiClient.post('/bans/bulk-whitelist', { ips: [...selectedIps], label: label || undefined });
+      toast.success(`${selectedIps.size} IPs whitelisted`);
+      setSelectedIps(new Set());
+      load();
+    } catch { toast.error('Bulk whitelist failed'); }
+  };
+
   const handleLiftBanById = async (banId: number, ipAddr?: string) => {
     try {
       await apiClient.delete(`/bans/${banId}`);
@@ -909,6 +960,22 @@ function ActivityTab({ isAdmin }: ActivityTabProps) {
         </button>
       </div>
 
+      {/* Bulk action bar */}
+      {selectedIps.size > 0 && (
+        <div className="flex items-center gap-3 mb-3 px-3 py-2 rounded-lg bg-accent/10 border border-accent/20">
+          <span className="text-sm font-medium text-accent">{selectedIps.size} selected</span>
+          <Button size="sm" variant="secondary" onClick={bulkBan}>
+            <ShieldOff size={11} className="mr-1" />Ban selected
+          </Button>
+          <Button size="sm" variant="secondary" onClick={bulkWhitelist}>
+            <ShieldCheck size={11} className="mr-1" />Whitelist selected
+          </Button>
+          <button onClick={() => setSelectedIps(new Set())} className="ml-auto text-xs text-text-muted hover:text-text-primary">
+            Clear selection
+          </button>
+        </div>
+      )}
+
       {/* Table */}
       <div className="rounded-lg border border-border bg-bg-secondary overflow-hidden">
         {!loading && rows.length === 0 ? (
@@ -923,6 +990,9 @@ function ActivityTab({ isAdmin }: ActivityTabProps) {
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-border bg-bg-tertiary">
+                <th className="px-2 py-2.5 w-8">
+                  <input type="checkbox" checked={selectedIps.size === rows.length && rows.length > 0} onChange={toggleSelectAll} className="accent-accent" />
+                </th>
                 <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">IP Address</th>
                 <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">Country</th>
                 <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">Failures</th>
@@ -946,6 +1016,9 @@ function ActivityTab({ isAdmin }: ActivityTabProps) {
                       onClick={() => handleRowClick(row)}
                       className="hover:bg-bg-hover transition-colors cursor-pointer"
                     >
+                      <td className="px-2 py-3" onClick={e => e.stopPropagation()}>
+                        <input type="checkbox" checked={selectedIps.has(row.ip)} onChange={() => toggleSelectIp(row.ip)} className="accent-accent" />
+                      </td>
                       <td className="px-4 py-3">
                         <span className="font-mono text-text-primary">{anonIp(row.ip)}</span>
                         {displayLabel && (
@@ -1010,13 +1083,21 @@ function ActivityTab({ isAdmin }: ActivityTabProps) {
                               <ShieldOff size={11} className="mr-1" />Ban
                             </Button>
                           )}
-                          {row.status !== 'whitelisted' && (
+                          {row.status !== 'whitelisted' ? (
                             <Button
                               size="sm"
                               variant="secondary"
                               onClick={() => handleWhitelist(row.ip, '')}
                             >
                               <ShieldCheck size={11} className="mr-1" />Whitelist
+                            </Button>
+                          ) : (
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              onClick={() => handleUnwhitelist(row.ip)}
+                            >
+                              <ShieldOff size={11} className="mr-1" />Unwhitelist
                             </Button>
                           )}
                           {row.status === 'banned' && (

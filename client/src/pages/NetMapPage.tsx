@@ -69,14 +69,14 @@ function ipTtlForStatus(status: string): number {
 
 /** Compute orbit radius — spread IPs as an asteroid belt around agent.
  *  Each IP gets its own orbit lane with enough spacing to not overlap. */
-/** How many orbit rings an agent needs for N IPs. ~6 IPs per ring. */
+/** How many orbit rings an agent needs for N IPs. ~20 IPs per ring. */
 function orbitRingCount(ipCount: number): number {
   if (ipCount <= 0) return 0;
-  return Math.max(1, Math.ceil(ipCount / 6));
+  return Math.max(1, Math.ceil(ipCount / 20));
 }
 
 /** Spacing between orbit rings (px). */
-const ORBIT_RING_GAP = 12;
+const ORBIT_RING_GAP = 10;
 
 /** Radius of orbit ring N (0-indexed) around an agent of radius nodeR. */
 function orbitRingRadius(nodeR: number, ringIndex: number): number {
@@ -884,8 +884,6 @@ export function NetMapPage() {
 
     const paused = orbitPausedRef.current || clickedIp !== null;
     for (const ip of ipsRef.current.values()) {
-      if (!paused) ip.orbitAngle += ip.orbitSpeed;
-
       // Arrival: fly from spawn point toward orbit target
       if (ip.arriveT < 1) ip.arriveT = Math.min(1, ip.arriveT + 0.0025);
 
@@ -894,6 +892,10 @@ export function NetMapPage() {
         if (!ag) continue;
         const totalIps = ipsPerAgent.get(ag.id) ?? 1;
         const orbR = orbRadius(ag.r, ip.orbitSlot, totalIps);
+        // Kepler: outer orbits rotate slower (speed ∝ 1/√r)
+        const baseR = ag.r + 18;
+        const keplerFactor = Math.sqrt(baseR / Math.max(orbR, baseR));
+        if (!paused) ip.orbitAngle += ip.orbitSpeed * keplerFactor;
         const targetX = ag.x + Math.cos(ip.orbitAngle) * orbR;
         const targetY = ag.y + Math.sin(ip.orbitAngle) * orbR * ip.orbitEccentricity;
         if (ip.arriveT < 1) {
@@ -905,6 +907,7 @@ export function NetMapPage() {
         }
       } else if (ip.agentIds.length > 1) {
         // Multi-agent: elliptical orbit around weighted centroid
+        if (!paused) ip.orbitAngle += ip.orbitSpeed * 0.7; // multi-agent orbits are slower
         const ags = ip.agentIds.map(id => agMapFull.get(id)).filter(Boolean) as AgentNode[];
         // Fallback: if only 1 agent resolved, orbit around that agent
         if (ags.length === 0) continue;
@@ -1326,10 +1329,9 @@ export function NetMapPage() {
 
       ctx.globalAlpha = 1;
 
-      // Label BELOW outermost orbit ring
+      // Label BELOW agent body (close, rings pass through)
       if (k > 0.4) {
-        const outerR = agentOrbitOuterR(agent.r, conns);
-        const labelY = sy + outerR + 6;
+        const labelY = sy + effR + 8;
         const kk = Math.min(k, 1.3);
         const fs = Math.round((agent.r >= 15 ? 10 : 8.5) * kk);
         ctx.font = `500 ${fs}px "Inter", "Segoe UI", ui-sans-serif, sans-serif`;
