@@ -897,7 +897,7 @@ export function NetMapPage() {
         const keplerFactor = Math.sqrt(baseR / Math.max(orbR, baseR));
         if (!paused) ip.orbitAngle += ip.orbitSpeed * keplerFactor;
         const targetX = ag.x + Math.cos(ip.orbitAngle) * orbR;
-        const targetY = ag.y + Math.sin(ip.orbitAngle) * orbR * ip.orbitEccentricity;
+        const targetY = ag.y + Math.sin(ip.orbitAngle) * orbR;
         if (ip.arriveT < 1) {
           ip.x = ip.spawnX + (targetX - ip.spawnX) * ip.arriveT;
           ip.y = ip.spawnY + (targetY - ip.spawnY) * ip.arriveT;

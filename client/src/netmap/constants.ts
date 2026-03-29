@@ -1,7 +1,7 @@
 // ── NetMap Constants ──────────────────────────────────────────────────────────
 
 /** IP TTL by status — clean vanish fast, threats linger. */
-export const IP_TTL_CLEAN      = 30 * 1000;   // 30 s — clean IPs stay briefly visible
+export const IP_TTL_CLEAN      = 60 * 1000;   // 60 s — clean IPs stay visible a minute
 export const IP_TTL_SUSPICIOUS = 5 * 60 * 1000; // 5 min — suspicious stay visible
 export const IP_TTL_BANNED     = 10 * 60 * 1000; // 10 min — banned stay longest
 export const IP_TTL            = 90 * 1000;   // fallback for unknown status
