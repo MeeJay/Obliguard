@@ -22,9 +22,9 @@ import { anonHostname, anonIp } from '../utils/anonymize';
 
 import type { AgentNode, IpNode, Particle, Ripple, LiveEvent, AgentPeerLink, WlEntry } from '../netmap/types';
 import {
-  IP_TTL, IP_FADE_AGE, PEER_LINK_TTL,
-  RING_INNER_R,
-  EVENT_COLORS, DANGEROUS_SVCS, PEER_LINK_COLOR,
+  IP_TTL, IP_FADE_AGE, IP_TTL_CLEAN, IP_TTL_SUSPICIOUS, IP_TTL_BANNED,
+  PEER_LINK_TTL, RING_INNER_R,
+  EVENT_COLORS, DANGEROUS_SVCS, PEER_LINK_COLOR, DEVICE_TYPE_COLORS,
   BADGE_H, BADGE_FONT,
 } from '../netmap/constants';
 import {
@@ -38,6 +38,50 @@ import {
 import { ForceSimulation } from '../netmap/physics';
 import { useNetMapTabStore } from '../netmap/tabStore';
 
+
+// ── Device type detection ─────────────────────────────────────────────────────
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function detectDeviceType(d: any): string {
+  if (d.deviceType === 'mikrotik') return 'firewall';
+  const os = (d.osInfo?.os ?? d.osInfo?.platform ?? '').toLowerCase();
+  const host = (d.hostname ?? '').toLowerCase();
+  if (os.includes('opnsense') || os.includes('pfsense') || host.includes('opn') || host.includes('pfsense')) return 'firewall';
+  if (os.includes('routeros') || os.includes('mikrotik') || host.includes('mikrotik')) return 'firewall';
+  if (os.includes('linux')) return 'server';
+  if (os.includes('windows server') || os.includes('windows_server')) return 'server';
+  if (os.includes('windows')) return 'windows';
+  if (os.includes('darwin') || os.includes('macos')) return 'desktop';
+  if (os.includes('freebsd')) return 'server';
+  return 'default';
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function detectDeviceColor(d: any): string {
+  return DEVICE_TYPE_COLORS[detectDeviceType(d)] ?? DEVICE_TYPE_COLORS.default;
+}
+
+/** Get IP TTL based on status. */
+function ipTtlForStatus(status: string): number {
+  if (status === 'banned') return IP_TTL_BANNED;
+  if (status === 'suspicious') return IP_TTL_SUSPICIOUS;
+  if (status === 'clean') return IP_TTL_CLEAN;
+  return IP_TTL;
+}
+
+/** Compute mockup-style tight orbit radius. */
+function orbRadius(nodeR: number, slot: number, totalSlots: number): number {
+  const minR = nodeR + 6;
+  const maxLayers = Math.ceil(Math.sqrt(totalSlots * 2));
+  const layer = Math.floor(slot / Math.max(1, Math.ceil(totalSlots / maxLayers)));
+  const layerSpacing = Math.max(2.5, Math.min(4, 60 / Math.max(1, maxLayers)));
+  return minR + layer * layerSpacing;
+}
+
+function hexRgb(h: string): [number, number, number] {
+  const m = h.match(/#(..)(..)(..)/);
+  return m ? [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)] : [128, 128, 128];
+}
 
 // ── Component ──────────────────────────────────────────────────────────────────
 
@@ -87,6 +131,11 @@ export function NetMapPage() {
   const [selectedAgent, setSelectedAgent] = useState<AgentNode | null>(null);
   const [banningIp,     setBanningIp]     = useState<string | null>(null);
   const [socketOk,      setSocketOk]      = useState(false);
+  const [orbitPaused,   setOrbitPaused]   = useState(false);
+  const [clickedIp,     setClickedIp]     = useState<IpNode | null>(null);
+  const orbitPausedRef  = useRef(false);
+  // Keep ref in sync
+  orbitPausedRef.current = orbitPaused;
   const [liveLoadingMore, setLiveLoadingMore] = useState(false);
   const [tooltip, setTooltip] = useState<{
     x: number; y: number;
@@ -114,15 +163,12 @@ export function NetMapPage() {
     const oc = bgRef.current;
     oc.width = w; oc.height = h;
     const ctx = oc.getContext('2d')!;
-    ctx.fillStyle = '#030202';
+    ctx.fillStyle = '#03070d';
     ctx.fillRect(0, 0, w, h);
+    // Mockup v5: subtle blue/warm nebulae on deep space
     const nebulae: [number, number, number, string][] = [
-      [w * 0.80, h * 0.38, Math.min(w, h) * 0.50, 'rgba(170,75,12,0.22)'],
-      [w * 0.72, h * 0.58, Math.min(w, h) * 0.32, 'rgba(200,110,8,0.14)'],
-      [w * 0.88, h * 0.22, Math.min(w, h) * 0.28, 'rgba(140,55,8,0.15)'],
-      [w * 0.18, h * 0.28, Math.min(w, h) * 0.38, 'rgba(22,16,8,0.18)'],
-      [w * 0.12, h * 0.60, Math.min(w, h) * 0.26, 'rgba(28,18,8,0.14)'],
-      [w * 0.48, h * 0.75, Math.min(w, h) * 0.20, 'rgba(60,22,6,0.12)'],
+      [w * 0.35, h * 0.25, Math.min(w, h) * 0.50, 'rgba(8,22,45,0.16)'],
+      [w * 0.80, h * 0.50, Math.min(w, h) * 0.25, 'rgba(40,15,8,0.05)'],
     ];
     for (const [nx, ny, nr, c] of nebulae) {
       const g = ctx.createRadialGradient(nx, ny, 0, nx, ny, nr);
@@ -131,13 +177,12 @@ export function NetMapPage() {
     }
     let s = 123456789;
     const rand = () => { s = (s * 1664525 + 1013904223) & 0xffffffff; return (s >>> 0) / 0xffffffff; };
-    for (let i = 0; i < 980; i++) {
+    for (let i = 0; i < 350; i++) {
       const px = rand() * w, py = rand() * h;
-      const sz = rand() < 0.04 ? 1.25 : rand() < 0.18 ? 0.70 : 0.42;
-      const al = 0.07 + rand() * 0.55;
-      const tint = rand() < 0.28 ? '#ffd8a0' : rand() < 0.18 ? '#a0c8ff' : '#e8eeff';
-      ctx.globalAlpha = al; ctx.fillStyle = tint;
-      ctx.beginPath(); ctx.arc(px, py, sz, 0, Math.PI * 2); ctx.fill();
+      const sz = rand() * 1 + 0.2;
+      const al = 0.08 + rand() * 0.22;
+      ctx.globalAlpha = al; ctx.fillStyle = 'rgba(120,150,185,1)';
+      ctx.fillRect(px, py, sz, sz);
     }
     ctx.globalAlpha = 1;
   }, []);
@@ -164,7 +209,7 @@ export function NetMapPage() {
       }
       node.failures   = Math.max(node.failures, failures);
       node.services   = [...new Set([...node.services, ...services])];
-      node.dotR       = 2.5 + Math.min(node.failures / 10, 8);
+      node.dotR       = 1.2 + Math.min(node.failures / 15, 3);
       node.lastSeen   = now;
       node.eventCount += evtCount;
       node.agentWeights[agentId] = (node.agentWeights[agentId] ?? 0) + evtCount;
@@ -183,7 +228,7 @@ export function NetMapPage() {
         agentIds: [agentId],
         agentWeights: { [agentId]: evtCount },
         x: ag.x, y: ag.y,
-        dotR: 2.5 + Math.min(failures / 10, 8),
+        dotR: 1.2 + Math.min(failures / 15, 3),
         color: statusColor(status),
         status, failures, services, eventCount: evtCount,
         lastSeen: now,
@@ -451,7 +496,7 @@ export function NetMapPage() {
 
     try {
       const [devRes, evRes, banRes] = await Promise.all([
-        apiClient.get<{ data: { id: number; hostname: string; name: string | null; status: string; updatedAt: string; wsConnected: boolean; groupId: number | null; groupName: string | null; resolvedSettings: { checkIntervalSeconds: number; maxMissedPushes: number } }[] }>('/agent/devices'),
+        apiClient.get<{ data: { id: number; hostname: string; name: string | null; status: string; updatedAt: string; wsConnected: boolean; groupId: number | null; groupName: string | null; deviceType?: string; osInfo?: { platform?: string; os?: string; hostname?: string } | null; resolvedSettings: { checkIntervalSeconds: number; maxMissedPushes: number } }[] }>('/agent/devices'),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         apiClient.get<{ data: any[] }>('/ip-events', { params: { pageSize: 500 } })
           .catch(() => ({ data: { data: [] } })),
@@ -510,7 +555,7 @@ export function NetMapPage() {
       const placed = devs.length > 0
         ? devs.slice(0, 20)
         : [{ id: -1, hostname: 'Server', name: null, status: 'approved',
-             updatedAt: '', wsConnected: true, groupId: null, groupName: null, resolvedSettings: { checkIntervalSeconds: 60, maxMissedPushes: 2 } }];
+             updatedAt: '', wsConnected: true, groupId: null, groupName: null, deviceType: 'agent', osInfo: null, resolvedSettings: { checkIntervalSeconds: 60, maxMissedPushes: 2 } }];
 
       agentsRef.current = placed.map(d => {
         const lastPushAt      = d.updatedAt ? new Date(d.updatedAt).getTime() : 0;
@@ -529,6 +574,8 @@ export function NetMapPage() {
           wsConnected:     d.wsConnected,
           groupId:         d.groupId ?? null,
           groupName:       d.groupName ?? null,
+          deviceColor:     detectDeviceColor(d),
+          deviceType:      detectDeviceType(d),
         };
       });
       layoutAgents(agentsRef.current, w, h);
@@ -601,7 +648,7 @@ export function NetMapPage() {
           agentIds:     validIds,
           agentWeights: weights,
           x: agArr[0]?.x ?? w / 2, y: agArr[0]?.y ?? h / 2,
-          dotR:         2.5 + Math.min((rep?.failures ?? allFailures) / 10, 8),
+          dotR:         1.2 + Math.min((rep?.failures ?? allFailures) / 15, 3),
           color:        statusColor(status),
           status, failures: rep?.failures ?? allFailures,
           services: allServices, eventCount: totalCount,
@@ -629,7 +676,7 @@ export function NetMapPage() {
           country: rep.country, flag: flagEmoji(rep.country),
           agentIds: [targetId], agentWeights: { [targetId]: 0 },
           x: agentMap.get(targetId)!.x, y: agentMap.get(targetId)!.y,
-          dotR:     2.5 + Math.min(rep.failures / 10, 8),
+          dotR:     1.2 + Math.min(rep.failures / 15, 3),
           color:    statusColor(rep.status),
           status:   rep.status, failures: rep.failures, services: rep.services,
           eventCount: 0, lastSeen: Date.now(), glowUntil: 0,
@@ -657,7 +704,7 @@ export function NetMapPage() {
           country: '??', flag: flagEmoji('??'),
           agentIds: [targetId], agentWeights: { [targetId]: 0 },
           x: agentMap.get(targetId)!.x, y: agentMap.get(targetId)!.y,
-          dotR: 3, color: '#22c55e',
+          dotR: 1.5, color: '#22c55e',
           status: 'whitelisted', failures: 0, services: [],
           eventCount: 0, lastSeen: Date.now(), glowUntil: 0,
           whitelistLabel: wle.label,
@@ -786,8 +833,9 @@ export function NetMapPage() {
       }
     }
 
+    const paused = orbitPausedRef.current || clickedIp !== null;
     for (const ip of ipsRef.current.values()) {
-      ip.orbitAngle += ip.orbitSpeed;
+      if (!paused) ip.orbitAngle += ip.orbitSpeed;
 
       // Arrival: fly from spawn point toward orbit target
       if (ip.arriveT < 1) ip.arriveT = Math.min(1, ip.arriveT + 0.012);
@@ -796,11 +844,7 @@ export function NetMapPage() {
         const ag = agMapFull.get(ip.agentIds[0]);
         if (!ag) continue;
         const totalIps = ipsPerAgent.get(ag.id) ?? 1;
-        // Logarithmic orbit radius: dense packing, max ~120px from agent
-        const maxOrbR = ag.r + Math.min(120, 20 + totalIps * 0.8);
-        const minOrbR = ag.r + 14;
-        const t = totalIps <= 1 ? 0 : ip.orbitSlot / (totalIps - 1);
-        const orbR = minOrbR + (maxOrbR - minOrbR) * Math.sqrt(t);
+        const orbR = orbRadius(ag.r, ip.orbitSlot, totalIps);
         const targetX = ag.x + Math.cos(ip.orbitAngle) * orbR;
         const targetY = ag.y + Math.sin(ip.orbitAngle) * orbR * 0.72;
         if (ip.arriveT < 1) {
@@ -844,7 +888,7 @@ export function NetMapPage() {
     if (frameRef.current === 0) {
       let changed = false;
       for (const [key, ip] of ipsRef.current) {
-        if (now - ip.lastSeen > IP_TTL) { ipsRef.current.delete(key); changed = true; }
+        if (now - ip.lastSeen > ipTtlForStatus(ip.status)) { ipsRef.current.delete(key); changed = true; }
       }
       if (changed) setIpCount(ipsRef.current.size);
       // Peer link expiry
@@ -982,22 +1026,19 @@ export function NetMapPage() {
       ctx.restore();
     }
 
-    // ── Faint orbit ellipses around agents ─────────────────────────────
+    // ── Faint orbit ellipses around agents (mockup v5) ─────────────────
     for (const ag of agents) {
-      const conns  = ipsByAgent.get(ag.id) ?? 0;
-      if (conns === 0) continue;
+      const conns = ipsByAgent.get(ag.id) ?? 0;
+      if (conns < 3) continue;
       const dimmed = selId !== null && selId !== ag.id;
-      const maxR = ag.r + Math.min(120, 20 + conns * 0.8);
-      // 2–3 faint ellipses at 33%, 66%, 100% of max orbit radius
-      const lanes = conns > 8 ? 3 : conns > 3 ? 2 : 1;
-      for (let i = 0; i < lanes; i++) {
-        const r = ag.r + 14 + (maxR - ag.r - 14) * ((i + 1) / lanes);
-        ctx.save();
-        ctx.globalAlpha = dimmed ? 0.012 : 0.025 - i * 0.006;
-        ctx.strokeStyle = ag.wsConnected ? 'rgba(70,130,190,0.4)' : '#1e2e3e';
-        ctx.lineWidth = 0.3 / k;
-        ctx.beginPath(); ctx.ellipse(ag.x, ag.y, r, r * 0.72, 0, 0, Math.PI * 2);
-        ctx.stroke(); ctx.restore();
+      if (dimmed) continue;
+      const maxR = orbRadius(ag.r, conns - 1, conns);
+      const layers = Math.min(8, Math.ceil(Math.sqrt(conns * 2)));
+      for (let i = 0; i < layers; i++) {
+        const r = ag.r + (maxR - ag.r) * (i / layers);
+        ctx.strokeStyle = `rgba(100,160,220,${0.02 + 0.005 * Math.min(conns, 50) / 50})`;
+        ctx.lineWidth = 0.3;
+        ctx.beginPath(); ctx.ellipse(ag.x, ag.y, r, r * 0.7, 0, 0, Math.PI * 2); ctx.stroke();
       }
     }
 
@@ -1005,8 +1046,10 @@ export function NetMapPage() {
     for (const ip of ipNodes) {
       if (ip.arriveT < 0.5) continue;
       const dimmed = selId !== null && !ip.agentIds.includes(selId);
-      const ageSec = (now - ip.lastSeen) / 1000;
-      const ageFade = ageSec < IP_FADE_AGE / 1000 ? 1 : Math.max(0, 1 - (ageSec - IP_FADE_AGE / 1000) / 45);
+      const ttl = ipTtlForStatus(ip.status);
+      const ageMs = now - ip.lastSeen;
+      const fadeStart = ttl * IP_FADE_AGE;
+      const ageFade = ageMs < fadeStart ? 1 : Math.max(0, 1 - (ageMs - fadeStart) / (ttl - fadeStart));
       const linkAlpha = (dimmed ? 0.02 : 0.06) * ageFade * ip.arriveT;
       for (const aid of ip.agentIds) {
         const ag = agMap.get(aid);
@@ -1026,8 +1069,10 @@ export function NetMapPage() {
     for (const ip of ipNodes) {
       const dimmed  = selId !== null && !ip.agentIds.includes(selId);
       const glow    = now < ip.glowUntil;
-      const ageSec  = (now - ip.lastSeen) / 1000;
-      const ageFade = ageSec < IP_FADE_AGE / 1000 ? 1 : Math.max(0, 1 - (ageSec - IP_FADE_AGE / 1000) / 45);
+      const ipTtl    = ipTtlForStatus(ip.status);
+      const ipAgeMs  = now - ip.lastSeen;
+      const ipFadeS  = ipTtl * IP_FADE_AGE;
+      const ageFade  = ipAgeMs < ipFadeS ? 1 : Math.max(0, 1 - (ipAgeMs - ipFadeS) / (ipTtl - ipFadeS));
       const alpha   = (dimmed ? 0.10 : 0.85) * ageFade;
 
       // Trail (comet tail)
@@ -1073,34 +1118,26 @@ export function NetMapPage() {
         ctx.restore();
       }
 
-      // IP dot with radial gradient for depth
+      // IP dot — small and subtle, mockup v5 style
+      const bc = ip.status === 'banned' ? [226, 75, 74]
+               : ip.status === 'suspicious' ? [249, 168, 37]
+               : [93, 202, 165];
       ctx.save();
-      ctx.globalAlpha = alpha;
-      const baseColor = ip.status === 'whitelisted' ? '#22c55e'
-                      : ip.status === 'banned'       ? '#ef4444'
-                      : ip.status === 'suspicious'   ? '#f97316'
-                      : '#93a8c0';
-      if (ip.dotR > 3 && !dimmed) {
-        ctx.shadowBlur = ip.dotR * 2.5; ctx.shadowColor = baseColor;
-        const dg = ctx.createRadialGradient(ip.x - ip.dotR * 0.3, ip.y - ip.dotR * 0.3, 0, ip.x, ip.y, ip.dotR);
-        dg.addColorStop(0, '#ffffff');
-        dg.addColorStop(0.35, baseColor);
-        dg.addColorStop(1, baseColor + '40');
-        ctx.fillStyle = dg;
-      } else {
-        ctx.shadowBlur = ip.dotR * 1.5; ctx.shadowColor = baseColor;
-        ctx.fillStyle = baseColor;
-      }
+      ctx.shadowBlur = 1.5 * Math.min(k, 2); ctx.shadowColor = `rgba(${bc[0]},${bc[1]},${bc[2]},${alpha * 0.3})`;
+      ctx.fillStyle = `rgba(${bc[0]},${bc[1]},${bc[2]},${alpha * 0.65})`;
       ctx.beginPath(); ctx.arc(ip.x, ip.y, ip.dotR, 0, Math.PI * 2); ctx.fill();
-
-      // Thin ring outline for readability
-      if (!dimmed && ip.dotR > 2.5) {
-        ctx.globalAlpha = alpha * 0.4;
-        ctx.strokeStyle = baseColor;
-        ctx.lineWidth = 0.5 / k;
-        ctx.beginPath(); ctx.arc(ip.x, ip.y, ip.dotR + 1.5, 0, Math.PI * 2); ctx.stroke();
-      }
+      ctx.shadowBlur = 0;
       ctx.restore();
+
+      // IP label — only at high zoom
+      if (k > 1.5 && !dimmed && alpha > 0.2) {
+        ctx.save();
+        ctx.font = `${Math.round(6 * k)}px "Inconsolata", "JetBrains Mono", monospace`;
+        ctx.fillStyle = `rgba(${bc[0]},${bc[1]},${bc[2]},${alpha * 0.3})`;
+        ctx.textAlign = 'center';
+        ctx.fillText(anonIp(ip.ip), ip.x, ip.y - ip.dotR - 2 * k);
+        ctx.restore();
+      }
 
       if (!dimmed && shouldLabel(ip)) {
         const effectiveLabel = ip.displayLabel ?? ip.whitelistLabel ?? null;
@@ -1113,95 +1150,93 @@ export function NetMapPage() {
       }
     }
 
-    // ── Agent nodes ──────────────────────────────────────────────────────
+    // ── Agent nodes (mockup v5 style) ─────────────────────────────────
     for (const agent of agents) {
       const isSel    = selId === agent.id;
       const dimmed   = selId !== null && !isSel;
       const isOnline = agent.wsConnected;
       const conns    = ipsByAgent.get(agent.id) ?? 0;
-      const breathe  = 1 + conns * 0.006 * Math.sin(ts * 0.003 + agent.phase);
-      const pulse    = (Math.sin(ts / 1100 + agent.phase) + 1) / 2;
-      const alpha    = dimmed ? 0.18 : 1.0;
-      const nr       = agent.r * breathe;
+      const breathe  = 1 + Math.min(conns * 0.002, 0.06) * Math.sin(ts * 0.003 + agent.phase);
+      const col      = agent.deviceColor;
+      const rgb      = hexRgb(col);
+      const effR     = agent.r * breathe;
+      const sx       = agent.x, sy = agent.y;
 
-      // Outer breathing ring
-      ctx.save();
-      ctx.globalAlpha = alpha * (isOnline ? (0.03 + pulse * 0.04) : 0.015);
-      ctx.strokeStyle = isOnline ? '#c8e0ff' : '#4b5563';
-      ctx.shadowBlur  = isOnline ? 20 : 4;
-      ctx.shadowColor = isOnline ? 'rgba(180,210,255,0.5)' : '#4b5563';
-      ctx.lineWidth   = 0.6 / k;
-      ctx.beginPath(); ctx.arc(agent.x, agent.y, nr + 22 + (isOnline ? pulse * 6 : 0), 0, Math.PI * 2);
-      ctx.stroke(); ctx.restore();
-
-      // Inner accent ring (selected = bright, otherwise subtle)
-      if (isSel || isOnline) {
-        ctx.save();
-        ctx.globalAlpha = alpha * (isSel ? 0.25 : 0.06);
-        ctx.strokeStyle = isSel ? '#fbbf24' : '#8bb8e0';
-        ctx.lineWidth   = (isSel ? 1.2 : 0.5) / k;
-        ctx.beginPath(); ctx.arc(agent.x, agent.y, nr + 6, 0, Math.PI * 2);
-        ctx.stroke(); ctx.restore();
+      // Heat glow for heavily targeted agents
+      if (conns > 25) {
+        const heatR = effR + Math.min(conns, 120) * 1.2;
+        const hg = ctx.createRadialGradient(sx, sy, effR, sx, sy, heatR);
+        hg.addColorStop(0, `rgba(226,75,74,${Math.min(0.06, conns * 0.0005)})`);
+        hg.addColorStop(0.6, `rgba(245,166,35,${Math.min(0.03, conns * 0.0003)})`);
+        hg.addColorStop(1, 'transparent');
+        ctx.fillStyle = hg; ctx.beginPath(); ctx.arc(sx, sy, heatR, 0, Math.PI * 2); ctx.fill();
       }
 
-      // Core body — two-layer gradient for depth
-      ctx.save();
-      ctx.globalAlpha = alpha * (isOnline ? 1.0 : 0.40);
-      ctx.shadowBlur  = isOnline ? 22 : 5;
-      ctx.shadowColor = isOnline ? 'rgba(220,240,255,0.7)' : '#475569';
-      const g = ctx.createRadialGradient(
-        agent.x - nr * 0.2, agent.y - nr * 0.2, 0,
-        agent.x, agent.y, nr,
-      );
-      if (isOnline) {
-        g.addColorStop(0, '#ffffff');
-        g.addColorStop(0.30, 'rgba(200,225,255,0.6)');
-        g.addColorStop(0.70, 'rgba(140,180,220,0.15)');
-        g.addColorStop(1, 'rgba(100,150,200,0)');
-      } else {
-        g.addColorStop(0, '#8899aa');
-        g.addColorStop(0.35, 'rgba(80,95,110,0.35)');
-        g.addColorStop(1, 'rgba(55,65,80,0)');
-      }
-      ctx.fillStyle = g;
-      ctx.beginPath(); ctx.arc(agent.x, agent.y, nr, 0, Math.PI * 2); ctx.fill();
-      ctx.restore();
-
-      // Label — larger, with text shadow for pop
-      const fs = Math.round(Math.max(10, 13 * Math.min(k, 1.3)));
-      ctx.save();
-      ctx.globalAlpha  = alpha * (isOnline ? 0.92 : 0.45);
-      ctx.font         = `600 ${fs}px "Inter", "Segoe UI", ui-sans-serif, sans-serif`;
-      ctx.fillStyle    = isOnline ? (isSel ? '#fef3c7' : '#e0ecfa') : '#64748b';
-      ctx.textAlign    = 'center'; ctx.textBaseline = 'bottom';
-      ctx.shadowBlur   = 8; ctx.shadowColor = 'rgba(0,0,0,0.9)';
-      ctx.fillText(agent.label, agent.x, agent.y - nr - 10);
-      ctx.restore();
-
-      // Group name subtitle (small, under label)
-      if (agent.groupName && isOnline && !dimmed && k > 0.5) {
-        const gfs = Math.round(Math.max(7, 8.5 * Math.min(k, 1.2)));
-        ctx.save();
-        ctx.globalAlpha = 0.30;
-        ctx.font        = `400 ${gfs}px "Inter", "Segoe UI", ui-sans-serif, sans-serif`;
-        ctx.fillStyle   = '#8ba0b8';
-        ctx.textAlign   = 'center'; ctx.textBaseline = 'bottom';
-        ctx.shadowBlur  = 4; ctx.shadowColor = 'rgba(0,0,0,0.8)';
-        ctx.fillText(agent.groupName, agent.x, agent.y - nr - 10 - fs - 1);
-        ctx.restore();
+      // Firewall shield arcs (rotating partial arcs)
+      if (agent.deviceType === 'firewall') {
+        for (let i = 1; i <= 2; i++) {
+          const rr = effR * (1.3 + i * 0.5);
+          const rot = ts * 0.0004 * (i % 2 ? 1 : -1);
+          ctx.save(); ctx.translate(sx, sy); ctx.rotate(rot);
+          ctx.beginPath(); ctx.arc(0, 0, rr, -0.2, Math.PI * 0.35);
+          ctx.strokeStyle = `rgba(245,166,35,${0.03 / i})`; ctx.lineWidth = 0.5; ctx.stroke();
+          ctx.beginPath(); ctx.arc(0, 0, rr, Math.PI * 0.7, Math.PI * 1.1);
+          ctx.strokeStyle = `rgba(245,166,35,${0.02 / i})`; ctx.stroke();
+          ctx.restore();
+        }
       }
 
-      // Offline badge
-      if (!isOnline) {
-        const bfs = Math.round(Math.max(7, 9 * Math.min(k, 1.2)));
-        ctx.save();
-        ctx.globalAlpha = alpha * 0.50;
-        ctx.font        = `500 ${bfs}px "Inter", "Segoe UI", ui-sans-serif, sans-serif`;
-        ctx.fillStyle   = '#78909c';
-        ctx.textAlign   = 'center'; ctx.textBaseline = 'top';
-        ctx.shadowBlur  = 4; ctx.shadowColor = 'rgba(0,0,0,0.7)';
-        ctx.fillText('OFFLINE', agent.x, agent.y + nr + 6);
-        ctx.restore();
+      // Body — gradient with bright core (mockup style)
+      const grd = ctx.createRadialGradient(sx - effR * 0.2, sy - effR * 0.2, effR * 0.05, sx, sy, effR);
+      grd.addColorStop(0, 'rgba(255,255,255,0.25)');
+      grd.addColorStop(0.3, col);
+      grd.addColorStop(1, `rgba(${rgb[0]},${rgb[1]},${rgb[2]},0.1)`);
+      ctx.globalAlpha = dimmed ? 0.2 : (isOnline ? 1 : 0.35);
+      ctx.fillStyle = grd; ctx.beginPath(); ctx.arc(sx, sy, effR, 0, Math.PI * 2); ctx.fill();
+
+      // Bright inner core
+      ctx.shadowBlur = effR * 0.5; ctx.shadowColor = col;
+      ctx.fillStyle = col;
+      ctx.beginPath(); ctx.arc(sx, sy, effR * 0.4, 0, Math.PI * 2); ctx.fill();
+      ctx.shadowBlur = 0;
+
+      // Hover ring
+      if (isSel) {
+        ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.arc(sx, sy, agent.r + 5, 0, Math.PI * 2); ctx.stroke();
+      }
+
+      ctx.globalAlpha = 1;
+
+      // Label BELOW agent (mockup style)
+      if (k > 0.4) {
+        const fs = Math.round((agent.r >= 15 ? 10 : 8.5) * Math.min(k, 1.3));
+        ctx.font = `500 ${fs}px "Inter", "Segoe UI", ui-sans-serif, sans-serif`;
+        ctx.fillStyle = dimmed ? 'rgba(200,220,240,0.2)' : 'rgba(200,220,240,0.8)';
+        ctx.textAlign = 'center';
+        ctx.fillText(agent.label, sx, sy + effR + 10 * Math.min(k, 1.3));
+
+        // IP count + group name
+        if (conns > 0 && k > 0.5 && !dimmed) {
+          ctx.font = `${Math.round(7.5 * Math.min(k, 1.2))}px "Inconsolata", "JetBrains Mono", monospace`;
+          ctx.fillStyle = conns > 50 ? 'rgba(226,75,74,0.55)' : conns > 15 ? 'rgba(245,166,35,0.45)' : 'rgba(93,202,165,0.4)';
+          ctx.fillText(conns + ' IPs', sx, sy + effR + 19 * Math.min(k, 1.3));
+        }
+
+        // Group name (subtle)
+        if (agent.groupName && k > 0.6 && !dimmed) {
+          const yOff = conns > 0 ? 27 : 19;
+          ctx.font = `${Math.round(6.5 * Math.min(k, 1.2))}px "Inter", "Segoe UI", ui-sans-serif, sans-serif`;
+          ctx.fillStyle = 'rgba(100,140,190,0.28)';
+          ctx.fillText(agent.groupName.toUpperCase(), sx, sy + effR + yOff * Math.min(k, 1.3));
+        }
+
+        // Offline label
+        if (!isOnline) {
+          ctx.font = `500 ${Math.round(7 * Math.min(k, 1.2))}px "Inter", ui-sans-serif, sans-serif`;
+          ctx.fillStyle = 'rgba(226,75,74,0.5)';
+          ctx.fillText('OFFLINE', sx, sy - effR - 6);
+        }
       }
     }
 
@@ -1682,15 +1717,26 @@ export function NetMapPage() {
     const mx = e.clientX - rect.left, my = e.clientY - rect.top;
     const tr = transformRef.current;
     const wx = (mx - tr.x) / tr.k, wy = (my - tr.y) / tr.k;
+
+    // IP click → open side panel
+    for (const ip of ipsRef.current.values()) {
+      if ((wx - ip.x) ** 2 + (wy - ip.y) ** 2 <= (ip.dotR + 12) ** 2) {
+        setClickedIp(ip);
+        return;
+      }
+    }
+
+    // Agent click → focus
     for (const ag of agentsRef.current) {
       if ((wx - ag.x) ** 2 + (wy - ag.y) ** 2 <= (ag.r + 24) ** 2) {
         const newSel = selectedRef.current === ag.id ? null : ag.id;
         selectedRef.current = newSel;
         setSelectedAgent(newSel !== null ? agentsRef.current.find(a => a.id === newSel) ?? null : null);
+        setClickedIp(null);
         return;
       }
     }
-    selectedRef.current = null; setSelectedAgent(null);
+    selectedRef.current = null; setSelectedAgent(null); setClickedIp(null);
   }, []);
 
   const toggleFilter = useCallback((type: FlowType) => {
@@ -1707,7 +1753,7 @@ export function NetMapPage() {
   // ── JSX ───────────────────────────────────────────────────────────────────
 
   return (
-    <div className="flex flex-col h-[calc(100vh-4rem)] bg-[#030202] overflow-hidden select-none">
+    <div className="flex flex-col h-[calc(100vh-4rem)] bg-[#03070d] overflow-hidden select-none">
 
       {/* ── Header ──────────────────────────────────────────────────────────── */}
       <div className="flex items-center justify-between px-5 py-2 border-b border-[#110c04] shrink-0 bg-[#070502]">
@@ -2003,6 +2049,69 @@ export function NetMapPage() {
                 </span>
               </div>
             )}
+          </div>
+        )}
+
+        {/* ── Pause button ──────────────────────────────────────────────────── */}
+        <button
+          onClick={() => setOrbitPaused(p => !p)}
+          className={`absolute bottom-3 left-3 z-20 px-2.5 py-1 rounded text-[10px] font-mono tracking-wider border transition-colors ${
+            orbitPaused
+              ? 'bg-amber-500/15 text-amber-400 border-amber-500/30'
+              : 'text-slate-600 border-slate-800 hover:text-slate-400 hover:border-slate-600'
+          }`}
+        >
+          {orbitPaused ? '▶ RESUME' : '❚❚ PAUSE'}
+        </button>
+
+        {/* ── IP side panel (on click) ──────────────────────────────────────── */}
+        {clickedIp && (
+          <div className="absolute top-0 right-0 z-30 w-72 h-full bg-[rgba(5,12,22,0.95)] border-l border-[rgba(90,138,181,0.2)] p-4 overflow-y-auto">
+            <div className="flex items-center justify-between mb-4">
+              <span className="font-mono text-xs text-slate-500 uppercase tracking-widest">IP Detail</span>
+              <button onClick={() => setClickedIp(null)} className="text-slate-500 hover:text-white text-lg leading-none">&times;</button>
+            </div>
+            <div className="font-mono text-sm font-semibold mb-1" style={{ color: clickedIp.color }}>
+              {clickedIp.flag} {anonIp(clickedIp.ip)}
+            </div>
+            <div className="text-[10px] uppercase tracking-wider mb-4" style={{ color: clickedIp.status === 'banned' ? '#E24B4A' : clickedIp.status === 'suspicious' ? '#F5A623' : '#5DCAA5' }}>
+              {clickedIp.status}
+            </div>
+            <div className="space-y-2 text-xs mb-5">
+              {[
+                { label: 'Country', value: clickedIp.country },
+                { label: 'Failures', value: String(clickedIp.failures) },
+                { label: 'Events', value: String(clickedIp.eventCount) },
+                { label: 'Services', value: clickedIp.services.join(', ') || '—' },
+              ].map(r => (
+                <div key={r.label} className="flex justify-between">
+                  <span className="text-slate-500">{r.label}</span>
+                  <span className="text-slate-300 font-mono">{r.value}</span>
+                </div>
+              ))}
+            </div>
+            <div className="space-y-1.5">
+              <button onClick={() => { void quickBan(clickedIp.ip); setClickedIp(null); }}
+                className="w-full px-3 py-1.5 rounded text-xs font-medium bg-red-500/15 text-red-400 border border-red-500/25 hover:bg-red-500/25 transition-colors">
+                Ban IP
+              </button>
+              <a href={`https://www.abuseipdb.com/check/${clickedIp.ip}`} target="_blank" rel="noopener noreferrer"
+                className="block w-full px-3 py-1.5 rounded text-xs font-medium text-slate-400 border border-slate-700 hover:border-slate-500 text-center transition-colors">
+                AbuseIPDB
+              </a>
+              <a href={`https://www.shodan.io/host/${clickedIp.ip}`} target="_blank" rel="noopener noreferrer"
+                className="block w-full px-3 py-1.5 rounded text-xs font-medium text-slate-400 border border-slate-700 hover:border-slate-500 text-center transition-colors">
+                Shodan
+              </a>
+              <a href={`https://www.virustotal.com/gui/ip-address/${clickedIp.ip}`} target="_blank" rel="noopener noreferrer"
+                className="block w-full px-3 py-1.5 rounded text-xs font-medium text-slate-400 border border-slate-700 hover:border-slate-500 text-center transition-colors">
+                VirusTotal
+              </a>
+              <Link to={`/ip-reputation?search=${clickedIp.ip}`} onClick={() => setClickedIp(null)}
+                className="block w-full px-3 py-1.5 rounded text-xs font-medium text-cyan-400 border border-cyan-500/25 hover:bg-cyan-500/10 text-center transition-colors">
+                View in IP Reputation
+              </Link>
+            </div>
           </div>
         )}
       </div>

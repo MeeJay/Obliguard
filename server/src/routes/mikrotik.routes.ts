@@ -9,6 +9,8 @@ import {
   testMikroTikConnection,
   syncMikroTikBans,
   pollMikroTikImport,
+  clearMikroTikLogCache,
+  debugMikroTikLogs,
 } from '../controllers/mikrotik.controller';
 
 const router = Router();
@@ -23,6 +25,8 @@ router.get('/:id/credentials', getMikroTikCredentials);
 router.put('/:id/credentials', updateMikroTikCredentials);
 router.post('/:id/test', testMikroTikConnection);
 router.post('/:id/sync-bans', syncMikroTikBans);
+router.post('/:id/clear-log-cache', clearMikroTikLogCache);
+router.get('/:id/debug-logs', debugMikroTikLogs);
 router.post('/import/poll', pollMikroTikImport);
 
 export default router;

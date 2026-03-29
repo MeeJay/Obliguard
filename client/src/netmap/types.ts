@@ -13,6 +13,10 @@ export interface AgentNode {
   wsConnected: boolean;
   groupId: number | null;
   groupName: string | null;
+  /** Device type color (firewall/router/server/windows/desktop). */
+  deviceColor: string;
+  /** Device type label for display. */
+  deviceType: string;
 }
 
 export interface IpNode {

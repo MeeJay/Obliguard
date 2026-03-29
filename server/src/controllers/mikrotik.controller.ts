@@ -79,6 +79,49 @@ export async function syncMikroTikBans(req: Request, res: Response): Promise<voi
   }
 }
 
+export async function clearMikroTikLogCache(req: Request, res: Response): Promise<void> {
+  try {
+    const deviceId = req.params.id ? parseInt(req.params.id, 10) : undefined;
+    const { mikrotikLogPoller } = await import('../services/mikrotik/mikrotikLogPoller.service');
+    mikrotikLogPoller.clearCache(deviceId);
+    res.json({ ok: true, message: `Cache cleared${deviceId ? ` for device ${deviceId}` : ' (all)'}. Next poll will re-seed.` });
+  } catch (err) {
+    res.status(500).json({ error: 'Internal error' });
+  }
+}
+
+export async function debugMikroTikLogs(req: Request, res: Response): Promise<void> {
+  try {
+    const deviceId = parseInt(req.params.id, 10);
+    const { createRouterOSClient } = await import('../services/mikrotik/routerosClient');
+    const { mikrotikDeviceService } = await import('../services/mikrotik/mikrotikDevice.service');
+    const cfg = await mikrotikDeviceService.getRouterOSConfig(deviceId);
+    if (!cfg) { res.status(404).json({ error: 'Credentials not found' }); return; }
+
+    const client = await createRouterOSClient({
+      host: cfg.host, port: cfg.port, useTls: cfg.useTls,
+      username: cfg.username, password: cfg.password,
+    });
+    const entries = await client.getLogEntries();
+    client.close();
+
+    // Show last 20 entries with parse result
+    const { parseMikroTikSyslog } = await import('../services/mikrotik/syslogParser');
+    const last20 = entries.slice(-20).map((e) => ({
+      id: e.id,
+      time: e.time,
+      topics: e.topics,
+      message: e.message,
+      parsed: parseMikroTikSyslog(e.message),
+    }));
+
+    res.json({ total: entries.length, last20 });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ error: msg });
+  }
+}
+
 export async function pollMikroTikImport(req: Request, res: Response): Promise<void> {
   try {
     await mikrotikImport.pollNow();

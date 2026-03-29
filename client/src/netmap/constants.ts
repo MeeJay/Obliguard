@@ -1,7 +1,11 @@
 // ── NetMap Constants ──────────────────────────────────────────────────────────
 
-export const IP_TTL        = 90 * 1000;   // 90 s — IPs fade then disappear if no fresh event
-export const IP_FADE_AGE   = 45 * 1000;   // fade starts at 45 s
+/** IP TTL by status — clean vanish fast, threats linger. */
+export const IP_TTL_CLEAN      = 10 * 1000;   // 10 s — clean IPs blink in and out
+export const IP_TTL_SUSPICIOUS = 5 * 60 * 1000; // 5 min — suspicious stay visible
+export const IP_TTL_BANNED     = 10 * 60 * 1000; // 10 min — banned stay longest
+export const IP_TTL            = 90 * 1000;   // fallback for unknown status
+export const IP_FADE_AGE       = 0.6;         // fraction of TTL where fade starts (60%)
 export const PEER_LINK_TTL = 120 * 1000;  // 120 s — peer links linger after last event
 
 /** Ring layout constants — shared by layout functions and animate(). */
@@ -27,6 +31,16 @@ export const DANGEROUS_SVCS = new Set(['ssh', 'rdp', 'ftp', 'mysql', 'telnet', '
 
 /** Colors used for peer link edges: LAN = subdued blue, WAN = amber/orange */
 export const PEER_LINK_COLOR: Record<'lan' | 'wan', string> = { lan: '#3b82f6', wan: '#f97316' };
+
+/** Device type colors — matching mockup v5 */
+export const DEVICE_TYPE_COLORS: Record<string, string> = {
+  firewall: '#F5A623',   // MikroTik, OPNsense, pfSense
+  router:   '#00cfff',   // network equipment
+  server:   '#7F77DD',   // Linux servers
+  windows:  '#3b82f6',   // Windows machines
+  desktop:  '#5DCAA5',   // workstations
+  default:  '#90c8f0',   // unknown
+};
 
 /** Badge rendering constants */
 export const BADGE_H    = 15;
