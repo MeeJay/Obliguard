@@ -552,6 +552,58 @@ export interface AgentDevice {
   wanMatchingEnabled: boolean;
   /** True when the agent has an active WebSocket command channel to the server. */
   wsConnected: boolean;
+  /** Device type: 'agent' for Go agent binary, 'mikrotik' for remote MikroTik devices. */
+  deviceType: 'agent' | 'mikrotik';
+}
+
+// ============================================
+// MikroTik remote device types
+// ============================================
+
+export interface MikroTikCredentials {
+  id: number;
+  deviceId: number;
+  apiHost: string;
+  apiPort: number;
+  apiUseTls: boolean;
+  apiUsername: string;
+  /** Source IP that syslog arrives from — used to route packets to this device. */
+  syslogIdentifier: string;
+  /** Address-list name to PUSH bans to (export). */
+  addressListName: string;
+  /** Comma-separated address-list names to IMPORT from (e.g. "blacklist,honeypot"). Null = disabled. */
+  importAddressLists: string | null;
+  lastApiConnectedAt: string | null;
+  lastApiError: string | null;
+  lastSyslogAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateMikroTikDeviceRequest {
+  name: string;
+  hostname: string;
+  groupId?: number | null;
+  apiHost: string;
+  apiPort?: number;
+  apiUseTls?: boolean;
+  apiUsername: string;
+  apiPassword: string;
+  syslogIdentifier: string;
+  addressListName?: string;
+  /** Comma-separated address-list names to import from (e.g. "blacklist,honeypot"). */
+  importAddressLists?: string;
+}
+
+export interface UpdateMikroTikCredentialsRequest {
+  apiHost?: string;
+  apiPort?: number;
+  apiUseTls?: boolean;
+  apiUsername?: string;
+  apiPassword?: string;
+  syslogIdentifier?: string;
+  addressListName?: string;
+  importAddressLists?: string | null;
 }
 
 // ============================================

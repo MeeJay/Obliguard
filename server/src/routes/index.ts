@@ -26,6 +26,7 @@ import obligateCallbackRoutes from './obligateCallback.routes';
 import oblitoolsRoutes from './oblitools.routes';
 import systemRoutes from './system.routes';
 import permissionSetsRoutes from './permissionSets.routes';
+import mikrotikRoutes from './mikrotik.routes';
 
 const router = Router();
 
@@ -66,6 +67,7 @@ tenantRouter.use('/ip-reputation', ipReputationRoutes);
   tenantRouter.use('/ip-labels', ipDisplayNamesRoutes);
 tenantRouter.use('/service-templates', serviceTemplatesRoutes);
 tenantRouter.use('/geo', geoRoutes);
+tenantRouter.use('/mikrotik', mikrotikRoutes);
 
 router.use('/', tenantRouter);
 

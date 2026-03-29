@@ -93,7 +93,13 @@ async function main() {
   // 6. Start BanEngine — evaluates IP thresholds and enforces bans every 30s
   banEngine.start();
 
-  // 7. Listen
+  // 7. Start MikroTik syslog listener (UDP) + address-list import poller
+  const { syslogListener } = await import('./services/mikrotik/syslogListener');
+  syslogListener.start();
+  const { mikrotikImport } = await import('./services/mikrotik/mikrotikImport.service');
+  mikrotikImport.start();
+
+  // 8. Listen
   server.listen(config.port, () => {
     logger.info(`Obliguard server listening on port ${config.port}`);
     logger.info(`Environment: ${config.nodeEnv}`);

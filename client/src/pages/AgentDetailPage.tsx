@@ -21,6 +21,7 @@ import type {
 import { SOCKET_EVENTS } from '@obliview/shared';
 import { NotificationTypesPanel } from '@/components/agent/NotificationTypesPanel';
 import { ServiceTemplatesPanel } from '@/components/agent/ServiceTemplatesPanel';
+import { MikroTikPanel } from '@/components/mikrotik/MikroTikPanel';
 import { anonIp, anonHostname, anonUsername } from '@/utils/anonymize';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -823,7 +824,7 @@ function LocalTemplateModal({
 
 // ── TemplatesSection ──────────────────────────────────────────────────────────
 
-function TemplatesSection({ deviceId }: { deviceId: number }) {
+function TemplatesSection({ deviceId, deviceType }: { deviceId: number; deviceType?: 'agent' | 'mikrotik' }) {
   const [localTemplates, setLocalTemplates] = useState<ServiceTemplate[]>([]);
   const [localLoading,   setLocalLoading]   = useState(true);
   const [localExpanded,  setLocalExpanded]  = useState(true);
@@ -859,6 +860,13 @@ function TemplatesSection({ deviceId }: { deviceId: number }) {
 
   return (
     <>
+      {/* MikroTik configuration panel (only for MikroTik devices) */}
+      {deviceType === 'mikrotik' && (
+        <div className="mb-4">
+          <MikroTikPanel deviceId={deviceId} />
+        </div>
+      )}
+
       {/* Global service templates — opt-out model */}
       <ServiceTemplatesPanel
         scope="device"
@@ -1471,7 +1479,7 @@ export function AgentDetailPage() {
               </div>
 
               {/* Templates section */}
-              <TemplatesSection deviceId={devId!} />
+              <TemplatesSection deviceId={devId!} deviceType={device.deviceType} />
 
               {/* Notification Types — per-agent overrides */}
               <NotificationTypesPanel

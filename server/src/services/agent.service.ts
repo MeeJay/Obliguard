@@ -30,6 +30,23 @@ import { banService } from './ban.service';
 import { ipReputationService } from './ipReputation.service';
 import { serviceTemplateService } from './serviceTemplate.service';
 
+// ── MikroTik online detection ────────────────────────────────
+// A MikroTik device is considered online if we received a syslog packet
+// within the last 5 minutes.
+const MIKROTIK_ONLINE_TIMEOUT_MS = 5 * 60 * 1000;
+const mikrotikLastSeen = new Map<number, number>(); // deviceId → timestamp ms
+
+/** Mark a MikroTik device as seen (called from syslog listener). */
+export function markMikrotikSeen(deviceId: number): void {
+  mikrotikLastSeen.set(deviceId, Date.now());
+}
+
+function isMikrotikOnline(deviceId: number): boolean {
+  const last = mikrotikLastSeen.get(deviceId);
+  if (!last) return false;
+  return (Date.now() - last) < MIKROTIK_ONLINE_TIMEOUT_MS;
+}
+
 // ── RFC-1918 helper ─────────────────────────────────────────
 function isRfc1918(ip: string): boolean {
   const parts = ip.split('.').map(Number);
@@ -183,7 +200,10 @@ function rowToDevice(
     lastThreatAt: row.last_threat_at ? row.last_threat_at.toISOString() : null,
     lastAttackAt: row.last_attack_at ? row.last_attack_at.toISOString() : null,
     wanMatchingEnabled: row.wan_matching_enabled ?? false,
-    wsConnected: obliguardHub.isConnected(row.uuid),
+    wsConnected: row.device_type === 'mikrotik'
+      ? isMikrotikOnline(row.id)
+      : obliguardHub.isConnected(row.uuid),
+    deviceType: (row.device_type as 'agent' | 'mikrotik') ?? 'agent',
   };
 }
 

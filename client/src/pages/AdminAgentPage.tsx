@@ -18,6 +18,7 @@ import {
   PowerOff,
   X,
   Settings2,
+  Router,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { SOCKET_EVENTS } from '@obliview/shared';
@@ -28,6 +29,7 @@ import { getSocket } from '@/socket/socketClient';
 import { Button } from '@/components/common/Button';
 import { Input } from '@/components/common/Input';
 import { useUiStore } from '@/store/uiStore';
+import { AddMikroTikModal } from '@/components/mikrotik/AddMikroTikModal';
 import { anonHostname, anonIp } from '@/utils/anonymize';
 import toast from 'react-hot-toast';
 
@@ -512,6 +514,7 @@ export function AdminAgentPage() {
   const [groups, setGroups] = useState<MonitorGroup[]>([]);
 
   const { openAddAgentModal } = useUiStore();
+  const [showAddMikroTik, setShowAddMikroTik] = useState(false);
   const [showCreateKey, setShowCreateKey] = useState(false);
   const [newKeyName, setNewKeyName] = useState('');
   const [saving, setSaving] = useState(false);
@@ -839,6 +842,9 @@ export function AdminAgentPage() {
           >
             <RefreshCw size={14} />
           </button>
+          <Button variant="secondary" onClick={() => setShowAddMikroTik(true)}>
+            <Router size={14} className="mr-1.5" />Add MikroTik
+          </Button>
           <Button onClick={openAddAgentModal}>
             <Plus size={14} className="mr-1.5" />Add Agent
           </Button>
@@ -1196,6 +1202,12 @@ export function AdminAgentPage() {
           onCancel={() => setShowBulkEditModal(false)}
         />
       )}
+
+      <AddMikroTikModal
+        open={showAddMikroTik}
+        onClose={() => setShowAddMikroTik(false)}
+        onCreated={() => { fetchDevices(); toast.success('MikroTik device created'); }}
+      />
     </div>
   );
 }

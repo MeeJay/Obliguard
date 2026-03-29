@@ -142,6 +142,12 @@ class BanService {
       .returning('*') as BanRow[];
 
     _io?.emit('ban:created', rowToBan(row, isAdmin));
+
+    // Push ban to MikroTik devices (fire-and-forget)
+    import('./mikrotik/mikrotikBanSync.service')
+      .then(({ mikrotikBanSync }) => mikrotikBanSync.pushBanToAll(data.ip, 'ban'))
+      .catch(() => {});
+
     return rowToBan(row, isAdmin);
   }
 
@@ -170,6 +176,11 @@ class BanService {
 
     await db('ip_bans').where('id', banId).update({ is_active: false });
     _io?.emit('ban:lifted', { id: banId });
+
+    // Push unban to MikroTik devices (fire-and-forget)
+    import('./mikrotik/mikrotikBanSync.service')
+      .then(({ mikrotikBanSync }) => mikrotikBanSync.pushBanToAll(ban.ip, 'unban'))
+      .catch(() => {});
   }
 
   /**
@@ -391,6 +402,11 @@ class BanEngine {
 
     logger.info({ ip, service, failureCount }, 'BanEngine: auto-banned IP');
     _io?.emit('ban:auto', { ip, service, failureCount, originTenantId });
+
+    // Push auto-ban to MikroTik devices (fire-and-forget)
+    import('./mikrotik/mikrotikBanSync.service')
+      .then(({ mikrotikBanSync }) => mikrotikBanSync.pushBanToAll(ip, 'ban'))
+      .catch(() => {});
 
     // ── Mark origin agents as "under attack" ──────────────────────────────────
     // Find agent devices that had recent auth_failure events from this IP (last 10 min)
