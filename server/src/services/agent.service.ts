@@ -119,6 +119,8 @@ interface AgentDeviceRow {
   last_attack_at: Date | null;
   // migration 005 (Obliguard)
   wan_matching_enabled: boolean;
+  // migration 017 (MikroTik)
+  device_type: string;
 }
 
 function rowToApiKey(row: AgentApiKeyRow): AgentApiKey {
