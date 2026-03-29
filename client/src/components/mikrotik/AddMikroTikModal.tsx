@@ -179,7 +179,10 @@ export function AddMikroTikModal({ open, onClose, onCreated }: Props) {
                 </div>
               </div>
               <label className="flex items-center gap-2 mt-2 text-xs text-text-muted cursor-pointer">
-                <input type="checkbox" checked={apiUseTls} onChange={e => setApiUseTls(e.target.checked)} className="rounded border-border" />
+                <input type="checkbox" checked={apiUseTls} onChange={e => {
+                  setApiUseTls(e.target.checked);
+                  setApiPort(e.target.checked ? '8729' : '8728');
+                }} className="rounded border-border" />
                 Use TLS (port 8729)
               </label>
             </div>

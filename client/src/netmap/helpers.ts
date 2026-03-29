@@ -69,6 +69,33 @@ export function matchWhitelist(ip: string, entries: WlEntry[]): WlEntry | null {
   return null;
 }
 
+// ── Orbital defaults for new IpNodes ──────────────────────────────────────────
+
+/** Generate orbital motion fields for a new IpNode. */
+export function makeOrbitalFields(ip: string, canvasW: number, canvasH: number): {
+  orbitAngle: number; orbitSpeed: number; orbitSlot: number;
+  arriveT: number; spawnX: number; spawnY: number; trail: { x: number; y: number }[];
+} {
+  const r1 = ipRand(ip, 42);
+  const r2 = ipRand(ip, 77);
+  const edge = ipRand(ip, 99);
+  let sx: number, sy: number;
+  if (edge < 0.25) { sx = r1 * canvasW; sy = -30; }
+  else if (edge < 0.5) { sx = canvasW + 30; sy = r1 * canvasH * 0.6; }
+  else if (edge < 0.75) { sx = -30; sy = r1 * canvasH * 0.6; }
+  else { sx = canvasW * 0.2 + r1 * canvasW * 0.6; sy = -30; }
+
+  return {
+    orbitAngle: r1 * Math.PI * 2,
+    orbitSpeed: (0.0008 + r2 * 0.0018) * (r1 < 0.5 ? 1 : -1),
+    orbitSlot: 0,
+    arriveT: 0,
+    spawnX: sx,
+    spawnY: sy,
+    trail: [],
+  };
+}
+
 // ── Convex hull (Graham scan) ─────────────────────────────────────────────────
 
 export function convexHull(points: { x: number; y: number }[]): { x: number; y: number }[] {

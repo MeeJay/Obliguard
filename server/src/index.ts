@@ -93,7 +93,9 @@ async function main() {
   // 6. Start BanEngine — evaluates IP thresholds and enforces bans every 30s
   banEngine.start();
 
-  // 7. Start MikroTik address-list import poller
+  // 7. Start MikroTik pollers (log pull via API + address-list import)
+  const { mikrotikLogPoller } = await import('./services/mikrotik/mikrotikLogPoller.service');
+  mikrotikLogPoller.start();
   const { mikrotikImport } = await import('./services/mikrotik/mikrotikImport.service');
   mikrotikImport.start();
 

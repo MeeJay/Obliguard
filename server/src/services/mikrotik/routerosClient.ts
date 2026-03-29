@@ -298,6 +298,34 @@ export class RouterOSClient {
     return ips;
   }
 
+  /**
+   * Fetch recent log entries. Returns an array of { id, time, topics, message }.
+   * RouterOS /log/print returns entries with attributes:
+   *   =.id=  =time=  =topics=  =message=
+   */
+  async getLogEntries(topics?: string): Promise<Array<{ id: string; time: string; topics: string; message: string }>> {
+    const cmd = ['/log/print'];
+    if (topics) {
+      // Filter by topic (e.g., "system" to get auth-related entries)
+      cmd.push(`?topics=${topics}`);
+    }
+    const result = await this.sendAndWait(cmd);
+
+    const entries: Array<{ id: string; time: string; topics: string; message: string }> = [];
+    for (const sentence of result) {
+      if (sentence[0] !== '!re') continue;
+      const entry = { id: '', time: '', topics: '', message: '' };
+      for (const word of sentence) {
+        if (word.startsWith('=.id=')) entry.id = word.slice(5);
+        else if (word.startsWith('=time=')) entry.time = word.slice(6);
+        else if (word.startsWith('=topics=')) entry.topics = word.slice(8);
+        else if (word.startsWith('=message=')) entry.message = word.slice(9);
+      }
+      if (entry.message) entries.push(entry);
+    }
+    return entries;
+  }
+
   close(): void {
     this.socket?.destroy();
     this.socket = null;

@@ -23,13 +23,14 @@ import { anonHostname, anonIp } from '../utils/anonymize';
 import type { AgentNode, IpNode, Particle, Ripple, LiveEvent, AgentPeerLink, WlEntry } from '../netmap/types';
 import {
   IP_TTL, IP_FADE_AGE, PEER_LINK_TTL,
-  RING_INNER_R, RING_GAP, PER_RING, ARC_START, ARC_SPAN,
+  RING_INNER_R,
   EVENT_COLORS, DANGEROUS_SVCS, PEER_LINK_COLOR,
   BADGE_H, BADGE_FONT,
 } from '../netmap/constants';
 import {
   flagEmoji, svcColor, isDangerousSvc, statusColor, agentExclusionR,
   shouldLabel, ipToInt, matchWhitelist, badgeText, drawBadgeAt,
+  makeOrbitalFields,
 } from '../netmap/helpers';
 import {
   placeIp, distributeIpsAroundAgents, relayoutIps, layoutAgents,
@@ -175,6 +176,7 @@ export function NetMapPage() {
     } else {
       const agentMap = new Map(agents.map(a => [a.id, a]));
       const ag = agentMap.get(agentId)!;
+      const { w: cW, h: cH } = sizeRef.current;
       const node: IpNode = {
         key: ip, ip,
         country, flag: flagEmoji(country),
@@ -186,6 +188,7 @@ export function NetMapPage() {
         status, failures, services, eventCount: evtCount,
         lastSeen: now,
         glowUntil: glow ? now + 2500 : 0,
+        ...makeOrbitalFields(ip, cW, cH),
       };
       placeIp(node, agentMap);
       map.set(ip, node);
@@ -605,6 +608,7 @@ export function NetMapPage() {
           lastSeen: Date.now(), glowUntil: 0,
           whitelistLabel: matchWhitelist(evIp, wlEntries)?.label,
           displayLabel:   displayNameMap.get(evIp) ?? null,
+          ...makeOrbitalFields(evIp, w, h),
         };
         ipsRef.current.set(evIp, node);
         cnt++;
@@ -631,6 +635,7 @@ export function NetMapPage() {
           eventCount: 0, lastSeen: Date.now(), glowUntil: 0,
           whitelistLabel: matchWhitelist(repIp, wlEntries)?.label,
           displayLabel:   displayNameMap.get(repIp) ?? null,
+          ...makeOrbitalFields(repIp, w, h),
         };
         ipsRef.current.set(repIp, node);
         cnt++;
@@ -657,6 +662,7 @@ export function NetMapPage() {
           eventCount: 0, lastSeen: Date.now(), glowUntil: 0,
           whitelistLabel: wle.label,
           displayLabel:   displayNameMap.get(wle.plainIp) ?? null,
+          ...makeOrbitalFields(wle.plainIp, w, h),
         };
         ipsRef.current.set(wle.plainIp, node);
         cnt++;
@@ -675,6 +681,21 @@ export function NetMapPage() {
 
       // Batch layout with repulsion (initial geometric placement)
       distributeIpsAroundAgents(agentsRef.current, [...ipsRef.current.values()], w, h);
+
+      // Assign orbit slots per agent — sequential so they don't overlap
+      const slotCounters = new Map<number, number>();
+      for (const ip of ipsRef.current.values()) {
+        if (ip.agentIds.length === 1) {
+          const aid = ip.agentIds[0];
+          const slot = slotCounters.get(aid) ?? 0;
+          ip.orbitSlot = slot;
+          ip.arriveT = 1; // already on screen from init
+          slotCounters.set(aid, slot + 1);
+        } else {
+          ip.orbitSlot = 0;
+          ip.arriveT = 1;
+        }
+      }
       setIpCount(ipsRef.current.size);
 
       // ── Initialize force simulation with current positions ──────────────
@@ -744,19 +765,64 @@ export function NetMapPage() {
 
     const now = Date.now(); // hoisted — used for age/fade throughout the frame
 
-    // ── Force simulation tick ───────────────────────────────────────────────
+    // ── Force simulation tick (agents only — IPs orbit around them) ─────
     const sim = simRef.current;
     if (sim && sim.isActive) {
       sim.tick(3);
-      // Copy simulation positions back to agent/IP refs
       for (const ag of agentsRef.current) {
         const sn = sim.getNode(`a:${ag.id}`);
         if (sn) { ag.x = sn.x; ag.y = sn.y; }
       }
-      for (const ip of ipsRef.current.values()) {
-        const sn = sim.getNode(`ip:${ip.ip}`);
-        if (sn) { ip.x = sn.x; ip.y = sn.y; }
+    }
+
+    // ── IP orbital motion ─────────────────────────────────────────────────
+    const agMapFull = new Map(agentsRef.current.map(a => [a.id, a]));
+    for (const ip of ipsRef.current.values()) {
+      ip.orbitAngle += ip.orbitSpeed;
+
+      // Arrival: fly from spawn point toward orbit target
+      if (ip.arriveT < 1) ip.arriveT = Math.min(1, ip.arriveT + 0.012);
+
+      if (ip.agentIds.length === 1) {
+        const ag = agMapFull.get(ip.agentIds[0]);
+        if (!ag) continue;
+        const orbR = ag.r + 18 + ip.orbitSlot * 10;
+        const targetX = ag.x + Math.cos(ip.orbitAngle) * orbR;
+        const targetY = ag.y + Math.sin(ip.orbitAngle) * orbR * 0.72;
+        if (ip.arriveT < 1) {
+          ip.x = ip.spawnX + (targetX - ip.spawnX) * ip.arriveT;
+          ip.y = ip.spawnY + (targetY - ip.spawnY) * ip.arriveT;
+        } else {
+          ip.x = targetX;
+          ip.y = targetY;
+        }
+      } else if (ip.agentIds.length > 1) {
+        // Multi-agent: elliptical orbit around midpoint
+        const ags = ip.agentIds.map(id => agMapFull.get(id)).filter(Boolean) as AgentNode[];
+        if (ags.length < 2) continue;
+        const totalW = ags.reduce((s, ag) => s + (ip.agentWeights[ag.id] ?? 1), 0) || 1;
+        let cx = 0, cy = 0;
+        for (const ag of ags) { const wt = (ip.agentWeights[ag.id] ?? 1) / totalW; cx += ag.x * wt; cy += ag.y * wt; }
+        const dx = ags[1].x - ags[0].x, dy = ags[1].y - ags[0].y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 80;
+        const linkAngle = Math.atan2(dy, dx);
+        const ex = dist * 0.45, ey = Math.max(25, dist * 0.2);
+        const lx = ex * Math.cos(ip.orbitAngle), ly = ey * Math.sin(ip.orbitAngle);
+        const cosA = Math.cos(linkAngle), sinA = Math.sin(linkAngle);
+        const targetX = cx + lx * cosA - ly * sinA;
+        const targetY = cy + lx * sinA + ly * cosA;
+        if (ip.arriveT < 1) {
+          ip.x = ip.spawnX + (targetX - ip.spawnX) * ip.arriveT;
+          ip.y = ip.spawnY + (targetY - ip.spawnY) * ip.arriveT;
+        } else {
+          ip.x = targetX;
+          ip.y = targetY;
+        }
       }
+
+      // Trail
+      ip.trail.push({ x: ip.x, y: ip.y });
+      if (ip.trail.length > 10) ip.trail.shift();
     }
 
     // IP + peer link expiry every ~5 s
@@ -901,61 +967,40 @@ export function NetMapPage() {
       ctx.restore();
     }
 
-    // ── Orbital rings (faint arcs at each ring radius) ─────────────────
+    // ── Faint orbit ellipses around agents ─────────────────────────────
     for (const ag of agents) {
-      const ipCount  = ipsByAgent.get(ag.id) ?? 0;
-      if (ipCount === 0) continue;
-      const rings    = Math.ceil(ipCount / PER_RING);
-      const dimmed   = selId !== null && selId !== ag.id;
-      const agOnline = ag.wsConnected;
-      for (let ring = 0; ring < rings; ring++) {
-        const r = RING_INNER_R + ring * RING_GAP;
+      const conns  = ipsByAgent.get(ag.id) ?? 0;
+      if (conns === 0) continue;
+      const dimmed = selId !== null && selId !== ag.id;
+      // Show up to 3 faint orbit lanes
+      const lanes = Math.min(3, Math.ceil(conns / 6));
+      for (let i = 0; i < lanes; i++) {
+        const r = ag.r + 18 + i * 10 * 3;
         ctx.save();
-        const baseAlpha = dimmed ? 0.008 : 0.030 - ring * 0.005;
-        ctx.globalAlpha = agOnline ? Math.max(baseAlpha, 0.005) : Math.max(baseAlpha * 0.3, 0.003);
-        ctx.strokeStyle = agOnline ? '#5a9abb' : '#3a4858';
-        ctx.lineWidth   = 0.4 / k;
-        // Draw only the 240° arc where IPs sit, not a full circle
-        ctx.beginPath(); ctx.arc(ag.x, ag.y, r, ARC_START, ARC_START + ARC_SPAN);
+        ctx.globalAlpha = dimmed ? 0.015 : 0.03 - i * 0.008;
+        ctx.strokeStyle = ag.wsConnected ? 'rgba(80,140,200,0.5)' : '#2a3a4a';
+        ctx.lineWidth = 0.3 / k;
+        ctx.beginPath(); ctx.ellipse(ag.x, ag.y, r, r * 0.72, 0, 0, Math.PI * 2);
         ctx.stroke(); ctx.restore();
       }
     }
 
-    // ── IP–agent edges ────────────────────────────────────────────────────
-    // All flows in Obliguard are inbound (external IP → protected agent).
-    // Animated only for IPs active in the last 8 s; older = faint static line.
+    // ── IP thin link lines to agents ──────────────────────────────────────
     for (const ip of ipNodes) {
-      const ageSec   = (now - ip.lastSeen) / 1000;
-      const isRecent = ageSec < 8;
-      const ageFade  = ageSec < IP_FADE_AGE / 1000 ? 1 : Math.max(0, 1 - (ageSec - IP_FADE_AGE / 1000) / 45);
-      const dimmed   = selId !== null && !ip.agentIds.includes(selId);
-      const baseAlpha = dimmed   ? 0.03
-                      : isRecent ? (selId !== null ? 0.60 : 0.38)
-                      :            0.09 * ageFade;
-      const edgeColor = ip.status === 'banned'      ? '#ef4444'
-                      : ip.status === 'suspicious'  ? '#f97316'
-                      : ip.status === 'whitelisted' ? '#22c55e'
-                      : ip.failures > 0             ? '#fbbf24'
-                      :                               '#38bdf8';
-      const thickness = (isRecent ? 1.5 + Math.min(ip.eventCount / 25, 2.0) : 0.5) / k;
+      if (ip.arriveT < 0.5) continue;
+      const dimmed = selId !== null && !ip.agentIds.includes(selId);
+      const ageSec = (now - ip.lastSeen) / 1000;
+      const ageFade = ageSec < IP_FADE_AGE / 1000 ? 1 : Math.max(0, 1 - (ageSec - IP_FADE_AGE / 1000) / 45);
+      const linkAlpha = (dimmed ? 0.02 : 0.06) * ageFade * ip.arriveT;
       for (const aid of ip.agentIds) {
         const ag = agMap.get(aid);
         if (!ag) continue;
         ctx.save();
-        ctx.globalAlpha = baseAlpha;
-        ctx.strokeStyle = edgeColor;
-        ctx.lineWidth   = thickness;
-        if (isRecent) {
-          // Animated: inbound (suspicious/banned) = IP→agent, outbound (clean) = agent→IP
-          const isInbound = ip.failures > 0 || ip.status === 'banned' || ip.status === 'suspicious';
-          ctx.setLineDash([3, 7]);
-          ctx.lineDashOffset = isInbound ? -(ts / 50) % 10 : (ts / 50) % 10;
-        } else {
-          ctx.setLineDash([1, 14]);
-          ctx.lineDashOffset = 0;
-        }
-        ctx.beginPath(); ctx.moveTo(ip.x, ip.y); ctx.lineTo(ag.x, ag.y);
-        ctx.stroke(); ctx.setLineDash([]); ctx.restore();
+        ctx.globalAlpha = linkAlpha;
+        ctx.strokeStyle = ip.status === 'banned' ? '#ef4444' : ip.status === 'suspicious' ? '#f97316' : '#3a6a8a';
+        ctx.lineWidth = 0.3 / k;
+        ctx.beginPath(); ctx.moveTo(ip.x, ip.y); ctx.lineTo(ag.x, ag.y); ctx.stroke();
+        ctx.restore();
       }
     }
 
@@ -968,6 +1013,15 @@ export function NetMapPage() {
       const ageSec  = (now - ip.lastSeen) / 1000;
       const ageFade = ageSec < IP_FADE_AGE / 1000 ? 1 : Math.max(0, 1 - (ageSec - IP_FADE_AGE / 1000) / 45);
       const alpha   = (dimmed ? 0.10 : 0.85) * ageFade;
+
+      // Trail (comet tail)
+      if (ip.trail.length > 1 && !dimmed && alpha > 0.1) {
+        for (let ti = 0; ti < ip.trail.length - 1; ti++) {
+          const ta = (ti / ip.trail.length) * alpha * 0.2;
+          ctx.fillStyle = `rgba(${ip.status === 'banned' ? '226,75,74' : ip.status === 'suspicious' ? '249,115,22' : '93,202,165'},${ta})`;
+          ctx.beginPath(); ctx.arc(ip.trail[ti].x, ip.trail[ti].y, 0.6 / k, 0, Math.PI * 2); ctx.fill();
+        }
+      }
 
       // Persistent banned pulse (slow throb)
       if (ip.status === 'banned' && !dimmed) {
@@ -1048,9 +1102,11 @@ export function NetMapPage() {
       const isSel    = selId === agent.id;
       const dimmed   = selId !== null && !isSel;
       const isOnline = agent.wsConnected;
+      const conns    = ipsByAgent.get(agent.id) ?? 0;
+      const breathe  = 1 + conns * 0.006 * Math.sin(ts * 0.003 + agent.phase);
       const pulse    = (Math.sin(ts / 1100 + agent.phase) + 1) / 2;
       const alpha    = dimmed ? 0.18 : 1.0;
-      const nr       = agent.r;
+      const nr       = agent.r * breathe;
 
       // Outer breathing ring
       ctx.save();

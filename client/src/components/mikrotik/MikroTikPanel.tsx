@@ -175,7 +175,10 @@ export function MikroTikPanel({ deviceId, mikrotikStatus }: Props) {
             </div>
             <div className="flex items-end pb-1">
               <label className="flex items-center gap-2 text-xs text-text-muted cursor-pointer">
-                <input type="checkbox" checked={apiUseTls} onChange={e => setApiUseTls(e.target.checked)} className="rounded border-border" />
+                <input type="checkbox" checked={apiUseTls} onChange={e => {
+                  setApiUseTls(e.target.checked);
+                  setApiPort(e.target.checked ? '8729' : '8728');
+                }} className="rounded border-border" />
                 TLS (port 8729)
               </label>
             </div>

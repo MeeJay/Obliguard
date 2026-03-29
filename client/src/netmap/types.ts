@@ -35,6 +35,21 @@ export interface IpNode {
   whitelistLabel?: string | null;
   /** Custom display label from ip_display_names — shown for any status. */
   displayLabel?: string | null;
+
+  // ── Orbital motion ──────────────────────────────────────────────────────
+  /** Current orbit angle (radians). */
+  orbitAngle: number;
+  /** Orbit speed (radians per frame). Positive = CCW, negative = CW. */
+  orbitSpeed: number;
+  /** Orbit slot index — determines distance from agent center. */
+  orbitSlot: number;
+  /** 0→1 arrival progress. When < 1, IP is flying in from spawn point. */
+  arriveT: number;
+  /** Spawn position (edge of canvas) for arrival animation. */
+  spawnX: number;
+  spawnY: number;
+  /** Trail of recent positions for comet tail effect. */
+  trail: { x: number; y: number }[];
 }
 
 export interface Particle {
