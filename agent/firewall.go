@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 )
 
@@ -518,10 +519,12 @@ func (f *WindowsFirewall) Flush() error {
 	}
 	f.dirty = false
 
-	var ips []string
+	// Build sorted IP list for deterministic chunking
+	ips := make([]string, 0, len(f.cache))
 	for ip := range f.cache {
 		ips = append(ips, ip)
 	}
+	sort.Strings(ips)
 
 	// 1. Persist to file (source of truth — survives crashes)
 	f.saveBanlist(ips)
@@ -557,9 +560,8 @@ func (f *WindowsFirewall) saveBanlist(ips []string) {
 	}
 }
 
-// maxIPsPerRule keeps the netsh command line under Windows' ~32KB limit.
-// 2000 IPs * ~15 chars each ≈ 30KB.
-const maxIPsPerRule = 2000
+// maxIPsPerRule — Windows Firewall limits rules to 1000 remote addresses.
+const maxIPsPerRule = 1000
 
 func (f *WindowsFirewall) syncRules(ips []string) error {
 	if f.appliedChunks == nil {
@@ -607,17 +609,18 @@ func (f *WindowsFirewall) syncRules(ips []string) error {
 	}
 
 	// Delete any extra chunks from previous syncs (if IP count decreased)
-	for i := len(chunks); i < len(chunks)+10; i++ {
-		if _, ok := f.appliedChunks[i]; !ok {
-			continue
+	for i := len(chunks); i < len(chunks)+50; i++ {
+		key := i
+		if _, ok := f.appliedChunks[key]; !ok {
+			break // no more old chunks
 		}
 		suffix := fmt.Sprintf("-%d", i+1)
 		exec.Command("netsh", "advfirewall", "firewall", "delete", "rule", "name="+winRuleIn+suffix).Run()
 		exec.Command("netsh", "advfirewall", "firewall", "delete", "rule", "name="+winRuleOut+suffix).Run()
-		delete(f.appliedChunks, i)
+		delete(f.appliedChunks, key)
 		updated++
 	}
-	// Also clean the base name if we now have multiple chunks
+	// Clean base name (no suffix) if we use numbered chunks
 	if len(chunks) > 1 {
 		exec.Command("netsh", "advfirewall", "firewall", "delete", "rule", "name="+winRuleIn).Run()
 		exec.Command("netsh", "advfirewall", "firewall", "delete", "rule", "name="+winRuleOut).Run()
