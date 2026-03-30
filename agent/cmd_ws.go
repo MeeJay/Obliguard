@@ -229,31 +229,34 @@ func applyOGConfig(cfg *Config, lw *LogWatcher, fw FirewallManager, msg *cmdConf
 		}
 	}
 
-	// Apply ban delta immediately
-	if msg.BanList != nil {
-		addCount, addErr := 0, 0
-		for _, ip := range msg.BanList.Add {
-			if err := fw.BanIP(ip); err != nil {
-				addErr++
-			} else {
-				addCount++
+	// Apply ban delta in background (Flush can be slow on Windows with many rules)
+	if msg.BanList != nil && (len(msg.BanList.Add) > 0 || len(msg.BanList.Remove) > 0) {
+		banAdd := msg.BanList.Add
+		banRem := msg.BanList.Remove
+		go func() {
+			addCount, addErr := 0, 0
+			for _, ip := range banAdd {
+				if err := fw.BanIP(ip); err != nil {
+					addErr++
+				} else {
+					addCount++
+				}
 			}
-		}
-		remCount, remErr := 0, 0
-		for _, ip := range msg.BanList.Remove {
-			if err := fw.UnbanIP(ip); err != nil {
-				remErr++
-			} else {
-				remCount++
+			remCount, remErr := 0, 0
+			for _, ip := range banRem {
+				if err := fw.UnbanIP(ip); err != nil {
+					remErr++
+				} else {
+					remCount++
+				}
 			}
-		}
-		// Flush buffered changes (nftables/ipset/Windows: single batch call)
-		if err := fw.Flush(); err != nil {
-			log.Printf("Firewall flush: %v", err)
-		}
-		if addCount > 0 || remCount > 0 || addErr > 0 || remErr > 0 {
-			log.Printf("Firewall: +%d banned, -%d unbanned (errors: +%d/-%d)", addCount, remCount, addErr, remErr)
-		}
+			if err := fw.Flush(); err != nil {
+				log.Printf("Firewall flush: %v", err)
+			}
+			if addCount > 0 || remCount > 0 || addErr > 0 || remErr > 0 {
+				log.Printf("Firewall: +%d banned, -%d unbanned (errors: +%d/-%d)", addCount, remCount, addErr, remErr)
+			}
+		}()
 	}
 
 	// Update log watcher service configs

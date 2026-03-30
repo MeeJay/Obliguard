@@ -801,8 +801,9 @@ func (f *WindowsFirewall) saveBanlist(ips []string) {
 	}
 }
 
-// maxIPsPerRule — Windows Firewall limits rules to 1000 remote addresses.
-const maxIPsPerRule = 1000
+// maxIPsPerRule — conservative limit for Windows Firewall reliability.
+// netsh can fail silently with large remoteip lists; 500 is safe.
+const maxIPsPerRule = 500
 
 func (f *WindowsFirewall) syncRules(ips []string) error {
 	if f.appliedChunks == nil {
@@ -814,7 +815,6 @@ func (f *WindowsFirewall) syncRules(ips []string) error {
 
 	for i, chunk := range chunks {
 		ipList := strings.Join(chunk, ",")
-		// Skip this chunk if it hasn't changed
 		if f.appliedChunks[i] == ipList {
 			continue
 		}
@@ -826,23 +826,22 @@ func (f *WindowsFirewall) syncRules(ips []string) error {
 		nameIn := winRuleIn + suffix
 		nameOut := winRuleOut + suffix
 
-		// Delete then recreate this chunk only
 		exec.Command("netsh", "advfirewall", "firewall", "delete", "rule", "name="+nameIn).Run()
 		exec.Command("netsh", "advfirewall", "firewall", "delete", "rule", "name="+nameOut).Run()
 
-		if err := exec.Command("netsh", "advfirewall", "firewall", "add", "rule",
+		if out, err := exec.Command("netsh", "advfirewall", "firewall", "add", "rule",
 			"name="+nameIn, "dir=in", "action=block",
 			"remoteip="+ipList, "enable=yes",
 			"description=Obliguard blocked IPs",
-		).Run(); err != nil {
-			log.Printf("Firewall: failed to add rule %s: %v", nameIn, err)
+		).CombinedOutput(); err != nil {
+			log.Printf("Firewall: rule %s FAILED: %v — %s", nameIn, err, strings.TrimSpace(string(out)))
 		}
-		if err := exec.Command("netsh", "advfirewall", "firewall", "add", "rule",
+		if out, err := exec.Command("netsh", "advfirewall", "firewall", "add", "rule",
 			"name="+nameOut, "dir=out", "action=block",
 			"remoteip="+ipList, "enable=yes",
 			"description=Obliguard blocked IPs",
-		).Run(); err != nil {
-			log.Printf("Firewall: failed to add rule %s: %v", nameOut, err)
+		).CombinedOutput(); err != nil {
+			log.Printf("Firewall: rule %s FAILED: %v — %s", nameOut, err, strings.TrimSpace(string(out)))
 		}
 
 		f.appliedChunks[i] = ipList
