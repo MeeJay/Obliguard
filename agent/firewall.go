@@ -3,7 +3,9 @@ package main
 import (
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
@@ -434,10 +436,9 @@ const winRuleOut = "Obliguard-Block-out"
 const winRulePrefix = "Obliguard-Block-" // kept for legacy cleanup
 
 type WindowsFirewall struct {
-	migrated bool
-	// In-memory cache of the current IP set — avoids re-reading netsh on every call
 	cache    map[string]bool
-	dirty    bool // true when cache has changes not yet written to netsh
+	dirty    bool
+	loaded   bool
 }
 
 func (f *WindowsFirewall) Name() string { return "windows" }
@@ -447,96 +448,57 @@ func (f *WindowsFirewall) IsAvailable() bool {
 	return err == nil
 }
 
-// loadCache populates the in-memory set from the actual firewall rules (once).
+// banlistPath returns the path to the persistent IP list file next to the agent binary.
+func (f *WindowsFirewall) banlistPath() string {
+	exe, _ := os.Executable()
+	return filepath.Join(filepath.Dir(exe), "obliguard-banlist.txt")
+}
+
+// loadCache reads the banlist file into memory, then imports any legacy per-IP rules.
 func (f *WindowsFirewall) loadCache() {
-	if f.cache != nil {
+	if f.loaded {
 		return
 	}
+	f.loaded = true
 	f.cache = make(map[string]bool)
-	grouped := f.getGroupedIPs()
-	for _, ip := range grouped {
-		f.cache[ip] = true
+
+	// 1. Read from banlist file (source of truth)
+	data, err := os.ReadFile(f.banlistPath())
+	if err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			ip := strings.TrimSpace(line)
+			if ip != "" && ipPattern().MatchString(ip) {
+				f.cache[ip] = true
+			}
+		}
 	}
-	legacy := f.getLegacyIPs()
-	for _, ip := range legacy {
-		f.cache[ip] = true
+
+	// 2. Also import any legacy per-IP rules still in the firewall
+	legacyIPs := f.getLegacyIPs()
+	if len(legacyIPs) > 0 {
+		log.Printf("Firewall: importing %d legacy per-IP rules", len(legacyIPs))
+		for _, ip := range legacyIPs {
+			f.cache[ip] = true
+		}
+		f.dirty = true
+	}
+
+	if len(f.cache) > 0 {
+		log.Printf("Firewall: loaded %d banned IPs", len(f.cache))
 	}
 }
 
 func (f *WindowsFirewall) BanIP(ip string) error {
-	f.ensureMigrated()
 	f.loadCache()
 	if f.cache[ip] {
-		return nil // already banned
+		return nil
 	}
 	f.cache[ip] = true
 	f.dirty = true
 	return nil
 }
 
-// Flush writes all pending changes to the Windows Firewall in a single operation.
-// Called after a batch of BanIP/UnbanIP calls.
-func (f *WindowsFirewall) Flush() error {
-	if !f.dirty {
-		return nil
-	}
-	f.dirty = false
-	var ips []string
-	for ip := range f.cache {
-		ips = append(ips, ip)
-	}
-	if len(ips) == 0 {
-		exec.Command("netsh", "advfirewall", "firewall", "delete", "rule", "name="+winRuleIn).Run()
-		exec.Command("netsh", "advfirewall", "firewall", "delete", "rule", "name="+winRuleOut).Run()
-		return nil
-	}
-	return f.syncRules(ips)
-}
-
-// ensureMigrated consolidates legacy per-IP rules into the grouped rules on first run.
-func (f *WindowsFirewall) ensureMigrated() {
-	if f.migrated {
-		return
-	}
-	f.migrated = true
-
-	// Collect all IPs from legacy per-IP rules
-	legacyIPs := f.getLegacyIPs()
-	if len(legacyIPs) == 0 {
-		return
-	}
-
-	log.Printf("Firewall: migrating %d legacy per-IP rules to grouped rules...", len(legacyIPs))
-
-	// Also get any IPs already in the grouped rule
-	groupedIPs := f.getGroupedIPs()
-	seen := make(map[string]bool)
-	var allIPs []string
-	for _, ip := range groupedIPs {
-		if !seen[ip] {
-			seen[ip] = true
-			allIPs = append(allIPs, ip)
-		}
-	}
-	for _, ip := range legacyIPs {
-		if !seen[ip] {
-			seen[ip] = true
-			allIPs = append(allIPs, ip)
-		}
-	}
-
-	// Create the grouped rules
-	if len(allIPs) > 0 {
-		f.syncRules(allIPs)
-	}
-
-	// Delete ALL legacy per-IP rules
-	f.cleanupLegacyRules()
-	log.Printf("Firewall: migration complete — %d IPs in 2 grouped rules", len(allIPs))
-}
-
 func (f *WindowsFirewall) UnbanIP(ip string) error {
-	f.ensureMigrated()
 	f.loadCache()
 	if !f.cache[ip] {
 		return nil
@@ -546,14 +508,53 @@ func (f *WindowsFirewall) UnbanIP(ip string) error {
 	return nil
 }
 
-// syncRules creates or updates the two Obliguard rules with the given IP list.
-func (f *WindowsFirewall) syncRules(ips []string) error {
-	if len(ips) == 0 {
+// Flush writes all pending changes to both the banlist file AND the Windows Firewall.
+func (f *WindowsFirewall) Flush() error {
+	if !f.dirty {
 		return nil
 	}
+	f.dirty = false
+
+	var ips []string
+	for ip := range f.cache {
+		ips = append(ips, ip)
+	}
+
+	// 1. Persist to file (source of truth — survives crashes)
+	f.saveBanlist(ips)
+
+	// 2. Apply to Windows Firewall
+	if len(ips) == 0 {
+		exec.Command("netsh", "advfirewall", "firewall", "delete", "rule", "name="+winRuleIn).Run()
+		exec.Command("netsh", "advfirewall", "firewall", "delete", "rule", "name="+winRuleOut).Run()
+	} else {
+		f.syncRules(ips)
+	}
+
+	// 3. Clean up legacy per-IP rules (safe: IPs are persisted in file + grouped rule)
+	f.cleanupLegacyRules()
+	return nil
+}
+
+func (f *WindowsFirewall) GetBannedIPs() ([]string, error) {
+	f.loadCache()
+	var ips []string
+	for ip := range f.cache {
+		ips = append(ips, ip)
+	}
+	return ips, nil
+}
+
+func (f *WindowsFirewall) saveBanlist(ips []string) {
+	data := strings.Join(ips, "\n") + "\n"
+	if err := os.WriteFile(f.banlistPath(), []byte(data), 0644); err != nil {
+		log.Printf("Firewall: failed to save banlist: %v", err)
+	}
+}
+
+func (f *WindowsFirewall) syncRules(ips []string) error {
 	ipList := strings.Join(ips, ",")
 
-	// Delete and recreate (netsh doesn't support modifying remoteip on existing rules reliably)
 	exec.Command("netsh", "advfirewall", "firewall", "delete", "rule", "name="+winRuleIn).Run()
 	exec.Command("netsh", "advfirewall", "firewall", "delete", "rule", "name="+winRuleOut).Run()
 
@@ -573,12 +574,10 @@ func (f *WindowsFirewall) syncRules(ips []string) error {
 		return fmt.Errorf("add outbound rule: %w", err)
 	}
 
-	// Clean up legacy per-IP rules from old versions
-	f.cleanupLegacyRules()
+	log.Printf("Firewall: synced %d IPs to Windows Firewall", len(ips))
 	return nil
 }
 
-// cleanupLegacyRules removes old-style per-IP rules (Obliguard-Block-A-B-C-D-*)
 func (f *WindowsFirewall) cleanupLegacyRules() {
 	out, _ := exec.Command("netsh", "advfirewall", "firewall", "show", "rule", "name=all", "dir=in").Output()
 	for _, line := range strings.Split(string(out), "\n") {
@@ -587,54 +586,11 @@ func (f *WindowsFirewall) cleanupLegacyRules() {
 			continue
 		}
 		raw := strings.TrimRight(line[idx:], " \r\n\t")
-		// Skip the new grouped rules
 		if raw == winRuleIn || raw == winRuleOut {
 			continue
 		}
-		// Delete any legacy per-IP rule
 		exec.Command("netsh", "advfirewall", "firewall", "delete", "rule", "name="+raw).Run()
 	}
-}
-
-func (f *WindowsFirewall) GetBannedIPs() ([]string, error) {
-	f.ensureMigrated()
-	f.loadCache()
-	var ips []string
-	for ip := range f.cache {
-		ips = append(ips, ip)
-	}
-	return ips, nil
-}
-
-// getGroupedIPs reads IPs from the grouped "Obliguard-Block-in" rule.
-func (f *WindowsFirewall) getGroupedIPs() []string {
-	out, err := exec.Command("netsh", "advfirewall", "firewall", "show", "rule",
-		"name="+winRuleIn, "verbose").Output()
-	if err != nil {
-		return nil
-	}
-	// Find the line containing RemoteIP — it has IPs separated by commas.
-	// The field name varies by locale, but the value line follows a pattern:
-	// IPs are on a line that contains dots and commas (e.g. "1.2.3.4,5.6.7.8")
-	// or after a label like "RemoteIP:" / "Adresse IP distante:"
-	ipRe := ipPattern()
-	for _, line := range strings.Split(string(out), "\n") {
-		trimmed := strings.TrimSpace(line)
-		// Skip empty lines and lines that are just labels
-		if trimmed == "" || trimmed == "Any" || trimmed == "Quelconque" {
-			continue
-		}
-		// Look for a line with multiple IPs (comma-separated)
-		ips := ipRe.FindAllString(trimmed, -1)
-		if len(ips) >= 1 && strings.Contains(trimmed, ".") {
-			// Verify this isn't a subnet mask or version number line
-			// by checking at least one result has 4 octets
-			if ipRe.MatchString(ips[0]) {
-				return ips
-			}
-		}
-	}
-	return nil
 }
 
 // getLegacyIPs reads IPs from old-style per-IP rules (Obliguard-Block-A-B-C-D-*).
@@ -653,7 +609,6 @@ func (f *WindowsFirewall) getLegacyIPs() []string {
 			continue
 		}
 		raw := strings.TrimRight(line[idx:], " \r\n\t")
-		// Skip the new grouped rules
 		if raw == winRuleIn || raw == winRuleOut {
 			continue
 		}
