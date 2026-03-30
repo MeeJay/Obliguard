@@ -75,7 +75,7 @@ export function matchWhitelist(ip: string, entries: WlEntry[]): WlEntry | null {
 export function makeOrbitalFields(ip: string, canvasW: number, canvasH: number): {
   orbitAngle: number; orbitSpeed: number; orbitSlot: number;
   arriveT: number; spawnX: number; spawnY: number; trail: { x: number; y: number }[];
-  orbitEccentricity: number;
+  orbitEccentricity: number; orbitCurrentR: number;
 } {
   const r1 = ipRand(ip, 42);
   const r2 = ipRand(ip, 77);
@@ -98,6 +98,7 @@ export function makeOrbitalFields(ip: string, canvasW: number, canvasH: number):
     spawnY: sy,
     trail: [],
     orbitEccentricity: 0.55 + r3 * 0.30,
+    orbitCurrentR: 0,
   };
 }
 

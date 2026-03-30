@@ -126,6 +126,8 @@ export function NetMapPage() {
   const starsRef = useRef<{ x: number; y: number; s: number; b: number }[]>([]);
   /** Per-agent orbit slot counter for golden-angle distribution. */
   const slotCountersRef = useRef(new Map<number, number>());
+  /** Per-agent smooth ring count (float, lerps toward integer target). */
+  const agentDisplayedRingsRef = useRef(new Map<number, number>());
 
   const transformRef = useRef({ x: 0, y: 0, k: 1 });
   const dragRef      = useRef<{ x: number; y: number; startX: number; startY: number } | null>(null);
@@ -891,7 +893,11 @@ export function NetMapPage() {
         const ag = agMapFull.get(ip.agentIds[0]);
         if (!ag) continue;
         const totalIps = ipsPerAgent.get(ag.id) ?? 1;
-        const orbR = orbRadius(ag.r, ip.orbitSlot, totalIps);
+        const targetR = orbRadius(ag.r, ip.orbitSlot, totalIps);
+        // Smooth lerp: orbit radius transitions smoothly when slot changes
+        if (ip.orbitCurrentR <= 0) ip.orbitCurrentR = targetR; // init
+        ip.orbitCurrentR += (targetR - ip.orbitCurrentR) * 0.05;
+        const orbR = ip.orbitCurrentR;
         // Kepler: outer orbits rotate slower (speed ∝ 1/√r)
         const baseR = ag.r + 18;
         const keplerFactor = Math.sqrt(baseR / Math.max(orbR, baseR));
@@ -955,7 +961,30 @@ export function NetMapPage() {
       for (const [key, ip] of ipsRef.current) {
         if (now - ip.lastSeen > ipTtlForStatus(ip.status)) { ipsRef.current.delete(key); changed = true; }
       }
-      if (changed) setIpCount(ipsRef.current.size);
+      if (changed) {
+        setIpCount(ipsRef.current.size);
+        // Reassign slots: surviving IPs pack into lowest rings
+        const slotMap = new Map<number, number>();
+        const sorted = [...ipsRef.current.values()]
+          .filter(ip => ip.agentIds.length === 1)
+          .sort((a, b) => a.lastSeen - b.lastSeen);
+        for (const ip of sorted) {
+          const aid = ip.agentIds[0];
+          const slot = slotMap.get(aid) ?? 0;
+          ip.orbitSlot = slot;
+          slotMap.set(aid, slot + 1);
+        }
+        slotCountersRef.current = slotMap;
+        // Update agent radii in force simulation
+        const sim = simRef.current;
+        if (sim) {
+          for (const ag of agentsRef.current) {
+            const sn = sim.getNode(`a:${ag.id}`);
+            if (sn) sn.radius = agentOrbitOuterR(ag.r, slotMap.get(ag.id) ?? 0);
+          }
+          sim.reheat(0.3);
+        }
+      }
       // Peer link expiry
       for (const [key, link] of agentLinksRef.current) {
         if (now - link.lastSeen > PEER_LINK_TTL) agentLinksRef.current.delete(key);
@@ -1104,16 +1133,24 @@ export function NetMapPage() {
       ctx.restore();
     }
 
-    // ── Orbit rings around agents (one ring per ~6 IPs) ─────────────────
+    // ── Orbit rings around agents (smooth fade-in/fade-out) ────────────
     for (const ag of agents) {
       const conns = ipsByAgent.get(ag.id) ?? 0;
-      if (conns === 0) continue;
+      const targetRings = orbitRingCount(conns);
+      const current = agentDisplayedRingsRef.current.get(ag.id) ?? targetRings;
+      const smoothed = current + (targetRings - current) * 0.03;
+      agentDisplayedRingsRef.current.set(ag.id, smoothed);
+      if (smoothed < 0.05) continue;
       const dimmed = selId !== null && selId !== ag.id;
-      const rings = orbitRingCount(conns);
-      for (let i = 0; i < rings; i++) {
+      const fullRings = Math.floor(smoothed);
+      const partialFrac = smoothed - fullRings;
+      for (let i = 0; i <= fullRings; i++) {
         const r = orbitRingRadius(ag.r, i);
+        const ringAlpha = (i === fullRings && partialFrac < 0.99)
+          ? partialFrac * (dimmed ? 0.04 : 0.10)
+          : (dimmed ? 0.04 : 0.10);
         ctx.save();
-        ctx.globalAlpha = dimmed ? 0.04 : 0.10;
+        ctx.globalAlpha = ringAlpha;
         ctx.strokeStyle = ag.wsConnected ? '#4a8abb' : '#2a3a4a';
         ctx.lineWidth = 0.5 / k;
         ctx.beginPath(); ctx.arc(ag.x, ag.y, r, 0, Math.PI * 2); ctx.stroke();
@@ -1773,14 +1810,23 @@ export function NetMapPage() {
     const mx = e.clientX - rect.left, my = e.clientY - rect.top;
     const tr = transformRef.current;
     const wx = (mx - tr.x) / tr.k, wy = (my - tr.y) / tr.k;
+    // Find the CLOSEST IP within hit range (not just the first match)
+    let closestIp: IpNode | null = null;
+    let closestDist = Infinity;
     for (const ip of ipsRef.current.values()) {
-      if ((wx - ip.x) ** 2 + (wy - ip.y) ** 2 <= (ip.dotR + 12) ** 2) {
-        setTooltip({ x: mx, y: my, ip: anonIp(ip.ip), flag: ip.flag, country: ip.country,
-          status: ip.status, failures: ip.failures, services: ip.services, color: ip.color });
-        return;
+      const d2 = (wx - ip.x) ** 2 + (wy - ip.y) ** 2;
+      const hitR = ip.dotR + 12;
+      if (d2 <= hitR * hitR && d2 < closestDist) {
+        closestDist = d2;
+        closestIp = ip;
       }
     }
-    setTooltip(null);
+    if (closestIp) {
+      setTooltip({ x: mx, y: my, ip: anonIp(closestIp.ip), flag: closestIp.flag, country: closestIp.country,
+        status: closestIp.status, failures: closestIp.failures, services: closestIp.services, color: closestIp.color });
+    } else {
+      setTooltip(null);
+    }
   }, []);
 
   const handleMouseUp = useCallback((e: React.MouseEvent<HTMLDivElement>) => {

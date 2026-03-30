@@ -56,6 +56,8 @@ export interface IpNode {
   trail: { x: number; y: number }[];
   /** Per-IP ellipse eccentricity (0.55–0.85) for asteroid belt spread. */
   orbitEccentricity: number;
+  /** Current displayed orbit radius — lerps toward target for smooth transitions. */
+  orbitCurrentR: number;
 }
 
 export interface Particle {
