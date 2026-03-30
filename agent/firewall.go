@@ -552,30 +552,76 @@ func (f *WindowsFirewall) saveBanlist(ips []string) {
 	}
 }
 
+// maxIPsPerRule keeps the netsh command line under Windows' ~32KB limit.
+// 2000 IPs * ~15 chars each ≈ 30KB.
+const maxIPsPerRule = 2000
+
 func (f *WindowsFirewall) syncRules(ips []string) error {
-	ipList := strings.Join(ips, ",")
+	// Delete all existing Obliguard rules (grouped)
+	f.deleteGroupedRules()
 
-	exec.Command("netsh", "advfirewall", "firewall", "delete", "rule", "name="+winRuleIn).Run()
-	exec.Command("netsh", "advfirewall", "firewall", "delete", "rule", "name="+winRuleOut).Run()
+	// Split IPs into chunks and create one rule pair per chunk
+	chunks := chunkStrings(ips, maxIPsPerRule)
+	for i, chunk := range chunks {
+		ipList := strings.Join(chunk, ",")
+		suffix := ""
+		if len(chunks) > 1 {
+			suffix = fmt.Sprintf("-%d", i+1)
+		}
+		nameIn := winRuleIn + suffix
+		nameOut := winRuleOut + suffix
 
-	if err := exec.Command("netsh", "advfirewall", "firewall", "add", "rule",
-		"name="+winRuleIn, "dir=in", "action=block",
-		"remoteip="+ipList, "enable=yes",
-		"description=Obliguard blocked IPs",
-	).Run(); err != nil {
-		return fmt.Errorf("add inbound rule: %w", err)
+		if err := exec.Command("netsh", "advfirewall", "firewall", "add", "rule",
+			"name="+nameIn, "dir=in", "action=block",
+			"remoteip="+ipList, "enable=yes",
+			"description=Obliguard blocked IPs",
+		).Run(); err != nil {
+			log.Printf("Firewall: failed to add rule %s: %v", nameIn, err)
+		}
+
+		if err := exec.Command("netsh", "advfirewall", "firewall", "add", "rule",
+			"name="+nameOut, "dir=out", "action=block",
+			"remoteip="+ipList, "enable=yes",
+			"description=Obliguard blocked IPs",
+		).Run(); err != nil {
+			log.Printf("Firewall: failed to add rule %s: %v", nameOut, err)
+		}
 	}
 
-	if err := exec.Command("netsh", "advfirewall", "firewall", "add", "rule",
-		"name="+winRuleOut, "dir=out", "action=block",
-		"remoteip="+ipList, "enable=yes",
-		"description=Obliguard blocked IPs",
-	).Run(); err != nil {
-		return fmt.Errorf("add outbound rule: %w", err)
-	}
-
-	log.Printf("Firewall: synced %d IPs to Windows Firewall", len(ips))
+	log.Printf("Firewall: synced %d IPs in %d rule pair(s)", len(ips), len(chunks))
 	return nil
+}
+
+// deleteGroupedRules removes all Obliguard-Block-in* and Obliguard-Block-out* rules.
+func (f *WindowsFirewall) deleteGroupedRules() {
+	out, _ := exec.Command("netsh", "advfirewall", "firewall", "show", "rule", "name=all", "dir=in").Output()
+	for _, line := range strings.Split(string(out), "\n") {
+		idx := strings.Index(line, "Obliguard-Block-in")
+		if idx >= 0 {
+			name := strings.TrimRight(line[idx:], " \r\n\t")
+			exec.Command("netsh", "advfirewall", "firewall", "delete", "rule", "name="+name).Run()
+		}
+	}
+	out, _ = exec.Command("netsh", "advfirewall", "firewall", "show", "rule", "name=all", "dir=out").Output()
+	for _, line := range strings.Split(string(out), "\n") {
+		idx := strings.Index(line, "Obliguard-Block-out")
+		if idx >= 0 {
+			name := strings.TrimRight(line[idx:], " \r\n\t")
+			exec.Command("netsh", "advfirewall", "firewall", "delete", "rule", "name="+name).Run()
+		}
+	}
+}
+
+func chunkStrings(s []string, size int) [][]string {
+	var chunks [][]string
+	for i := 0; i < len(s); i += size {
+		end := i + size
+		if end > len(s) {
+			end = len(s)
+		}
+		chunks = append(chunks, s[i:end])
+	}
+	return chunks
 }
 
 func (f *WindowsFirewall) cleanupLegacyRules() {
