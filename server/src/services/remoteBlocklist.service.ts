@@ -238,12 +238,18 @@ export const remoteBlocklistService = {
   async syncOblitools(list: BlocklistRow): Promise<void> {
     if (!list.api_key) return;
 
-    let url = list.url;
+    // Build URL with filters
+    const urlObj = new URL(list.url);
     if (list.last_sync_at) {
-      url += `?since=${list.last_sync_at.toISOString()}`;
+      urlObj.searchParams.set('since', list.last_sync_at.toISOString());
+    }
+    // Exclude our own data to avoid re-importing what we pushed
+    const instanceName = await appConfigService.get('oblitools_instance_name');
+    if (instanceName) {
+      urlObj.searchParams.set('exclude_source', instanceName);
     }
 
-    const res = await fetch(url, {
+    const res = await fetch(urlObj.toString(), {
       headers: { Authorization: `Bearer ${list.api_key}` },
       signal: AbortSignal.timeout(30_000),
     });
@@ -256,11 +262,17 @@ export const remoteBlocklistService = {
         reports?: number;
         sources?: string[];
         reason?: string;
+        status?: 'banned' | 'suspicious';
       }>;
     };
 
-    let count = 0;
+    let countBanned = 0;
+    let countSuspicious = 0;
+
     for (const [ip, data] of Object.entries(body.ips ?? {})) {
+      const status = data.status ?? 'banned';
+
+      // Store in remote_blocked_ips (tracking/display)
       await db('remote_blocked_ips')
         .insert({
           blocklist_id: list.id,
@@ -278,14 +290,52 @@ export const remoteBlocklistService = {
           reports: db.raw('GREATEST(EXCLUDED.reports, remote_blocked_ips.reports)'),
           sources: db.raw('COALESCE(EXCLUDED.sources, remote_blocked_ips.sources)'),
         });
-      count++;
+
+      if (status === 'banned') {
+        // Create a global auto-ban if not already banned
+        const existingBan = await db('ip_bans').where({ ip, is_active: true }).first();
+        if (!existingBan) {
+          await db('ip_bans').insert({
+            ip,
+            scope: 'global',
+            ban_type: 'auto',
+            reason: `obli.tools: ${data.reason ?? 'shared ban'} (${data.reports ?? 1} reports)`,
+            is_active: true,
+          }).catch(() => {}); // ignore duplicates
+        }
+        countBanned++;
+      } else {
+        // Suspicious: inject auth_failure events to pre-load the ban engine counter.
+        // Each "report" from another instance counts as one failure, effectively
+        // reducing the remaining attempts before this IP gets auto-banned locally.
+        const reports = Math.min(data.reports ?? 1, 10); // Cap at 10 to avoid instant-ban
+        for (let i = 0; i < reports; i++) {
+          await db('ip_events').insert({
+            id: `oblitools-${ip}-${Date.now()}-${i}`,
+            ip,
+            username: '',
+            service: 'oblitools_shared',
+            event_type: 'auth_failure',
+            raw_log: `obli.tools: suspicious IP (${data.reports ?? 1} reports from ${(data.sources ?? []).length} sources)`,
+            tenant_id: list.tenant_id,
+            source_ip_type: 'public',
+            timestamp: new Date(),
+          }).catch(() => {});
+        }
+        // Mark IP as suspicious in reputation
+        const { ipReputationService } = await import('./ipReputation.service');
+        await ipReputationService.ensureExists(ip).catch(() => {});
+        countSuspicious++;
+      }
     }
 
     await db('remote_blocklists').where({ id: list.id }).update({
       last_sync_at: new Date(),
-      last_sync_count: count,
+      last_sync_count: countBanned + countSuspicious,
     });
-    if (count > 0) logger.info(`Synced ${count} IPs from obli.tools blocklist "${list.name}"`);
+    if (countBanned > 0 || countSuspicious > 0) {
+      logger.info(`Synced from obli.tools "${list.name}": ${countBanned} banned, ${countSuspicious} suspicious`);
+    }
   },
 
   async syncUrl(list: BlocklistRow): Promise<void> {
@@ -339,18 +389,32 @@ export const remoteBlocklistService = {
 
     const lastPushStr = await appConfigService.get('oblitools_last_push_at');
     const lastPush = lastPushStr ? new Date(lastPushStr) : new Date(0);
+    const stripCidr = (ip: string) => String(ip).replace(/\/\d+$/, '');
 
+    // 1. Collect new banned IPs (auto-bans since last push)
     const newBans = await db('ip_bans')
       .where('ban_type', 'auto')
       .where('banned_at', '>', lastPush)
       .where('is_active', true)
       .select('ip', 'reason') as { ip: string; reason: string | null }[];
 
-    const stripCidr = (ip: string) => String(ip).replace(/\/\d+$/, '');
-    const publicBans = newBans
-      .map(b => ({ ip: stripCidr(String(b.ip)), reason: b.reason }))
+    const bannedIps = newBans
+      .map(b => ({ ip: stripCidr(String(b.ip)), reason: b.reason ?? 'auto_ban', status: 'banned' as const }))
       .filter(b => !isRfc1918(b.ip));
-    if (publicBans.length === 0) return `No new auto-bans since last push (${lastPushStr ?? 'never'}).`;
+
+    // 2. Collect suspicious IPs (not yet banned but flagged)
+    const suspiciousRows = await db('ip_reputation')
+      .where('status', 'suspicious')
+      .where('updated_at', '>', lastPush)
+      .select('ip') as { ip: string }[];
+
+    const alreadyBanned = new Set(bannedIps.map(b => b.ip));
+    const suspiciousIps = suspiciousRows
+      .map(r => ({ ip: stripCidr(String(r.ip)), reason: 'suspicious', status: 'suspicious' as const }))
+      .filter(s => !isRfc1918(s.ip) && !alreadyBanned.has(s.ip));
+
+    const allIps = [...bannedIps, ...suspiciousIps];
+    if (allIps.length === 0) return `No new IPs to push since last push (${lastPushStr ?? 'never'}).`;
 
     const instanceName = (await appConfigService.get('oblitools_instance_name')) || 'obliguard';
 
@@ -362,12 +426,13 @@ export const remoteBlocklistService = {
       },
       body: JSON.stringify({
         instance: instanceName,
-        ips: publicBans.map(b => ({
+        ips: allIps.map(b => ({
           ip: b.ip,
-          reason: b.reason ?? 'auto_ban',
+          reason: b.reason,
+          status: b.status,
         })),
       }),
-      signal: AbortSignal.timeout(15_000),
+      signal: AbortSignal.timeout(30_000),
     });
 
     if (!res.ok) {
@@ -379,7 +444,7 @@ export const remoteBlocklistService = {
 
     const ack = await res.json() as { accepted?: number; new?: number };
     await appConfigService.set('oblitools_last_push_at', new Date().toISOString());
-    const msg = `Pushed ${publicBans.length} IPs — accepted: ${ack.accepted ?? '?'}, new: ${ack.new ?? '?'}`;
+    const msg = `Pushed ${bannedIps.length} banned + ${suspiciousIps.length} suspicious — accepted: ${ack.accepted ?? '?'}, new: ${ack.new ?? '?'}`;
     logger.info(msg);
     return msg;
   },

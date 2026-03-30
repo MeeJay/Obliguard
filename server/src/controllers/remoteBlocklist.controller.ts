@@ -80,10 +80,13 @@ export const remoteBlocklistController = {
     } catch (err) { next(err); }
   },
 
-  async forcePush(_req: Request, res: Response, next: NextFunction): Promise<void> {
+  async forcePush(_req: Request, res: Response, _next: NextFunction): Promise<void> {
     try {
       const result = await remoteBlocklistService.pushNewBans();
       res.json({ success: true, message: result ?? 'Push completed' });
-    } catch (err) { next(err); }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      res.status(502).json({ success: false, message: msg });
+    }
   },
 };
