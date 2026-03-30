@@ -319,6 +319,8 @@ class IpReputationService {
           db.raw('r.asn'),
           db.raw('COALESCE(r.updated_at, b.banned_at) AS updated_at'),
           'b.id as active_ban_id',
+          'b.ban_type as ban_type',
+          'b.banned_by_user_id as banned_by_user_id',
         )
         .where('b.is_active', true)
         .where(function () {
@@ -333,12 +335,14 @@ class IpReputationService {
       const total = Number(countResult?.count ?? 0);
 
       const rows = await q.orderBy('b.banned_at', 'desc').limit(limit).offset(offset) as Array<
-        IpReputationRow & { active_ban_id: number | null }
+        IpReputationRow & { active_ban_id: number | null; ban_type: string | null; banned_by_user_id: number | null }
       >;
 
       const data = rows.map((row) => ({
         ...rowToReputation(row, 'banned'),
         activeBanId: row.active_ban_id ?? null,
+        banType: row.ban_type ?? null,
+        bannedByUserId: row.banned_by_user_id ?? null,
       }));
 
       return { data, total };

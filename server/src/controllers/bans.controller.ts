@@ -18,6 +18,12 @@ export async function getBanById(req: Request, res: Response, next: NextFunction
     const id = parseInt(req.params.id, 10);
     const row = await db('ip_bans').where({ id }).first();
     if (!row) throw new AppError(404, 'Ban not found');
+    // Resolve username if manual ban
+    let bannedByUsername: string | null = null;
+    if (row.banned_by_user_id) {
+      const user = await db('users').where({ id: row.banned_by_user_id }).select('username', 'display_name').first();
+      bannedByUsername = user?.display_name || user?.username || null;
+    }
     res.json({
       success: true,
       data: {
@@ -28,6 +34,7 @@ export async function getBanById(req: Request, res: Response, next: NextFunction
         scope: row.scope,
         scopeId: row.scope_id,
         bannedByUserId: row.banned_by_user_id,
+        bannedByUsername,
         bannedAt: row.banned_at,
         expiresAt: row.expires_at,
         isActive: row.is_active,

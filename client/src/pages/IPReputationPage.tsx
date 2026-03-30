@@ -237,15 +237,37 @@ function IPDetailDrawer({ ip, onClose, onBan, onWhitelist, onLiftBan, onClear, o
   const [showWhitelistForm, setShowWhitelistForm] = useState(false);
   const [showRenameForm, setShowRenameForm] = useState(false);
   const [renameValue, setRenameValue] = useState(currentLabel ?? '');
-  const [banInfo, setBanInfo] = useState<{ banType?: string; reason?: string; bannedByUserId?: number | null; scope?: string } | null>(null);
+  const [banInfo, setBanInfo] = useState<{ banType?: string; reason?: string; bannedByUserId?: number | null; bannedByUsername?: string | null; scope?: string } | null>(null);
+  const [whitelistInfo, setWhitelistInfo] = useState<{ createdByUsername?: string | null; label?: string | null } | null>(null);
 
   // Fetch ban details if IP is banned
   useEffect(() => {
+    setBanInfo(null);
     if (ip.status !== 'banned' || !ip.activeBanId) return;
-    apiClient.get<{ data: { banType?: string; reason?: string; bannedByUserId?: number | null; scope?: string } }>(`/bans/${ip.activeBanId}`)
+    apiClient.get<{ data: { banType?: string; reason?: string; bannedByUserId?: number | null; bannedByUsername?: string | null; scope?: string } }>(`/bans/${ip.activeBanId}`)
       .then(res => setBanInfo(res.data?.data ?? null))
       .catch(() => {});
   }, [ip.status, ip.activeBanId]);
+
+  // Fetch whitelist details if IP is whitelisted
+  useEffect(() => {
+    setWhitelistInfo(null);
+    if (ip.status !== 'whitelisted') return;
+    apiClient.get<{ data: { id: number; ip: string; label?: string; created_by?: number; scope?: string }[] }>('/whitelist')
+      .then(async res => {
+        const entry = (res.data?.data ?? []).find(w => w.ip === ip.ip || w.ip === ip.ip + '/32');
+        if (!entry) return;
+        let createdByUsername: string | null = null;
+        if (entry.created_by) {
+          try {
+            const userRes = await apiClient.get<{ data: { username?: string; displayName?: string } }>(`/users/${entry.created_by}`);
+            createdByUsername = userRes.data?.data?.displayName || userRes.data?.data?.username || null;
+          } catch { /* ignore */ }
+        }
+        setWhitelistInfo({ createdByUsername, label: entry.label ?? null });
+      })
+      .catch(() => {});
+  }, [ip.status, ip.ip]);
 
   const loadEvents = useCallback(async () => {
     setLoadingEvents(true);
@@ -328,7 +350,12 @@ function IPDetailDrawer({ ip, onClose, onBan, onWhitelist, onLiftBan, onClear, o
                   'inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium',
                   banInfo.banType === 'auto' ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20' : 'bg-blue-500/10 text-blue-400 border border-blue-500/20',
                 )}>
-                  {banInfo.banType === 'auto' ? 'Auto-ban' : 'Manual'}
+                  {banInfo.banType === 'auto' ? 'Auto-ban' : `Manual${banInfo.bannedByUsername ? ' by ' + banInfo.bannedByUsername : ''}`}
+                </span>
+              )}
+              {whitelistInfo && (
+                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium bg-green-500/10 text-green-400 border border-green-500/20">
+                  Whitelisted{whitelistInfo.createdByUsername ? ' by ' + whitelistInfo.createdByUsername : ''}
                 </span>
               )}
             </div>
@@ -588,7 +615,7 @@ function IPDetailDrawer({ ip, onClose, onBan, onWhitelist, onLiftBan, onClear, o
                   }}
                 >
                   <Eraser size={13} className="mr-1.5" />
-                  {isAdmin ? 'Clear globally' : 'Clear suspicious'}
+                  Clear
                 </Button>
               </div>
             )}
@@ -1000,6 +1027,7 @@ function ActivityTab({ isAdmin }: ActivityTabProps) {
                 <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">Agents</th>
                 <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">Last seen</th>
                 <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">Status</th>
+                <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">Source</th>
                 <th className="px-4 py-2.5 text-right text-xs font-medium text-text-muted uppercase tracking-wide">Actions</th>
               </tr>
             </thead>
@@ -1062,6 +1090,16 @@ function ActivityTab({ isAdmin }: ActivityTabProps) {
                           )}
                         </div>
                       </td>
+                      <td className="px-4 py-3">
+                        {(() => {
+                          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                          const r = row as any;
+                          if (r.banType === 'auto') return <span className="text-[10px] font-medium text-amber-400">Auto-ban</span>;
+                          if (r.banType === 'manual') return <span className="text-[10px] font-medium text-blue-400">Manual</span>;
+                          if (row.status === 'whitelisted') return <span className="text-[10px] font-medium text-green-400">Whitelist</span>;
+                          return <span className="text-[10px] text-text-muted">—</span>;
+                        })()}
+                      </td>
                       <td className="px-4 py-3 text-right">
                         <div
                           className="flex items-center justify-end gap-1 flex-wrap"
@@ -1118,8 +1156,7 @@ function ActivityTab({ isAdmin }: ActivityTabProps) {
                               onClick={() => void handleClear(row.ip)}
                               title={isAdmin ? 'Reset failure counter globally' : 'Clear suspicious for your tenant'}
                             >
-                              <Eraser size={11} className="mr-1" />
-                              {isAdmin ? 'Clear (global)' : 'Clear'}
+                              <Eraser size={11} className="mr-1" />Clear
                             </Button>
                           )}
                         </div>
