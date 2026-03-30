@@ -231,23 +231,28 @@ func applyOGConfig(cfg *Config, lw *LogWatcher, fw FirewallManager, msg *cmdConf
 
 	// Apply ban delta immediately
 	if msg.BanList != nil {
+		addCount, addErr := 0, 0
 		for _, ip := range msg.BanList.Add {
 			if err := fw.BanIP(ip); err != nil {
-				log.Printf("Firewall ban %s: %v", ip, err)
+				addErr++
 			} else {
-				log.Printf("Firewall: banned %s", ip)
+				addCount++
 			}
 		}
+		remCount, remErr := 0, 0
 		for _, ip := range msg.BanList.Remove {
 			if err := fw.UnbanIP(ip); err != nil {
-				log.Printf("Firewall unban %s: %v", ip, err)
+				remErr++
 			} else {
-				log.Printf("Firewall: unbanned %s", ip)
+				remCount++
 			}
 		}
-		// Flush buffered changes (Windows: single netsh call for the whole batch)
+		// Flush buffered changes (nftables/ipset/Windows: single batch call)
 		if err := fw.Flush(); err != nil {
 			log.Printf("Firewall flush: %v", err)
+		}
+		if addCount > 0 || remCount > 0 || addErr > 0 || remErr > 0 {
+			log.Printf("Firewall: +%d banned, -%d unbanned (errors: +%d/-%d)", addCount, remCount, addErr, remErr)
 		}
 	}
 

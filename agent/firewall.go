@@ -182,9 +182,20 @@ func (f *NftablesFirewall) GetBannedIPs() ([]string, error) {
 	return ips, nil
 }
 
-// ── firewalld ─────────────────────────────────────────────────────────────────
+// ── firewalld (ipset-based for scalability) ─────────────────────────────────
+//
+// Strategy: use an ipset "obliguard" managed via firewalld's own ipset support.
+// Two rich-rules reference the ipset. Ban/unban = add/delete from ipset.
+// Fallback to individual rich-rules if ipset is not available.
 
-type FirewalldFirewall struct{}
+const fwdSetName = "obliguard"
+
+type FirewalldFirewall struct {
+	hasIpset   bool
+	initialized bool
+	pendingAdd []string
+	pendingDel []string
+}
 
 func (f *FirewalldFirewall) Name() string { return "firewalld" }
 
@@ -193,7 +204,72 @@ func (f *FirewalldFirewall) IsAvailable() bool {
 	return err == nil && strings.TrimSpace(string(out)) == "running"
 }
 
+func (f *FirewalldFirewall) init() {
+	if f.initialized {
+		return
+	}
+	f.initialized = true
+	// Try to create/use a firewalld ipset
+	err := exec.Command("firewall-cmd", "--permanent", "--new-ipset="+fwdSetName, "--type=hash:ip").Run()
+	if err != nil {
+		// May already exist
+		out, _ := exec.Command("firewall-cmd", "--permanent", "--get-ipsets").Output()
+		f.hasIpset = strings.Contains(string(out), fwdSetName)
+	} else {
+		f.hasIpset = true
+	}
+	if f.hasIpset {
+		// Ensure drop rules referencing the ipset exist
+		ruleIn := fmt.Sprintf("rule family=ipv4 source ipset=%s drop", fwdSetName)
+		ruleOut := fmt.Sprintf("rule family=ipv4 destination ipset=%s drop", fwdSetName)
+		exec.Command("firewall-cmd", "--permanent", "--add-rich-rule="+ruleIn).Run()
+		exec.Command("firewall-cmd", "--permanent", "--add-rich-rule="+ruleOut).Run()
+
+		// Migrate legacy per-IP rich-rules into ipset and remove them
+		f.migrateLegacyRichRules()
+
+		exec.Command("firewall-cmd", "--reload").Run()
+	}
+}
+
+// migrateLegacyRichRules finds individual "source address=X.X.X.X drop" rich-rules,
+// imports their IPs into the ipset, and removes the rules.
+func (f *FirewalldFirewall) migrateLegacyRichRules() {
+	out, err := exec.Command("firewall-cmd", "--permanent", "--list-rich-rules").Output()
+	if err != nil {
+		return
+	}
+	ipRe := ipPattern()
+	migrated := 0
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.Contains(line, "drop") {
+			continue
+		}
+		// Skip the ipset-based rules we just created
+		if strings.Contains(line, "ipset=") {
+			continue
+		}
+		// Extract IP from "rule family=ipv4 source address=X.X.X.X drop"
+		if m := ipRe.FindString(line); m != "" {
+			// Add IP to ipset
+			exec.Command("firewall-cmd", "--permanent", "--ipset="+fwdSetName, "--add-entry="+m).Run()
+			// Remove the legacy rich-rule
+			exec.Command("firewall-cmd", "--permanent", "--remove-rich-rule="+line).Run()
+			migrated++
+		}
+	}
+	if migrated > 0 {
+		log.Printf("Firewall: migrated %d legacy firewalld rich-rules to ipset", migrated)
+	}
+}
+
 func (f *FirewalldFirewall) BanIP(ip string) error {
+	f.init()
+	if f.hasIpset {
+		f.pendingAdd = append(f.pendingAdd, ip)
+		return nil
+	}
 	ruleIn := fmt.Sprintf("rule family=ipv4 source address=%s drop", ip)
 	ruleOut := fmt.Sprintf("rule family=ipv4 destination address=%s drop", ip)
 	exec.Command("firewall-cmd", "--permanent", fmt.Sprintf("--add-rich-rule=%s", ruleIn)).Run()
@@ -202,6 +278,11 @@ func (f *FirewalldFirewall) BanIP(ip string) error {
 }
 
 func (f *FirewalldFirewall) UnbanIP(ip string) error {
+	f.init()
+	if f.hasIpset {
+		f.pendingDel = append(f.pendingDel, ip)
+		return nil
+	}
 	ruleIn := fmt.Sprintf("rule family=ipv4 source address=%s drop", ip)
 	ruleOut := fmt.Sprintf("rule family=ipv4 destination address=%s drop", ip)
 	exec.Command("firewall-cmd", "--permanent", fmt.Sprintf("--remove-rich-rule=%s", ruleIn)).Run()
@@ -209,9 +290,43 @@ func (f *FirewalldFirewall) UnbanIP(ip string) error {
 	return exec.Command("firewall-cmd", "--reload").Run()
 }
 
-func (f *FirewalldFirewall) Flush() error { return nil }
+func (f *FirewalldFirewall) Flush() error {
+	if !f.hasIpset {
+		return nil
+	}
+	needReload := false
+	for _, ip := range f.pendingAdd {
+		exec.Command("firewall-cmd", "--permanent", "--ipset="+fwdSetName, "--add-entry="+ip).Run()
+		needReload = true
+	}
+	for _, ip := range f.pendingDel {
+		exec.Command("firewall-cmd", "--permanent", "--ipset="+fwdSetName, "--remove-entry="+ip).Run()
+		needReload = true
+	}
+	f.pendingAdd = nil
+	f.pendingDel = nil
+	if needReload {
+		return exec.Command("firewall-cmd", "--reload").Run()
+	}
+	return nil
+}
 
 func (f *FirewalldFirewall) GetBannedIPs() ([]string, error) {
+	f.init()
+	if f.hasIpset {
+		out, err := exec.Command("firewall-cmd", "--permanent", "--ipset="+fwdSetName, "--get-entries").Output()
+		if err != nil {
+			return nil, nil
+		}
+		var ips []string
+		for _, line := range strings.Split(string(out), "\n") {
+			ip := strings.TrimSpace(line)
+			if ip != "" && ipPattern().MatchString(ip) {
+				ips = append(ips, ip)
+			}
+		}
+		return ips, nil
+	}
 	out, err := exec.Command("firewall-cmd", "--list-rich-rules").Output()
 	if err != nil {
 		return nil, err
@@ -230,9 +345,20 @@ func (f *FirewalldFirewall) GetBannedIPs() ([]string, error) {
 	return ips, nil
 }
 
-// ── UFW ───────────────────────────────────────────────────────────────────────
+// ── UFW (uses ipset under the hood if available) ─────────────────────────────
+//
+// UFW doesn't support ipsets natively. When ipset is available, we bypass ufw
+// and inject iptables rules matching the ipset directly. This scales to 30K+ IPs.
+// Fallback: individual ufw deny rules (slow for large sets).
 
-type UFWFirewall struct{}
+const ufwSetName = "obliguard"
+
+type UFWFirewall struct {
+	hasIpset    bool
+	initialized bool
+	pendingAdd  []string
+	pendingDel  []string
+}
 
 func (f *UFWFirewall) Name() string { return "ufw" }
 
@@ -241,20 +367,99 @@ func (f *UFWFirewall) IsAvailable() bool {
 	return err == nil && strings.Contains(string(out), "Status: active")
 }
 
+func (f *UFWFirewall) init() {
+	if f.initialized {
+		return
+	}
+	f.initialized = true
+	_, err := exec.LookPath("ipset")
+	f.hasIpset = err == nil
+	if f.hasIpset {
+		exec.Command("ipset", "create", ufwSetName, "hash:ip", "-exist").Run()
+		// Add iptables rules matching the ipset (bypass ufw for performance)
+		if exec.Command("iptables", "-C", "INPUT", "-m", "set", "--match-set", ufwSetName, "src", "-j", "DROP").Run() != nil {
+			exec.Command("iptables", "-I", "INPUT", "1", "-m", "set", "--match-set", ufwSetName, "src", "-j", "DROP").Run()
+		}
+		if exec.Command("iptables", "-C", "OUTPUT", "-m", "set", "--match-set", ufwSetName, "dst", "-j", "DROP").Run() != nil {
+			exec.Command("iptables", "-I", "OUTPUT", "1", "-m", "set", "--match-set", ufwSetName, "dst", "-j", "DROP").Run()
+		}
+		// Migrate legacy per-IP ufw rules into ipset
+		f.migrateLegacyUfwRules()
+	}
+}
+
 func (f *UFWFirewall) BanIP(ip string) error {
+	f.init()
+	if f.hasIpset {
+		f.pendingAdd = append(f.pendingAdd, ip)
+		return nil
+	}
 	exec.Command("ufw", "insert", "1", "deny", "from", ip, "to", "any").Run()
 	return exec.Command("ufw", "insert", "1", "deny", "out", "from", "any", "to", ip).Run()
 }
 
 func (f *UFWFirewall) UnbanIP(ip string) error {
+	f.init()
+	if f.hasIpset {
+		f.pendingDel = append(f.pendingDel, ip)
+		return nil
+	}
 	exec.Command("ufw", "delete", "deny", "from", ip, "to", "any").Run()
 	exec.Command("ufw", "delete", "deny", "out", "from", "any", "to", ip).Run()
 	return nil
 }
 
-func (f *UFWFirewall) Flush() error { return nil }
+func (f *UFWFirewall) Flush() error {
+	if !f.hasIpset {
+		return nil
+	}
+	if len(f.pendingAdd) > 0 || len(f.pendingDel) > 0 {
+		var lines []string
+		for _, ip := range f.pendingAdd {
+			lines = append(lines, fmt.Sprintf("add %s %s -exist", ufwSetName, ip))
+		}
+		for _, ip := range f.pendingDel {
+			lines = append(lines, fmt.Sprintf("del %s %s -exist", ufwSetName, ip))
+		}
+		cmd := exec.Command("ipset", "restore")
+		cmd.Stdin = strings.NewReader(strings.Join(lines, "\n") + "\n")
+		if err := cmd.Run(); err != nil {
+			for _, ip := range f.pendingAdd {
+				exec.Command("ipset", "add", ufwSetName, ip, "-exist").Run()
+			}
+			for _, ip := range f.pendingDel {
+				exec.Command("ipset", "del", ufwSetName, ip, "-exist").Run()
+			}
+		}
+		f.pendingAdd = nil
+		f.pendingDel = nil
+	}
+	return nil
+}
 
 func (f *UFWFirewall) GetBannedIPs() ([]string, error) {
+	f.init()
+	if f.hasIpset {
+		out, err := exec.Command("ipset", "list", ufwSetName).Output()
+		if err != nil {
+			return nil, nil
+		}
+		var ips []string
+		ipRe := ipPattern()
+		inMembers := false
+		for _, line := range strings.Split(string(out), "\n") {
+			if strings.HasPrefix(line, "Members:") {
+				inMembers = true
+				continue
+			}
+			if inMembers {
+				if m := ipRe.FindString(line); m != "" {
+					ips = append(ips, m)
+				}
+			}
+		}
+		return ips, nil
+	}
 	out, err := exec.Command("ufw", "status", "numbered").Output()
 	if err != nil {
 		return nil, err
@@ -271,6 +476,42 @@ func (f *UFWFirewall) GetBannedIPs() ([]string, error) {
 		}
 	}
 	return ips, nil
+}
+
+// migrateLegacyUfwRules removes individual "deny from X.X.X.X" ufw rules
+// and imports their IPs into the ipset.
+func (f *UFWFirewall) migrateLegacyUfwRules() {
+	out, err := exec.Command("ufw", "status", "numbered").Output()
+	if err != nil {
+		return
+	}
+	ipRe := ipPattern()
+	var legacyIPs []string
+	seen := make(map[string]bool)
+	for _, line := range strings.Split(string(out), "\n") {
+		if !strings.Contains(strings.ToUpper(line), "DENY") {
+			continue
+		}
+		if m := ipRe.FindString(line); m != "" && !seen[m] {
+			seen[m] = true
+			legacyIPs = append(legacyIPs, m)
+		}
+	}
+	if len(legacyIPs) == 0 {
+		return
+	}
+	log.Printf("Firewall: migrating %d legacy ufw rules to ipset...", len(legacyIPs))
+	// Add all IPs to ipset first
+	for _, ip := range legacyIPs {
+		exec.Command("ipset", "add", ufwSetName, ip, "-exist").Run()
+	}
+	// Delete legacy ufw rules (delete from bottom to top to keep numbering stable)
+	for i := len(legacyIPs) - 1; i >= 0; i-- {
+		ip := legacyIPs[i]
+		exec.Command("ufw", "--force", "delete", "deny", "from", ip, "to", "any").Run()
+		exec.Command("ufw", "--force", "delete", "deny", "out", "from", "any", "to", ip).Run()
+	}
+	log.Printf("Firewall: migration complete — %d IPs moved to ipset", len(legacyIPs))
 }
 
 // ── iptables (ipset-based if available, fallback to chain rules) ─────────────
