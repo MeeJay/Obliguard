@@ -213,6 +213,10 @@ func (ws *wsConn) SendPong(payload []byte) error {
 	return ws.WriteFrame(0xA, payload)
 }
 
+func (ws *wsConn) SendText(payload []byte) error {
+	return ws.WriteFrame(0x1, payload)
+}
+
 func (ws *wsConn) Close() {
 	_ = ws.WriteFrame(0x8, []byte{})
 	_ = ws.conn.Close()

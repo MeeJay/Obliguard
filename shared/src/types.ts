@@ -1093,3 +1093,36 @@ export interface ObliguardPushResponse {
   services?: Record<string, AgentServiceConfig>;
   command?: string;
 }
+
+// ============================================
+// Firewall rule management
+// ============================================
+
+export interface FirewallRule {
+  id: string;
+  name: string;
+  direction: 'in' | 'out' | 'both';
+  action: 'allow' | 'block';
+  protocol: string;
+  localPort: string;
+  remoteIp: string;
+  enabled: boolean;
+  source: 'system' | 'obliguard';
+  platform: string;
+}
+
+export interface FirewallAddRequest {
+  name?: string;
+  direction: 'in' | 'out';
+  action: 'allow' | 'block';
+  protocol: string;
+  localPort?: string;
+  remoteIp?: string;
+}
+
+export interface FirewallCommandResponse {
+  success: boolean;
+  error?: string;
+  rules?: FirewallRule[];
+  platform?: string;
+}

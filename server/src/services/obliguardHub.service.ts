@@ -82,6 +82,7 @@ class ObliguardHubService {
         switch (msg.type) {
           case 'heartbeat': await this._handleHeartbeat(conn, msg); break;
           case 'events':    await this._handleEventsFlush(conn, msg); break;
+          case 'firewall_response': this._resolveFirewallResponse(msg); break;
           default:          break; // unknown message type — ignore
         }
       } catch { /* malformed JSON */ }
@@ -285,6 +286,32 @@ class ObliguardHubService {
       this._unregister(deviceUuid, conn.ws);
       return false;
     }
+  }
+
+  // ── Firewall command: push and wait for response ─────────────────────────
+
+  private firewallWaiters = new Map<string, { resolve: (val: unknown) => void; timer: ReturnType<typeof setTimeout> }>();
+
+  async pushAndWait(deviceUuid: string, cmd: OrCommand, timeoutMs = 30000): Promise<unknown> {
+    const delivered = this.push(deviceUuid, cmd);
+    if (!delivered) throw new Error('Agent is not connected');
+
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.firewallWaiters.delete(cmd.id);
+        reject(new Error('Agent did not respond within ' + (timeoutMs / 1000) + 's'));
+      }, timeoutMs);
+      this.firewallWaiters.set(cmd.id, { resolve, timer });
+    });
+  }
+
+  private _resolveFirewallResponse(msg: { id?: string; [k: string]: unknown }): void {
+    if (!msg.id) return;
+    const waiter = this.firewallWaiters.get(msg.id);
+    if (!waiter) return;
+    clearTimeout(waiter.timer);
+    this.firewallWaiters.delete(msg.id);
+    waiter.resolve(msg);
   }
 
   isConnected(deviceUuid: string): boolean {

@@ -4,12 +4,13 @@ import {
   ArrowLeft, RefreshCw, ShieldOff, ShieldCheck, ExternalLink,
   ChevronLeft, ChevronRight, Wifi, Cpu, Server, X, Eye,
   Trash2, AlertTriangle,
-  ChevronDown, ChevronUp, LayoutGrid, Network, Pencil, ArrowLeftRight,
+  ChevronDown, ChevronUp, LayoutGrid, Network, Pencil, ArrowLeftRight, Shield,
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import apiClient from '@/api/client';
 import { agentApi } from '@/api/agent.api';
 import { bansApi } from '@/api/bans.api';
+import { FirewallPanel } from '@/components/agent/FirewallPanel';
 import { whitelistApi } from '@/api/whitelist.api';
 import { serviceTemplatesApi } from '@/api/serviceTemplates.api';
 import { getSocket } from '@/socket/socketClient';
@@ -987,7 +988,7 @@ function TemplatesSection({ deviceId, deviceType, mikrotikStatus }: { deviceId: 
 // ── Main Page ─────────────────────────────────────────────────────────────────
 
 const PAGE_SIZE = 50;
-type TabId = 'overview' | 'starmap';
+type TabId = 'overview' | 'starmap' | 'firewall';
 
 export function AgentDetailPage() {
   const { deviceId } = useParams<{ deviceId: string }>();
@@ -1515,6 +1516,11 @@ export function AgentDetailPage() {
               </div>
             </div>
           )}
+          {activeTab === 'firewall' && device && (
+            <div className="p-6">
+              <FirewallPanel deviceId={device.id} wsConnected={device.wsConnected ?? false} />
+            </div>
+          )}
         </div>
 
         {/* ── Right icon sidebar ────────────────────────────────────────────── */}
@@ -1540,6 +1546,17 @@ export function AgentDetailPage() {
             }`}
           >
             <Network size={18} />
+          </button>
+          <button
+            onClick={() => setActiveTab('firewall')}
+            title="Firewall Rules"
+            className={`w-10 h-10 rounded-lg flex items-center justify-center transition-colors ${
+              activeTab === 'firewall'
+                ? 'bg-accent/15 text-accent'
+                : 'text-text-muted hover:text-text-primary hover:bg-bg-hover'
+            }`}
+          >
+            <Shield size={18} />
           </button>
         </div>
       </div>

@@ -191,16 +191,17 @@ func cmdWSSession(cfg *Config, lw *LogWatcher, fw FirewallManager) error {
 			case 0xA: // pong — ignore
 
 			case 0x1: // text — JSON from server
-				handleOGServerFrame(cfg, lw, fw, f.payload)
+				handleOGServerFrame(ws, cfg, lw, fw, f.payload)
 			}
 		}
 	}
 }
 
 // handleOGServerFrame dispatches a server-sent text frame.
-func handleOGServerFrame(cfg *Config, lw *LogWatcher, fw FirewallManager, payload []byte) {
+func handleOGServerFrame(ws *wsConn, cfg *Config, lw *LogWatcher, fw FirewallManager, payload []byte) {
 	var env struct {
 		Type string `json:"type"`
+		ID   string `json:"id"`
 	}
 	if err := json.Unmarshal(payload, &env); err != nil {
 		log.Printf("Command WS: malformed JSON: %v", err)
@@ -215,6 +216,12 @@ func handleOGServerFrame(cfg *Config, lw *LogWatcher, fw FirewallManager, payloa
 			return
 		}
 		applyOGConfig(cfg, lw, fw, &msg)
+
+	case "firewall_list", "firewall_add", "firewall_delete", "firewall_toggle":
+		frm := DetectFirewallRuleManager()
+		go handleFirewallCommand(frm, env.Type, env.ID, payload, func(data []byte) {
+			ws.SendText(data)
+		})
 	}
 }
 

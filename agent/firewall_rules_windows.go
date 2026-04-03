@@ -1,0 +1,215 @@
+//go:build windows
+
+package main
+
+import (
+	"fmt"
+	"os/exec"
+	"strings"
+)
+
+func init() { platformRuleManager = &WindowsRuleManager{} }
+
+// WindowsRuleManager manages Windows Defender Firewall rules via netsh.
+type WindowsRuleManager struct{}
+
+func (m *WindowsRuleManager) PlatformName() string { return "windows" }
+
+func (m *WindowsRuleManager) ListRules() ([]FwRule, error) {
+	out, err := exec.Command("netsh", "advfirewall", "firewall", "show", "rule", "name=all", "verbose").Output()
+	if err != nil {
+		return nil, fmt.Errorf("netsh show rule: %w", err)
+	}
+	return parseNetshVerbose(string(out)), nil
+}
+
+func (m *WindowsRuleManager) AddRule(req FwAddRequest) error {
+	name := req.Name
+	if name == "" {
+		name = fmt.Sprintf("Obliguard-Custom-%s-%s-%s", req.Direction, req.Protocol, req.LocalPort)
+	}
+	dir := "in"
+	if req.Direction == "out" {
+		dir = "out"
+	}
+	action := "block"
+	if req.Action == "allow" {
+		action = "allow"
+	}
+
+	args := []string{
+		"advfirewall", "firewall", "add", "rule",
+		"name=" + name,
+		"dir=" + dir,
+		"action=" + action,
+		"enable=yes",
+	}
+	if req.Protocol != "" && req.Protocol != "any" {
+		args = append(args, "protocol="+req.Protocol)
+	} else {
+		args = append(args, "protocol=any")
+	}
+	if req.LocalPort != "" && req.LocalPort != "any" {
+		args = append(args, "localport="+req.LocalPort)
+	}
+	if req.RemoteIP != "" && req.RemoteIP != "any" {
+		args = append(args, "remoteip="+req.RemoteIP)
+	}
+
+	if out, err := exec.Command("netsh", args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("netsh add rule: %s — %w", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+func (m *WindowsRuleManager) DeleteRule(ruleID string) error {
+	// ruleID on Windows = rule name (or "name::dir" composite)
+	name := ruleID
+	if idx := strings.Index(ruleID, "::"); idx >= 0 {
+		name = ruleID[:idx]
+	}
+	if out, err := exec.Command("netsh", "advfirewall", "firewall", "delete", "rule", "name="+name).CombinedOutput(); err != nil {
+		return fmt.Errorf("netsh delete rule: %s — %w", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+func (m *WindowsRuleManager) ToggleRule(ruleID string, enabled bool) error {
+	name := ruleID
+	if idx := strings.Index(ruleID, "::"); idx >= 0 {
+		name = ruleID[:idx]
+	}
+	enableStr := "yes"
+	if !enabled {
+		enableStr = "no"
+	}
+	if out, err := exec.Command("netsh", "advfirewall", "firewall", "set", "rule",
+		"name="+name, "new", "enable="+enableStr).CombinedOutput(); err != nil {
+		return fmt.Errorf("netsh set rule: %s — %w", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+// parseNetshVerbose parses the verbose output of "netsh advfirewall firewall show rule name=all verbose".
+// Rules are separated by blank lines. Each block has locale-dependent field labels.
+// We parse by position: first non-separator line = rule name, then look for key patterns.
+func parseNetshVerbose(output string) []FwRule {
+	var rules []FwRule
+	blocks := splitNetshBlocks(output)
+
+	for _, block := range blocks {
+		if len(block) < 3 {
+			continue
+		}
+		rule := FwRule{Platform: "windows", Enabled: true, Source: "system"}
+
+		for _, line := range block {
+			// Split on first colon to get key-value
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			key := strings.TrimSpace(parts[0])
+			val := strings.TrimSpace(parts[1])
+
+			// Match locale-independently by checking common substrings
+			keyLower := strings.ToLower(key)
+			switch {
+			case isFieldName(keyLower):
+				rule.Name = val
+				rule.ID = val
+			case isFieldDir(keyLower):
+				if strings.Contains(strings.ToLower(val), "in") {
+					rule.Direction = "in"
+				} else {
+					rule.Direction = "out"
+				}
+			case isFieldAction(keyLower):
+				if strings.Contains(strings.ToLower(val), "block") || strings.Contains(strings.ToLower(val), "bloquer") {
+					rule.Action = "block"
+				} else {
+					rule.Action = "allow"
+				}
+			case isFieldEnabled(keyLower):
+				rule.Enabled = strings.Contains(strings.ToLower(val), "yes") || strings.Contains(strings.ToLower(val), "oui")
+			case isFieldProtocol(keyLower):
+				rule.Protocol = strings.ToLower(val)
+			case isFieldLocalPort(keyLower):
+				rule.LocalPort = val
+			case isFieldRemoteIP(keyLower):
+				rule.RemoteIP = val
+			}
+		}
+
+		if rule.Name == "" {
+			continue
+		}
+
+		// Composite ID to avoid ambiguity
+		if rule.Direction != "" {
+			rule.ID = rule.Name + "::" + rule.Direction
+		}
+
+		// Detect Obliguard-managed rules
+		if strings.HasPrefix(rule.Name, "Obliguard-") {
+			rule.Source = "obliguard"
+		}
+
+		// Defaults
+		if rule.Protocol == "" {
+			rule.Protocol = "any"
+		}
+		if rule.LocalPort == "" {
+			rule.LocalPort = "any"
+		}
+		if rule.RemoteIP == "" {
+			rule.RemoteIP = "any"
+		}
+
+		rules = append(rules, rule)
+	}
+	return rules
+}
+
+func splitNetshBlocks(output string) [][]string {
+	var blocks [][]string
+	var current []string
+	for _, line := range strings.Split(output, "\n") {
+		trimmed := strings.TrimRight(line, "\r\n\t ")
+		if trimmed == "" || strings.HasPrefix(trimmed, "---") {
+			if len(current) > 0 {
+				blocks = append(blocks, current)
+				current = nil
+			}
+			continue
+		}
+		current = append(current, trimmed)
+	}
+	if len(current) > 0 {
+		blocks = append(blocks, current)
+	}
+	return blocks
+}
+
+// Locale-independent field detection — works for English, French, German, Spanish
+func isFieldName(k string) bool {
+	return strings.Contains(k, "rule name") || strings.Contains(k, "nom de la") || strings.Contains(k, "regelname") || strings.Contains(k, "nombre de la regla") || (strings.Contains(k, "nom") && strings.Contains(k, "gle"))
+}
+func isFieldDir(k string) bool {
+	return strings.Contains(k, "direction") || strings.Contains(k, "richtung") || strings.Contains(k, "dirección")
+}
+func isFieldAction(k string) bool {
+	return strings.Contains(k, "action") || strings.Contains(k, "aktion") || strings.Contains(k, "acción")
+}
+func isFieldEnabled(k string) bool {
+	return strings.Contains(k, "enabled") || strings.Contains(k, "activ") || strings.Contains(k, "aktiviert") || strings.Contains(k, "habilitad")
+}
+func isFieldProtocol(k string) bool {
+	return strings.Contains(k, "protocol") || strings.Contains(k, "protokoll")
+}
+func isFieldLocalPort(k string) bool {
+	return strings.Contains(k, "localport") || strings.Contains(k, "port local") || strings.Contains(k, "lokaler port") || strings.Contains(k, "puerto local")
+}
+func isFieldRemoteIP(k string) bool {
+	return strings.Contains(k, "remoteip") || strings.Contains(k, "ip distante") || strings.Contains(k, "remote-ip") || strings.Contains(k, "ip remota")
+}

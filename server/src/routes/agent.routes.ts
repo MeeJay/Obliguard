@@ -96,4 +96,11 @@ router.patch('/devices/:id', requireAuth, requireRole('admin'), requireTenant, u
 router.delete('/devices/:id', requireAuth, requireRole('admin'), requireTenant, deleteDevice);
 router.post('/devices/:id/command', requireAuth, requireRole('admin'), requireTenant, sendDeviceCommand);
 
+// Firewall rule management (real-time via agent WS)
+import { getFirewallRules, addFirewallRule, deleteFirewallRule, toggleFirewallRule } from '../controllers/firewall.controller';
+router.get('/devices/:id/firewall/rules', requireAuth, requireRole('admin'), requireTenant, getFirewallRules);
+router.post('/devices/:id/firewall/rules', requireAuth, requireRole('admin'), requireTenant, addFirewallRule);
+router.delete('/devices/:id/firewall/rules/:ruleId', requireAuth, requireRole('admin'), requireTenant, deleteFirewallRule);
+router.patch('/devices/:id/firewall/rules/:ruleId', requireAuth, requireRole('admin'), requireTenant, toggleFirewallRule);
+
 export default router;
