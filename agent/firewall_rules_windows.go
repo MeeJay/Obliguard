@@ -20,7 +20,16 @@ func (m *WindowsRuleManager) ListRules() ([]FwRule, error) {
 	if err != nil {
 		return nil, fmt.Errorf("netsh show rule: %w", err)
 	}
-	return parseNetshVerbose(string(out)), nil
+	rules := parseNetshVerbose(string(out))
+	// Filter out Obliguard ban rules (they have thousands of IPs and are managed separately)
+	var filtered []FwRule
+	for _, r := range rules {
+		if strings.HasPrefix(r.Name, "Obliguard-Block-") {
+			continue
+		}
+		filtered = append(filtered, r)
+	}
+	return filtered, nil
 }
 
 func (m *WindowsRuleManager) AddRule(req FwAddRequest) error {

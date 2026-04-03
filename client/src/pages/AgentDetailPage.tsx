@@ -1304,7 +1304,7 @@ export function AgentDetailPage() {
       <div className="flex mt-6 border-t border-border">
 
         {/* ── Tab content ─────────────────────────────────────────────────── */}
-        <div className="flex-1 min-w-0">
+        <div className="flex-1 min-w-0 overflow-y-auto">
           {activeTab === 'overview' ? (
             <div className="p-6 space-y-6">
 
@@ -1493,7 +1493,7 @@ export function AgentDetailPage() {
               />
             </div>
 
-          ) : (
+          ) : activeTab === 'starmap' ? (
             /* ── Star Map tab ─────────────────────────────────────────────── */
             <div className="p-6" style={{ height: 'max(480px, calc(100vh - 340px))' }}>
               <div className="h-full rounded-lg border border-border bg-bg-secondary overflow-hidden">
@@ -1515,12 +1515,11 @@ export function AgentDetailPage() {
                 </div>
               </div>
             </div>
-          )}
-          {activeTab === 'firewall' && device && (
+          ) : activeTab === 'firewall' && device ? (
             <div className="p-6">
               <FirewallPanel deviceId={device.id} wsConnected={device.wsConnected ?? false} />
             </div>
-          )}
+          ) : null}
         </div>
 
         {/* ── Right icon sidebar ────────────────────────────────────────────── */}
