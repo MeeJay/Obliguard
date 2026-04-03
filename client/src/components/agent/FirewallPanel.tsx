@@ -13,19 +13,23 @@ export function FirewallPanel({ deviceId, wsConnected }: Props) {
   const [rules, setRules] = useState<FirewallRule[]>([]);
   const [platform, setPlatform] = useState<string>('');
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState('');
   const [showAdd, setShowAdd] = useState(false);
   const [pending, setPending] = useState<Set<string>>(new Set());
 
   const loadRules = useCallback(async () => {
     setLoading(true);
+    setError(null);
     try {
       const result = await firewallApi.getRules(deviceId);
       setRules(result.rules ?? []);
       setPlatform(result.platform ?? '');
     } catch (err) {
-      const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error;
-      toast.error(msg || 'Failed to fetch firewall rules');
+      const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error
+        ?? (err as Error)?.message ?? 'Failed to fetch firewall rules';
+      setError(msg);
+      toast.error(msg);
     } finally {
       setLoading(false);
     }
@@ -114,9 +118,22 @@ export function FirewallPanel({ deviceId, wsConnected }: Props) {
 
       {/* Table */}
       {loading ? (
-        <div className="py-12 text-center text-sm text-text-muted">Fetching rules from agent...</div>
+        <div className="py-12 text-center">
+          <RefreshCw size={20} className="animate-spin mx-auto mb-2 text-accent" />
+          <p className="text-sm text-text-muted">Fetching rules from agent...</p>
+          <p className="text-xs text-text-muted mt-1">This may take a few seconds</p>
+        </div>
+      ) : error ? (
+        <div className="py-12 text-center">
+          <ShieldOff size={24} className="mx-auto mb-2 text-status-down" />
+          <p className="text-sm text-status-down font-medium">Failed to load firewall rules</p>
+          <p className="text-xs text-text-muted mt-1 max-w-sm mx-auto">{error}</p>
+          <button onClick={() => void loadRules()} className="mt-3 px-3 py-1 rounded text-xs text-accent border border-accent/30 hover:bg-accent/10 transition-colors">
+            Retry
+          </button>
+        </div>
       ) : filtered.length === 0 ? (
-        <div className="py-12 text-center text-sm text-text-muted">{filter ? 'No rules match' : 'No firewall rules found'}</div>
+        <div className="py-12 text-center text-sm text-text-muted">{filter ? 'No rules match the filter' : 'No firewall rules found on this agent'}</div>
       ) : (
         <div className="rounded-lg border border-border overflow-hidden max-h-[60vh] overflow-y-auto">
           <table className="w-full text-xs">
@@ -201,12 +218,14 @@ function AddRuleModal({ platform, onAdd, onClose }: {
   onClose: () => void;
 }) {
   const [name, setName] = useState('');
+  const [description, setDescription] = useState('');
   const [direction, setDirection] = useState<'in' | 'out'>('in');
   const [action, setAction] = useState<'allow' | 'block'>('block');
   const [protocol, setProtocol] = useState('tcp');
   const [localPort, setLocalPort] = useState('');
   const [remoteIp, setRemoteIp] = useState('');
   const [saving, setSaving] = useState(false);
+  const nameRequired = platform === 'windows';
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -229,13 +248,21 @@ function AddRuleModal({ platform, onAdd, onClose }: {
           <button onClick={onClose} className="text-text-muted hover:text-text-primary"><X size={16} /></button>
         </div>
         <form onSubmit={handleSubmit} className="space-y-3">
-          {platform === 'windows' && (
-            <div>
-              <label className="block text-xs font-medium text-text-secondary mb-1">Rule Name</label>
-              <input type="text" value={name} onChange={e => setName(e.target.value)} placeholder="My Rule"
-                className="w-full px-3 py-1.5 rounded border border-border bg-bg-secondary text-sm text-text-primary" />
-            </div>
-          )}
+          <div>
+            <label className="block text-xs font-medium text-text-secondary mb-1">
+              Rule Name {nameRequired && <span className="text-status-down">*</span>}
+            </label>
+            <input type="text" value={name} onChange={e => setName(e.target.value)}
+              placeholder={nameRequired ? 'Required on Windows' : 'Optional — auto-generated'}
+              required={nameRequired}
+              className="w-full px-3 py-1.5 rounded border border-border bg-bg-secondary text-sm text-text-primary" />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-text-secondary mb-1">Description (optional)</label>
+            <input type="text" value={description} onChange={e => setDescription(e.target.value)}
+              placeholder="Internal note — stored in Obliguard only"
+              className="w-full px-3 py-1.5 rounded border border-border bg-bg-secondary text-sm text-text-primary" />
+          </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="block text-xs font-medium text-text-secondary mb-1">Direction</label>

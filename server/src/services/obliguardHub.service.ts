@@ -295,10 +295,12 @@ class ObliguardHubService {
   async pushAndWait(deviceUuid: string, cmd: OrCommand, timeoutMs = 30000): Promise<unknown> {
     const delivered = this.push(deviceUuid, cmd);
     if (!delivered) throw new Error('Agent is not connected');
+    logger.info({ deviceUuid, cmdType: cmd.type, cmdId: cmd.id }, 'pushAndWait: command sent, awaiting response');
 
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.firewallWaiters.delete(cmd.id);
+        logger.warn({ deviceUuid, cmdId: cmd.id }, 'pushAndWait: TIMEOUT after ' + (timeoutMs / 1000) + 's');
         reject(new Error('Agent did not respond within ' + (timeoutMs / 1000) + 's'));
       }, timeoutMs);
       this.firewallWaiters.set(cmd.id, { resolve, timer });
@@ -306,9 +308,16 @@ class ObliguardHubService {
   }
 
   private _resolveFirewallResponse(msg: { id?: string; [k: string]: unknown }): void {
-    if (!msg.id) return;
+    if (!msg.id) {
+      logger.warn('Firewall response without id — ignoring');
+      return;
+    }
     const waiter = this.firewallWaiters.get(msg.id);
-    if (!waiter) return;
+    if (!waiter) {
+      logger.warn({ msgId: msg.id }, 'Firewall response for unknown/expired waiter');
+      return;
+    }
+    logger.info({ msgId: msg.id, success: msg.success }, 'pushAndWait: response received');
     clearTimeout(waiter.timer);
     this.firewallWaiters.delete(msg.id);
     waiter.resolve(msg);

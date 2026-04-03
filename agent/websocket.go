@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 )
 
 const wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -19,6 +20,7 @@ const wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 type wsConn struct {
 	conn net.Conn
 	r    *bufio.Reader
+	wmu  sync.Mutex // protects WriteFrame from concurrent goroutines
 }
 
 func wsConnect(rawURL string, extraHeaders http.Header) (*wsConn, error) {
@@ -175,6 +177,8 @@ func (ws *wsConn) ReadFrame() (opcode byte, payload []byte, err error) {
 }
 
 func (ws *wsConn) WriteFrame(opcode byte, payload []byte) error {
+	ws.wmu.Lock()
+	defer ws.wmu.Unlock()
 	payLen := len(payload)
 
 	var header []byte

@@ -3,6 +3,7 @@ import { db } from '../db';
 import { obliguardHub } from '../services/obliguardHub.service';
 import { AppError } from '../middleware/errorHandler';
 import { randomUUID } from 'crypto';
+import { logger } from '../utils/logger';
 
 async function getDeviceUuid(deviceId: number): Promise<string> {
   const row = await db('agent_devices').where({ id: deviceId }).select('uuid').first();
@@ -14,11 +15,14 @@ export async function getFirewallRules(req: Request, res: Response, next: NextFu
   try {
     const deviceId = parseInt(req.params.id, 10);
     const uuid = await getDeviceUuid(deviceId);
+    logger.info({ deviceId, uuid }, 'Firewall: sending firewall_list command');
+    const cmdId = randomUUID();
     const result = await obliguardHub.pushAndWait(uuid, {
       type: 'firewall_list',
-      id: randomUUID(),
+      id: cmdId,
       payload: {},
     });
+    logger.info({ deviceId, ruleCount: (result as { rules?: unknown[] })?.rules?.length }, 'Firewall: got response');
     res.json({ success: true, data: result });
   } catch (err: unknown) {
     if (err instanceof Error && err.message.includes('not connected')) {
