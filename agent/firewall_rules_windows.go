@@ -128,13 +128,17 @@ func parseNetshVerbose(output string) []FwRule {
 				rule.Name = val
 				rule.ID = val
 			case isFieldDir(keyLower):
-				if strings.Contains(strings.ToLower(val), "in") {
+				valLower := strings.ToLower(val)
+				// "In"/"Inbound"/"Actif"/"Eingehend"/"Entrante" = inbound
+				// "Out"/"Outbound"/"Sortie"/"Ausgehend"/"Saliente" = outbound
+				if strings.Contains(valLower, "in") || strings.Contains(valLower, "actif") || strings.Contains(valLower, "eingehend") || strings.Contains(valLower, "entrant") {
 					rule.Direction = "in"
 				} else {
 					rule.Direction = "out"
 				}
 			case isFieldAction(keyLower):
-				if strings.Contains(strings.ToLower(val), "block") || strings.Contains(strings.ToLower(val), "bloquer") {
+				valLower := strings.ToLower(val)
+				if strings.Contains(valLower, "block") || strings.Contains(valLower, "bloquer") {
 					rule.Action = "block"
 				} else {
 					rule.Action = "allow"
@@ -164,14 +168,16 @@ func parseNetshVerbose(output string) []FwRule {
 			rule.Source = "obliguard"
 		}
 
-		// Defaults
-		if rule.Protocol == "" {
+		// Normalize locale-dependent "any" values
+		protLower := strings.ToLower(rule.Protocol)
+		if rule.Protocol == "" || protLower == "tout" || protLower == "alle" || protLower == "todos" || protLower == "all" {
 			rule.Protocol = "any"
 		}
 		if rule.LocalPort == "" {
 			rule.LocalPort = "any"
 		}
-		if rule.RemoteIP == "" {
+		remLower := strings.ToLower(rule.RemoteIP)
+		if rule.RemoteIP == "" || remLower == "tout" || remLower == "alle" || remLower == "todos" || remLower == "any" || remLower == "quelconque" {
 			rule.RemoteIP = "any"
 		}
 
@@ -181,11 +187,24 @@ func parseNetshVerbose(output string) []FwRule {
 }
 
 func splitNetshBlocks(output string) [][]string {
+	// netsh verbose output format:
+	//   Nom de la règle :    RuleName
+	//   -------
+	//   Description :        ...
+	//   Activé :             ...
+	//   ...
+	//   (empty line)
+	//   Nom de la règle :    NextRule
+	//   -------
+	// Split on empty lines (block separator), skip --- lines within blocks
 	var blocks [][]string
 	var current []string
 	for _, line := range strings.Split(output, "\n") {
 		trimmed := strings.TrimRight(line, "\r\n\t ")
-		if trimmed == "" || strings.HasPrefix(trimmed, "---") {
+		if strings.HasPrefix(trimmed, "---") {
+			continue // skip separator lines, keep building current block
+		}
+		if trimmed == "" {
 			if len(current) > 0 {
 				blocks = append(blocks, current)
 				current = nil
