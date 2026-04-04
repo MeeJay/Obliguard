@@ -74,8 +74,18 @@ func init() {
 
 // ── Command handlers called from cmd_ws.go ──────────────────────────────────
 
-func handleFirewallCommand(frm FirewallRuleManager, cmdType string, cmdID string, payload json.RawMessage, sendFn func([]byte)) {
+func handleFirewallCommand(frm FirewallRuleManager, cmdType string, cmdID string, rawMsg json.RawMessage, sendFn func([]byte)) {
 	resp := FwResponse{Type: "firewall_response", ID: cmdID, Platform: frm.PlatformName()}
+
+	// Extract the nested "payload" field from the full WS message
+	var envelope struct {
+		Payload json.RawMessage `json:"payload"`
+	}
+	_ = json.Unmarshal(rawMsg, &envelope)
+	payload := envelope.Payload
+	if len(payload) == 0 {
+		payload = rawMsg
+	}
 
 	switch cmdType {
 	case "firewall_list":
@@ -95,7 +105,6 @@ func handleFirewallCommand(frm FirewallRuleManager, cmdType string, cmdID string
 			resp.Error = err.Error()
 		} else {
 			resp.Success = true
-			// Re-list after mutation
 			if rules, err := frm.ListRules(); err == nil {
 				resp.Rules = rules
 			}

@@ -72,31 +72,47 @@ func (m *WindowsRuleManager) AddRule(req FwAddRequest) error {
 }
 
 func (m *WindowsRuleManager) DeleteRule(ruleID string) error {
-	// ruleID on Windows = rule name (or "name::dir" composite)
-	name := ruleID
-	if idx := strings.Index(ruleID, "::"); idx >= 0 {
-		name = ruleID[:idx]
+	name, dir := parseRuleID(ruleID)
+	args := []string{"advfirewall", "firewall", "delete", "rule", "name=" + name}
+	if dir != "" {
+		args = append(args, "dir="+dir)
 	}
-	if out, err := exec.Command("netsh", "advfirewall", "firewall", "delete", "rule", "name="+name).CombinedOutput(); err != nil {
+	if out, err := exec.Command("netsh", args...).CombinedOutput(); err != nil {
 		return fmt.Errorf("netsh delete rule: %s — %w", strings.TrimSpace(string(out)), err)
 	}
 	return nil
 }
 
 func (m *WindowsRuleManager) ToggleRule(ruleID string, enabled bool) error {
-	name := ruleID
-	if idx := strings.Index(ruleID, "::"); idx >= 0 {
-		name = ruleID[:idx]
-	}
+	name, dir := parseRuleID(ruleID)
 	enableStr := "yes"
 	if !enabled {
 		enableStr = "no"
 	}
-	if out, err := exec.Command("netsh", "advfirewall", "firewall", "set", "rule",
-		"name="+name, "new", "enable="+enableStr).CombinedOutput(); err != nil {
+	args := []string{"advfirewall", "firewall", "set", "rule", "name=" + name}
+	if dir != "" {
+		args = append(args, "dir="+dir)
+	}
+	args = append(args, "new", "enable="+enableStr)
+	if out, err := exec.Command("netsh", args...).CombinedOutput(); err != nil {
 		return fmt.Errorf("netsh set rule: %s — %w", strings.TrimSpace(string(out)), err)
 	}
 	return nil
+}
+
+// parseRuleID splits "RuleName::in" into name and netsh dir value.
+func parseRuleID(ruleID string) (name string, dir string) {
+	if idx := strings.Index(ruleID, "::"); idx >= 0 {
+		name = ruleID[:idx]
+		d := ruleID[idx+2:]
+		if d == "in" {
+			dir = "in"
+		} else if d == "out" {
+			dir = "out"
+		}
+		return
+	}
+	return ruleID, ""
 }
 
 // parseNetshVerbose parses the verbose output of "netsh advfirewall firewall show rule name=all verbose".
