@@ -11,10 +11,12 @@
  * Pure Canvas 2D — no WebGL, no extra dependencies.
  */
 
-import { useEffect, useRef, useState, useCallback } from 'react';
-import { Shield, Ban, Activity, RefreshCw, Zap, X, ExternalLink } from 'lucide-react';
+import { useEffect, useRef, useState, useCallback, lazy, Suspense } from 'react';
+import { Shield, Ban, Activity, RefreshCw, Zap, X, ExternalLink, Box, Grid2x2 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { Link } from 'react-router-dom';
+
+const NetMap3D = lazy(() => import('../netmap3d/NetMap3D'));
 import { getSocket } from '../socket/socketClient';
 import apiClient from '../api/client';
 import { ipLabelsApi } from '../api/ipLabels.api';
@@ -160,6 +162,7 @@ export function NetMapPage() {
   const [orbitPaused,   setOrbitPaused]   = useState(false);
   const [clickedIp,     setClickedIp]     = useState<IpNode | null>(null);
   const [threatOnly,    setThreatOnly]    = useState(false);
+  const [viewMode,      setViewMode]      = useState<'2d' | '3d'>(() => (localStorage.getItem('obliguard-netmap-viewmode') as '2d' | '3d') ?? '2d');
   const [searchIp,      setSearchIp]      = useState('');
   const [searchHit,     setSearchHit]     = useState<string | null>(null);
   const orbitPausedRef  = useRef(false);
@@ -1941,6 +1944,22 @@ export function NetMapPage() {
             {threatOnly ? '⚠ THREATS' : '⚠ ALL'}
           </button>
 
+          {/* 2D/3D toggle */}
+          <button
+            onClick={() => {
+              const next = viewMode === '2d' ? '3d' : '2d';
+              setViewMode(next);
+              localStorage.setItem('obliguard-netmap-viewmode', next);
+            }}
+            className={`px-2 py-0.5 rounded text-[10px] font-mono tracking-wider border transition-colors ${
+              viewMode === '3d'
+                ? 'bg-purple-500/15 text-purple-400 border-purple-500/30'
+                : 'text-slate-600 border-slate-800 hover:text-slate-400'
+            }`}
+          >
+            {viewMode === '2d' ? <Box size={11} /> : <Grid2x2 size={11} />}
+          </button>
+
           <button
             onClick={() => void init()}
             className="ml-1 p-1.5 rounded border border-slate-800 text-slate-600 hover:text-cyan-400 hover:border-cyan-500/30 transition-colors"
@@ -2083,6 +2102,22 @@ export function NetMapPage() {
       )}
 
       {/* ── Canvas area ─────────────────────────────────────────────────────── */}
+      {viewMode === '3d' ? (
+        <div className="flex-1 relative overflow-hidden">
+          <Suspense fallback={<div className="flex-1 flex items-center justify-center bg-[#020408] text-slate-600 text-sm">Loading 3D engine…</div>}>
+            <NetMap3D
+              agentsRef={agentsRef}
+              ipsRef={ipsRef}
+              agentLinksRef={agentLinksRef}
+              visibleAgentIds={visibleAgentIdsRef.current}
+              threatOnly={threatOnly}
+              searchHit={searchHit}
+              onSelectAgent={(ag) => { selectedRef.current = ag?.id ?? null; setSelectedAgent(ag); }}
+              onSelectIp={(ip) => setClickedIp(ip)}
+            />
+          </Suspense>
+        </div>
+      ) : (
       <div
         ref={containerRef}
         className="flex-1 relative overflow-hidden"
@@ -2365,6 +2400,7 @@ export function NetMapPage() {
           </div>
         )}
       </div>
+      )}
 
       {/* ── Bottom live feed ────────────────────────────────────────────────── */}
       <div className="shrink-0 border-t border-[#110c04] bg-[#070502]">
