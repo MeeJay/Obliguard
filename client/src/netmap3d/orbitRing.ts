@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { ORBIT_RING_GAP_3D, AGENT_RADIUS } from './constants3d';
+import { ORBIT_RING_GAP_3D, AGENT_RADIUS, SCALE } from './constants3d';
 
 const GOLDEN_ANGLE = 2.399963;
 
@@ -11,16 +11,16 @@ export function createOrbitRings(ringCount: number): THREE.Group {
   const group = new THREE.Group();
 
   for (let i = 0; i < ringCount; i++) {
-    const radius = AGENT_RADIUS + 3 + i * ORBIT_RING_GAP_3D;
+    const radius = AGENT_RADIUS + 4 + i * ORBIT_RING_GAP_3D;
     const curve = new THREE.EllipseCurve(0, 0, radius, radius, 0, Math.PI * 2, false, 0);
     const points = curve.getPoints(128);
     const geo = new THREE.BufferGeometry().setFromPoints(
       points.map(p => new THREE.Vector3(p.x, 0, p.y)),
     );
     const mat = new THREE.LineBasicMaterial({
-      color: 0x4a8abb,
+      color: 0x3388cc,
       transparent: true,
-      opacity: 0.07,
+      opacity: 0.10,
       depthWrite: false,
     });
     const ring = new THREE.LineLoop(geo, mat);
@@ -45,8 +45,8 @@ export function getOrbitPosition3D(
   orbitAngle: number,
   orbitCurrentR: number,
 ): THREE.Vector3 {
-  // Map the 2D orbit radius to 3D
-  const r3d = orbitCurrentR * 0.15; // same SCALE factor
+  // Map the 2D orbit radius to 3D using SCALE
+  const r3d = orbitCurrentR * SCALE;
   if (r3d <= 0) return agentPos.clone();
 
   // Ring index for inclination

@@ -48,7 +48,7 @@ export default function NetMap3D({
     starsRef.current = stars;
 
     // IP pool
-    const ipPool = new IpMeshPool(1000);
+    const ipPool = new IpMeshPool(2000);
     ipPool.mesh.userData.isIpPool = true;
     ctx.scene.add(ipPool.mesh);
     ipPoolRef.current = ipPool;
@@ -56,14 +56,13 @@ export default function NetMap3D({
     // Interactions
     const cleanupInteractions = setupInteractions(
       ctx, el,
-      () => {}, // hover agent (TODO: tooltip)
+      () => {}, // hover agent
       () => {}, // hover ip
       (type, id) => {
         if (type === 'agent') {
           const ag = agentsRef.current.find(a => a.id === id);
           onSelectAgent(ag ?? null);
         } else if (type === 'ip') {
-          // id is instanceId — need to map back to IpNode
           const ipArr = getFilteredIps();
           const ip = ipArr[id as number];
           if (ip) onSelectIp(ip);
@@ -229,10 +228,19 @@ export default function NetMap3D({
 
       const pos3d = getOrbitPosition3D(agentPos, ip.orbitSlot, totalIps, ip.orbitAngle, ip.orbitCurrentR);
 
-      // Arrival animation
+      // Arrival animation — fly from far away toward orbit
       if (ip.arriveT < 1) {
-        const spawn = new THREE.Vector3(ip.spawnX * SCALE, 50, ip.spawnY * SCALE);
-        pos3d.lerp(spawn, 1 - ip.arriveT);
+        // Spawn point: far above in 3D space, offset from agent
+        const spawnDir = new THREE.Vector3(
+          (ip.spawnX - agent.x) * SCALE,
+          80, // high above
+          (ip.spawnY - agent.y) * SCALE,
+        ).normalize().multiplyScalar(120);
+        const spawn = agentPos.clone().add(spawnDir);
+        // Smooth ease-in
+        const t = ip.arriveT;
+        const ease = t * t * (3 - 2 * t); // smoothstep
+        pos3d.lerpVectors(spawn, pos3d, ease);
       }
 
       positions.push({
@@ -266,18 +274,22 @@ export default function NetMap3D({
       const tgt = agentMap.get(link.targetId);
       if (!src || !tgt) continue;
 
+      const srcPos = new THREE.Vector3(src.x * SCALE, 0, src.y * SCALE);
+      const tgtPos = new THREE.Vector3(tgt.x * SCALE, 0, tgt.y * SCALE);
+      const midY = srcPos.distanceTo(tgtPos) * 0.15; // arc height proportional to distance
+
       if (!existing.has(key)) {
         const curve = new THREE.CatmullRomCurve3([
-          new THREE.Vector3(src.x * SCALE, 0, src.y * SCALE),
-          new THREE.Vector3((src.x + tgt.x) / 2 * SCALE, 8, (src.y + tgt.y) / 2 * SCALE), // arc up
-          new THREE.Vector3(tgt.x * SCALE, 0, tgt.y * SCALE),
+          srcPos,
+          new THREE.Vector3((srcPos.x + tgtPos.x) / 2, midY, (srcPos.z + tgtPos.z) / 2),
+          tgtPos,
         ]);
         const geo = new THREE.BufferGeometry().setFromPoints(curve.getPoints(50));
         const color = link.type === 'wan' ? 0xf97316 : 0x3b82f6;
         const mat = new THREE.LineBasicMaterial({
           color,
           transparent: true,
-          opacity: 0.2,
+          opacity: 0.3,
           depthWrite: false,
         });
         const line = new THREE.Line(geo, mat);
@@ -287,9 +299,9 @@ export default function NetMap3D({
         // Update positions
         const line = existing.get(key)!;
         const curve = new THREE.CatmullRomCurve3([
-          new THREE.Vector3(src.x * SCALE, 0, src.y * SCALE),
-          new THREE.Vector3((src.x + tgt.x) / 2 * SCALE, 8, (src.y + tgt.y) / 2 * SCALE),
-          new THREE.Vector3(tgt.x * SCALE, 0, tgt.y * SCALE),
+          srcPos,
+          new THREE.Vector3((srcPos.x + tgtPos.x) / 2, midY, (srcPos.z + tgtPos.z) / 2),
+          tgtPos,
         ]);
         const points = curve.getPoints(50);
         const positions = line.geometry.getAttribute('position') as THREE.BufferAttribute;
@@ -305,7 +317,7 @@ export default function NetMap3D({
     <div
       ref={containerRef}
       className="w-full h-full relative"
-      style={{ background: '#020408' }}
+      style={{ background: '#000206' }}
     />
   );
 }

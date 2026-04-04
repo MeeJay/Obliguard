@@ -22,24 +22,25 @@ export function createScene(container: HTMLElement): SceneContext {
   const w = container.clientWidth;
   const h = container.clientHeight;
 
-  // Scene
+  // Scene — deep space black
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x020408);
-  scene.fog = new THREE.FogExp2(0x020408, 0.0003);
+  scene.background = new THREE.Color(0x000206);
+  scene.fog = new THREE.FogExp2(0x000206, 0.00015);
 
-  // Camera
-  const camera = new THREE.PerspectiveCamera(55, w / h, 0.1, 10000);
-  camera.position.set(0, CAM_INITIAL_DIST * 0.6, CAM_INITIAL_DIST);
+  // Camera — wider FOV for immersion
+  const camera = new THREE.PerspectiveCamera(60, w / h, 0.1, 12000);
+  camera.position.set(0, CAM_INITIAL_DIST * 0.7, CAM_INITIAL_DIST);
 
-  // Renderer
+  // Renderer — high quality
   const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
   renderer.setSize(w, h);
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.2;
+  renderer.toneMappingExposure = 1.4;
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
   container.appendChild(renderer.domElement);
 
-  // CSS2D label renderer (HTML overlays on top of WebGL)
+  // CSS2D label renderer
   const labelRenderer = new CSS2DRenderer();
   labelRenderer.setSize(w, h);
   labelRenderer.domElement.style.position = 'absolute';
@@ -48,7 +49,7 @@ export function createScene(container: HTMLElement): SceneContext {
   labelRenderer.domElement.style.pointerEvents = 'none';
   container.appendChild(labelRenderer.domElement);
 
-  // Post-processing (bloom)
+  // Post-processing — bloom for glow
   const composer = new EffectComposer(renderer);
   composer.addPass(new RenderPass(scene, camera));
   const bloomPass = new UnrealBloomPass(
@@ -59,22 +60,36 @@ export function createScene(container: HTMLElement): SceneContext {
   );
   composer.addPass(bloomPass);
 
-  // Orbit controls
+  // Orbit controls — smooth, cinematic
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
-  controls.dampingFactor = 0.05;
+  controls.dampingFactor = 0.06;
   controls.minDistance = CAM_MIN_DIST;
   controls.maxDistance = CAM_MAX_DIST;
   controls.enablePan = true;
-  controls.panSpeed = 0.5;
-  controls.rotateSpeed = 0.6;
+  controls.panSpeed = 0.6;
+  controls.rotateSpeed = 0.5;
+  controls.zoomSpeed = 0.8;
 
-  // Ambient light (soft fill)
-  scene.add(new THREE.AmbientLight(0x1a2540, 0.8));
-  // Point light at center (like a sun)
-  const centerLight = new THREE.PointLight(0xffffff, 1.2, 500);
-  centerLight.position.set(0, 0, 0);
-  scene.add(centerLight);
+  // ── Lighting ──────────────────────────────────────────────────────────────
+
+  // Soft ambient fill — cold blue tint
+  scene.add(new THREE.AmbientLight(0x0a1530, 1.2));
+
+  // Main "sun" — warm white at origin
+  const sun = new THREE.PointLight(0xffeedd, 2.0, 800);
+  sun.position.set(0, 30, 0);
+  scene.add(sun);
+
+  // Secondary fill light — cool blue from below for rim lighting
+  const fillBelow = new THREE.PointLight(0x2244aa, 0.6, 600);
+  fillBelow.position.set(0, -50, 0);
+  scene.add(fillBelow);
+
+  // Distant directional for key shadows
+  const dirLight = new THREE.DirectionalLight(0xaaccff, 0.4);
+  dirLight.position.set(100, 80, 60);
+  scene.add(dirLight);
 
   return {
     scene,

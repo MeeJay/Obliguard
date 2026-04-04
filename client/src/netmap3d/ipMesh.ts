@@ -3,6 +3,7 @@ import { STATUS_COLORS, IP_RADIUS_MIN, IP_RADIUS_MAX } from './constants3d';
 
 /**
  * InstancedMesh pool for all IP dots — single draw call for hundreds of IPs.
+ * Uses emissive glow so IPs are self-illuminating like NASA Eyes.
  */
 export class IpMeshPool {
   mesh: THREE.InstancedMesh;
@@ -10,14 +11,14 @@ export class IpMeshPool {
   private colorAttr: THREE.InstancedBufferAttribute;
   private dummy = new THREE.Object3D();
 
-  constructor(maxCount = 1000) {
+  constructor(maxCount = 2000) {
     this.maxCount = maxCount;
-    const geo = new THREE.SphereGeometry(1, 12, 12);
+    const geo = new THREE.SphereGeometry(1, 16, 16);
     const mat = new THREE.MeshStandardMaterial({
-      roughness: 0.4,
-      metalness: 0.1,
+      roughness: 0.3,
+      metalness: 0.2,
       emissive: new THREE.Color(0xffffff),
-      emissiveIntensity: 0.3,
+      emissiveIntensity: 0.5,
     });
     this.mesh = new THREE.InstancedMesh(geo, mat, maxCount);
     this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
@@ -28,13 +29,9 @@ export class IpMeshPool {
     this.colorAttr = new THREE.InstancedBufferAttribute(colors, 3);
     this.mesh.instanceColor = this.colorAttr;
 
-    // Start with 0 visible
     this.mesh.count = 0;
   }
 
-  /**
-   * Update all IP instances in one pass.
-   */
   update(
     positions: { x: number; y: number; z: number; radius: number; color: number }[],
   ): void {

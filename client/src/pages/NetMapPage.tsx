@@ -855,10 +855,6 @@ export function NetMapPage() {
   // ── Animation loop ────────────────────────────────────────────────────────
 
   const animate = useCallback((ts: number) => {
-    const canvas = canvasRef.current;
-    if (!canvas) { rafRef.current = requestAnimationFrame(animate); return; }
-    const ctx = canvas.getContext('2d')!;
-    const { w, h } = sizeRef.current;
     const dt = Math.min((ts - lastTsRef.current) / 1000, 0.05);
     lastTsRef.current = ts;
 
@@ -993,6 +989,12 @@ export function NetMapPage() {
         if (now - link.lastSeen > PEER_LINK_TTL) agentLinksRef.current.delete(key);
       }
     }
+
+    // ── 2D drawing (skip if canvas not mounted, e.g. in 3D mode) ─────────
+    const canvas = canvasRef.current;
+    if (!canvas) { rafRef.current = requestAnimationFrame(animate); return; }
+    const ctx = canvas.getContext('2d')!;
+    const { w, h } = sizeRef.current;
 
     ctx.clearRect(0, 0, w, h);
     const bg = bgRef.current;
