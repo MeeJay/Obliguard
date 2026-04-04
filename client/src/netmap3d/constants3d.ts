@@ -46,7 +46,7 @@ export const CAM_MAX_DIST = 3000;
 export const STAR_COUNT = 15000;
 export const STAR_SPHERE_RADIUS = 5000;
 
-/** Bloom settings — stronger for NASA Eyes look */
-export const BLOOM_STRENGTH = 1.0;
-export const BLOOM_RADIUS = 0.5;
-export const BLOOM_THRESHOLD = 0.3;
+/** Bloom settings — high emissive objects get natural glow via bloom */
+export const BLOOM_STRENGTH = 1.5;
+export const BLOOM_RADIUS = 0.6;
+export const BLOOM_THRESHOLD = 0.2;

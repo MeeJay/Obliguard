@@ -13,7 +13,8 @@ export function setupInteractions(
   onClick: (type: 'agent' | 'ip', id: number | string) => void,
   onDoubleClick: (position: THREE.Vector3) => void,
 ): () => void {
-  const { raycaster, mouse, camera } = ctx;
+  const raycaster = new THREE.Raycaster();
+  const mouse = new THREE.Vector2(-999, -999);
 
   const onMouseMove = (e: MouseEvent) => {
     const rect = container.getBoundingClientRect();
@@ -23,32 +24,58 @@ export function setupInteractions(
 
   const onClickHandler = (e: MouseEvent) => {
     if (e.button !== 0) return; // left click only
-    raycaster.setFromCamera(mouse, camera);
+    raycaster.setFromCamera(mouse, ctx.camera);
 
-    // Check agents first (they're larger)
-    const agentMeshes = ctx.scene.children.filter(c => c.userData.agentId != null);
-    const agentHits = raycaster.intersectObjects(agentMeshes, true);
+    // Collect all objects for raycasting
+    const allObjects: THREE.Object3D[] = [];
+    const agentGroups: THREE.Group[] = [];
+    let ipPoolMesh: THREE.InstancedMesh | null = null;
+
+    ctx.scene.traverse((obj) => {
+      if (obj.userData.agentId != null) {
+        agentGroups.push(obj as THREE.Group);
+      }
+      if (obj.userData.isIpPool && obj instanceof THREE.InstancedMesh) {
+        ipPoolMesh = obj;
+      }
+    });
+
+    // Check agents first (traverse into groups recursively)
+    for (const group of agentGroups) {
+      allObjects.push(...group.children.filter(c => c instanceof THREE.Mesh));
+    }
+    const agentHits = raycaster.intersectObjects(allObjects, false);
     if (agentHits.length > 0) {
+      // Walk up to find the group with agentId
       let obj: THREE.Object3D | null = agentHits[0].object;
-      while (obj && !obj.userData.agentId) obj = obj.parent;
-      if (obj?.userData.agentId) {
+      while (obj && obj.userData.agentId == null) obj = obj.parent;
+      if (obj?.userData.agentId != null) {
         onClick('agent', obj.userData.agentId);
         return;
       }
     }
 
     // Check IPs (instanced mesh — use instanceId)
-    const ipMeshes = ctx.scene.children.filter(c => c.userData.isIpPool);
-    const ipHits = raycaster.intersectObjects(ipMeshes, false);
-    if (ipHits.length > 0 && ipHits[0].instanceId != null) {
-      onClick('ip', ipHits[0].instanceId);
+    if (ipPoolMesh) {
+      const ipHits = raycaster.intersectObject(ipPoolMesh, false);
+      if (ipHits.length > 0 && ipHits[0].instanceId != null) {
+        onClick('ip', ipHits[0].instanceId);
+        return;
+      }
     }
   };
 
   const onDblClick = (_e: MouseEvent) => {
-    raycaster.setFromCamera(mouse, camera);
-    const allMeshes = ctx.scene.children.filter(c => c.userData.agentId != null);
-    const hits = raycaster.intersectObjects(allMeshes, true);
+    raycaster.setFromCamera(mouse, ctx.camera);
+    const meshes: THREE.Object3D[] = [];
+    ctx.scene.traverse((obj) => {
+      if (obj.userData.agentId != null) {
+        for (const child of (obj as THREE.Group).children) {
+          if (child instanceof THREE.Mesh) meshes.push(child);
+        }
+      }
+    });
+    const hits = raycaster.intersectObjects(meshes, false);
     if (hits.length > 0) {
       onDoubleClick(hits[0].point);
     }
@@ -77,13 +104,13 @@ export function flyTo(
   const start = camera.position.clone();
   const startTarget = (controls as any).target.clone();
   const dir = target.clone().sub(camera.position).normalize();
-  const endPos = target.clone().sub(dir.multiplyScalar(30)); // 30 units away
+  const endPos = target.clone().sub(dir.multiplyScalar(30));
   const startTime = performance.now();
 
   function animate() {
     const elapsed = (performance.now() - startTime) / 1000;
     const t = Math.min(elapsed / duration, 1);
-    const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; // easeInOutQuad
+    const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
 
     camera.position.lerpVectors(start, endPos, ease);
     (controls as any).target.lerpVectors(startTarget, target, ease);

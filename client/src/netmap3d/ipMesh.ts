@@ -15,10 +15,11 @@ export class IpMeshPool {
     this.maxCount = maxCount;
     const geo = new THREE.SphereGeometry(1, 16, 16);
     const mat = new THREE.MeshStandardMaterial({
-      roughness: 0.3,
-      metalness: 0.2,
+      color: 0x000000,
+      roughness: 0.1,
+      metalness: 0.0,
       emissive: new THREE.Color(0xffffff),
-      emissiveIntensity: 0.5,
+      emissiveIntensity: 1.2,
     });
     this.mesh = new THREE.InstancedMesh(geo, mat, maxCount);
     this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
