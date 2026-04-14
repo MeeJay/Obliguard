@@ -115,24 +115,13 @@ func setupConfig(urlArg, keyArg string) *Config {
 		cfg.APIKey = keyArg
 	}
 
-	// Always try to migrate to the hardware-derived UUID so that existing agents
-	// get the stable, reproducible identity on their next restart.
-	// If hardware detection fails (containers, some VMs), keep whatever UUID is
-	// already stored; generate a random one only if there is none at all.
-	if hwUUID := getMachineUUID(); hwUUID != "" {
-		if cfg.DeviceUUID != hwUUID {
-			if cfg.DeviceUUID == "" {
-				log.Printf("Hardware-derived device UUID: %s", hwUUID)
-			} else {
-				log.Printf("Migrating device UUID %s → %s (hardware-derived)", cfg.DeviceUUID, hwUUID)
-			}
-			cfg.DeviceUUID = hwUUID
-			_ = saveConfig(cfg)
+	// Resolve the best available device UUID using the shared Obli* cascade:
+	// SMBIOS → disk-serial-derived → previously stored → fresh random.
+	if resolved := resolveDeviceUUID(cfg.DeviceUUID); resolved != cfg.DeviceUUID {
+		if cfg.DeviceUUID != "" {
+			log.Printf("Migrating device UUID %s → %s", cfg.DeviceUUID, resolved)
 		}
-	} else if cfg.DeviceUUID == "" {
-		// No SMBIOS / machine-id available — fall back to a random UUID.
-		cfg.DeviceUUID = generateUUID()
-		log.Printf("Generated random device UUID: %s", cfg.DeviceUUID)
+		cfg.DeviceUUID = resolved
 		_ = saveConfig(cfg)
 	}
 	if cfg.CheckIntervalSeconds == 0 {
