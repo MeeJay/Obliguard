@@ -718,6 +718,8 @@ function ActivityTab({ isAdmin }: ActivityTabProps) {
   // Admin-only tenant selector
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [selectedTenantId, setSelectedTenantId] = useState<number | null>(null);
+  // Add-IP modal
+  const [showAddModal, setShowAddModal] = useState(false);
 
   // Debounce search
   useEffect(() => {
@@ -932,6 +934,20 @@ function ActivityTab({ isAdmin }: ActivityTabProps) {
     setSelectedBanId(row.activeBanId ?? null);
   };
 
+  const handleAddIp = async (req: import('@obliview/shared').AddIpReputationRequest) => {
+    try {
+      const { ipReputationApi } = await import('../api/ipReputation.api');
+      await ipReputationApi.add(req);
+      toast.success(`${req.ip} added as ${req.status}`);
+      setShowAddModal(false);
+      load();
+    } catch (err: any) {
+      const msg = err?.response?.data?.message || err?.message || 'Failed to add IP';
+      toast.error(msg);
+      throw err;
+    }
+  };
+
   const totalPages = Math.ceil(total / PAGE_SIZE);
 
   return (
@@ -985,6 +1001,9 @@ function ActivityTab({ isAdmin }: ActivityTabProps) {
         >
           <RefreshCw size={14} />
         </button>
+        <Button size="sm" variant="primary" onClick={() => setShowAddModal(true)}>
+          <Plus size={13} className="mr-1" />Add IP
+        </Button>
       </div>
 
       {/* Bulk action bar */}
@@ -1230,6 +1249,13 @@ function ActivityTab({ isAdmin }: ActivityTabProps) {
           }}
           onClear={handleClear}
           isAdmin={isAdmin}
+        />
+      )}
+
+      {showAddModal && (
+        <AddIpReputationModal
+          onSave={handleAddIp}
+          onClose={() => setShowAddModal(false)}
         />
       )}
     </>
@@ -1712,6 +1738,150 @@ function AddBanModal({ onSave, onClose }: AddBanModalProps) {
         <div className="flex gap-2 mt-6">
           <Button variant="danger" loading={saving} onClick={handleSubmit} className="flex-1">
             <ShieldOff size={14} className="mr-1.5" />Add ban
+          </Button>
+          <Button variant="secondary" onClick={onClose} className="flex-1">
+            Cancel
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── AddIpReputationModal ──────────────────────────────────────────────────────
+// Manually add an IP with any of the 4 statuses (banned / suspicious / whitelisted / clean).
+
+interface AddIpReputationModalProps {
+  onSave: (req: import('@obliview/shared').AddIpReputationRequest) => Promise<void>;
+  onClose: () => void;
+}
+
+function AddIpReputationModal({ onSave, onClose }: AddIpReputationModalProps) {
+  const [ip, setIp] = useState('');
+  const [status, setStatus] = useState<IpStatus>('banned');
+  const [label, setLabel] = useState('');
+  const [reason, setReason] = useState('');
+  const [scope, setScope] = useState<BanScope>('global');
+  const [expiresAt, setExpiresAt] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const handleSubmit = async () => {
+    if (!ip.trim()) { toast.error('IP address is required'); return; }
+    setSaving(true);
+    try {
+      const req: import('@obliview/shared').AddIpReputationRequest = { ip: ip.trim(), status };
+      if (status === 'banned') {
+        req.reason = reason.trim() || null;
+        req.scope = scope;
+        req.expiresAt = expiresAt || null;
+      } else if (status === 'whitelisted') {
+        req.label = label.trim() || null;
+        req.scope = scope as WhitelistScope;
+      }
+      await onSave(req);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const STATUS_OPTIONS: { value: IpStatus; label: string; colorClass: string }[] = [
+    { value: 'banned',      label: 'Banned',      colorClass: 'bg-red-500/10 text-red-400 border-red-500/30' },
+    { value: 'suspicious',  label: 'Suspicious',  colorClass: 'bg-amber-500/10 text-amber-400 border-amber-500/30' },
+    { value: 'whitelisted', label: 'Whitelisted', colorClass: 'bg-green-500/10 text-green-400 border-green-500/30' },
+    { value: 'clean',       label: 'Clean',       colorClass: 'bg-blue-500/10 text-blue-400 border-blue-500/30' },
+  ];
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+      <div className="w-full max-w-md rounded-xl border border-border bg-bg-primary shadow-2xl p-6">
+        <div className="flex items-center justify-between mb-5">
+          <h2 className="text-base font-semibold text-text-primary">Add IP to reputation</h2>
+          <button
+            onClick={onClose}
+            className="p-1.5 rounded-lg text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="space-y-4">
+          <Input
+            label="IP Address"
+            placeholder="192.168.1.1"
+            value={ip}
+            onChange={e => setIp(e.target.value)}
+            autoFocus
+          />
+
+          <div className="space-y-1">
+            <label className="block text-sm font-medium text-text-secondary">Status</label>
+            <div className="grid grid-cols-2 gap-2">
+              {STATUS_OPTIONS.map(opt => (
+                <button
+                  key={opt.value}
+                  type="button"
+                  onClick={() => setStatus(opt.value)}
+                  className={cn(
+                    'px-3 py-2 text-sm font-medium rounded-md border transition-colors',
+                    status === opt.value
+                      ? opt.colorClass
+                      : 'bg-bg-tertiary text-text-muted border-border hover:text-text-primary',
+                  )}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {(status === 'banned' || status === 'whitelisted') && (
+            <div className="space-y-1">
+              <label className="block text-sm font-medium text-text-secondary">Scope</label>
+              <select
+                value={scope}
+                onChange={e => setScope(e.target.value as BanScope)}
+                className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
+              >
+                <option value="global">Global</option>
+                <option value="tenant">Tenant</option>
+              </select>
+            </div>
+          )}
+
+          {status === 'banned' && (
+            <>
+              <Input
+                label="Reason (optional)"
+                placeholder="Why is this IP being banned?"
+                value={reason}
+                onChange={e => setReason(e.target.value)}
+              />
+              <div className="space-y-1">
+                <label className="block text-sm font-medium text-text-secondary">Expires at (optional)</label>
+                <input
+                  type="datetime-local"
+                  value={expiresAt}
+                  onChange={e => setExpiresAt(e.target.value)}
+                  className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
+                />
+                <p className="text-xs text-text-muted">Leave blank for a permanent ban.</p>
+              </div>
+            </>
+          )}
+
+          {status === 'whitelisted' && (
+            <Input
+              label="Label (optional)"
+              placeholder="e.g. Office VPN"
+              value={label}
+              onChange={e => setLabel(e.target.value)}
+            />
+          )}
+        </div>
+
+        <div className="flex gap-2 mt-6">
+          <Button variant="primary" loading={saving} onClick={handleSubmit} className="flex-1">
+            <Plus size={14} className="mr-1.5" />Add IP
           </Button>
           <Button variant="secondary" onClick={onClose} className="flex-1">
             Cancel

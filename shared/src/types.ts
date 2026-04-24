@@ -1007,6 +1007,24 @@ export interface CreateWhitelistRequest {
   scopeId?: number | null;
 }
 
+/**
+ * Manually add an IP to the reputation module with a desired status.
+ * Routed server-side to the appropriate table (ip_bans, ip_whitelist, or ip_reputation).
+ */
+export interface AddIpReputationRequest {
+  ip: string;
+  status: IpStatus;
+  /** Used when status='whitelisted' */
+  label?: string | null;
+  /** Used when status='banned' */
+  reason?: string | null;
+  /** Used when status='banned' or 'whitelisted' */
+  scope?: BanScope | WhitelistScope;
+  scopeId?: number | null;
+  /** Used when status='banned' (ISO timestamp, null = permanent) */
+  expiresAt?: string | null;
+}
+
 // ============================================
 // Obliguard — Agent push payload types
 // ============================================

@@ -604,6 +604,59 @@ class IpReputationService {
     // Remove per-tenant baselines — they're now obsolete (counter was reset to 0)
     await db('ip_reputation_tenant_clears').where({ ip }).delete();
   }
+
+  /**
+   * Manually marks an IP as suspicious.
+   *
+   * Upserts ip_reputation so total_failures >= 1 (status becomes 'suspicious'
+   * unless the IP is banned/whitelisted). Also wipes any per-tenant baseline
+   * that would mask the suspicious status.
+   */
+  async markSuspicious(ip: string): Promise<void> {
+    const now = new Date();
+    await db('ip_reputation')
+      .insert({
+        ip,
+        total_failures: 1,
+        total_successes: 0,
+        affected_agents_count: 0,
+        affected_services: [],
+        attempted_usernames: [],
+        first_seen: null,
+        last_seen: null,
+        last_event_device_id: null,
+        geo_country_code: null,
+        geo_city: null,
+        asn: null,
+        updated_at: now,
+      })
+      .onConflict('ip')
+      .merge({
+        total_failures: db.raw('GREATEST(ip_reputation.total_failures, 1)'),
+        updated_at: now,
+      });
+
+    // Drop any tenant baselines that would hide the new suspicious state
+    await db('ip_reputation_tenant_clears').where({ ip }).delete();
+  }
+
+  /**
+   * Manually marks an IP as clean.
+   *
+   * Admins: resets global counter to 0 via clearGlobal.
+   * Tenant users: installs a per-tenant baseline = current total_failures
+   *   (same behaviour as clearForTenant).
+   * Ensures a reputation row exists so the IP is visible in the list.
+   */
+  async markClean(ip: string, tenantId: number | undefined, isAdmin: boolean, userId: number): Promise<void> {
+    await this.ensureExists(ip);
+    if (isAdmin) {
+      await this.clearGlobal(ip);
+    } else {
+      if (!tenantId) throw new Error('No tenant context');
+      await this.clearForTenant(ip, tenantId, userId);
+    }
+  }
 }
 
 export const ipReputationService = new IpReputationService();

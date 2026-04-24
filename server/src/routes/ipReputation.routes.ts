@@ -5,11 +5,19 @@ import {
   listReputation,
   getIpDetail,
   clearSuspicious,
+  addIp,
 } from '../controllers/ipReputation.controller';
 
 const router = Router();
 
 router.get('/', requireAuth, listReputation);
+
+/**
+ * POST /api/ip-reputation
+ * Manually adds an IP with a desired status (banned/suspicious/whitelisted/clean).
+ * Tenant-scoped entries require tenant admin; global entries require platform admin.
+ */
+router.post('/', requireAuth, requireRole('admin'), addIp);
 
 /**
  * POST /api/ip-reputation/:ip/clear

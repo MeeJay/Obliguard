@@ -1,5 +1,5 @@
 import apiClient from './client';
-import type { ApiResponse, IpReputation, IpEvent } from '@obliview/shared';
+import type { ApiResponse, IpReputation, IpEvent, AddIpReputationRequest } from '@obliview/shared';
 
 export const ipReputationApi = {
   async list(params?: {
@@ -17,5 +17,9 @@ export const ipReputationApi = {
       `/ip-reputation/${encodeURIComponent(ip)}`,
     );
     return res.data.data!;
+  },
+
+  async add(data: AddIpReputationRequest): Promise<void> {
+    await apiClient.post<ApiResponse<unknown>>('/ip-reputation', data);
   },
 };
