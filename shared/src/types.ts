@@ -4,7 +4,7 @@ import type { SettingsKey } from './settingsDefaults';
 // ============================================
 // User types
 // ============================================
-export type AppTheme = 'modern' | 'neon';
+export type AppTheme = 'obli-operator' | 'modern' | 'neon';
 
 export interface UserPreferences {
   toastEnabled: boolean;

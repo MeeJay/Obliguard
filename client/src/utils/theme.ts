@@ -18,11 +18,11 @@ export function applyTheme(theme: AppTheme): void {
 export function loadSavedTheme(): AppTheme {
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved === 'neon' || saved === 'modern') return saved;
+    if (saved === 'obli-operator' || saved === 'neon' || saved === 'modern') return saved;
   } catch {
     // ignore
   }
-  return 'modern';
+  return 'obli-operator';
 }
 
 /** Apply theme immediately on module import to prevent flash of unstyled content. */

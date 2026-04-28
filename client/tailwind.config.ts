@@ -48,15 +48,38 @@ export default {
         },
         // Alias used by enrollment wizard and interactive components
         primary: 'rgb(var(--c-primary) / <alpha-value>)',
+        // Obli Suite brand palette — used by the topbar app switcher
+        // and the per-app active-pill highlight. Values fixed per
+        // D:\Mockup\obli-design-system.md §1; not theme-swappable.
+        obli: {
+          view:   '#2bc4bd',
+          guard:  '#f5a623',
+          guard2: '#ffb84a',
+          map:    '#1edd8a',
+          ance:   '#e03a3a',
+          hub:    '#2d4ec9',
+        },
       },
       fontFamily: {
+        // Obli Design v1 — two-tier font stack:
+        //   font-sans     → Inter / system stack for body, nav, table rows
+        //   font-display  → Rajdhani for headings + hero values (≥24px only)
+        //   font-mono     → JetBrains Mono for IDs / counts / timestamps
         sans: [
+          'Inter',
           '-apple-system',
           'BlinkMacSystemFont',
           'Segoe UI',
           'Noto Sans',
           'Helvetica',
           'Arial',
+          'sans-serif',
+        ],
+        display: [
+          'Rajdhani',
+          'Inter',
+          '-apple-system',
+          'Segoe UI',
           'sans-serif',
         ],
         mono: ['JetBrains Mono', 'Fira Code', 'Consolas', 'monospace'],

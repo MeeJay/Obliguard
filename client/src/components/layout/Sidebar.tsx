@@ -22,13 +22,16 @@ import {
   PackageOpen,
   ChevronDown,
   ChevronRight,
+  ChevronsLeft,
+  ChevronsRight,
   GripVertical,
-  PanelLeft,
-  PanelLeftClose,
+  Pin,
+  PinOff,
   Network,
   Shield,
   ScanSearch,
   Building2,
+  Plus,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { cn } from '@/utils/cn';
@@ -120,18 +123,17 @@ function DraggableDeviceItem({
         to={`/agents/${device.id}`}
         data-status={effectiveStatus ?? 'inactive'}
         className={cn(
-          'flex items-center gap-2 rounded-md px-2 py-1 text-sm transition-colors',
+          'flex items-center gap-2 rounded-md px-2 py-1 text-[13px] transition-colors',
           isActive
             ? 'bg-bg-active text-text-primary'
             : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary',
         )}
         onClick={e => {
-          // Prevent navigation when dragging
           if (isDragging) e.preventDefault();
         }}
       >
         <AgentStatusBadge status={effectiveStatus} />
-        <span className="truncate flex-1 text-xs">{anonHostname(displayName)}</span>
+        <span className="truncate flex-1">{anonHostname(displayName)}</span>
       </Link>
     </div>
   );
@@ -157,13 +159,11 @@ function AgentGroupSection({
   const groupDevices  = devices.filter(d => d.groupId === group.id);
   const hasContent    = group.children.length > 0 || groupDevices.length > 0;
 
-  // Drop target: agents (and subgroups) can be dropped here
   const { setNodeRef: setDropRef, isOver } = useDroppable({
     id: `drop-agent-group-${group.id}`,
     data: { type: 'agent-group', groupId: group.id },
   });
 
-  // Draggable: the group itself can be dragged to reparent it
   const { attributes, listeners, setNodeRef: setDragRef, isDragging } = useDraggable({
     id: `drag-agent-group-${group.id}`,
     data: { type: 'agent-group-drag', group },
@@ -178,12 +178,10 @@ function AgentGroupSection({
         isDragging && 'opacity-40',
       )}
     >
-      {/* Header row */}
       <div
         className="flex items-center gap-0.5 group/row"
         style={{ paddingLeft: `${depth * 14}px` }}
       >
-        {/* Drag handle — reveals on row hover */}
         <div
           ref={setDragRef}
           {...attributes}
@@ -194,7 +192,6 @@ function AgentGroupSection({
           <GripVertical size={10} />
         </div>
 
-        {/* Expand / collapse toggle */}
         <button
           onClick={() => setExpanded(v => !v)}
           className={cn(
@@ -205,25 +202,23 @@ function AgentGroupSection({
           {expanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
         </button>
 
-        {/* Group link */}
         <Link
           to={`/group/${group.id}`}
           className={cn(
-            'flex flex-1 items-center gap-2 rounded-md px-2 py-1 text-sm transition-colors',
+            'flex flex-1 items-center gap-2 rounded-md px-2 py-1 text-[13px] transition-colors',
             isGroupActive
               ? 'bg-bg-active text-text-primary'
               : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary',
           )}
         >
           <Server size={13} className="shrink-0 text-text-muted" />
-          <span className="truncate flex-1">{anonHostname(group.name)}</span>
+          <span className="truncate flex-1 font-medium">{anonHostname(group.name)}</span>
           {groupDevices.length > 0 && (
-            <span className="text-xs text-text-muted">{groupDevices.length}</span>
+            <span className="text-xs font-mono text-text-muted">{groupDevices.length}</span>
           )}
         </Link>
       </div>
 
-      {/* Expanded: child groups + direct agents */}
       {expanded && (
         <>
           {group.children.map(child => (
@@ -305,17 +300,21 @@ export function Sidebar() {
     { label: t('nav.settings'),         path: '/settings',                icon: <Settings size={18} />,     adminOnly: true },
   ];
 
-  const { openAddAgentModal, sidebarFloating, toggleSidebarFloating } = useUiStore();
+  const {
+    openAddAgentModal,
+    sidebarFloating,
+    toggleSidebarFloating,
+    sidebarCollapsed,
+    toggleSidebarCollapsed,
+  } = useUiStore();
   const { tree, fetchTree } = useGroupStore();
 
   const [approvedDevices, setApprovedDevices] = useState<AgentDevice[]>([]);
-  // Real-time UP/ALERT/DOWN/INACTIVE status received via AGENT_STATUS_CHANGED events.
   const [deviceStatuses, setDeviceStatuses] = useState<Map<number, string>>(new Map());
 
   const [search, setSearch] = useState('');
   const [adminMenuOpen, setAdminMenuOpen] = usePersisted<boolean>('sidebar:admin-open', true);
 
-  // Agent groups (kind='agent')
   const agentGroups = tree.filter(n => n.kind === 'agent');
   const admin = isAdmin();
 
@@ -323,7 +322,6 @@ export function Sidebar() {
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
   );
 
-  // Fetch approved+suspended devices for sidebar (admin only)
   const loadDevices = useCallback(() => {
     if (!admin) return;
     Promise.all([
@@ -340,7 +338,6 @@ export function Sidebar() {
     return () => clearInterval(id);
   }, [loadDevices]);
 
-  // Real-time sidebar updates
   useEffect(() => {
     if (!admin) return;
     const socket = getSocket();
@@ -399,7 +396,6 @@ export function Sidebar() {
       const dragData = active.data.current;
       const dropData = over.data.current;
 
-      // Agent → Group: move agent to a different group
       if (dragData?.type === 'agent-device' && dropData?.type === 'agent-group') {
         const device       = dragData.device as AgentDevice;
         const targetGroupId = dropData.groupId as number | null;
@@ -414,11 +410,10 @@ export function Sidebar() {
         return;
       }
 
-      // Group → Group: reparent a group under another group
       if (dragData?.type === 'agent-group-drag' && dropData?.type === 'agent-group') {
         const group        = dragData.group as GroupTreeNode;
         const targetGroupId = dropData.groupId as number | null;
-        if (group.id === targetGroupId) return; // Can't drop on itself
+        if (group.id === targetGroupId) return;
         try {
           await groupsApi.move(group.id, targetGroupId);
           void fetchTree();
@@ -432,32 +427,28 @@ export function Sidebar() {
     [loadDevices, fetchTree],
   );
 
-  // Filter nav items by search
   const filteredNavItems = navItems.filter(item => {
     if (item.adminOnly && !admin) return false;
     if (!search) return true;
     return item.label.toLowerCase().includes(search.toLowerCase());
   });
 
-  // Filter agent devices by search
   const filteredDevices = search
     ? approvedDevices.filter(d =>
         (d.name ?? d.hostname).toLowerCase().includes(search.toLowerCase()),
       )
     : approvedDevices;
 
-  // ── Agent section render helper ──────────────────────────────────────────
   const ungroupedDevices = filteredDevices.filter(d => d.groupId === null);
 
   const renderAgentContent = () => !admin ? null : (
     <DndContext sensors={sensors} onDragEnd={handleAgentDragEnd}>
       <div className="mt-2 pt-2 border-t border-border">
-        <div className="px-2 py-1 flex items-center gap-1.5 text-xs font-medium text-text-muted uppercase tracking-wider">
+        <div className="px-2 py-1.5 flex items-center gap-2 text-[11px] font-mono font-medium text-text-muted uppercase tracking-[0.12em]">
           <Server size={12} />
           {t('groups.agentGroup')}
         </div>
 
-        {/* Hierarchical agent groups (recursive) */}
         {agentGroups.map(group => (
           <AgentGroupSection
             key={group.id}
@@ -468,7 +459,6 @@ export function Sidebar() {
           />
         ))}
 
-        {/* Ungrouped devices — drop zone for null groupId */}
         {ungroupedDevices.length > 0 && (
           <DroppableGroupHeader groupId={null}>
             <div className="px-2 py-0.5 mt-1 text-[10px] font-medium text-text-muted uppercase tracking-wider">
@@ -488,21 +478,104 @@ export function Sidebar() {
     </DndContext>
   );
 
-  // Split non-admin nav from admin nav for the collapsible admin section
   const topNav = filteredNavItems.filter(item => !item.adminOnly);
   const adminNav = filteredNavItems.filter(item => item.adminOnly);
 
+  // ── Collapsed mode (Obli Design v1) — 64 px icon-only column ─────────────
+  if (sidebarCollapsed) {
+    const allItems = [...topNav, ...adminNav];
+    return (
+      <aside className="flex h-full w-16 shrink-0 flex-col bg-bg-secondary">
+        <div className="flex h-12 shrink-0 items-center justify-center">
+          <button
+            onClick={toggleSidebarCollapsed}
+            title={t('nav.expandSidebar', 'Expand sidebar')}
+            className="rounded-md p-1.5 text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary"
+          >
+            <ChevronsRight size={16} />
+          </button>
+        </div>
+
+        {admin && (
+          <div className="px-2 pt-1">
+            <button
+              onClick={openAddAgentModal}
+              title={t('nav.addAgent', 'Add agent')}
+              className="flex h-10 w-full items-center justify-center rounded-md bg-accent/12 text-accent transition-colors hover:bg-accent/20"
+            >
+              <Plus size={16} />
+            </button>
+          </div>
+        )}
+
+        <nav className="flex-1 overflow-y-auto px-2 pt-3 space-y-1">
+          {allItems.map((item) => {
+            const isActive = location.pathname === item.path
+              || (item.path !== '/' && location.pathname.startsWith(item.path + '/'));
+            return (
+              <Link
+                key={item.path}
+                to={item.path}
+                title={item.label}
+                className={cn(
+                  'relative flex h-10 w-full items-center justify-center rounded-md transition-colors',
+                  isActive
+                    ? 'bg-accent/12 text-accent'
+                    : 'text-text-muted hover:bg-bg-hover hover:text-text-primary',
+                )}
+              >
+                {item.icon}
+              </Link>
+            );
+          })}
+        </nav>
+
+        <div className="p-2 space-y-1">
+          <Link
+            to="/profile"
+            title={anonUsername(user?.displayName || (user?.username?.startsWith('og_') ? user.username.slice(3) : user?.username))}
+            className={cn(
+              'flex h-10 w-full items-center justify-center rounded-md transition-colors',
+              location.pathname === '/profile'
+                ? 'bg-bg-active text-text-primary'
+                : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary',
+            )}
+          >
+            <UserCircle size={18} />
+          </Link>
+          <button
+            onClick={() => useAuthStore.getState().logout()}
+            title={t('nav.signOut')}
+            className="flex h-10 w-full items-center justify-center rounded-md text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary"
+          >
+            <LogOut size={18} />
+          </button>
+        </div>
+      </aside>
+    );
+  }
+
+  // ── Expanded mode ───────────────────────────────────────────────────────────
   return (
-    <aside className="flex h-full w-full flex-col border-r border-border bg-bg-secondary">
-      {/* Logo + float/pin toggle */}
-      <div className="flex h-14 shrink-0 items-center justify-between border-b border-border px-4">
-        <Link to="/" className="flex items-center gap-2 min-w-0">
-          <img src="/logo.svg" alt="Obliguard" className="h-10 w-auto max-w-[200px] object-contain" />
-        </Link>
-        <div className="flex items-center gap-1 flex-shrink-0 ml-2">
+    <aside className="flex h-full w-full flex-col bg-bg-secondary">
+
+      {/* Sidebar head — collapse + float/pin toggles only. The logo and
+          tenant selector live in the topbar (Header.tsx) so they remain
+          visible when the sidebar is collapsed or floating. */}
+      <div className="flex h-9 shrink-0 items-center justify-end px-3 pt-2">
+        <div className="flex items-center gap-1">
+          {!sidebarFloating && (
+            <button
+              onClick={toggleSidebarCollapsed}
+              title={t('nav.collapseSidebar', 'Collapse sidebar')}
+              className="rounded p-1.5 text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary"
+            >
+              <ChevronsLeft size={15} />
+            </button>
+          )}
           <button
             onClick={toggleSidebarFloating}
-            title={sidebarFloating ? t('nav.pinSidebar') : t('nav.floatSidebar')}
+            title={sidebarFloating ? t('nav.pinSidebar', 'Pin sidebar') : t('nav.floatSidebar', 'Float sidebar (auto-hide)')}
             className={cn(
               'p-1.5 rounded transition-colors',
               sidebarFloating
@@ -510,38 +583,37 @@ export function Sidebar() {
                 : 'text-text-muted hover:text-text-primary hover:bg-bg-hover',
             )}
           >
-            {sidebarFloating ? <PanelLeft size={15} /> : <PanelLeftClose size={15} />}
+            {sidebarFloating ? <PinOff size={15} /> : <Pin size={15} />}
           </button>
         </div>
       </div>
 
-      {/* Add Agent button */}
+      {/* Add agent button — accent pill */}
       {admin && (
-        <div className="px-3 pt-3 flex gap-2">
+        <div className="px-3 pt-2">
           <button
             onClick={openAddAgentModal}
-            className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm font-medium text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary"
+            className="flex w-full items-center justify-center gap-2 rounded-md bg-accent/12 hover:bg-accent/20 px-3 py-2 text-[13px] font-medium text-accent transition-colors"
           >
-            <Cpu size={14} />
-            {t('common.agent')}
+            <Plus size={15} />
+            {t('nav.addAgent', 'Add agent')}
           </button>
         </div>
       )}
 
       {/* Search */}
-      <div className="px-3 py-3">
+      <div className="px-3 py-2.5">
         <input
           type="text"
           placeholder={t('common.search')}
           value={search}
           onChange={e => setSearch(e.target.value)}
-          className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-1.5 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:ring-1 focus:ring-accent"
+          className="w-full rounded-md bg-bg-tertiary px-3 py-2 text-[13px] text-text-primary placeholder:text-text-muted focus:outline-none focus:ring-1 focus:ring-accent"
         />
       </div>
 
       {/* Main nav + agents */}
-      <div className="flex-1 overflow-y-auto px-2">
-        {/* Top nav items (non-admin) */}
+      <div className="flex-1 overflow-y-auto px-2 min-h-0">
         <nav>
           {topNav.map((item) => {
             const isActive = location.pathname === item.path;
@@ -550,7 +622,7 @@ export function Sidebar() {
                 key={item.path}
                 to={item.path}
                 className={cn(
-                  'flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors',
+                  'flex items-center gap-3 rounded-md px-3 py-2 text-[14px] transition-colors',
                   isActive
                     ? 'bg-bg-active text-text-primary'
                     : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary',
@@ -563,7 +635,6 @@ export function Sidebar() {
           })}
         </nav>
 
-        {/* Agent devices list */}
         {renderAgentContent()}
       </div>
 
@@ -588,7 +659,7 @@ export function Sidebar() {
                     key={item.path}
                     to={item.path}
                     className={cn(
-                      'flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors',
+                      'flex items-center gap-3 rounded-md px-3 py-2 text-[14px] transition-colors',
                       isActive
                         ? 'bg-bg-active text-text-primary'
                         : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary',
@@ -619,9 +690,7 @@ export function Sidebar() {
           <span className="truncate flex-1">{anonUsername(user?.displayName || (user?.username?.startsWith('og_') ? user.username.slice(3) : user?.username))}</span>
         </Link>
         <button
-          onClick={() => {
-            useAuthStore.getState().logout();
-          }}
+          onClick={() => useAuthStore.getState().logout()}
           className="flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary"
         >
           <LogOut size={18} />
