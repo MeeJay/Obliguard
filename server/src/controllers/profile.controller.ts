@@ -18,6 +18,7 @@ function buildUserResponse(row: Record<string, unknown>) {
     preferredLanguage: row.preferred_language ?? 'en',
     enrollmentVersion: row.enrollment_version ?? 0,
     hasPassword: !!row.password_hash,
+    avatar: row.avatar ?? null,
   };
 }
 
@@ -25,7 +26,7 @@ export const profileController = {
   async get(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const row = await db('users')
-        .select('id', 'username', 'display_name', 'role', 'is_active', 'created_at', 'updated_at', 'preferences', 'email', 'preferred_language', 'enrollment_version', 'password_hash')
+        .select('id', 'username', 'display_name', 'role', 'is_active', 'created_at', 'updated_at', 'preferences', 'email', 'preferred_language', 'enrollment_version', 'password_hash', 'avatar')
         .where({ id: req.session.userId })
         .first();
 
@@ -61,7 +62,7 @@ export const profileController = {
       const [row] = await db('users')
         .where({ id: req.session.userId })
         .update(updatePayload)
-        .returning(['id', 'username', 'display_name', 'role', 'is_active', 'created_at', 'updated_at', 'preferences', 'email', 'preferred_language', 'enrollment_version']);
+        .returning(['id', 'username', 'display_name', 'role', 'is_active', 'created_at', 'updated_at', 'preferences', 'email', 'preferred_language', 'enrollment_version', 'avatar']);
 
       if (!row) throw new AppError(404, 'User not found');
 

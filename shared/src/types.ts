@@ -43,6 +43,8 @@ export interface User {
   totpEnabled?: boolean;
   emailOtpEnabled?: boolean;
   foreignSource?: string | null;
+  /** Profile picture as base64 data URI or remote URL — synced from Obligate when SSO is used. */
+  avatar?: string | null;
 }
 
 export interface UserWithPassword extends User {

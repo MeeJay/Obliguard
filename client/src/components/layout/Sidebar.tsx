@@ -541,7 +541,11 @@ export function Sidebar() {
                 : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary',
             )}
           >
-            <UserCircle size={18} />
+            {user?.avatar ? (
+              <img src={user.avatar} alt="" className="w-6 h-6 rounded-full object-cover" />
+            ) : (
+              <UserCircle size={18} />
+            )}
           </Link>
           <button
             onClick={() => useAuthStore.getState().logout()}
@@ -686,7 +690,11 @@ export function Sidebar() {
               : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary',
           )}
         >
-          <UserCircle size={18} />
+          {user?.avatar ? (
+            <img src={user.avatar} alt="" className="w-[20px] h-[20px] rounded-full object-cover" />
+          ) : (
+            <UserCircle size={18} />
+          )}
           <span className="truncate flex-1">{anonUsername(user?.displayName || (user?.username?.startsWith('og_') ? user.username.slice(3) : user?.username))}</span>
         </Link>
         <button

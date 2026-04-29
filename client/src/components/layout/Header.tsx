@@ -221,12 +221,20 @@ export function Header() {
         {user && (
           <>
             <div className="flex items-center gap-2 pl-1.5 pr-3 py-1 rounded-full bg-bg-hover">
-              <div
-                className="w-7 h-7 rounded-full flex items-center justify-center text-[11px] font-semibold text-white"
-                style={{ background: 'linear-gradient(135deg, rgba(245,166,35,0.6), rgba(255,184,74,0.4))' }}
-              >
-                {(displayedUsername?.[0] ?? '?').toUpperCase()}
-              </div>
+              {user.avatar ? (
+                <img
+                  src={user.avatar}
+                  alt={displayedUsername}
+                  className="w-7 h-7 rounded-full object-cover"
+                />
+              ) : (
+                <div
+                  className="w-7 h-7 rounded-full flex items-center justify-center text-[11px] font-semibold text-white"
+                  style={{ background: 'linear-gradient(135deg, rgba(245,166,35,0.6), rgba(255,184,74,0.4))' }}
+                >
+                  {(displayedUsername?.[0] ?? '?').toUpperCase()}
+                </div>
+              )}
               <span className="text-[13px] font-medium text-text-primary">{displayedUsername}</span>
               <span className="text-[10px] font-mono uppercase tracking-wider text-accent pl-2 border-l border-border-light">
                 {user.role}

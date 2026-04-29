@@ -21,6 +21,7 @@ interface UserRow {
   foreign_source?: string | null;
   foreign_id?: number | null;
   foreign_source_url?: string | null;
+  avatar?: string | null;
 }
 
 function rowToUser(row: UserRow): User {
@@ -39,6 +40,7 @@ function rowToUser(row: UserRow): User {
     totpEnabled: row.totp_enabled ?? false,
     emailOtpEnabled: row.email_otp_enabled ?? false,
     foreignSource: row.foreign_source ?? null,
+    avatar: row.avatar ?? null,
   };
 }
 
