@@ -9,6 +9,7 @@ declare module 'express-session' {
     role: string;
     currentTenantId: number;
     oauthState: string;
+    requestedTenantSlug?: string;
   }
 }
 

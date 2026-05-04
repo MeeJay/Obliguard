@@ -3,6 +3,7 @@ import { LogOut, Download, ShieldOff, ShieldAlert } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useAuthStore } from '@/store/authStore';
+import { useTenantStore } from '@/store/tenantStore';
 import { useSocketStore } from '@/store/socketStore';
 import { appConfigApi } from '@/api/appConfig.api';
 import apiClient from '@/api/client';
@@ -10,6 +11,7 @@ import type { ApiResponse } from '@obliview/shared';
 import { anonUsername } from '@/utils/anonymize';
 import { NotificationCenter } from './NotificationCenter';
 import { TenantSwitcher } from './TenantSwitcher';
+import { UserAvatar } from '@/components/common/UserAvatar';
 import { cn } from '@/utils/cn';
 
 /** True when running inside the native desktop app overlay. */
@@ -96,11 +98,21 @@ export function Header() {
   const goApp = (app: AppEntry) => {
     if (app.type === CURRENT_APP) return;
     const target = connectedApps.find(c => c.appType === app.type);
-    if (target) window.location.href = `${target.baseUrl}/auth/sso-redirect`;
+    if (!target) return;
+    // Cross-app tenant handoff: forward the current tenant slug so the target
+    // app can re-select the same tenant after Obligate SSO completes. Falls
+    // back to the user's first available tenant on the target side if the
+    // slug does not exist there.
+    const ts = useTenantStore.getState();
+    const tenantSlug = ts.tenants.find(t => t.id === ts.currentTenantId)?.slug;
+    const url = new URL(`${target.baseUrl}/auth/sso-redirect`);
+    if (tenantSlug) url.searchParams.set('tenant', tenantSlug);
+    window.location.href = url.toString();
   };
 
   const username = user?.username ?? '';
-  const displayedUsername = anonUsername(username.startsWith('og_') ? username.slice(3) : username);
+  const rawName = user?.displayName?.trim() || (username.startsWith('og_') ? username.slice(3) : username);
+  const displayedUsername = anonUsername(rawName);
 
   return (
     <header className="flex h-13 shrink-0 items-center gap-3 bg-bg-secondary px-4" style={{ height: 52 }}>
@@ -221,20 +233,7 @@ export function Header() {
         {user && (
           <>
             <div className="flex items-center gap-2 pl-1.5 pr-3 py-1 rounded-full bg-bg-hover">
-              {user.avatar ? (
-                <img
-                  src={user.avatar}
-                  alt={displayedUsername}
-                  className="w-7 h-7 rounded-full object-cover"
-                />
-              ) : (
-                <div
-                  className="w-7 h-7 rounded-full flex items-center justify-center text-[11px] font-semibold text-white"
-                  style={{ background: 'linear-gradient(135deg, rgba(245,166,35,0.6), rgba(255,184,74,0.4))' }}
-                >
-                  {(displayedUsername?.[0] ?? '?').toUpperCase()}
-                </div>
-              )}
+              <UserAvatar avatar={user.avatar} username={username} size={28} />
               <span className="text-[13px] font-medium text-text-primary">{displayedUsername}</span>
               <span className="text-[10px] font-mono uppercase tracking-wider text-accent pl-2 border-l border-border-light">
                 {user.role}

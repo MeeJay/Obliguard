@@ -15,7 +15,6 @@ import {
   Bell,
   Users,
   FolderTree,
-  UserCircle,
   LogOut,
   Cpu,
   Server,
@@ -44,6 +43,7 @@ import type { AgentDevice, MonitorStatus, GroupTreeNode } from '@obliview/shared
 import { SOCKET_EVENTS } from '@obliview/shared';
 import { groupsApi } from '@/api/groups.api';
 import { anonHostname, anonUsername } from '@/utils/anonymize';
+import { UserAvatar } from '@/components/common/UserAvatar';
 import toast from 'react-hot-toast';
 
 // ── localStorage helpers ─────────────────────────────────────────────────────
@@ -541,11 +541,7 @@ export function Sidebar() {
                 : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary',
             )}
           >
-            {user?.avatar ? (
-              <img src={user.avatar} alt="" className="w-6 h-6 rounded-full object-cover" />
-            ) : (
-              <UserCircle size={18} />
-            )}
+            <UserAvatar avatar={user?.avatar} username={user?.username ?? '?'} size={24} />
           </Link>
           <button
             onClick={() => useAuthStore.getState().logout()}
@@ -684,18 +680,21 @@ export function Sidebar() {
         <Link
           to="/profile"
           className={cn(
-            'flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors',
+            'flex items-center gap-2.5 rounded-md px-2 py-1.5 transition-colors',
             location.pathname === '/profile'
-              ? 'bg-bg-active text-text-primary'
-              : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary',
+              ? 'bg-accent/10'
+              : 'hover:bg-bg-hover',
           )}
         >
-          {user?.avatar ? (
-            <img src={user.avatar} alt="" className="w-[20px] h-[20px] rounded-full object-cover" />
-          ) : (
-            <UserCircle size={18} />
-          )}
-          <span className="truncate flex-1">{anonUsername(user?.displayName || (user?.username?.startsWith('og_') ? user.username.slice(3) : user?.username))}</span>
+          <UserAvatar avatar={user?.avatar} username={user?.username ?? '?'} size={20} />
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-[13px] font-medium text-text-primary">
+              {anonUsername(user?.displayName || (user?.username?.startsWith('og_') ? user.username.slice(3) : user?.username))}
+            </div>
+            <div className="truncate font-mono text-[10px] text-text-muted">
+              {(user?.username?.startsWith('og_') ? user.username.slice(3) : user?.username) ?? ''} · {user?.role ?? ''}
+            </div>
+          </div>
         </Link>
         <button
           onClick={() => useAuthStore.getState().logout()}
