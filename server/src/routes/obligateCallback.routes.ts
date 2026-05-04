@@ -173,19 +173,34 @@ router.get('/callback', async (req, res) => {
     // Cross-app handoff: prefer the tenant slug requested by the source app
     // when the user has access to a tenant with that slug. Otherwise fall
     // back to the first available tenant (existing behaviour).
+    //
+    // Platform admins (assertion.role === 'admin') have implicit access to
+    // every tenant but no user_tenants rows — so the regular JOIN misses for
+    // them. They only need a tenant-existence check. Tenant admins / members
+    // keep the strict JOIN to preserve access control. Detection uses the
+    // assertion role, never the local user.role.
     let resolvedTenantId: number | null = null;
     const requestedSlug = req.session.requestedTenantSlug;
     if (requestedSlug) {
-      const match = await db('tenants as t')
-        .join('user_tenants as ut', 'ut.tenant_id', 't.id')
-        .where({ 't.slug': requestedSlug, 'ut.user_id': localUserId })
-        .select('t.id')
-        .first() as { id: number } | undefined;
+      const isPlatformAdmin = assertion.role === 'admin';
+      let match: { id: number } | undefined;
+      if (isPlatformAdmin) {
+        match = await db('tenants')
+          .where({ slug: requestedSlug })
+          .select('id')
+          .first() as { id: number } | undefined;
+      } else {
+        match = await db('tenants as t')
+          .join('user_tenants as ut', 'ut.tenant_id', 't.id')
+          .where({ 't.slug': requestedSlug, 'ut.user_id': localUserId })
+          .select('t.id')
+          .first() as { id: number } | undefined;
+      }
       if (match) {
         resolvedTenantId = match.id;
-        logger.info({ userId: localUserId, slug: requestedSlug }, 'Cross-app handoff: tenant matched');
+        logger.info({ userId: localUserId, slug: requestedSlug, isPlatformAdmin }, 'Cross-app handoff: tenant matched');
       } else {
-        logger.info({ userId: localUserId, slug: requestedSlug },
+        logger.info({ userId: localUserId, slug: requestedSlug, isPlatformAdmin },
           'Cross-app handoff: requested tenant not accessible, falling back');
       }
       // Always clear so the value does not leak into a subsequent login that did
