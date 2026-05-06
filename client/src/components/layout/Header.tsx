@@ -5,7 +5,6 @@ import { useTranslation } from 'react-i18next';
 import { useAuthStore } from '@/store/authStore';
 import { useTenantStore } from '@/store/tenantStore';
 import { useSocketStore } from '@/store/socketStore';
-import { appConfigApi } from '@/api/appConfig.api';
 import apiClient from '@/api/client';
 import type { ApiResponse } from '@obliview/shared';
 import { anonUsername } from '@/utils/anonymize';
@@ -48,7 +47,6 @@ export function Header() {
   const { user, logout } = useAuthStore();
   const { status: socketStatus } = useSocketStore();
   const [connectedApps, setConnectedApps] = useState<Array<{ appType: string; name: string; baseUrl: string }>>([]);
-  const [obligateUrl, setObligateUrl] = useState<string | null>(null);
 
   // Security chips data — Obliguard-specific (shows active bans + suspicious IPs)
   const [activeBans, setActiveBans] = useState<number | null>(null);
@@ -60,9 +58,6 @@ export function Header() {
       .then((d: { success: boolean; data?: Array<{ appType: string; name: string; baseUrl: string }> }) => {
         if (d.success && d.data) setConnectedApps(d.data);
       })
-      .catch(() => {});
-    appConfigApi.getConfig()
-      .then(cfg => setObligateUrl(cfg.obligate_url ?? null))
       .catch(() => {});
   }, []);
 
@@ -126,42 +121,42 @@ export function Header() {
           context that gets carried across apps. */}
       <TenantSwitcher />
 
-      {/* App switcher pills */}
+      {/* App switcher pills — only show the current app + apps the user can
+          actually reach (returned by /api/auth/connected-apps). Unreachable
+          apps are hidden entirely rather than greyed out. */}
       {!isNativeApp && (
         <nav className="flex items-center gap-1 ml-1">
-          {APP_ORDER.map((app) => {
-            const isCurrent = app.type === CURRENT_APP;
-            const isReachable = reachable.has(app.type);
-            const dimmed = !isReachable && !isCurrent;
-            return (
-              <button
-                key={app.type}
-                type="button"
-                onClick={() => goApp(app)}
-                disabled={dimmed}
-                className={cn(
-                  'flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[13px] font-medium transition-colors',
-                  isCurrent
-                    ? 'text-[color:var(--app-current)]'
-                    : 'text-text-muted hover:bg-bg-hover hover:text-text-primary',
-                  dimmed && 'opacity-40 cursor-not-allowed hover:bg-transparent hover:text-text-muted',
-                )}
-                style={isCurrent
-                  ? ({ '--app-current': app.color, backgroundColor: hexA(app.color, 0.12) } as React.CSSProperties)
-                  : undefined}
-                title={obligateUrl && !isReachable ? `${app.label} — not connected to Obligate` : app.label}
-              >
-                <span
-                  className="w-1.5 h-1.5 rounded-full shrink-0"
-                  style={{
-                    background: app.color,
-                    boxShadow: isCurrent ? `0 0 8px ${app.color}` : undefined,
-                  }}
-                />
-                {app.label}
-              </button>
-            );
-          })}
+          {APP_ORDER
+            .filter((app) => app.type === CURRENT_APP || reachable.has(app.type))
+            .map((app) => {
+              const isCurrent = app.type === CURRENT_APP;
+              return (
+                <button
+                  key={app.type}
+                  type="button"
+                  onClick={() => goApp(app)}
+                  className={cn(
+                    'flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[13px] font-medium transition-colors',
+                    isCurrent
+                      ? 'text-[color:var(--app-current)]'
+                      : 'text-text-muted hover:bg-bg-hover hover:text-text-primary',
+                  )}
+                  style={isCurrent
+                    ? ({ '--app-current': app.color, backgroundColor: hexA(app.color, 0.12) } as React.CSSProperties)
+                    : undefined}
+                  title={app.label}
+                >
+                  <span
+                    className="w-1.5 h-1.5 rounded-full shrink-0"
+                    style={{
+                      background: app.color,
+                      boxShadow: isCurrent ? `0 0 8px ${app.color}` : undefined,
+                    }}
+                  />
+                  {app.label}
+                </button>
+              );
+            })}
         </nav>
       )}
 
