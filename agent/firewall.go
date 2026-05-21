@@ -29,6 +29,13 @@ type FirewallManager interface {
 	IsAvailable() bool
 	// Name returns the backend identifier string (sent in push body).
 	Name() string
+
+	// IsRateLimitSupported reports whether this backend can enforce per-IP
+	// rate limiting. Backends that return false treat ApplyRateLimits as a no-op.
+	IsRateLimitSupported() bool
+	// ApplyRateLimits installs the given per-IP rate limit rules, replacing any
+	// previously-applied set. An empty slice clears all rate limiting.
+	ApplyRateLimits(rules []RateLimitRule) error
 }
 
 // ── Auto-detection ────────────────────────────────────────────────────────────
@@ -86,9 +93,9 @@ func DetectFirewall() FirewallManager {
 // Two rules (inbound + outbound) match the set. Ban/unban = add/delete from set.
 // Result: 2 rules total regardless of IP count.
 
-const nftTable    = "obliguard"
-const nftSet      = "obliguard_ips"
-const nftChain    = "blocklist"
+const nftTable = "obliguard"
+const nftSet = "obliguard_ips"
+const nftChain = "blocklist"
 const nftChainOut = "blocklist_out"
 
 type NftablesFirewall struct {
@@ -170,6 +177,9 @@ func (f *NftablesFirewall) Flush() error {
 }
 
 func (f *NftablesFirewall) GetBannedIPs() ([]string, error) {
+	// IMPORTANT: only report the server-managed ban set. The rate-limit
+	// escalation set (nftRLBanSet) is intentionally excluded so the server's
+	// computeBanDelta does not try to "unban" IPs the rate limiter auto-banned.
 	out, err := exec.Command("nft", "list", "set", "inet", nftTable, nftSet).Output()
 	if err != nil {
 		return nil, nil
@@ -182,6 +192,115 @@ func (f *NftablesFirewall) GetBannedIPs() ([]string, error) {
 	return ips, nil
 }
 
+// ── nftables rate limiting ──────────────────────────────────────────────────
+//
+// Strategy (declarative, rebuilt on every ApplyRateLimits call):
+//   - one timeout set "obliguard_rl_bans" holds IPs auto-banned for blowing
+//     past the limit; elements expire on their own (ban_ttl) via the set's
+//     `flags timeout`. This set is SEPARATE from the server-managed ban set so
+//     the two never fight (see GetBannedIPs).
+//   - two chains hooked at input AND forward (priority -15, before the ban
+//     chains at -10) so both host-bound traffic and traffic forwarded to Docker
+//     containers are rate limited.
+//   - each chain drops anything already in the ban set, then evaluates the
+//     per-rule meters: a high-threshold meter (maxValue × banMultiplier) that
+//     records a timeout ban, followed by the soft meter (maxValue) that drops.
+
+const nftRLBanSet = "obliguard_rl_bans"
+const nftRLChainIn = "ratelimit_in"
+const nftRLChainFwd = "ratelimit_fwd"
+
+func (f *NftablesFirewall) IsRateLimitSupported() bool { return true }
+
+func (f *NftablesFirewall) ApplyRateLimits(rules []RateLimitRule) error {
+	if err := f.ensureTable(); err != nil {
+		return err
+	}
+
+	run := func(c string) { exec.Command("nft", strings.Fields(c)...).Run() }
+
+	// Timeout-backed ban set (idempotent) and the two rate-limit chains.
+	run(fmt.Sprintf("add set inet %s %s { type ipv4_addr; flags timeout; }", nftTable, nftRLBanSet))
+	run(fmt.Sprintf("add chain inet %s %s { type filter hook input priority -15; policy accept; }", nftTable, nftRLChainIn))
+	run(fmt.Sprintf("add chain inet %s %s { type filter hook forward priority -15; policy accept; }", nftTable, nftRLChainFwd))
+
+	// Rebuild both chains from scratch each time so config is declarative.
+	run(fmt.Sprintf("flush chain inet %s %s", nftTable, nftRLChainIn))
+	run(fmt.Sprintf("flush chain inet %s %s", nftTable, nftRLChainFwd))
+
+	for _, chain := range []struct{ name, tag string }{
+		{nftRLChainIn, "i"}, {nftRLChainFwd, "f"},
+	} {
+		// Drop anything currently rate-limit-banned.
+		run(fmt.Sprintf("add rule inet %s %s ip saddr @%s drop", nftTable, chain.name, nftRLBanSet))
+
+		for _, r := range rules {
+			if r.MaxValue < 1 || (r.Type != "connection" && r.Type != "rate") {
+				continue
+			}
+			for _, cmd := range f.nftRateRules(chain.name, chain.tag, r) {
+				run(cmd)
+			}
+		}
+	}
+	return nil
+}
+
+// nftRateRules builds the nft rule command(s) for one rule on one chain:
+// an optional escalation→ban rule (when banMultiplier is set) followed by the
+// soft drop/reject rule.
+func (f *NftablesFirewall) nftRateRules(chainName, chainTag string, r RateLimitRule) []string {
+	portTag := "all"
+	portMatch := "meta l4proto tcp"
+	if r.Port != nil {
+		portTag = fmt.Sprintf("%d", *r.Port)
+		portMatch = fmt.Sprintf("tcp dport %d", *r.Port)
+	}
+	typeTag := "c"
+	if r.Type == "rate" {
+		typeTag = "r"
+	}
+
+	// gauge produces the meter body for a given threshold value.
+	gauge := func(threshold int) string {
+		if r.Type == "rate" {
+			return fmt.Sprintf("{ ip saddr limit rate over %d/second }", threshold)
+		}
+		return fmt.Sprintf("{ ip saddr ct count over %d }", threshold)
+	}
+
+	verdict := "drop"
+	if r.Action == "reject" {
+		verdict = "reject"
+	}
+
+	var cmds []string
+
+	// Escalation tier first: blowing past maxValue × banMultiplier records a
+	// timeout ban (then drops). Soft-tier traffic falls through to the next rule.
+	if r.BanMultiplier != nil && *r.BanMultiplier >= 2 {
+		banThreshold := r.MaxValue * (*r.BanMultiplier)
+		ttl := ""
+		if r.BanTTLSeconds != nil && *r.BanTTLSeconds > 0 {
+			ttl = fmt.Sprintf(" timeout %ds", *r.BanTTLSeconds)
+		}
+		cmds = append(cmds, fmt.Sprintf(
+			"add rule inet %s %s %s ct state new meter og_%s_%s_%s_b %s add @%s { ip saddr%s } drop",
+			nftTable, chainName, portMatch, chainTag, typeTag, portTag,
+			gauge(banThreshold), nftRLBanSet, ttl,
+		))
+	}
+
+	// Soft tier: over maxValue → drop/reject.
+	cmds = append(cmds, fmt.Sprintf(
+		"add rule inet %s %s %s ct state new meter og_%s_%s_%s %s %s",
+		nftTable, chainName, portMatch, chainTag, typeTag, portTag,
+		gauge(r.MaxValue), verdict,
+	))
+
+	return cmds
+}
+
 // ── firewalld (ipset-based for scalability) ─────────────────────────────────
 //
 // Strategy: use an ipset "obliguard" managed via firewalld's own ipset support.
@@ -191,10 +310,10 @@ func (f *NftablesFirewall) GetBannedIPs() ([]string, error) {
 const fwdSetName = "obliguard"
 
 type FirewalldFirewall struct {
-	hasIpset   bool
+	hasIpset    bool
 	initialized bool
-	pendingAdd []string
-	pendingDel []string
+	pendingAdd  []string
+	pendingDel  []string
 }
 
 func (f *FirewalldFirewall) Name() string { return "firewalld" }
@@ -519,9 +638,9 @@ func (f *UFWFirewall) migrateLegacyUfwRules() {
 // Strategy: if ipset is available, use a hash:ip set "obliguard" with two
 // iptables rules matching the set. Otherwise, fall back to individual chain rules.
 
-const iptChain    = "OBLIGUARD"
+const iptChain = "OBLIGUARD"
 const iptChainOut = "OBLIGUARD_OUT"
-const iptSetName  = "obliguard"
+const iptSetName = "obliguard"
 
 type IptablesFirewall struct {
 	initialized bool
@@ -666,6 +785,130 @@ func (f *IptablesFirewall) GetBannedIPs() ([]string, error) {
 	return ips, nil
 }
 
+// ── iptables rate limiting ──────────────────────────────────────────────────
+//
+// A dedicated chain OBLIGUARD_RL holds the rate-limit rules. It is hooked into:
+//   - INPUT            → traffic destined to this machine's own services
+//   - DOCKER-USER      → if Docker is present (Docker routes ALL forwarded
+//                        traffic through DOCKER-USER first), covering containers
+//   - FORWARD          → only when DOCKER-USER is absent (router/bridge case)
+// We pick exactly one forward-path hook to avoid double-counting a packet.
+//
+// connection limits use connlimit; rate limits use hashlimit (srcip mode).
+// Escalation bans use an ipset with per-entry timeout via the SET target, kept
+// in obliguard_rl_bans — SEPARATE from the server-managed ban set, so the two
+// never fight. GetBannedIPs does not report it.
+
+const iptRLChain = "OBLIGUARD_RL"
+const iptRLBanSet = "obliguard_rl_bans"
+
+func (f *IptablesFirewall) IsRateLimitSupported() bool { return true }
+
+// hasDockerUserChain reports whether Docker's DOCKER-USER chain exists.
+func (f *IptablesFirewall) hasDockerUserChain() bool {
+	return exec.Command("iptables", "-L", "DOCKER-USER", "-n").Run() == nil
+}
+
+// ensureRLJump idempotently inserts a jump to OBLIGUARD_RL at the top of chain.
+func ensureRLJump(parent string) {
+	if exec.Command("iptables", "-C", parent, "-j", iptRLChain).Run() != nil {
+		exec.Command("iptables", "-I", parent, "1", "-j", iptRLChain).Run()
+	}
+}
+
+func (f *IptablesFirewall) ApplyRateLimits(rules []RateLimitRule) error {
+	_ = f.ensureChain() // sets f.hasIpset and the server-managed ban chains
+
+	// Dedicated rate-limit chain + escalation ban set.
+	exec.Command("iptables", "-N", iptRLChain).Run() // ignore "exists"
+	if f.hasIpset {
+		exec.Command("ipset", "create", iptRLBanSet, "hash:ip", "timeout", "0", "-exist").Run()
+	}
+
+	// Hook points: always INPUT, plus exactly one forward-path hook.
+	ensureRLJump("INPUT")
+	if f.hasDockerUserChain() {
+		ensureRLJump("DOCKER-USER")
+	} else {
+		ensureRLJump("FORWARD")
+	}
+
+	// Rebuild the chain declaratively.
+	exec.Command("iptables", "-F", iptRLChain).Run()
+
+	// Drop anything currently rate-limit-banned (first packet after escalation
+	// adds the IP; subsequent packets are dropped here).
+	if f.hasIpset {
+		exec.Command("iptables", "-A", iptRLChain, "-m", "set", "--match-set", iptRLBanSet, "src", "-j", "DROP").Run()
+	}
+
+	for i, r := range rules {
+		if r.MaxValue < 1 || (r.Type != "connection" && r.Type != "rate") {
+			continue
+		}
+		for _, args := range f.iptRateRuleArgs(i, r) {
+			exec.Command("iptables", args...).Run()
+		}
+	}
+	return nil
+}
+
+// iptRateRuleArgs builds the iptables rule arg-slices for one rule: an optional
+// escalation→ban rule (when banMultiplier is set and ipset is available),
+// followed by the soft drop/reject rule.
+func (f *IptablesFirewall) iptRateRuleArgs(idx int, r RateLimitRule) [][]string {
+	base := []string{"-A", iptRLChain, "-p", "tcp"}
+	if r.Port != nil {
+		base = append(base, "--dport", fmt.Sprintf("%d", *r.Port))
+	}
+
+	verdict := []string{"-j", "DROP"}
+	if r.Action == "reject" {
+		verdict = []string{"-j", "REJECT", "--reject-with", "tcp-reset"}
+	}
+
+	// matchFor builds the rate/connection match args for a given threshold.
+	matchFor := func(threshold int, nameSuffix string) []string {
+		if r.Type == "rate" {
+			return []string{
+				"-m", "conntrack", "--ctstate", "NEW",
+				"-m", "hashlimit",
+				"--hashlimit-mode", "srcip",
+				"--hashlimit-above", fmt.Sprintf("%d/sec", threshold),
+				"--hashlimit-name", fmt.Sprintf("og_%d_%s", idx, nameSuffix),
+			}
+		}
+		// connection: concurrent connections per /32 source
+		return []string{
+			"-m", "connlimit",
+			"--connlimit-above", fmt.Sprintf("%d", threshold),
+			"--connlimit-mask", "32",
+		}
+	}
+
+	var out [][]string
+
+	// Escalation tier: over maxValue × banMultiplier → record a timeout ban.
+	if r.BanMultiplier != nil && *r.BanMultiplier >= 2 && f.hasIpset {
+		banThreshold := r.MaxValue * (*r.BanMultiplier)
+		setTarget := []string{"-j", "SET", "--add-set", iptRLBanSet, "src", "--exist"}
+		if r.BanTTLSeconds != nil && *r.BanTTLSeconds > 0 {
+			setTarget = []string{"-j", "SET", "--add-set", iptRLBanSet, "src",
+				"--timeout", fmt.Sprintf("%d", *r.BanTTLSeconds), "--exist"}
+		}
+		rule := append(append([]string{}, base...), matchFor(banThreshold, "b")...)
+		rule = append(rule, setTarget...)
+		out = append(out, rule)
+	}
+
+	// Soft tier: over maxValue → drop/reject.
+	soft := append(append([]string{}, base...), matchFor(r.MaxValue, "s")...)
+	soft = append(soft, verdict...)
+	out = append(out, soft)
+
+	return out
+}
+
 // ── Windows Firewall (single rule with comma-separated IPs) ─────────────────
 //
 // Strategy: two rules total — "Obliguard-Block-in" and "Obliguard-Block-out".
@@ -673,7 +916,7 @@ func (f *IptablesFirewall) GetBannedIPs() ([]string, error) {
 // Ban = add IP to the list. Unban = remove IP from the list.
 // Result: 2 rules total regardless of IP count.
 
-const winRuleIn  = "Obliguard-Block-in"
+const winRuleIn = "Obliguard-Block-in"
 const winRuleOut = "Obliguard-Block-out"
 const winRulePrefix = "Obliguard-Block-" // kept for legacy cleanup
 
@@ -947,7 +1190,7 @@ func (f *WindowsFirewall) getLegacyIPs() []string {
 // ── macOS pf ──────────────────────────────────────────────────────────────────
 
 const pfAnchor = "obliguard"
-const pfTable  = "obliguard_blocklist"
+const pfTable = "obliguard_blocklist"
 
 type PFFirewall struct{ anchorFile string }
 
@@ -1055,6 +1298,30 @@ func (f *NoOpFirewall) BanIP(ip string) error           { return nil }
 func (f *NoOpFirewall) UnbanIP(ip string) error         { return nil }
 func (f *NoOpFirewall) Flush() error                    { return nil }
 func (f *NoOpFirewall) GetBannedIPs() ([]string, error) { return nil, nil }
+
+// ── Rate limiting: unsupported backends (Phase 2 ships nftables only) ─────────
+//
+// firewalld/ufw/iptables (Linux), pf (macOS/FreeBSD) and Windows are handled in
+// later phases. Until then they report no rate-limit support so the agent skips
+// ApplyRateLimits entirely for them.
+
+func (f *FirewalldFirewall) IsRateLimitSupported() bool              { return false }
+func (f *FirewalldFirewall) ApplyRateLimits(_ []RateLimitRule) error { return nil }
+
+func (f *UFWFirewall) IsRateLimitSupported() bool              { return false }
+func (f *UFWFirewall) ApplyRateLimits(_ []RateLimitRule) error { return nil }
+
+// WindowsFirewall rate limiting lives in firewall_ratelimit_windows.go (real,
+// WinDivert-based) and firewall_ratelimit_other.go (no-op on non-Windows).
+
+func (f *PFFirewall) IsRateLimitSupported() bool              { return false }
+func (f *PFFirewall) ApplyRateLimits(_ []RateLimitRule) error { return nil }
+
+func (f *FreeBSDPFFirewall) IsRateLimitSupported() bool              { return false }
+func (f *FreeBSDPFFirewall) ApplyRateLimits(_ []RateLimitRule) error { return nil }
+
+func (f *NoOpFirewall) IsRateLimitSupported() bool              { return false }
+func (f *NoOpFirewall) ApplyRateLimits(_ []RateLimitRule) error { return nil }
 
 // ── Shared helper ─────────────────────────────────────────────────────────────
 

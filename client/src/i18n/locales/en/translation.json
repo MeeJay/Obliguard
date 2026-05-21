@@ -80,6 +80,7 @@
     "bans": "Bans",
     "whitelist": "Whitelist",
     "serviceTemplates": "Service Templates",
+    "rateLimiting": "Rate Limiting",
     "groups": "Groups",
     "notifications": "Notifications",
     "users": "Users",

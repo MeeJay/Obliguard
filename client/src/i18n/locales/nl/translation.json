@@ -80,6 +80,7 @@
     "bans": "Blokkades",
     "whitelist": "Whitelist",
     "serviceTemplates": "Servicesjablonen",
+    "rateLimiting": "Snelheidslimiet",
     "groups": "Groepen",
     "notifications": "Meldingen",
     "users": "Gebruikers",

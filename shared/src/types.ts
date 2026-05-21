@@ -1009,6 +1009,70 @@ export interface CreateWhitelistRequest {
   scopeId?: number | null;
 }
 
+// ============================================
+// Obliguard — Rate limiting (per-IP, firewall-enforced)
+// ============================================
+
+/**
+ * Two independent, separately-toggled rate limiting mechanisms:
+ *   - 'connection' : cap on concurrent connections per source IP
+ *   - 'rate'       : cap on new connections per second per source IP
+ * (bandwidth/mbps shaping is a separate future mechanism — not modelled here)
+ */
+export type RateLimitType = 'connection' | 'rate';
+
+/** What the firewall does to packets that exceed `maxValue` (soft tier). */
+export type RateLimitAction = 'drop' | 'reject';
+
+export type RateLimitScope = 'global' | 'tenant' | 'group' | 'agent';
+
+export interface RateLimitPolicy {
+  id: number;
+  type: RateLimitType;
+  scope: RateLimitScope;
+  scopeId: number | null;
+  tenantId: number | null;
+  enabled: boolean;
+  /** TCP destination port the limit applies to. null = all inbound TCP. */
+  port: number | null;
+  /** connection: max concurrent conns/IP. rate: max new conns/sec/IP. */
+  maxValue: number;
+  /** Escalate to an auto-ban when traffic exceeds maxValue × this. null = never. */
+  banMultiplier: number | null;
+  /** Action on the soft tier (over maxValue, under ban threshold). */
+  action: RateLimitAction;
+  /** TTL for the escalation ban. null = permanent. */
+  banTtlSeconds: number | null;
+  createdBy: number | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateRateLimitPolicyRequest {
+  type: RateLimitType;
+  scope?: RateLimitScope;
+  scopeId?: number | null;
+  enabled?: boolean;
+  port?: number | null;
+  maxValue: number;
+  banMultiplier?: number | null;
+  action?: RateLimitAction;
+  banTtlSeconds?: number | null;
+}
+
+/**
+ * A resolved rate limit rule sent to the agent for firewall enforcement.
+ * Flattened from a RateLimitPolicy after global→group→agent resolution.
+ */
+export interface RateLimitRule {
+  type: RateLimitType;
+  port: number | null;
+  maxValue: number;
+  banMultiplier: number | null;
+  action: RateLimitAction;
+  banTtlSeconds: number | null;
+}
+
 /**
  * Manually add an IP to the reputation module with a desired status.
  * Routed server-side to the appropriate table (ip_bans, ip_whitelist, or ip_reputation).
@@ -1111,6 +1175,11 @@ export interface ObliguardPushResponse {
    * or by log path for custom services ('custom:/var/log/tomcat/catalina.out')
    */
   services?: Record<string, AgentServiceConfig>;
+  /**
+   * Resolved per-IP rate limiting rules to enforce in the local firewall.
+   * Empty/absent = no rate limiting. Whitelisted IPs are exempted by the agent.
+   */
+  rateLimits?: RateLimitRule[];
   command?: string;
 }
 

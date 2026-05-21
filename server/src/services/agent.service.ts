@@ -15,6 +15,7 @@ import type {
   ObliguardPushResponse,
   AgentServiceConfig,
   AgentIpEvent,
+  RateLimitRule,
 } from '@obliview/shared';
 import {
   DEFAULT_AGENT_THRESHOLDS,
@@ -860,6 +861,7 @@ export const agentService = {
 
     let resolvedWhitelist: string[] = [];
     let banDelta: { add: string[]; remove: string[] } = { add: [], remove: [] };
+    let resolvedRateLimits: RateLimitRule[] = [];
 
     try {
       resolvedWhitelist = await whitelistService.resolveWhitelistForAgent(
@@ -869,6 +871,13 @@ export const agentService = {
       );
     } catch (err) {
       logger.warn({ err, deviceId }, 'handlePush: whitelistService.resolveWhitelistForAgent failed');
+    }
+
+    try {
+      const { rateLimitPolicyService } = await import('./rateLimitPolicy.service');
+      resolvedRateLimits = await rateLimitPolicyService.resolveForAgent(deviceId, groupIds, agentTenantId);
+    } catch (err) {
+      logger.warn({ err, deviceId }, 'handlePush: rateLimitPolicyService.resolveForAgent failed');
     }
 
     try {
@@ -961,6 +970,7 @@ export const agentService = {
       banList: { add: banDelta.add, remove: banDelta.remove },
       whitelist: resolvedWhitelist,
       services: serviceConfigsMap,
+      rateLimits: resolvedRateLimits,
       command: pendingCommand ?? '',
     };
   },

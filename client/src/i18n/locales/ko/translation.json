@@ -80,6 +80,7 @@
     "bans": "차단",
     "whitelist": "화이트리스트",
     "serviceTemplates": "서비스 템플릿",
+    "rateLimiting": "속도 제한",
     "groups": "그룹",
     "notifications": "알림",
     "users": "사용자",

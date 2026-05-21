@@ -80,6 +80,7 @@
     "bans": "Blokování",
     "whitelist": "Whitelist",
     "serviceTemplates": "Šablony služeb",
+    "rateLimiting": "Omezení rychlosti",
     "groups": "Skupiny",
     "notifications": "Oznámení",
     "users": "Uživatelé",

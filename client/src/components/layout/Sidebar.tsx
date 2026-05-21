@@ -29,6 +29,7 @@ import {
   Network,
   Shield,
   ScanSearch,
+  Gauge,
   Building2,
   Plus,
 } from 'lucide-react';
@@ -293,6 +294,7 @@ export function Sidebar() {
     { label: t('nav.groups'),           path: '/groups',                  icon: <FolderTree size={18} />,   adminOnly: true },
     { label: t('nav.notifications'),    path: '/notifications',           icon: <Bell size={18} />,         adminOnly: true },
     { label: t('nav.serviceTemplates'), path: '/admin/service-templates', icon: <ScanSearch size={18} />,   adminOnly: true },
+    { label: t('nav.rateLimiting'),     path: '/admin/rate-limiting',     icon: <Gauge size={18} />,        adminOnly: true },
     { label: t('nav.workspaces'),        path: '/admin/tenants',           icon: <Building2 size={18} />,    adminOnly: true },
     { label: t('nav.users'),            path: '/admin/users',             icon: <Users size={18} />,        adminOnly: true },
     { label: t('nav.agents'),           path: '/admin/agents',            icon: <Cpu size={18} />,          adminOnly: true },

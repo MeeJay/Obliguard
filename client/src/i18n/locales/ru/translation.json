@@ -80,6 +80,7 @@
     "bans": "Блокировки",
     "whitelist": "Белый список",
     "serviceTemplates": "Шаблоны сервисов",
+    "rateLimiting": "Ограничение скорости",
     "groups": "Группы",
     "notifications": "Уведомления",
     "users": "Пользователи",

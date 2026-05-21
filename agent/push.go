@@ -36,7 +36,7 @@ type pushBody struct {
 	FirewallName   string                 `json:"firewallName,omitempty"`
 	LogSamples     map[string][]string    `json:"logSamples,omitempty"`
 	// RFC-1918 LAN IPs for agent-to-agent peer link detection on the NetMap.
-	LanIPs         []string               `json:"lanIPs,omitempty"`
+	LanIPs []string `json:"lanIPs,omitempty"`
 }
 
 // ── Obliguard push response types ─────────────────────────────────────────────
@@ -54,16 +54,28 @@ type banListDelta struct {
 	Remove []string `json:"remove"`
 }
 
+// RateLimitRule mirrors shared/src/types.ts RateLimitRule — a resolved per-IP
+// rate limit the agent enforces in the local firewall.
+type RateLimitRule struct {
+	Type          string `json:"type"`          // "connection" | "rate"
+	Port          *int   `json:"port"`          // nil = all inbound TCP
+	MaxValue      int    `json:"maxValue"`      // connection: concurrent conns/IP; rate: conns/sec/IP
+	BanMultiplier *int   `json:"banMultiplier"` // nil = never escalate to ban
+	Action        string `json:"action"`        // "drop" | "reject"
+	BanTTLSeconds *int   `json:"banTtlSeconds"` // nil = permanent ban on escalation
+}
+
 type pushResponse struct {
-	Status        string                        `json:"status"`
-	LatestVersion string                        `json:"latestVersion,omitempty"`
+	Status        string `json:"status"`
+	LatestVersion string `json:"latestVersion,omitempty"`
 	Config        *struct {
 		PushIntervalSeconds int `json:"pushIntervalSeconds"`
 	} `json:"config,omitempty"`
-	BanList   *banListDelta                     `json:"banList,omitempty"`
-	Whitelist []string                           `json:"whitelist,omitempty"`
-	Services  map[string]AgentServiceConfig      `json:"services,omitempty"`
-	Command   string                             `json:"command,omitempty"`
+	BanList    *banListDelta                 `json:"banList,omitempty"`
+	Whitelist  []string                      `json:"whitelist,omitempty"`
+	Services   map[string]AgentServiceConfig `json:"services,omitempty"`
+	RateLimits []RateLimitRule               `json:"rateLimits,omitempty"`
+	Command    string                        `json:"command,omitempty"`
 }
 
 var httpClient = &http.Client{Timeout: 30 * time.Second}
@@ -155,6 +167,15 @@ func push(cfg *Config, lw *LogWatcher, fw FirewallManager) {
 			}
 			if err := fw.Flush(); err != nil {
 				log.Printf("Firewall flush: %v", err)
+			}
+		}
+
+		// Apply per-IP rate limiting rules (no-op on backends that don't support it)
+		if fw.IsRateLimitSupported() {
+			if err := fw.ApplyRateLimits(result.RateLimits); err != nil {
+				log.Printf("Firewall: apply rate limits: %v", err)
+			} else if len(result.RateLimits) > 0 {
+				log.Printf("Firewall: applied %d rate limit rule(s)", len(result.RateLimits))
 			}
 		}
 

@@ -80,6 +80,7 @@
     "bans": "Blocages",
     "whitelist": "Liste blanche",
     "serviceTemplates": "Modèles de services",
+    "rateLimiting": "Limitation de débit",
     "groups": "Groupes",
     "notifications": "Notifications",
     "users": "Utilisateurs",

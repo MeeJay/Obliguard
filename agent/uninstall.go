@@ -89,6 +89,21 @@ func handleLinuxUninstall() error {
 		// Remove service unit / init script
 		"rm -f /etc/systemd/system/obliguard-agent.service /etc/init.d/obliguard-agent\n" +
 		"systemctl daemon-reload 2>/dev/null || true\n" +
+		// Tear down rate-limit firewall objects so they don't keep dropping
+		// traffic after the agent is gone (these actively shape live traffic).
+		// nftables:
+		"nft flush chain inet obliguard ratelimit_in 2>/dev/null || true\n" +
+		"nft delete chain inet obliguard ratelimit_in 2>/dev/null || true\n" +
+		"nft flush chain inet obliguard ratelimit_fwd 2>/dev/null || true\n" +
+		"nft delete chain inet obliguard ratelimit_fwd 2>/dev/null || true\n" +
+		"nft delete set inet obliguard obliguard_rl_bans 2>/dev/null || true\n" +
+		// iptables:
+		"iptables -D INPUT -j OBLIGUARD_RL 2>/dev/null || true\n" +
+		"iptables -D FORWARD -j OBLIGUARD_RL 2>/dev/null || true\n" +
+		"iptables -D DOCKER-USER -j OBLIGUARD_RL 2>/dev/null || true\n" +
+		"iptables -F OBLIGUARD_RL 2>/dev/null || true\n" +
+		"iptables -X OBLIGUARD_RL 2>/dev/null || true\n" +
+		"ipset destroy obliguard_rl_bans 2>/dev/null || true\n" +
 		// Remove binary and install directory (config at /etc/obliguard-agent/ is kept)
 		"rm -rf /opt/obliguard-agent/\n" +
 		// Self-delete

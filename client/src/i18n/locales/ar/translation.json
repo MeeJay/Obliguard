@@ -80,6 +80,7 @@
     "bans": "الحظر",
     "whitelist": "القائمة البيضاء",
     "serviceTemplates": "قوالب الخدمات",
+    "rateLimiting": "تحديد المعدل",
     "groups": "المجموعات",
     "notifications": "الإشعارات",
     "users": "المستخدمون",

@@ -35,7 +35,7 @@ const (
 // cmdHeartbeatMsg is the periodic status frame sent agent → server every 30 s.
 // Does NOT include events — those are flushed immediately via cmdEventsMsg.
 type cmdHeartbeatMsg struct {
-	Type           string                 `json:"type"`                      // always "heartbeat"
+	Type           string                 `json:"type"` // always "heartbeat"
 	Hostname       string                 `json:"hostname"`
 	AgentVersion   string                 `json:"agentVersion"`
 	OSInfo         OSInfo                 `json:"osInfo"`
@@ -47,19 +47,20 @@ type cmdHeartbeatMsg struct {
 
 // cmdEventsMsg carries auth events flushed in near-real-time (≤500 ms debounce).
 type cmdEventsMsg struct {
-	Type   string         `json:"type"`   // always "events"
+	Type   string         `json:"type"` // always "events"
 	Events []AgentIpEvent `json:"events"`
 }
 
 // cmdConfigMsg is the server's config response to a heartbeat.
 type cmdConfigMsg struct {
-	Type                string                       `json:"type"`                          // "config"
-	PushIntervalSeconds int                          `json:"pushIntervalSeconds,omitempty"` // heartbeat cadence (currently fixed at 30 s)
-	LatestVersion       string                       `json:"latestVersion,omitempty"`
-	BanList             *banListDelta                `json:"banList,omitempty"`
-	Whitelist           []string                     `json:"whitelist,omitempty"`
+	Type                string                        `json:"type"`                          // "config"
+	PushIntervalSeconds int                           `json:"pushIntervalSeconds,omitempty"` // heartbeat cadence (currently fixed at 30 s)
+	LatestVersion       string                        `json:"latestVersion,omitempty"`
+	BanList             *banListDelta                 `json:"banList,omitempty"`
+	Whitelist           []string                      `json:"whitelist,omitempty"`
 	Services            map[string]AgentServiceConfig `json:"services,omitempty"`
-	Command             string                       `json:"command,omitempty"`
+	RateLimits          []RateLimitRule               `json:"rateLimits,omitempty"`
+	Command             string                        `json:"command,omitempty"`
 }
 
 // ── Public entry point ────────────────────────────────────────────────────────
@@ -264,6 +265,16 @@ func applyOGConfig(cfg *Config, lw *LogWatcher, fw FirewallManager, msg *cmdConf
 				log.Printf("Firewall: +%d banned, -%d unbanned (errors: +%d/-%d)", addCount, remCount, addErr, remErr)
 			}
 		}()
+	}
+
+	// Apply per-IP rate limiting rules (no-op on backends that don't support it).
+	// Always called — an empty rule set clears any previously-applied limits.
+	if fw.IsRateLimitSupported() {
+		if err := fw.ApplyRateLimits(msg.RateLimits); err != nil {
+			log.Printf("Firewall: apply rate limits: %v", err)
+		} else if len(msg.RateLimits) > 0 {
+			log.Printf("Firewall: applied %d rate limit rule(s)", len(msg.RateLimits))
+		}
 	}
 
 	// Update log watcher service configs

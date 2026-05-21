@@ -80,6 +80,7 @@
     "bans": "Sperren",
     "whitelist": "Whitelist",
     "serviceTemplates": "Dienstvorlagen",
+    "rateLimiting": "Ratenbegrenzung",
     "groups": "Gruppen",
     "notifications": "Benachrichtigungen",
     "users": "Benutzer",

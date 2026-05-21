@@ -25,6 +25,7 @@ import { DownloadPage } from '@/pages/DownloadPage';
 import { ImportExportPage } from '@/pages/ImportExportPage';
 import { AdminTenantsPage } from '@/pages/AdminTenantsPage';
 import { ServiceTemplatesPage } from '@/pages/ServiceTemplatesPage';
+import { RateLimitPage } from '@/pages/RateLimitPage';
 import { SsoEnrollPage } from '@/pages/SsoEnrollPage';
 import { NotFoundPage } from '@/pages/NotFoundPage';
 import '@/i18n';
@@ -73,6 +74,7 @@ export default function App() {
               <Route path="/admin/import-export" element={<ImportExportPage />} />
               <Route path="/admin/tenants" element={<AdminTenantsPage />} />
               <Route path="/admin/service-templates" element={<ServiceTemplatesPage />} />
+              <Route path="/admin/rate-limiting" element={<RateLimitPage />} />
               <Route path="/agents/:deviceId" element={<AgentDetailPage />} />
               <Route path="/live-events" element={<LiveEventsPage />} />
               <Route path="/settings" element={<SettingsPage />} />

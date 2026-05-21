@@ -28,6 +28,7 @@ import systemRoutes from './system.routes';
 import permissionSetsRoutes from './permissionSets.routes';
 import mikrotikRoutes from './mikrotik.routes';
 import remoteBlocklistRoutes from './remoteBlocklist.routes';
+import rateLimitPoliciesRoutes from './rateLimitPolicies.routes';
 
 const router = Router();
 
@@ -70,6 +71,7 @@ tenantRouter.use('/service-templates', serviceTemplatesRoutes);
 tenantRouter.use('/geo', geoRoutes);
 tenantRouter.use('/mikrotik', mikrotikRoutes);
 tenantRouter.use('/remote-blocklists', remoteBlocklistRoutes);
+tenantRouter.use('/rate-limit-policies', rateLimitPoliciesRoutes);
 
 router.use('/', tenantRouter);
 
