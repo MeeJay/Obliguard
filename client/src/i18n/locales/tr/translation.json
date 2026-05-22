@@ -80,7 +80,7 @@
     "bans": "Yasaklar",
     "whitelist": "Beyaz Liste",
     "serviceTemplates": "Hizmet Şablonları",
-    "rateLimiting": "Hız sınırlama",
+    "networkLimiting": "Ağ sınırlama",
     "groups": "Gruplar",
     "notifications": "Bildirimler",
     "users": "Kullanıcılar",

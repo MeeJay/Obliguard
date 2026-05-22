@@ -80,7 +80,7 @@
     "bans": "ブロック",
     "whitelist": "ホワイトリスト",
     "serviceTemplates": "サービステンプレート",
-    "rateLimiting": "レート制限",
+    "networkLimiting": "ネットワーク制限",
     "groups": "グループ",
     "notifications": "通知",
     "users": "ユーザー",

@@ -80,7 +80,7 @@
     "bans": "Blocchi",
     "whitelist": "Whitelist",
     "serviceTemplates": "Modelli di servizio",
-    "rateLimiting": "Limite di frequenza",
+    "networkLimiting": "Limiti di rete",
     "groups": "Gruppi",
     "notifications": "Notifiche",
     "users": "Utenti",

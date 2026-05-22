@@ -22,6 +22,7 @@ import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { NotificationBindingsPanel } from '@/components/notifications/NotificationBindingsPanel';
 import { NotificationTypesPanel } from '@/components/agent/NotificationTypesPanel';
 import { ServiceTemplatesPanel } from '@/components/agent/ServiceTemplatesPanel';
+import { NetworkLimitsPanel } from '@/pages/RateLimitPage';
 import toast from 'react-hot-toast';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -715,6 +716,13 @@ export function GroupDetailPage() {
       {isAdmin() && isAgentGroup && (
         <div className="mt-6">
           <GroupTemplatesPanel groupId={groupId} />
+        </div>
+      )}
+
+      {/* ── Network limits scoped to this group ── */}
+      {isAdmin() && isAgentGroup && (
+        <div className="mt-6 rounded-lg border border-border bg-bg-secondary p-4">
+          <NetworkLimitsPanel scope="group" scopeId={groupId} label={group.name} title="Network limits" />
         </div>
       )}
 

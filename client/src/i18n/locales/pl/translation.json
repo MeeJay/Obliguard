@@ -80,7 +80,7 @@
     "bans": "Blokady",
     "whitelist": "Biała lista",
     "serviceTemplates": "Szablony usług",
-    "rateLimiting": "Ograniczanie tempa",
+    "networkLimiting": "Ograniczenia sieci",
     "groups": "Grupy",
     "notifications": "Powiadomienia",
     "users": "Użytkownicy",

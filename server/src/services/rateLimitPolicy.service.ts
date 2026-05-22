@@ -104,7 +104,7 @@ class RateLimitPolicyService {
     if ((scope === 'group' || scope === 'agent') && data.scopeId == null) {
       throw new Error('scopeId is required for group/agent scope');
     }
-    if (data.type !== 'connection' && data.type !== 'rate') {
+    if (data.type !== 'connection' && data.type !== 'rate' && data.type !== 'volume') {
       throw new Error(`Invalid rate limit type: ${data.type as string}`);
     }
     if (!Number.isFinite(data.maxValue) || data.maxValue < 1) {

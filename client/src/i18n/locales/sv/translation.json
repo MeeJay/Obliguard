@@ -80,7 +80,7 @@
     "bans": "Spärr",
     "whitelist": "Whitelist",
     "serviceTemplates": "Tjänstmallar",
-    "rateLimiting": "Hastighetsbegränsning",
+    "networkLimiting": "Nätverksbegränsning",
     "groups": "Grupper",
     "notifications": "Aviseringar",
     "users": "Användare",

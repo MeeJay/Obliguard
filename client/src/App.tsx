@@ -74,7 +74,7 @@ export default function App() {
               <Route path="/admin/import-export" element={<ImportExportPage />} />
               <Route path="/admin/tenants" element={<AdminTenantsPage />} />
               <Route path="/admin/service-templates" element={<ServiceTemplatesPage />} />
-              <Route path="/admin/rate-limiting" element={<RateLimitPage />} />
+              <Route path="/admin/network-limiting" element={<RateLimitPage />} />
               <Route path="/agents/:deviceId" element={<AgentDetailPage />} />
               <Route path="/live-events" element={<LiveEventsPage />} />
               <Route path="/settings" element={<SettingsPage />} />

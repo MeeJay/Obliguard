@@ -80,7 +80,7 @@
     "bans": "封禁",
     "whitelist": "白名单",
     "serviceTemplates": "服务模板",
-    "rateLimiting": "速率限制",
+    "networkLimiting": "网络限制",
     "groups": "分组",
     "notifications": "通知",
     "users": "用户",

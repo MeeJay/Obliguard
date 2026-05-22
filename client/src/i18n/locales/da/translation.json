@@ -80,7 +80,7 @@
     "bans": "Blokering",
     "whitelist": "Whitelist",
     "serviceTemplates": "Serviceskabeloner",
-    "rateLimiting": "Hastighedsbegrænsning",
+    "networkLimiting": "Netværksbegrænsning",
     "groups": "Grupper",
     "notifications": "Meddelelser",
     "users": "Brugere",

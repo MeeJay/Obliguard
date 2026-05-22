@@ -1014,14 +1014,16 @@ export interface CreateWhitelistRequest {
 // ============================================
 
 /**
- * Two independent, separately-toggled rate limiting mechanisms:
- *   - 'connection' : cap on concurrent connections per source IP
- *   - 'rate'       : cap on new connections per second per source IP
- * (bandwidth/mbps shaping is a separate future mechanism — not modelled here)
+ * Three independent, separately-toggled per-IP limiting mechanisms:
+ *   - 'connection' : cap on concurrent connections per source IP (connlimit / ct count)
+ *   - 'rate'       : cap on new connections per second per source IP (hashlimit / meter)
+ *   - 'volume'     : cap on bandwidth in mbit/s per source IP (traffic shaping —
+ *                    tc on Linux, dummynet on macOS; not a firewall mechanism)
+ * `maxValue` is interpreted per type: conns, conns/sec, or mbit/sec respectively.
  */
-export type RateLimitType = 'connection' | 'rate';
+export type RateLimitType = 'connection' | 'rate' | 'volume';
 
-/** What the firewall does to packets that exceed `maxValue` (soft tier). */
+/** What the firewall does to traffic that exceeds `maxValue` (soft tier). */
 export type RateLimitAction = 'drop' | 'reject';
 
 export type RateLimitScope = 'global' | 'tenant' | 'group' | 'agent';
@@ -1035,7 +1037,7 @@ export interface RateLimitPolicy {
   enabled: boolean;
   /** TCP destination port the limit applies to. null = all inbound TCP. */
   port: number | null;
-  /** connection: max concurrent conns/IP. rate: max new conns/sec/IP. */
+  /** connection: max concurrent conns/IP. rate: max new conns/sec/IP. volume: max mbit/sec/IP. */
   maxValue: number;
   /** Escalate to an auto-ban when traffic exceeds maxValue × this. null = never. */
   banMultiplier: number | null;
