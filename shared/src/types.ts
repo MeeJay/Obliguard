@@ -1023,8 +1023,15 @@ export interface CreateWhitelistRequest {
  */
 export type RateLimitType = 'connection' | 'rate' | 'volume';
 
-/** What the firewall does to traffic that exceeds `maxValue` (soft tier). */
-export type RateLimitAction = 'drop' | 'reject';
+/**
+ * What happens to traffic that exceeds `maxValue` (soft tier):
+ *   - 'drop'   : drop the offending packets/connection (works on every platform,
+ *                incl. Windows — the only enforcement mode available there)
+ *   - 'reject' : drop + send TCP RST (connection/rate types only)
+ *   - 'shape'  : queue/throttle excess to the limit — true traffic shaping,
+ *                only meaningful for the 'volume' type (Linux tc / macOS dummynet)
+ */
+export type RateLimitAction = 'drop' | 'reject' | 'shape';
 
 export type RateLimitScope = 'global' | 'tenant' | 'group' | 'agent';
 

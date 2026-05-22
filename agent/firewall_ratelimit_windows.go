@@ -7,14 +7,18 @@ package main
 //
 // Windows Firewall (netsh/WFP) is allow/block only — it cannot rate-limit per
 // source IP. WinDivert provides a pre-signed kernel driver that lets us divert
-// matching packets to user space, decide allow/drop, and reinject. We divert
-// only inbound TCP SYN packets (connection attempts), count them per source IP,
-// and drop the ones over the limit. The rest of each connection is never
-// diverted (doesn't match the filter) so allowed connections proceed normally.
+// matching packets to user space, decide allow/drop, and reinject.
 //
-// Scope (v1): the "rate" policy type (new connections/sec per IP). The
-// "connection" type (concurrent connections) needs full user-mode connection
-// tracking and is not implemented here yet — such rules are logged and skipped.
+// Two filter modes, chosen by the active rules:
+//   - SYN-only (light): when only 'rate' rules exist, we divert just inbound
+//     TCP SYNs and count new connections/sec per IP.
+//   - all-packets (heavy): when a 'volume' (drop-over-bandwidth) rule exists, we
+//     divert every inbound TCP packet to also measure per-IP bytes/sec.
+//
+// Supported types: 'rate' (new conns/sec) and 'volume'+'drop' (per-IP mbit/s
+// cap, drop over limit — the cross-platform "drop over limit" mode). NOT
+// supported: 'connection' (needs full conntrack) and 'volume'+'shape' (true
+// throttling needs a shaper Windows lacks) — both logged once and skipped.
 //
 // SAFETY: this whole backend is OFF unless WinDivert.dll sits next to the agent
 // binary (see IsRateLimitSupported). Existing Windows agents are unaffected
@@ -43,8 +47,12 @@ const (
 	// sizeof(WINDIVERT_ADDRESS) in WinDivert 2.x. Treated as an opaque blob:
 	// we never parse it, we only hand it back to WinDivertSend on reinjection.
 	winDivertAddrSize = 80
-	// Filter: inbound IPv4 TCP connection initiations only.
-	winDivertFilter = "inbound and ip and tcp and tcp.Syn and !tcp.Ack"
+	// SYN-only filter — light path used when only rate/connection limits exist.
+	winDivertFilterSyn = "inbound and ip and tcp and tcp.Syn and !tcp.Ack"
+	// Broad filter — every inbound TCP packet, needed to measure per-IP
+	// bandwidth for volume (drop-over-bandwidth) limits. Heavier (all packets
+	// traverse user space) so only used when a volume rule is configured.
+	winDivertFilterAll = "inbound and ip and tcp"
 )
 
 // winRL is the process-wide rate limiter state. There is only ever one
@@ -57,18 +65,22 @@ var winRL = &winRateLimiter{
 
 type ipCounter struct {
 	winStart time.Time
-	count    int
+	count    int // SYNs this window (rate type)
+	bytes    int // bytes this window (volume type)
 }
 
 type winRateLimiter struct {
 	mu      sync.Mutex
 	running bool
+	broad   bool // true when the current handle uses the all-packets filter
 	handle  uintptr
 	stop    chan struct{}
 
-	// resolved config (rate-type rules only)
-	portRules map[int]RateLimitRule // dport → rule
-	allRule   *RateLimitRule        // port==nil rule, applies to any dport
+	// resolved config
+	portRules    map[int]RateLimitRule // rate: dport → rule
+	allRule      *RateLimitRule        // rate: port==nil rule
+	volPortRules map[int]RateLimitRule // volume(drop): dport → rule
+	volAllRule   *RateLimitRule        // volume(drop): port==nil rule
 
 	cmu      sync.Mutex
 	counters map[uint32]*ipCounter // srcIP → current 1s window
@@ -76,6 +88,7 @@ type winRateLimiter struct {
 
 	fw           *WindowsFirewall
 	connTypeWarn sync.Once
+	shapeWarn    sync.Once
 }
 
 // winDivertDLLPath returns the path to WinDivert.dll if it is bundled next to
@@ -103,55 +116,72 @@ func (f *WindowsFirewall) ApplyRateLimits(rules []RateLimitRule) error {
 
 // apply reconfigures the limiter: rebuilds the rule maps and (re)starts or stops
 // the WinDivert capture loop accordingly.
+//
+// Supported on Windows:
+//   - 'rate'             : new connections/sec per IP (SYN counting)
+//   - 'volume' + 'drop'  : drop traffic over a per-IP bandwidth cap (mbit/s)
+//
+// Skipped (logged once): 'connection' (needs full conntrack), 'volume'+'shape'
+// (true throttling needs a shaper Windows lacks).
 func (rl *winRateLimiter) apply(rules []RateLimitRule) error {
 	portRules := make(map[int]RateLimitRule)
+	volPortRules := make(map[int]RateLimitRule)
 	var allRule *RateLimitRule
+	var volAllRule *RateLimitRule
 
 	for _, r := range rules {
 		if r.MaxValue < 1 {
 			continue
 		}
-		if r.Type == "connection" {
-			rl.connTypeWarn.Do(func() {
-				log.Printf("Firewall: 'connection' rate limit type is not supported on Windows yet — skipping (rate-type rules still apply)")
+		switch {
+		case r.Type == "rate":
+			if r.Port != nil {
+				portRules[*r.Port] = r
+			} else {
+				rc := r
+				allRule = &rc
+			}
+		case r.Type == "volume" && r.Action == "drop":
+			if r.Port != nil {
+				volPortRules[*r.Port] = r
+			} else {
+				rc := r
+				volAllRule = &rc
+			}
+		case r.Type == "volume": // shape
+			rl.shapeWarn.Do(func() {
+				log.Printf("Firewall: 'volume' traffic shaping is not available on Windows — use the 'drop over limit' option instead")
 			})
-			continue
-		}
-		if r.Type != "rate" {
-			continue
-		}
-		if r.Port != nil {
-			portRules[*r.Port] = r
-		} else {
-			rc := r
-			allRule = &rc
+		case r.Type == "connection":
+			rl.connTypeWarn.Do(func() {
+				log.Printf("Firewall: 'connection' limit type is not supported on Windows yet — skipping")
+			})
 		}
 	}
+
+	hasVolume := len(volPortRules) > 0 || volAllRule != nil
 
 	rl.mu.Lock()
 	rl.portRules = portRules
 	rl.allRule = allRule
-	hasRules := len(portRules) > 0 || allRule != nil
+	rl.volPortRules = volPortRules
+	rl.volAllRule = volAllRule
+	hasRules := len(portRules) > 0 || allRule != nil || hasVolume
 	running := rl.running
+	curBroad := rl.broad
 	rl.mu.Unlock()
 
 	switch {
 	case hasRules && !running:
-		rl.start()
+		rl.start(hasVolume)
 	case !hasRules && running:
 		rl.stopLoop()
+	case hasRules && running && hasVolume != curBroad:
+		// Filter scope changed (volume rules added/removed) — restart the handle.
+		rl.stopLoop()
+		rl.start(hasVolume)
 	}
 	return nil
-}
-
-// ruleFor returns the rate rule applicable to a destination port, or nil.
-func (rl *winRateLimiter) ruleFor(dport int) *RateLimitRule {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	if r, ok := rl.portRules[dport]; ok {
-		return &r
-	}
-	return rl.allRule
 }
 
 // ── WinDivert syscall wrapper (loaded dynamically, no CGO) ───────────────────
@@ -226,13 +256,17 @@ func (wd *winDivert) close(handle uintptr) {
 
 // ── Capture loop ─────────────────────────────────────────────────────────────
 
-func (rl *winRateLimiter) start() {
+func (rl *winRateLimiter) start(broad bool) {
 	wd, err := loadWinDivert()
 	if err != nil {
 		log.Printf("Firewall: WinDivert load failed, rate limiting disabled: %v", err)
 		return
 	}
-	handle, err := wd.open(winDivertFilter)
+	filter := winDivertFilterSyn
+	if broad {
+		filter = winDivertFilterAll
+	}
+	handle, err := wd.open(filter)
 	if err != nil {
 		log.Printf("Firewall: WinDivertOpen failed (driver not loaded / not admin?): %v", err)
 		return
@@ -240,12 +274,13 @@ func (rl *winRateLimiter) start() {
 
 	rl.mu.Lock()
 	rl.handle = handle
+	rl.broad = broad
 	rl.stop = make(chan struct{})
 	rl.running = true
 	stop := rl.stop
 	rl.mu.Unlock()
 
-	log.Printf("Firewall: WinDivert rate limiting active")
+	log.Printf("Firewall: WinDivert network limiting active (mode=%s)", map[bool]string{true: "all-packets", false: "syn"}[broad])
 	go rl.loop(wd, handle, stop)
 	go rl.janitor(stop)
 }
@@ -303,26 +338,49 @@ func (rl *winRateLimiter) loop(wd *winDivert, handle uintptr, stop chan struct{}
 
 		allow := rl.evaluate(buf[:n])
 		if allow {
-			wd.send(handle, buf, n, &addr) // reinject = allow the SYN through
+			wd.send(handle, buf, n, &addr) // reinject = allow the packet through
 		}
 		// drop = simply do not reinject
 	}
 }
 
-// evaluate parses an inbound IPv4 TCP SYN and decides whether to allow it.
+// evaluate parses an inbound IPv4 TCP packet and decides whether to allow it,
+// applying both the rate (SYN/sec) and volume (bytes/sec) limits per source IP.
 func (rl *winRateLimiter) evaluate(pkt []byte) bool {
 	if len(pkt) < 20 || pkt[0]>>4 != 4 {
 		return true // not IPv4 — let it through
 	}
 	ihl := int(pkt[0]&0x0f) * 4
-	if pkt[9] != 6 || len(pkt) < ihl+4 { // protocol 6 = TCP
+	if pkt[9] != 6 || len(pkt) < ihl+14 { // protocol 6 = TCP, need TCP flags byte
 		return true
 	}
 	srcIP := binary.BigEndian.Uint32(pkt[12:16])
 	dport := int(binary.BigEndian.Uint16(pkt[ihl+2 : ihl+4]))
+	flags := pkt[ihl+13]
+	isSyn := flags&0x02 != 0 && flags&0x10 == 0 // SYN set, ACK clear
+	pktLen := len(pkt)
 
-	r := rl.ruleFor(dport)
-	if r == nil {
+	// Resolve applicable rules (most specific port wins, else the all-ports rule).
+	rl.mu.Lock()
+	var rateRule *RateLimitRule
+	if r, ok := rl.portRules[dport]; ok {
+		rc := r
+		rateRule = &rc
+	} else if rl.allRule != nil {
+		rc := *rl.allRule
+		rateRule = &rc
+	}
+	var volRule *RateLimitRule
+	if r, ok := rl.volPortRules[dport]; ok {
+		rc := r
+		volRule = &rc
+	} else if rl.volAllRule != nil {
+		rc := *rl.volAllRule
+		volRule = &rc
+	}
+	rl.mu.Unlock()
+
+	if rateRule == nil && volRule == nil {
 		return true
 	}
 
@@ -343,13 +401,35 @@ func (rl *winRateLimiter) evaluate(pkt []byte) bool {
 		c = &ipCounter{winStart: now}
 		rl.counters[srcIP] = c
 	}
-	c.count++
 
-	if r.BanMultiplier != nil && *r.BanMultiplier >= 2 && c.count > r.MaxValue*(*r.BanMultiplier) {
-		rl.escalateBan(srcIP, r)
-		return false
+	drop := false
+
+	// Rate limit: count new-connection SYNs this second.
+	if rateRule != nil && isSyn {
+		c.count++
+		if rateRule.BanMultiplier != nil && *rateRule.BanMultiplier >= 2 && c.count > rateRule.MaxValue*(*rateRule.BanMultiplier) {
+			rl.escalateBan(srcIP, rateRule)
+			return false
+		}
+		if c.count > rateRule.MaxValue {
+			drop = true
+		}
 	}
-	return c.count <= r.MaxValue
+
+	// Volume limit: count bytes this second against the per-IP bandwidth cap.
+	if volRule != nil {
+		c.bytes += pktLen
+		limitBytes := volRule.MaxValue * 125000 // mbit/s → bytes/s (1 mbit = 125000 bytes)
+		if volRule.BanMultiplier != nil && *volRule.BanMultiplier >= 2 && c.bytes > limitBytes*(*volRule.BanMultiplier) {
+			rl.escalateBan(srcIP, volRule)
+			return false
+		}
+		if c.bytes > limitBytes {
+			drop = true
+		}
+	}
+
+	return !drop
 }
 
 // escalateBan hands the IP to the netsh ban machinery and records its TTL.

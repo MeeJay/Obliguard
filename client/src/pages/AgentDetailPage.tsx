@@ -4,7 +4,7 @@ import {
   ArrowLeft, RefreshCw, ShieldOff, ShieldCheck, ExternalLink,
   ChevronLeft, ChevronRight, Wifi, Cpu, Server, X, Eye,
   Trash2, AlertTriangle,
-  ChevronDown, ChevronUp, LayoutGrid, Network, Pencil, ArrowLeftRight, Shield, Gauge,
+  ChevronDown, ChevronUp, LayoutGrid, Network, Pencil, ArrowLeftRight, Shield, Gauge, Settings,
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import apiClient from '@/api/client';
@@ -989,7 +989,7 @@ function TemplatesSection({ deviceId, deviceType, mikrotikStatus }: { deviceId: 
 // ── Main Page ─────────────────────────────────────────────────────────────────
 
 const PAGE_SIZE = 50;
-type TabId = 'overview' | 'starmap' | 'firewall' | 'netlimits';
+type TabId = 'overview' | 'starmap' | 'firewall' | 'netlimits' | 'settings';
 
 export function AgentDetailPage() {
   const { deviceId } = useParams<{ deviceId: string }>();
@@ -1480,18 +1480,6 @@ export function AgentDetailPage() {
                 </div>
               </div>
 
-              {/* Templates section */}
-              <TemplatesSection deviceId={devId!} deviceType={device.deviceType} mikrotikStatus={device.mikrotikStatus} />
-
-              {/* Notification Types — per-agent overrides */}
-              <NotificationTypesPanel
-                config={device.notificationTypes ?? null}
-                scope="device"
-                onSave={async (notifTypes: NotificationTypeConfig | null) => {
-                  const updated = await agentApi.updateDevice(device.id, { notificationTypes: notifTypes });
-                  setDevice(updated);
-                }}
-              />
             </div>
 
           ) : activeTab === 'starmap' ? (
@@ -1523,6 +1511,24 @@ export function AgentDetailPage() {
           ) : activeTab === 'netlimits' && device ? (
             <div className="p-6">
               <NetworkLimitsPanel scope="agent" scopeId={device.id} label={device.name || device.hostname} title="Network limits (rate &amp; traffic shaping)" />
+            </div>
+          ) : activeTab === 'settings' && device ? (
+            <div className="p-6 space-y-6">
+              {/* Agent settings (push interval, missed pushes) */}
+              <AgentSettingsPanel device={device} onUpdate={d => setDevice(d)} />
+
+              {/* Service templates */}
+              <TemplatesSection deviceId={devId!} deviceType={device.deviceType} mikrotikStatus={device.mikrotikStatus} />
+
+              {/* Notification types — per-agent overrides */}
+              <NotificationTypesPanel
+                config={device.notificationTypes ?? null}
+                scope="device"
+                onSave={async (notifTypes: NotificationTypeConfig | null) => {
+                  const updated = await agentApi.updateDevice(device.id, { notificationTypes: notifTypes });
+                  setDevice(updated);
+                }}
+              />
             </div>
           ) : null}
         </div>
@@ -1573,12 +1579,18 @@ export function AgentDetailPage() {
           >
             <Gauge size={18} />
           </button>
+          <button
+            onClick={() => setActiveTab('settings')}
+            title="Settings"
+            className={`w-10 h-10 rounded-lg flex items-center justify-center transition-colors ${
+              activeTab === 'settings'
+                ? 'bg-accent/15 text-accent'
+                : 'text-text-muted hover:text-text-primary hover:bg-bg-hover'
+            }`}
+          >
+            <Settings size={18} />
+          </button>
         </div>
-      </div>
-
-      {/* ── Settings panel — always visible at bottom ─────────────────────── */}
-      <div className="border-t border-border bg-bg-secondary flex-shrink-0">
-        <AgentSettingsPanel device={device} onUpdate={d => setDevice(d)} />
       </div>
 
       {/* ── IP Detail Drawer ──────────────────────────────────────────────── */}

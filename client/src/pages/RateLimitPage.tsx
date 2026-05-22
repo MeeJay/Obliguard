@@ -155,13 +155,14 @@ function AddPolicyModal({ onSave, onClose, lockedTarget, lockedLabel }: AddPolic
     if (devices.length === 0) agentApi.listDevices('approved').then(setDevices).catch(() => {});
   }, [lockedTarget, scopeMode, groupTree.length, devices.length]);
 
-  const toggle = (set: Set<number>, setFn: (s: Set<number>) => void, id: number) => {
-    const next = new Set(set);
-    if (next.has(id)) next.delete(id); else next.add(id);
-    setFn(next);
-  };
-
   const isVolume = type === 'volume';
+
+  // Keep the action valid for the selected type:
+  //   volume → 'drop' | 'shape' ; connection/rate → 'drop' | 'reject'
+  useEffect(() => {
+    if (isVolume && action === 'reject') setAction('drop');
+    if (!isVolume && action === 'shape') setAction('drop');
+  }, [isVolume, action]);
 
   const handleSubmit = async () => {
     const max = Number(maxValue);
@@ -189,8 +190,7 @@ function AddPolicyModal({ onSave, onClose, lockedTarget, lockedLabel }: AddPolic
       type,
       port: port.trim() ? Number(port) : null,
       maxValue: max,
-      // bandwidth shaping always drops excess; action only meaningful for conn/rate
-      action: isVolume ? 'drop' : action,
+      action,
       banMultiplier: escalate && banMultiplier.trim() ? Number(banMultiplier) : null,
       banTtlSeconds: escalate && banTtl.trim() ? Number(banTtl) : null,
     };
@@ -254,20 +254,33 @@ function AddPolicyModal({ onSave, onClose, lockedTarget, lockedLabel }: AddPolic
             </div>
           </div>
 
-          {/* Action — not shown for volume (shaping always drops excess) */}
-          {!isVolume && (
-            <div className="space-y-1">
-              <label className="block text-sm font-medium text-text-secondary">Action over limit</label>
-              <select
-                value={action}
-                onChange={e => setAction(e.target.value as RateLimitAction)}
-                className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
-              >
-                <option value="drop">Drop (silent)</option>
-                <option value="reject">Reject (send RST)</option>
-              </select>
-            </div>
-          )}
+          {/* Action over limit */}
+          <div className="space-y-1">
+            <label className="block text-sm font-medium text-text-secondary">Enforcement</label>
+            <select
+              value={action}
+              onChange={e => setAction(e.target.value as RateLimitAction)}
+              className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
+            >
+              {isVolume ? (
+                <>
+                  <option value="drop">Drop over limit (all platforms · Windows)</option>
+                  <option value="shape">Traffic shaping (Linux / macOS)</option>
+                </>
+              ) : (
+                <>
+                  <option value="drop">Drop (silent)</option>
+                  <option value="reject">Reject (send RST)</option>
+                </>
+              )}
+            </select>
+            {isVolume && action === 'shape' && (
+              <p className="text-xs text-text-muted">True throttling. Not available on Windows — use "Drop over limit" there.</p>
+            )}
+            {isVolume && action === 'drop' && (
+              <p className="text-xs text-text-muted">Drops connections exceeding the bandwidth cap. Works everywhere, incl. Windows.</p>
+            )}
+          </div>
 
           {/* Escalation */}
           <div className="rounded-md border border-border bg-bg-tertiary/50 p-3 space-y-3">
@@ -310,10 +323,9 @@ function AddPolicyModal({ onSave, onClose, lockedTarget, lockedLabel }: AddPolic
                 <TargetTreePicker
                   tree={groupTree}
                   devices={devices}
-                  selectedGroups={selGroups}
-                  selectedAgents={selAgents}
-                  onToggleGroup={id => toggle(selGroups, setSelGroups, id)}
-                  onToggleAgent={id => toggle(selAgents, setSelAgents, id)}
+                  selGroups={selGroups}
+                  selAgents={selAgents}
+                  onChange={(g, a) => { setSelGroups(g); setSelAgents(a); }}
                 />
               )}
             </div>
@@ -585,7 +597,7 @@ export function RateLimitPage() {
                   <tr key={p.id} className={cn('hover:bg-bg-hover transition-colors', !p.enabled && 'opacity-50')}>
                     <td className="px-4 py-3"><TypeBadge type={p.type} /></td>
                     <td className="px-4 py-3 font-mono text-text-primary text-xs">{describeLimit(p)}</td>
-                    <td className="px-4 py-3 text-text-secondary capitalize">{p.type === 'volume' ? 'shape' : p.action}</td>
+                    <td className="px-4 py-3 text-text-secondary capitalize">{p.action}</td>
                     <td className="px-4 py-3 text-text-muted text-xs">
                       {p.banMultiplier != null
                         ? `Ban at ×${p.banMultiplier}${p.banTtlSeconds != null ? ` (${p.banTtlSeconds}s)` : ' (permanent)'}`

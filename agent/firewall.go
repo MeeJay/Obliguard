@@ -235,7 +235,7 @@ func (f *NftablesFirewall) ApplyRateLimits(rules []RateLimitRule) error {
 		run(fmt.Sprintf("add rule inet %s %s ip saddr @%s drop", nftTable, chain.name, nftRLBanSet))
 
 		for _, r := range rules {
-			if r.MaxValue < 1 || (r.Type != "connection" && r.Type != "rate") {
+			if r.MaxValue < 1 || (r.Type != "connection" && r.Type != "rate" && r.Type != "volume") {
 				continue
 			}
 			for _, cmd := range f.nftRateRules(chain.name, chain.tag, r) {
@@ -248,29 +248,53 @@ func (f *NftablesFirewall) ApplyRateLimits(rules []RateLimitRule) error {
 
 // nftRateRules builds the nft rule command(s) for one rule on one chain:
 // an optional escalation→ban rule (when banMultiplier is set) followed by the
-// soft drop/reject rule.
+// soft enforcement rule.
+//
+// Supports all three types:
+//   - connection : ct count over N         (per-IP concurrent connections)
+//   - rate       : limit rate over N/second (per-IP new connections/sec)
+//   - volume     : limit rate over N kbytes/second, action 'drop' only
+//     (per-IP bandwidth cap — drops traffic over the limit; this is
+//     the cross-platform "drop over limit" mode, NOT true shaping)
+//
+// volume + 'shape' is not expressible in nftables and is skipped here (tc territory).
 func (f *NftablesFirewall) nftRateRules(chainName, chainTag string, r RateLimitRule) []string {
+	if r.Type == "volume" && r.Action != "drop" {
+		return nil // true shaping is handled by tc, not nftables
+	}
+
 	portTag := "all"
 	portMatch := "meta l4proto tcp"
 	if r.Port != nil {
 		portTag = fmt.Sprintf("%d", *r.Port)
 		portMatch = fmt.Sprintf("tcp dport %d", *r.Port)
 	}
+
 	typeTag := "c"
-	if r.Type == "rate" {
+	stateMatch := "ct state new " // count new connections for conn/rate types
+	switch r.Type {
+	case "rate":
 		typeTag = "r"
+	case "volume":
+		typeTag = "v"
+		stateMatch = "" // byte-rate counts every packet, not just new connections
 	}
 
-	// gauge produces the meter body for a given threshold value.
+	// gauge produces the meter body for a threshold in the rule's native unit.
 	gauge := func(threshold int) string {
-		if r.Type == "rate" {
+		switch r.Type {
+		case "rate":
 			return fmt.Sprintf("{ ip saddr limit rate over %d/second }", threshold)
+		case "volume":
+			// threshold is mbit/s; nftables wants a byte rate (1 mbit = 125 kbytes)
+			return fmt.Sprintf("{ ip saddr limit rate over %d kbytes/second }", threshold*125)
+		default: // connection
+			return fmt.Sprintf("{ ip saddr ct count over %d }", threshold)
 		}
-		return fmt.Sprintf("{ ip saddr ct count over %d }", threshold)
 	}
 
 	verdict := "drop"
-	if r.Action == "reject" {
+	if r.Type != "volume" && r.Action == "reject" {
 		verdict = "reject"
 	}
 
@@ -285,16 +309,16 @@ func (f *NftablesFirewall) nftRateRules(chainName, chainTag string, r RateLimitR
 			ttl = fmt.Sprintf(" timeout %ds", *r.BanTTLSeconds)
 		}
 		cmds = append(cmds, fmt.Sprintf(
-			"add rule inet %s %s %s ct state new meter og_%s_%s_%s_b %s add @%s { ip saddr%s } drop",
-			nftTable, chainName, portMatch, chainTag, typeTag, portTag,
+			"add rule inet %s %s %s %smeter og_%s_%s_%s_b %s add @%s { ip saddr%s } drop",
+			nftTable, chainName, portMatch, stateMatch, chainTag, typeTag, portTag,
 			gauge(banThreshold), nftRLBanSet, ttl,
 		))
 	}
 
 	// Soft tier: over maxValue → drop/reject.
 	cmds = append(cmds, fmt.Sprintf(
-		"add rule inet %s %s %s ct state new meter og_%s_%s_%s %s %s",
-		nftTable, chainName, portMatch, chainTag, typeTag, portTag,
+		"add rule inet %s %s %s %smeter og_%s_%s_%s %s %s",
+		nftTable, chainName, portMatch, stateMatch, chainTag, typeTag, portTag,
 		gauge(r.MaxValue), verdict,
 	))
 
@@ -804,8 +828,12 @@ const iptRLBanSet = "obliguard_rl_bans"
 
 func (f *IptablesFirewall) IsRateLimitSupported() bool { return true }
 
-// hasDockerUserChain reports whether Docker's DOCKER-USER chain exists.
-func (f *IptablesFirewall) hasDockerUserChain() bool {
+func (f *IptablesFirewall) ApplyRateLimits(rules []RateLimitRule) error {
+	return applyIptablesRateLimits(rules)
+}
+
+// iptHasDockerUserChain reports whether Docker's DOCKER-USER chain exists.
+func iptHasDockerUserChain() bool {
 	return exec.Command("iptables", "-L", "DOCKER-USER", "-n").Run() == nil
 }
 
@@ -816,18 +844,28 @@ func ensureRLJump(parent string) {
 	}
 }
 
-func (f *IptablesFirewall) ApplyRateLimits(rules []RateLimitRule) error {
-	_ = f.ensureChain() // sets f.hasIpset and the server-managed ban chains
+// applyIptablesRateLimits installs the rate-limit rules via raw iptables. Shared
+// by the iptables backend and the ufw backend (ufw already injects raw iptables
+// rules for its bans, so this is consistent there).
+//
+// Note: only 'connection' and 'rate' types are enforceable here — iptables has
+// no per-IP byte-rate match, so 'volume' limits are skipped (handled by
+// nftables/WinDivert, or tc in a future pass).
+func applyIptablesRateLimits(rules []RateLimitRule) error {
+	hasIpset := false
+	if _, err := exec.LookPath("ipset"); err == nil {
+		hasIpset = true
+	}
 
 	// Dedicated rate-limit chain + escalation ban set.
 	exec.Command("iptables", "-N", iptRLChain).Run() // ignore "exists"
-	if f.hasIpset {
+	if hasIpset {
 		exec.Command("ipset", "create", iptRLBanSet, "hash:ip", "timeout", "0", "-exist").Run()
 	}
 
 	// Hook points: always INPUT, plus exactly one forward-path hook.
 	ensureRLJump("INPUT")
-	if f.hasDockerUserChain() {
+	if iptHasDockerUserChain() {
 		ensureRLJump("DOCKER-USER")
 	} else {
 		ensureRLJump("FORWARD")
@@ -838,7 +876,7 @@ func (f *IptablesFirewall) ApplyRateLimits(rules []RateLimitRule) error {
 
 	// Drop anything currently rate-limit-banned (first packet after escalation
 	// adds the IP; subsequent packets are dropped here).
-	if f.hasIpset {
+	if hasIpset {
 		exec.Command("iptables", "-A", iptRLChain, "-m", "set", "--match-set", iptRLBanSet, "src", "-j", "DROP").Run()
 	}
 
@@ -846,7 +884,7 @@ func (f *IptablesFirewall) ApplyRateLimits(rules []RateLimitRule) error {
 		if r.MaxValue < 1 || (r.Type != "connection" && r.Type != "rate") {
 			continue
 		}
-		for _, args := range f.iptRateRuleArgs(i, r) {
+		for _, args := range iptRateRuleArgs(i, r, hasIpset) {
 			exec.Command("iptables", args...).Run()
 		}
 	}
@@ -856,7 +894,7 @@ func (f *IptablesFirewall) ApplyRateLimits(rules []RateLimitRule) error {
 // iptRateRuleArgs builds the iptables rule arg-slices for one rule: an optional
 // escalation→ban rule (when banMultiplier is set and ipset is available),
 // followed by the soft drop/reject rule.
-func (f *IptablesFirewall) iptRateRuleArgs(idx int, r RateLimitRule) [][]string {
+func iptRateRuleArgs(idx int, r RateLimitRule, hasIpset bool) [][]string {
 	base := []string{"-A", iptRLChain, "-p", "tcp"}
 	if r.Port != nil {
 		base = append(base, "--dport", fmt.Sprintf("%d", *r.Port))
@@ -889,7 +927,7 @@ func (f *IptablesFirewall) iptRateRuleArgs(idx int, r RateLimitRule) [][]string 
 	var out [][]string
 
 	// Escalation tier: over maxValue × banMultiplier → record a timeout ban.
-	if r.BanMultiplier != nil && *r.BanMultiplier >= 2 && f.hasIpset {
+	if r.BanMultiplier != nil && *r.BanMultiplier >= 2 && hasIpset {
 		banThreshold := r.MaxValue * (*r.BanMultiplier)
 		setTarget := []string{"-j", "SET", "--add-set", iptRLBanSet, "src", "--exist"}
 		if r.BanTTLSeconds != nil && *r.BanTTLSeconds > 0 {
@@ -1299,17 +1337,25 @@ func (f *NoOpFirewall) UnbanIP(ip string) error         { return nil }
 func (f *NoOpFirewall) Flush() error                    { return nil }
 func (f *NoOpFirewall) GetBannedIPs() ([]string, error) { return nil, nil }
 
-// ── Rate limiting: unsupported backends (Phase 2 ships nftables only) ─────────
+// ── Rate limiting: remaining backends ────────────────────────────────────────
 //
-// firewalld/ufw/iptables (Linux), pf (macOS/FreeBSD) and Windows are handled in
-// later phases. Until then they report no rate-limit support so the agent skips
-// ApplyRateLimits entirely for them.
+// nftables, iptables and ufw enforce connection/rate limits (ufw reuses the
+// iptables path — see below). firewalld and pf (macOS/FreeBSD) are not wired yet:
+//   - firewalld: rich-rules can't express per-source connlimit, and raw iptables
+//     rules get flushed on `firewall-cmd --reload` — needs a firewalld-native or
+//     nft-direct approach.
+//   - pf: the macOS/FreeBSD pf integration would need a dedicated rate-limit
+//     anchor (pf keep-state max-src-conn / dummynet) — a separate pass.
 
 func (f *FirewalldFirewall) IsRateLimitSupported() bool              { return false }
 func (f *FirewalldFirewall) ApplyRateLimits(_ []RateLimitRule) error { return nil }
 
-func (f *UFWFirewall) IsRateLimitSupported() bool              { return false }
-func (f *UFWFirewall) ApplyRateLimits(_ []RateLimitRule) error { return nil }
+// UFW sits on iptables and already injects raw iptables rules for its bans, so
+// rate limiting reuses the shared iptables path (connection/rate; volume needs tc).
+func (f *UFWFirewall) IsRateLimitSupported() bool { return true }
+func (f *UFWFirewall) ApplyRateLimits(rules []RateLimitRule) error {
+	return applyIptablesRateLimits(rules)
+}
 
 // WindowsFirewall rate limiting lives in firewall_ratelimit_windows.go (real,
 // WinDivert-based) and firewall_ratelimit_other.go (no-op on non-Windows).
