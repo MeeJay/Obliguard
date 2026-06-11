@@ -28,6 +28,11 @@ func startNetConnMonitor(lw *LogWatcher) {
 					if !ok {
 						continue
 					}
+					// Opt-in gate: only surface connections for services with an
+					// enabled template (mirrors the file tailer / event-log poller).
+					if !lw.IsServiceEnabled(svc) {
+						continue
+					}
 					raw := fmt.Sprintf("New connection: %s:%d → :%d (%s)",
 						conn.remoteAddr, conn.remotePort, conn.localPort, svc)
 					lw.addEvent(makeEvent(conn.remoteAddr, "", svc, "auth_success", raw))

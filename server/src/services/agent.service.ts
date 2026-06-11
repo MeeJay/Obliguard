@@ -136,6 +136,8 @@ interface AgentDeviceRow {
   last_attack_at: Date | null;
   // migration 005 (Obliguard)
   wan_matching_enabled: boolean;
+  // migration 023 (Obliguard) — evaluate-only / dry-run mode
+  evaluate_only?: boolean;
   // migration 017 (MikroTik)
   device_type: string;
   // Joined from mikrotik_credentials (nullable — only present for MikroTik devices)
@@ -160,8 +162,16 @@ function rowToDevice(
   groupConfig?: AgentGroupConfig | null,
   groupThresholds?: AgentThresholds | null,
   globalConfig?: AgentGlobalConfig | null,
+  evalState?: { evaluateOnly: boolean; source: 'agent' | 'group' | null },
 ): AgentDevice {
   const override = row.override_group_settings ?? false;
+
+  // Effective evaluate-only: explicit evalState (resolved with group ancestry)
+  // wins; otherwise fall back to the device's own flag so at least a direct
+  // device-level setting is reflected even without ancestry resolution.
+  const evaluateOnly = evalState?.evaluateOnly ?? (row.evaluate_only ?? false);
+  const evaluateOnlySource: 'agent' | 'group' | null =
+    evalState !== undefined ? evalState.source : (row.evaluate_only ? 'agent' : null);
 
   // Global defaults (fall through when group/device have no override)
   const globalCIS = globalConfig?.checkIntervalSeconds ?? DEFAULT_AGENT_GLOBAL_CONFIG.checkIntervalSeconds;
@@ -225,6 +235,8 @@ function rowToDevice(
     wsConnected: row.device_type === 'mikrotik'
       ? isMikrotikOnline(row.id)
       : obliguardHub.isConnected(row.uuid),
+    evaluateOnly,
+    evaluateOnlySource,
     deviceType: (row.device_type as 'agent' | 'mikrotik') ?? 'agent',
     ...(row.device_type === 'mikrotik' ? {
       mikrotikStatus: getMikrotikStatus(row.id, row.mt_last_syslog_at, row.mt_last_api_connected_at),
@@ -250,6 +262,33 @@ async function getGroupAgentThresholds(groupId: number): Promise<AgentThresholds
   return (typeof g.agent_thresholds === 'string'
     ? JSON.parse(g.agent_thresholds)
     : g.agent_thresholds) as AgentThresholds;
+}
+
+/**
+ * Returns the set of group IDs that resolve to evaluate-only — i.e. the group
+ * itself OR any ancestor has evaluate_only=true (walked via group_closure).
+ * A device whose group_id is in this set inherits evaluate-only (dry-run) mode.
+ * One lookup serves a whole device list, avoiding per-device ancestry queries.
+ */
+async function getEvaluateOnlyGroupIds(): Promise<Set<number>> {
+  const flagged = await db('monitor_groups').where('evaluate_only', true).pluck('id') as number[];
+  if (flagged.length === 0) return new Set<number>();
+  const descendants = await db('group_closure')
+    .whereIn('ancestor_id', flagged)
+    .pluck('descendant_id') as number[];
+  return new Set<number>(descendants);
+}
+
+/** Resolve the effective evaluate-only state for a device row given the eval group set. */
+function evalStateFor(
+  row: AgentDeviceRow,
+  evalGroupIds: Set<number>,
+): { evaluateOnly: boolean; source: 'agent' | 'group' | null } {
+  if (row.evaluate_only) return { evaluateOnly: true, source: 'agent' };
+  if (row.group_id != null && evalGroupIds.has(row.group_id)) {
+    return { evaluateOnly: true, source: 'group' };
+  }
+  return { evaluateOnly: false, source: null };
 }
 
 // ============================================================
@@ -287,7 +326,7 @@ export const agentService = {
   async listDevices(tenantId: number, status?: AgentDevice['status']): Promise<AgentDevice[]> {
     // LEFT JOIN to fetch agent_group_config in one round-trip so resolvedSettings
     // can be computed without N+1 queries.
-    const [rows, globalConfig] = await Promise.all([
+    const [rows, globalConfig, evalGroupIds] = await Promise.all([
       (async () => {
         const query = db('agent_devices as d')
           .leftJoin('monitor_groups as g', 'g.id', 'd.group_id')
@@ -306,6 +345,7 @@ export const agentService = {
         return query as Promise<(AgentDeviceRow & { _group_agent_config: unknown; _group_agent_thresholds: unknown; _group_name: string | null })[]>;
       })(),
       appConfigService.getAgentGlobal(),
+      getEvaluateOnlyGroupIds(),
     ]);
     return rows.map((r) => {
       const gc = r._group_agent_config
@@ -318,7 +358,7 @@ export const agentService = {
           ? JSON.parse(r._group_agent_thresholds)
           : r._group_agent_thresholds) as AgentThresholds
         : null;
-      const dev = rowToDevice(r, gc, gt, globalConfig);
+      const dev = rowToDevice(r, gc, gt, globalConfig, evalStateFor(r, evalGroupIds));
       (dev as AgentDevice & { groupName?: string | null }).groupName = r._group_name ?? null;
       return dev;
     });
@@ -335,12 +375,13 @@ export const agentService = {
       )
       .first() as AgentDeviceRow | undefined;
     if (!row) return null;
-    const [groupConfig, groupThresholds, globalConfig] = await Promise.all([
+    const [groupConfig, groupThresholds, globalConfig, evalGroupIds] = await Promise.all([
       row.group_id ? getGroupAgentConfig(row.group_id) : null,
       row.group_id ? getGroupAgentThresholds(row.group_id) : null,
       appConfigService.getAgentGlobal(),
+      getEvaluateOnlyGroupIds(),
     ]);
-    return rowToDevice(row, groupConfig, groupThresholds, globalConfig);
+    return rowToDevice(row, groupConfig, groupThresholds, globalConfig, evalStateFor(row, evalGroupIds));
   },
 
   async countOnlineDevices(tenantId: number): Promise<number> {
@@ -353,12 +394,13 @@ export const agentService = {
   async getDeviceByUuid(uuid: string): Promise<AgentDevice | null> {
     const row = await db('agent_devices').where({ uuid }).first() as AgentDeviceRow | undefined;
     if (!row) return null;
-    const [groupConfig, groupThresholds, globalConfig] = await Promise.all([
+    const [groupConfig, groupThresholds, globalConfig, evalGroupIds] = await Promise.all([
       row.group_id ? getGroupAgentConfig(row.group_id) : null,
       row.group_id ? getGroupAgentThresholds(row.group_id) : null,
       appConfigService.getAgentGlobal(),
+      getEvaluateOnlyGroupIds(),
     ]);
-    return rowToDevice(row, groupConfig, groupThresholds, globalConfig);
+    return rowToDevice(row, groupConfig, groupThresholds, globalConfig, evalStateFor(row, evalGroupIds));
   },
 
   async updateDevice(id: number, data: {
@@ -375,6 +417,7 @@ export const agentService = {
     displayConfig?: AgentDisplayConfig | null;
     notificationTypes?: NotificationTypeConfig | null;
     wanMatchingEnabled?: boolean;
+    evaluateOnly?: boolean;
   }): Promise<AgentDevice | null> {
     const update: Record<string, unknown> = { updated_at: new Date() };
     if (data.status !== undefined) update.status = data.status;
@@ -392,18 +435,20 @@ export const agentService = {
       ? JSON.stringify(data.notificationTypes)
       : null;
     if (data.wanMatchingEnabled !== undefined) update.wan_matching_enabled = data.wanMatchingEnabled;
+    if (data.evaluateOnly !== undefined) update.evaluate_only = data.evaluateOnly;
 
     const [row] = await db('agent_devices')
       .where({ id })
       .update(update)
       .returning('*') as AgentDeviceRow[];
     if (!row) return null;
-    const [groupConfig, groupThresholds, globalConfig] = await Promise.all([
+    const [groupConfig, groupThresholds, globalConfig, evalGroupIds] = await Promise.all([
       row.group_id ? getGroupAgentConfig(row.group_id) : null,
       row.group_id ? getGroupAgentThresholds(row.group_id) : null,
       appConfigService.getAgentGlobal(),
+      getEvaluateOnlyGroupIds(),
     ]);
-    const device = rowToDevice(row, groupConfig, groupThresholds, globalConfig);
+    const device = rowToDevice(row, groupConfig, groupThresholds, globalConfig, evalStateFor(row, evalGroupIds));
 
     // Broadcast so the sidebar can update name/status/group without polling
     if (_io) {
@@ -675,16 +720,24 @@ export const agentService = {
       }
     }
 
-    // ── f2. Build track-only service type set ─────────────
+    // ── f2. Resolve templates for event tagging + opt-in gate ─────────────
     // Templates with mode='track' produce events stored for visibility but NOT
-    // counted by BanEngine. We resolve once per push so we can tag each event.
+    // counted by BanEngine (trackOnlyServices). Services whose resolved template
+    // is explicitly disabled (disabledServices) are dropped entirely — this is
+    // the server-side half of the opt-in gate, a defense-in-depth for agents
+    // that predate the client-side poller gate. We only drop services that have
+    // a resolved-but-disabled template (never custom/unknown services), so an
+    // intentional bind (enabled_override=true) always lets events through.
     const trackOnlyServices = new Set<string>();
+    const disabledServices = new Set<string>();
     if (body.events && body.events.length > 0) {
       try {
         const resolved = await serviceTemplateService.resolveForAgent(deviceId, groupIds);
         for (const cfg of resolved) {
-          if (cfg.mode === 'track') {
-            trackOnlyServices.add(cfg.serviceType);
+          if (cfg.enabled) {
+            if (cfg.mode === 'track') trackOnlyServices.add(cfg.serviceType);
+          } else {
+            disabledServices.add(cfg.serviceType);
           }
         }
       } catch (err) {
@@ -741,10 +794,15 @@ export const agentService = {
     }
 
     // ── g. Process events ─────────────────────────────────
-    if (body.events && body.events.length > 0) {
+    // Opt-in gate: drop events whose service has a resolved-but-disabled
+    // template before any storage / reputation / live-map emission.
+    const incomingEvents: AgentIpEvent[] = (body.events ?? []).filter(
+      (ev: AgentIpEvent) => !disabledServices.has(ev.service),
+    );
+    if (incomingEvents.length > 0) {
       try {
         // Enrich each event with source_agent_id / source_ip_type
-        const enrichedEvents = body.events.map((ev: AgentIpEvent) => {
+        const enrichedEvents = incomingEvents.map((ev: AgentIpEvent) => {
           let sourceAgentId: number | null = null;
           let sourceIpType: 'lan' | 'wan' | null = null;
 
@@ -781,7 +839,7 @@ export const agentService = {
 
         // Update IP reputation from the new events
         await ipReputationService.upsertFromEvents(
-          body.events.map((ev: AgentIpEvent) => ({
+          incomingEvents.map((ev: AgentIpEvent) => ({
             ip: ev.ip,
             service: ev.service,
             username: ev.username ?? null,
@@ -793,7 +851,7 @@ export const agentService = {
         // ── Threat detection: check if any IPs from this push are now suspicious ──
         // If so, mark this device as "under threat" for the next 3 min.
         const failureIps = [...new Set(
-          (body.events as AgentIpEvent[])
+          incomingEvents
             .filter(ev => ev.eventType === 'auth_failure')
             .map(ev => ev.ip),
         )];
@@ -892,6 +950,14 @@ export const agentService = {
       logger.warn({ err, deviceId }, 'handlePush: banService.computeBanDelta failed');
     }
 
+    // Evaluate-only (dry-run): this agent enforces NO bans. Override the delta to
+    // add nothing and remove everything it currently has at the firewall, so the
+    // observed traffic has zero network impact while whitelist rules are tuned.
+    // (Ban CREATION from this agent's events is separately skipped in BanEngine.)
+    if (device.evaluateOnly) {
+      banDelta = { add: [], remove: body.firewallBanned ?? [] };
+    }
+
     // ── h. Compute service configs ────────────────────────
     let serviceConfigsMap: Record<string, AgentServiceConfig> = {};
     try {
@@ -914,18 +980,12 @@ export const agentService = {
       serviceConfigsMap = {};
     }
 
-    // If no service templates are configured for this device/group, auto-enable
-    // all detected services with sensible defaults so log watching works
-    // out-of-the-box without requiring manual template configuration.
-    if (Object.keys(serviceConfigsMap).length === 0 && body.services && body.services.length > 0) {
-      for (const svc of body.services as { type: string }[]) {
-        serviceConfigsMap[svc.type] = {
-          enabled: true,
-          threshold: 5,
-          windowSeconds: 60,
-        };
-      }
-    }
+    // NOTE: intentionally NO auto-enable fallback here. Services are strictly
+    // opt-in: an agent only watches / emits events for services that resolve to
+    // an enabled template (global default, or a group/agent enabled_override).
+    // The previous "auto-enable all detected services" fallback violated that
+    // model (it silently turned on banning for every detected port), so it was
+    // removed — no enabled template means the agent stays silent for that service.
 
     // ── i. Handle pending command ─────────────────────────
     let pendingCommand: string | undefined;
@@ -1005,15 +1065,24 @@ export const agentService = {
       logger.warn({ err, deviceId }, 'processEventsFlush: group ancestry lookup failed');
     }
 
-    // Track-only service set
+    // Track-only + disabled service sets (same opt-in gate as handlePush)
     const trackOnlyServices = new Set<string>();
+    const disabledServices = new Set<string>();
     try {
       const { serviceTemplateService } = await import('./serviceTemplate.service');
       const resolved = await serviceTemplateService.resolveForAgent(deviceId, groupIds);
       for (const cfg of resolved) {
-        if (cfg.mode === 'track') trackOnlyServices.add(cfg.serviceType);
+        if (cfg.enabled) {
+          if (cfg.mode === 'track') trackOnlyServices.add(cfg.serviceType);
+        } else {
+          disabledServices.add(cfg.serviceType);
+        }
       }
     } catch { /* not yet configured — all services default to ban mode */ }
+
+    // Opt-in gate: drop events whose service has a resolved-but-disabled template.
+    const incomingEvents = events.filter((ev) => !disabledServices.has(ev.service));
+    if (incomingEvents.length === 0) return;
 
     // Peer link maps (LAN + WAN) — same logic as handlePush
     const lanIpToAgentId = new Map<string, number>();
@@ -1050,7 +1119,7 @@ export const agentService = {
 
     // Enrich + insert events
     try {
-      const enrichedEvents = events.map((ev: AgentIpEvent) => {
+      const enrichedEvents = incomingEvents.map((ev: AgentIpEvent) => {
         let sourceAgentId: number | null = null;
         let sourceIpType: 'lan' | 'wan' | null = null;
 
@@ -1086,7 +1155,7 @@ export const agentService = {
       await db('ip_events').insert(enrichedEvents);
 
       await ipReputationService.upsertFromEvents(
-        events.map((ev: AgentIpEvent) => ({
+        incomingEvents.map((ev: AgentIpEvent) => ({
           ip: ev.ip,
           service: ev.service,
           username: ev.username ?? null,
@@ -1097,7 +1166,7 @@ export const agentService = {
 
       // Threat detection — same check as handlePush
       const failureIps = [...new Set(
-        events
+        incomingEvents
           .filter((ev: AgentIpEvent) => ev.eventType === 'auth_failure')
           .map((ev: AgentIpEvent) => ev.ip),
       )];

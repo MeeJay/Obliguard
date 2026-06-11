@@ -959,5 +959,13 @@
     "toggleRole": "Klicka för att växla admin/medlem-roll",
     "roleAdmin": "admin",
     "switchWorkspace": "Byt arbetsyta"
+  },
+  "evaluateOnly": {
+    "badge": "Endast utvärdering",
+    "badgeTooltip": "Endast-utvärdering-läge: händelser observeras men inga blockeringar skapas eller verkställs.",
+    "groupTitle": "Endast-utvärdering-läge",
+    "groupDesc": "När det är aktiverat observerar den här gruppen och alla dess agenter händelser men skapar eller verkställer aldrig automatiska blockeringar. Perfekt för att finjustera whitelist-regler innan verkställande.",
+    "enabled": "Endast-utvärdering-läge aktiverat",
+    "disabled": "Endast-utvärdering-läge inaktiverat"
   }
 }

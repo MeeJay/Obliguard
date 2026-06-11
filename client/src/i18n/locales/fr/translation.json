@@ -959,5 +959,13 @@
     "toggleRole": "Cliquer pour basculer entre admin et membre",
     "roleAdmin": "admin",
     "switchWorkspace": "Changer d'espace de travail"
+  },
+  "evaluateOnly": {
+    "badge": "Évaluation",
+    "badgeTooltip": "Mode évaluation : les événements remontent mais aucun ban n'est créé ni appliqué.",
+    "groupTitle": "Mode évaluation seule",
+    "groupDesc": "Une fois activé, ce groupe et tous ses agents observent les événements sans jamais créer ni appliquer de ban automatique. Idéal pour régler la whitelist avant d'activer l'enforcement.",
+    "enabled": "Mode évaluation activé",
+    "disabled": "Mode évaluation désactivé"
   }
 }

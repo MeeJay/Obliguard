@@ -959,5 +959,13 @@
     "toggleRole": "Fai clic per attivare/disattivare il ruolo admin / membro",
     "roleAdmin": "admin",
     "switchWorkspace": "Cambia spazio di lavoro"
+  },
+  "evaluateOnly": {
+    "badge": "Solo valutazione",
+    "badgeTooltip": "Modalità solo valutazione: gli eventi vengono osservati ma nessun ban viene creato o applicato.",
+    "groupTitle": "Modalità solo valutazione",
+    "groupDesc": "Se attivata, questo gruppo e tutti i suoi agenti osservano gli eventi ma non creano né applicano mai ban automatici. Ideale per regolare la whitelist prima di applicare.",
+    "enabled": "Modalità solo valutazione attivata",
+    "disabled": "Modalità solo valutazione disattivata"
   }
 }

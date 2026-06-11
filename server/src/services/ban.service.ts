@@ -309,9 +309,15 @@ class BanEngine {
     // Fetch all approved agents
     const devices = await db('agent_devices')
       .where({ status: 'approved' })
-      .select('id', 'group_id', 'tenant_id') as Array<{ id: number; group_id: number | null; tenant_id: number }>;
+      .select('id', 'group_id', 'tenant_id', 'evaluate_only') as Array<{ id: number; group_id: number | null; tenant_id: number; evaluate_only: boolean }>;
 
     if (devices.length === 0) return;
+
+    // Groups flagged evaluate-only (dry-run). A device inherits the flag if any
+    // of its ancestor groups is in this set — such devices never auto-ban.
+    const evalOnlyGroups = new Set(
+      await db('monitor_groups').where('evaluate_only', true).pluck('id') as number[],
+    );
 
     // Pre-fetch group ancestries for all devices in one query
     const devicesWithGroups = await Promise.all(
@@ -327,6 +333,12 @@ class BanEngine {
 
     // Evaluate per-device
     for (const { dev, groupIds } of devicesWithGroups) {
+      // Evaluate-only (dry-run): observe events but never create auto-bans for
+      // this device (own flag or inherited from an ancestor group).
+      if (dev.evaluate_only || groupIds.some((g) => evalOnlyGroups.has(g))) {
+        continue;
+      }
+
       let resolved;
       try {
         resolved = await serviceTemplateService.resolveForAgent(dev.id, groupIds);

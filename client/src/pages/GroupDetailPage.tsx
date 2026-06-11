@@ -46,9 +46,23 @@ function AgentGroupSettingsPanel({ group, onUpdate }: { group: MonitorGroup; onU
   );
   const [savingInterval, setSavingInterval] = useState(false);
   const [savingMaxMissed, setSavingMaxMissed] = useState(false);
+  const [savingEval, setSavingEval] = useState(false);
 
   const isOverridingInterval = cfg.pushIntervalSeconds !== null;
   const isOverridingMaxMissed = cfg.maxMissedPushes !== null;
+
+  async function toggleEvaluateOnly() {
+    setSavingEval(true);
+    try {
+      const updated = await groupsApi.update(group.id, { evaluateOnly: !group.evaluateOnly });
+      onUpdate(updated);
+      toast.success(updated.evaluateOnly ? t('evaluateOnly.enabled') : t('evaluateOnly.disabled'));
+    } catch {
+      toast.error(t('groups.failedUpdate'));
+    } finally {
+      setSavingEval(false);
+    }
+  }
 
   async function saveConfig(patch: Partial<AgentGroupConfig>, setSaving: (v: boolean) => void) {
     setSaving(true);
@@ -215,6 +229,35 @@ function AgentGroupSettingsPanel({ group, onUpdate }: { group: MonitorGroup; onU
               {t('common.override')}
             </button>
           )}
+        </div>
+
+        {/* ── Evaluate-only (dry-run) mode ── */}
+        <div className="flex items-center gap-4 py-3">
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-text-primary">{t('evaluateOnly.groupTitle')}</span>
+              {group.evaluateOnly && (
+                <span className="inline-flex items-center rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-500">
+                  {t('evaluateOnly.badge')}
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-text-muted mt-0.5">{t('evaluateOnly.groupDesc')}</p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={group.evaluateOnly ?? false}
+            onClick={toggleEvaluateOnly}
+            disabled={savingEval}
+            className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 ${
+              group.evaluateOnly ? 'bg-amber-500' : 'bg-bg-tertiary border border-border'
+            }`}
+          >
+            <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
+              group.evaluateOnly ? 'translate-x-[18px]' : 'translate-x-0.5'
+            }`} />
+          </button>
         </div>
 
       </div>

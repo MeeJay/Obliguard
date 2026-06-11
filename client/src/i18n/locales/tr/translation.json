@@ -959,5 +959,13 @@
     "toggleRole": "Yönetici / üye rolünü değiştirmek için tıklayın",
     "roleAdmin": "yönetici",
     "switchWorkspace": "Çalışma alanı değiştir"
+  },
+  "evaluateOnly": {
+    "badge": "Yalnızca değerlendirme",
+    "badgeTooltip": "Yalnızca değerlendirme modu: olaylar gözlemlenir ancak hiçbir yasak oluşturulmaz veya uygulanmaz.",
+    "groupTitle": "Yalnızca değerlendirme modu",
+    "groupDesc": "Etkinleştirildiğinde bu grup ve tüm aracıları olayları gözlemler ancak asla otomatik yasak oluşturmaz veya uygulamaz. Uygulamadan önce beyaz liste kurallarını ayarlamak için idealdir.",
+    "enabled": "Yalnızca değerlendirme modu etkinleştirildi",
+    "disabled": "Yalnızca değerlendirme modu devre dışı bırakıldı"
   }
 }

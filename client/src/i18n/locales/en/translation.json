@@ -959,5 +959,13 @@
     "toggleRole": "Click to toggle admin / member role",
     "roleAdmin": "admin",
     "switchWorkspace": "Switch workspace"
+  },
+  "evaluateOnly": {
+    "badge": "Evaluate-only",
+    "badgeTooltip": "Evaluate-only mode: events are observed but no bans are created or enforced.",
+    "groupTitle": "Evaluate-only mode",
+    "groupDesc": "When enabled, this group and all its agents observe events but never create or enforce auto-bans. Ideal for tuning whitelist rules before enforcing.",
+    "enabled": "Evaluate-only mode enabled",
+    "disabled": "Evaluate-only mode disabled"
   }
 }

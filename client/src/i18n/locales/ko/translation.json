@@ -959,5 +959,13 @@
     "toggleRole": "Click to toggle admin / member role",
     "roleAdmin": "admin",
     "switchWorkspace": "Switch workspace"
+  },
+  "evaluateOnly": {
+    "badge": "평가 전용",
+    "badgeTooltip": "평가 전용 모드: 이벤트는 관찰되지만 차단은 생성되거나 적용되지 않습니다.",
+    "groupTitle": "평가 전용 모드",
+    "groupDesc": "활성화하면 이 그룹과 모든 에이전트가 이벤트를 관찰하지만 자동 차단을 생성하거나 적용하지 않습니다. 적용 전에 화이트리스트 규칙을 조정하는 데 적합합니다.",
+    "enabled": "평가 전용 모드가 활성화됨",
+    "disabled": "평가 전용 모드가 비활성화됨"
   }
 }

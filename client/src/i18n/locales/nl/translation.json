@@ -959,5 +959,13 @@
     "toggleRole": "Klik om tussen beheerder en lid te schakelen",
     "roleAdmin": "beheerder",
     "switchWorkspace": "Werkruimte wisselen"
+  },
+  "evaluateOnly": {
+    "badge": "Alleen evalueren",
+    "badgeTooltip": "Alleen-evalueren-modus: gebeurtenissen worden waargenomen maar er worden geen bans aangemaakt of toegepast.",
+    "groupTitle": "Alleen-evalueren-modus",
+    "groupDesc": "Indien ingeschakeld observeren deze groep en al haar agents gebeurtenissen, maar wordt nooit een automatische ban aangemaakt of toegepast. Ideaal om whitelistregels af te stemmen voordat je handhaaft.",
+    "enabled": "Alleen-evalueren-modus ingeschakeld",
+    "disabled": "Alleen-evalueren-modus uitgeschakeld"
   }
 }

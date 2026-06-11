@@ -959,5 +959,13 @@
     "toggleRole": "Clic para alternar entre admin y miembro",
     "roleAdmin": "admin",
     "switchWorkspace": "Cambiar espacio de trabajo"
+  },
+  "evaluateOnly": {
+    "badge": "Solo evaluación",
+    "badgeTooltip": "Modo solo evaluación: los eventos se observan pero no se crea ni aplica ningún bloqueo.",
+    "groupTitle": "Modo solo evaluación",
+    "groupDesc": "Cuando está activado, este grupo y todos sus agentes observan los eventos pero nunca crean ni aplican baneos automáticos. Ideal para ajustar la lista blanca antes de aplicar.",
+    "enabled": "Modo solo evaluación activado",
+    "disabled": "Modo solo evaluación desactivado"
   }
 }

@@ -959,5 +959,13 @@
     "toggleRole": "Clique para alternar entre admin e membro",
     "roleAdmin": "admin",
     "switchWorkspace": "Mudar espaço de trabalho"
+  },
+  "evaluateOnly": {
+    "badge": "Somente avaliação",
+    "badgeTooltip": "Modo somente avaliação: os eventos são observados, mas nenhum banimento é criado ou aplicado.",
+    "groupTitle": "Modo somente avaliação",
+    "groupDesc": "Quando ativado, este grupo e todos os seus agentes observam os eventos, mas nunca criam ou aplicam banimentos automáticos. Ideal para ajustar a lista de permissões antes de aplicar.",
+    "enabled": "Modo somente avaliação ativado",
+    "disabled": "Modo somente avaliação desativado"
   }
 }

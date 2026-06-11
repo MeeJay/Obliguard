@@ -959,5 +959,13 @@
     "toggleRole": "Klik for at skifte admin / medlemsrolle",
     "roleAdmin": "admin",
     "switchWorkspace": "Skift arbejdsrum"
+  },
+  "evaluateOnly": {
+    "badge": "Kun evaluering",
+    "badgeTooltip": "Kun-evaluering-tilstand: hændelser observeres, men der oprettes eller håndhæves ingen blokeringer.",
+    "groupTitle": "Kun-evaluering-tilstand",
+    "groupDesc": "Når aktiveret observerer denne gruppe og alle dens agenter hændelser, men opretter eller håndhæver aldrig automatiske blokeringer. Ideel til at finjustere whitelist-regler før håndhævelse.",
+    "enabled": "Kun-evaluering-tilstand aktiveret",
+    "disabled": "Kun-evaluering-tilstand deaktiveret"
   }
 }

@@ -11,6 +11,7 @@ import apiClient from '@/api/client';
 import { agentApi } from '@/api/agent.api';
 import { bansApi } from '@/api/bans.api';
 import { FirewallPanel } from '@/components/agent/FirewallPanel';
+import { EvaluateOnlyBanner } from '@/components/common/EvaluateOnlyBanner';
 import { NetworkLimitsPanel } from '@/pages/RateLimitPage';
 import { whitelistApi } from '@/api/whitelist.api';
 import { serviceTemplatesApi } from '@/api/serviceTemplates.api';
@@ -543,12 +544,17 @@ function AgentSettingsPanel({
   const [checkInterval,  setCheckInterval]  = useState(String(device.checkIntervalSeconds ?? 60));
   const [maxMissed,      setMaxMissed]      = useState(String(device.maxMissedPushes ?? resolvedMMP));
   const [wanMatching,    setWanMatching]    = useState(device.wanMatchingEnabled ?? false);
+  // evaluate-only: device-LEVEL flag. source==='agent' means the own flag is set;
+  // source==='group' means it's inherited (own flag is off — checked first in resolution).
+  const [evalOnly,       setEvalOnly]       = useState(device.evaluateOnlySource === 'agent');
   const [saving,         setSaving]         = useState(false);
+  const evalInherited = device.evaluateOnlySource === 'group';
 
   useEffect(() => {
     setCheckInterval(String(device.checkIntervalSeconds ?? 60));
     setMaxMissed(String(device.maxMissedPushes ?? (device.resolvedSettings?.maxMissedPushes ?? 2)));
     setWanMatching(device.wanMatchingEnabled ?? false);
+    setEvalOnly(device.evaluateOnlySource === 'agent');
   }, [device]);
 
   async function save(updates: Parameters<typeof agentApi.updateDevice>[1]) {
@@ -684,6 +690,26 @@ function AgentSettingsPanel({
           WAN matching
           {wanMatching && (
             <span className="ml-1 text-[10px] text-amber-400">(dedicated IP only)</span>
+          )}
+        </span>
+      </label>
+
+      {/* ── Evaluate-only (dry-run) — observe without enforcing ─────────── */}
+      <label
+        className="flex items-center gap-2 text-xs text-text-secondary cursor-pointer select-none"
+        title="When enabled, this agent observes events but never creates or enforces auto-bans. Useful for tuning whitelist rules before enforcement."
+      >
+        <Toggle
+          value={evalOnly || evalInherited}
+          onChange={() => {
+            if (evalInherited) return; // controlled by the group — manage it there
+            const v = !evalOnly; setEvalOnly(v); void save({ evaluateOnly: v });
+          }}
+        />
+        <span>
+          Evaluate-only
+          {evalInherited && (
+            <span className="ml-1 text-[10px] text-amber-400">(inherited from group)</span>
           )}
         </span>
       </label>
@@ -1292,6 +1318,13 @@ export function AgentDetailPage() {
           </button>
         </div>
       </div>
+
+      {/* ── Evaluate-only banner ─────────────────────────────────────────── */}
+      {device.evaluateOnly && (
+        <div className="px-6 pt-4 flex-shrink-0">
+          <EvaluateOnlyBanner source={device.evaluateOnlySource} />
+        </div>
+      )}
 
       {/* ── Stats strip ──────────────────────────────────────────────────── */}
       <div className="px-6 pt-4 grid grid-cols-2 lg:grid-cols-4 gap-3 flex-shrink-0">

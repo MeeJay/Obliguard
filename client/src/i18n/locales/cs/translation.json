@@ -959,5 +959,13 @@
     "toggleRole": "Kliknutím přepnete roli správce / člena",
     "roleAdmin": "admin",
     "switchWorkspace": "Přepnout workspace"
+  },
+  "evaluateOnly": {
+    "badge": "Pouze sledování",
+    "badgeTooltip": "Režim pouze sledování: události se zaznamenávají, ale žádné blokace se nevytvářejí ani neuplatňují.",
+    "groupTitle": "Režim pouze sledování",
+    "groupDesc": "Po zapnutí tato skupina a všichni její agenti sledují události, ale nikdy nevytvářejí ani neuplatňují automatické blokace. Ideální pro vyladění whitelistu před vynucením.",
+    "enabled": "Režim pouze sledování zapnut",
+    "disabled": "Režim pouze sledování vypnut"
   }
 }

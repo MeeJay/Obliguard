@@ -78,6 +78,19 @@ func (lw *LogWatcher) UpdateConfigs(configs map[string]AgentServiceConfig) {
 	lw.configs = configs
 }
 
+// IsServiceEnabled reports whether the server has sent an enabled config for
+// the given service key. The unconditional pollers (Windows Security Event Log,
+// TCP netconn monitor) call this so they honor the SAME opt-in gate as the file
+// tailer: no enabled template for a service ⇒ no events emitted for it. Without
+// this, those two pollers would surface RDP/Nginx events even when nothing is
+// enabled server-side (the file tailer already gates via cfg.Enabled).
+func (lw *LogWatcher) IsServiceEnabled(svc string) bool {
+	lw.mu.Lock()
+	defer lw.mu.Unlock()
+	cfg, ok := lw.configs[svc]
+	return ok && cfg.Enabled
+}
+
 // DrainEvents returns accumulated events and clears the internal buffer.
 func (lw *LogWatcher) DrainEvents() []AgentIpEvent {
 	lw.mu.Lock()

@@ -959,5 +959,13 @@
     "toggleRole": "Klicken, um zwischen Admin und Mitglied zu wechseln",
     "roleAdmin": "Admin",
     "switchWorkspace": "Arbeitsbereich wechseln"
+  },
+  "evaluateOnly": {
+    "badge": "Nur Beobachtung",
+    "badgeTooltip": "Beobachtungsmodus: Ereignisse werden erfasst, aber keine Sperren erstellt oder durchgesetzt.",
+    "groupTitle": "Beobachtungsmodus",
+    "groupDesc": "Wenn aktiviert, beobachten diese Gruppe und alle ihre Agenten Ereignisse, erstellen oder erzwingen jedoch niemals automatische Sperren. Ideal zum Anpassen der Whitelist vor der Durchsetzung.",
+    "enabled": "Beobachtungsmodus aktiviert",
+    "disabled": "Beobachtungsmodus deaktiviert"
   }
 }

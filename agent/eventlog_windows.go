@@ -30,6 +30,12 @@ func startPlatformEventLogWatcher(lw *LogWatcher) {
 		ticker := time.NewTicker(15 * time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
+			// Honor the opt-in gate: events from this poller are tagged
+			// service="rdp", so skip entirely (incl. the PowerShell query)
+			// unless an enabled RDP template was pushed by the server.
+			if !lw.IsServiceEnabled("rdp") {
+				continue
+			}
 			for _, e := range pollWindowsSecurityEvents() {
 				lw.addEvent(e)
 			}

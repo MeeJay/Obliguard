@@ -10,6 +10,7 @@ interface GroupRow {
   sort_order: number;
   is_general: boolean;
   group_notifications: boolean;
+  evaluate_only?: boolean;
   kind: string;
   tenant_id: number;
   agent_thresholds?: AgentThresholds | null;
@@ -28,6 +29,7 @@ function rowToGroup(row: GroupRow): MonitorGroup {
     sortOrder: row.sort_order,
     isGeneral: row.is_general,
     groupNotifications: row.group_notifications,
+    evaluateOnly: row.evaluate_only ?? false,
     kind: (row.kind as MonitorGroup['kind']) || 'monitor',
     agentThresholds: row.agent_thresholds
       ? (typeof row.agent_thresholds === 'string' ? JSON.parse(row.agent_thresholds) : row.agent_thresholds)
@@ -125,6 +127,7 @@ export const groupService = {
       sortOrder?: number;
       isGeneral?: boolean;
       groupNotifications?: boolean;
+      evaluateOnly?: boolean;
     },
   ): Promise<MonitorGroup | null> {
     const updateData: Record<string, unknown> = { updated_at: new Date() };
@@ -137,6 +140,7 @@ export const groupService = {
     if (data.sortOrder !== undefined) updateData.sort_order = data.sortOrder;
     if (data.isGeneral !== undefined) updateData.is_general = data.isGeneral;
     if (data.groupNotifications !== undefined) updateData.group_notifications = data.groupNotifications;
+    if (data.evaluateOnly !== undefined) updateData.evaluate_only = data.evaluateOnly;
 
     const [row] = await db<GroupRow>('monitor_groups')
       .where({ id })

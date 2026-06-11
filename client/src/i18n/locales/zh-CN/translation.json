@@ -959,5 +959,13 @@
     "toggleRole": "点击切换管理员/成员角色",
     "roleAdmin": "管理员",
     "switchWorkspace": "切换工作区"
+  },
+  "evaluateOnly": {
+    "badge": "仅评估",
+    "badgeTooltip": "仅评估模式：仅观察事件，不创建或执行任何封禁。",
+    "groupTitle": "仅评估模式",
+    "groupDesc": "启用后，该分组及其所有代理仅观察事件，绝不创建或执行自动封禁。适合在正式拦截前调整白名单规则。",
+    "enabled": "已启用仅评估模式",
+    "disabled": "已禁用仅评估模式"
   }
 }

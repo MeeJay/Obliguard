@@ -63,6 +63,11 @@ export interface MonitorGroup {
   sortOrder: number;
   isGeneral: boolean;
   groupNotifications: boolean;
+  /**
+   * Evaluate-only (dry-run) mode. When true, this group and all its descendant
+   * groups + agents observe events but never create or enforce auto-bans.
+   */
+  evaluateOnly?: boolean;
   kind: 'agent';
   agentThresholds?: AgentThresholds | null;
   agentGroupConfig?: AgentGroupConfig | null;
@@ -227,6 +232,7 @@ export interface UpdateGroupRequest {
   sortOrder?: number;
   isGeneral?: boolean;
   groupNotifications?: boolean;
+  evaluateOnly?: boolean;
 }
 
 export interface MoveGroupRequest {
@@ -558,6 +564,14 @@ export interface AgentDevice {
   wanMatchingEnabled: boolean;
   /** True when the agent has an active WebSocket command channel to the server. */
   wsConnected: boolean;
+  /**
+   * Effective evaluate-only (dry-run) state: true if this device's own flag is set
+   * OR it inherits the flag from an ancestor group. In this mode the agent observes
+   * events but creates/enforces NO bans.
+   */
+  evaluateOnly?: boolean;
+  /** Where the effective evaluate-only state comes from ('agent' = own flag, 'group' = inherited). */
+  evaluateOnlySource?: 'agent' | 'group' | null;
   /** Device type: 'agent' for Go agent binary, 'mikrotik' for remote MikroTik devices. */
   deviceType: 'agent' | 'mikrotik';
   /**

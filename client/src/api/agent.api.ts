@@ -51,6 +51,7 @@ export const agentApi = {
       displayConfig?: AgentDisplayConfig | null;
       notificationTypes?: NotificationTypeConfig | null;
       wanMatchingEnabled?: boolean;
+      evaluateOnly?: boolean;
     },
   ): Promise<AgentDevice> {
     const res = await apiClient.patch<ApiResponse<AgentDevice>>(`/agent/devices/${id}`, data);

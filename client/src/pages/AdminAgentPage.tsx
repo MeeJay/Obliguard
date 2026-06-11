@@ -19,6 +19,7 @@ import {
   X,
   Settings2,
   Router,
+  Eye,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { SOCKET_EVENTS } from '@obliview/shared';
@@ -1030,6 +1031,15 @@ export function AdminAgentPage() {
                             <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium bg-blue-500/10 text-blue-400">
                               <RefreshCw size={10} className="animate-spin" />
                               Updating
+                            </span>
+                          )}
+                          {device.evaluateOnly && (
+                            <span
+                              className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium bg-amber-500/10 text-amber-500 border border-amber-500/20"
+                              title={t('evaluateOnly.badgeTooltip')}
+                            >
+                              <Eye size={10} />
+                              {t('evaluateOnly.badge')}
                             </span>
                           )}
                         </div>

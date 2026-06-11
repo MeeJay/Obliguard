@@ -959,5 +959,13 @@
     "toggleRole": "Kliknij aby przełączyć rolę admin / member",
     "roleAdmin": "administrator",
     "switchWorkspace": "Zmień workspace"
+  },
+  "evaluateOnly": {
+    "badge": "Tylko obserwacja",
+    "badgeTooltip": "Tryb tylko obserwacji: zdarzenia są monitorowane, ale żadne blokady nie są tworzone ani egzekwowane.",
+    "groupTitle": "Tryb tylko obserwacji",
+    "groupDesc": "Po włączeniu ta grupa i wszyscy jej agenci obserwują zdarzenia, ale nigdy nie tworzą ani nie egzekwują automatycznych blokad. Idealne do dostrojenia białej listy przed egzekwowaniem.",
+    "enabled": "Włączono tryb tylko obserwacji",
+    "disabled": "Wyłączono tryb tylko obserwacji"
   }
 }
