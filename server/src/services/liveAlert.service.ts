@@ -1,6 +1,6 @@
 import type { Server as SocketIOServer } from 'socket.io';
 import { db } from '../db';
-import { SOCKET_EVENTS } from '@obliview/shared';
+import { SOCKET_EVENTS, isMasterTenant } from '@obliview/shared';
 
 let _io: SocketIOServer | null = null;
 
@@ -97,10 +97,9 @@ export const liveAlertService = {
 
   /** Fetch all alerts for a single tenant (newest first). */
   async getForTenant(tenantId: number, limit = 100): Promise<LiveAlertRow[]> {
-    const rows = await db('live_alerts')
-      .where({ tenant_id: tenantId })
-      .orderBy('created_at', 'desc')
-      .limit(limit);
+    let q = db('live_alerts');
+    if (!isMasterTenant(tenantId)) q = q.where({ tenant_id: tenantId });
+    const rows = await q.orderBy('created_at', 'desc').limit(limit);
     return rows.map(rowToAlert);
   },
 

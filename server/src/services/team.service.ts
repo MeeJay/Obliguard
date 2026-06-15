@@ -1,5 +1,6 @@
 import { db } from '../db';
 import type { UserTeam, TeamPermission } from '@obliview/shared';
+import { isMasterTenant } from '@obliview/shared';
 
 interface TeamRow {
   id: number;
@@ -54,7 +55,7 @@ export const teamService = {
       .join('tenants', 'user_teams.tenant_id', 'tenants.id')
       .select('user_teams.*', 'tenants.name as tenant_name')
       .orderBy('user_teams.name');
-    if (tenantId !== null) {
+    if (tenantId !== null && !isMasterTenant(tenantId)) {
       query.where('user_teams.tenant_id', tenantId);
     }
     const rows = await query;

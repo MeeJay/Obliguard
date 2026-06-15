@@ -8,6 +8,7 @@ import type {
   UpdateServiceTemplateRequest,
   UpsertServiceAssignmentRequest,
 } from '@obliview/shared';
+import { isMasterTenant } from '@obliview/shared';
 
 // ── Row interfaces ───────────────────────────────────────────────────────────
 
@@ -103,7 +104,7 @@ class ServiceTemplateService {
       .whereNull('owner_scope')  // exclude local templates
       .where((builder) => {
         builder.whereNull('tenant_id');
-        if (!isAdmin) {
+        if (!isAdmin && !isMasterTenant(tenantId)) {
           builder.orWhere('tenant_id', tenantId);
         } else {
           builder.orWhereNotNull('tenant_id');
@@ -139,7 +140,7 @@ class ServiceTemplateService {
     if (!row) return null;
 
     // Access control: non-admins can only see global or their tenant's templates
-    if (!isAdmin && row.tenant_id !== null && row.tenant_id !== tenantId) {
+    if (!isAdmin && !isMasterTenant(tenantId) && row.tenant_id !== null && row.tenant_id !== tenantId) {
       return null;
     }
 

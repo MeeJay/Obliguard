@@ -14,9 +14,11 @@ import {
   Eye,
 } from 'lucide-react';
 import type { IpBan, BanScope, CreateBanRequest } from '@obliview/shared';
+import { isMasterTenant } from '@obliview/shared';
 import { Button } from '@/components/common/Button';
 import { Input } from '@/components/common/Input';
 import { useAuthStore } from '@/store/authStore';
+import { useTenantStore } from '@/store/tenantStore';
 import { cn } from '@/utils/cn';
 import { anonIp } from '@/utils/anonymize';
 import toast from 'react-hot-toast';
@@ -270,6 +272,11 @@ interface BanListResponse {
 export function BansPage() {
   const { user } = useAuthStore();
   const isAdmin = user?.role === 'admin';
+  // The default (master) tenant is the god view: it's the only context where a
+  // GLOBAL ban can be lifted for everyone. Any other tenant can only "Exclude"
+  // a global ban (per-tenant override that doesn't touch other tenants).
+  const currentTenantId = useTenantStore((s) => s.currentTenantId);
+  const isMaster = isMasterTenant(currentTenantId);
 
   const [bans, setBans] = useState<IpBan[]>([]);
   const [total, setTotal] = useState(0);
@@ -528,9 +535,10 @@ export function BansPage() {
                     </td>
                     <td className="px-4 py-3 text-right">
                       <div className="flex items-center justify-end gap-1 flex-wrap">
-                        {/* Lift ban: admin always; non-admin only for own tenant-scoped bans */}
+                        {/* Lift ban: GLOBAL bans only from the Default tenant (lifts everywhere);
+                            tenant-scoped bans by their owner / any admin. */}
                         {ban.isActive && !isExpired(ban.expiresAt) &&
-                          (isAdmin || ban.scope === 'tenant') && (
+                          (ban.scope === 'global' ? (isMaster && isAdmin) : (isAdmin || ban.scope === 'tenant')) && (
                           <Button
                             size="sm"
                             variant="secondary"
@@ -550,8 +558,9 @@ export function BansPage() {
                             <Globe size={11} className="mr-1" />Promote global
                           </Button>
                         )}
-                        {/* Exclude / Remove exclusion: non-admin on global bans */}
-                        {!isAdmin && ban.scope === 'global' && ban.isActive && !isExpired(ban.expiresAt) && (
+                        {/* Exclude / Remove exclusion: any NON-default tenant, on global bans
+                            (per-tenant override — the Default tenant lifts globally instead). */}
+                        {!isMaster && isAdmin && ban.scope === 'global' && ban.isActive && !isExpired(ban.expiresAt) && (
                           ban.isExcludedByTenant ? (
                             <Button
                               size="sm"

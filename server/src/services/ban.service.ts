@@ -1,6 +1,7 @@
 import type { Server as SocketIOServer } from 'socket.io';
 import { db } from '../db';
 import type { IpBan, CreateBanRequest, BanScope } from '@obliview/shared';
+import { isMasterTenant } from '@obliview/shared';
 import { logger } from '../utils/logger';
 import { serviceTemplateService } from './serviceTemplate.service';
 import { ipReputationService } from './ipReputation.service';
@@ -80,7 +81,7 @@ class BanService {
 
     if (isAdmin) {
       // Admin sees all bans (global + all tenants)
-    } else {
+    } else if (!isAdmin && !isMasterTenant(tenantId)) {
       // Tenant admin sees: global bans + their own tenant bans
       q = q.where((b) => {
         b.where('ip_bans.scope', 'global').orWhere('ip_bans.tenant_id', tenantId);
@@ -168,8 +169,15 @@ class BanService {
     const ban = await db('ip_bans').where('id', banId).first() as BanRow | undefined;
     if (!ban) throw new Error('Ban not found');
 
+    // A GLOBAL ban is authoritative for every tenant, so lifting it removes it
+    // everywhere. That authority belongs ONLY to the default/master tenant (the
+    // god view). Any other tenant must use excludeForTenant() to opt out locally
+    // without affecting the tenant that created the ban.
+    if (ban.scope === 'global' && !isMasterTenant(tenantId)) {
+      throw new Error('Global bans can only be lifted from the Default tenant. Use "Exclude" to override this ban on the current tenant.');
+    }
+
     // Tenant admins can only lift their own tenant-scoped bans.
-    // To opt out of a global ban without revoking it for everyone, use excludeForTenant().
     if (!isAdmin && (ban.scope !== 'tenant' || ban.tenant_id !== tenantId)) {
       throw new Error('Insufficient permissions to lift this ban');
     }

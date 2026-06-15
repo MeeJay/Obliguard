@@ -21,6 +21,7 @@ import {
   DEFAULT_AGENT_THRESHOLDS,
   DEFAULT_AGENT_GLOBAL_CONFIG,
   SOCKET_EVENTS,
+  isMasterTenant,
 } from '@obliview/shared';
 import { appConfigService } from './appConfig.service';
 import { notificationService } from './notification.service';
@@ -343,7 +344,6 @@ export const agentService = {
         const query = db('agent_devices as d')
           .leftJoin('monitor_groups as g', 'g.id', 'd.group_id')
           .leftJoin('mikrotik_credentials as mt', 'mt.device_id', 'd.id')
-          .where({ 'd.tenant_id': tenantId })
           .select(
             'd.*',
             db.raw('g.agent_group_config as _group_agent_config'),
@@ -353,6 +353,7 @@ export const agentService = {
             db.raw('mt.last_api_connected_at as mt_last_api_connected_at'),
           )
           .orderBy('d.created_at', 'desc');
+        if (!isMasterTenant(tenantId)) query.where({ 'd.tenant_id': tenantId });
         if (status) query.where({ 'd.status': status });
         return query as Promise<(AgentDeviceRow & { _group_agent_config: unknown; _group_agent_thresholds: unknown; _group_name: string | null })[]>;
       })(),
@@ -397,9 +398,9 @@ export const agentService = {
   },
 
   async countOnlineDevices(tenantId: number): Promise<number> {
-    const [row] = await db('agent_devices')
-      .where({ tenant_id: tenantId, status: 'approved' })
-      .count<Array<{ count: string }>>({ count: '*' });
+    const q = db('agent_devices').where({ status: 'approved' });
+    if (!isMasterTenant(tenantId)) q.where({ tenant_id: tenantId });
+    const [row] = await q.count<Array<{ count: string }>>({ count: '*' });
     return Number(row?.count ?? 0);
   },
 

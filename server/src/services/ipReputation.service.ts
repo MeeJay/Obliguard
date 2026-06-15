@@ -1,5 +1,6 @@
 import { db } from '../db';
 import type { IpReputation, IpEvent, IpStatus } from '@obliview/shared';
+import { isMasterTenant } from '@obliview/shared';
 
 // ── Row interfaces ───────────────────────────────────────────────────────────
 
@@ -352,7 +353,7 @@ class IpReputationService {
 
     // Suspicious case: per-tenant clear baseline
     // CASE expression is different depending on whether we have a tenant context.
-    const suspiciousExpr = tenantId && !isAdmin
+    const suspiciousExpr = tenantId && !isAdmin && !isMasterTenant(tenantId)
       ? `r.total_failures > COALESCE(clr.baseline_failures, 0)`
       : `r.total_failures > 0`;
 
@@ -378,7 +379,7 @@ class IpReputationService {
       );
 
     // Per-tenant clear baseline — join only for non-admin tenant users
-    if (tenantId && !isAdmin) {
+    if (tenantId && !isAdmin && !isMasterTenant(tenantId)) {
       baseQuery.leftJoin('ip_reputation_tenant_clears as clr', function () {
         this.on('clr.ip', '=', 'r.ip').andOnVal('clr.tenant_id', '=', tenantId);
       });
@@ -413,7 +414,7 @@ class IpReputationService {
       .leftJoin('ip_whitelist as w', db.raw("r.ip <<= w.ip"))
       .count<Array<{ count: string }>>({ count: 'r.ip' });
 
-    if (tenantId && !isAdmin) {
+    if (tenantId && !isAdmin && !isMasterTenant(tenantId)) {
       countQuery.leftJoin('ip_reputation_tenant_clears as clr', function () {
         this.on('clr.ip', '=', 'r.ip').andOnVal('clr.tenant_id', '=', tenantId);
       });
@@ -479,7 +480,7 @@ class IpReputationService {
       if (wl) {
         status = 'whitelisted';
       } else if (Number(row.total_failures) > 0) {
-        if (tenantId && !isAdmin) {
+        if (tenantId && !isAdmin && !isMasterTenant(tenantId)) {
           // Check per-tenant baseline
           const clr = await db('ip_reputation_tenant_clears')
             .where({ ip, tenant_id: tenantId })
@@ -516,7 +517,7 @@ class IpReputationService {
       if (wl) {
         status = 'whitelisted';
       } else if (row && Number(row.total_failures) > 0) {
-        if (tenantId && !isAdmin) {
+        if (tenantId && !isAdmin && !isMasterTenant(tenantId)) {
           const clr = await db('ip_reputation_tenant_clears')
             .where({ ip, tenant_id: tenantId })
             .first() as { baseline_failures: number } | undefined;
@@ -540,7 +541,7 @@ class IpReputationService {
       .select('e.*', 'd.hostname')
       .orderBy('e.timestamp', 'desc')
       .limit(50);
-    if (tenantId && !isAdmin) { eventQ.where('e.tenant_id', tenantId); }
+    if (tenantId && !isAdmin && !isMasterTenant(tenantId)) { eventQ.where('e.tenant_id', tenantId); }
     const eventRows = await eventQ;
     const recentEvents = eventRows.map(rowToEvent);
 

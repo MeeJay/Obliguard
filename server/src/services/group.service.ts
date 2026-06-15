@@ -1,5 +1,6 @@
 import { db } from '../db';
 import type { MonitorGroup, GroupTreeNode, AgentThresholds, AgentGroupConfig } from '@obliview/shared';
+import { isMasterTenant } from '@obliview/shared';
 
 interface GroupRow {
   id: number;
@@ -63,7 +64,9 @@ async function ensureUniqueSlug(slug: string, excludeId?: number): Promise<strin
 
 export const groupService = {
   async getAll(tenantId: number): Promise<MonitorGroup[]> {
-    const rows = await db<GroupRow>('monitor_groups').where({ tenant_id: tenantId }).orderBy('sort_order').orderBy('name');
+    const q = db<GroupRow>('monitor_groups').orderBy('sort_order').orderBy('name');
+    if (!isMasterTenant(tenantId)) q.where({ tenant_id: tenantId });
+    const rows = await q;
     return rows.map(rowToGroup);
   },
 

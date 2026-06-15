@@ -1,4 +1,5 @@
 import { db } from '../db';
+import { isMasterTenant } from '@obliview/shared';
 import type {
   RateLimitPolicy,
   CreateRateLimitPolicyRequest,
@@ -64,7 +65,7 @@ class RateLimitPolicyService {
       if (!isAdmin) throw new Error('Only admins can view global rate limit policies');
       query.where({ scope: 'global' });
     } else if (scope === 'tenant') {
-      if (!isAdmin) query.where({ scope: 'tenant', tenant_id: tenantId });
+      if (!isAdmin && !isMasterTenant(tenantId)) query.where({ scope: 'tenant', tenant_id: tenantId });
       else query.where({ scope: 'tenant' });
     } else if (scope === 'group') {
       if (scopeId !== null) query.where({ scope: 'group', scope_id: scopeId });
@@ -83,7 +84,7 @@ class RateLimitPolicyService {
   /** List every policy visible to the caller across all scopes. */
   async listAll(tenantId: number, isAdmin: boolean): Promise<RateLimitPolicy[]> {
     const query = db<RateLimitPolicyRow>('rate_limit_policies');
-    if (!isAdmin) {
+    if (!isAdmin && !isMasterTenant(tenantId)) {
       query.where((b) =>
         b.where({ scope: 'global' })
           .orWhere({ scope: 'tenant', tenant_id: tenantId })

@@ -1,5 +1,6 @@
 import { db } from '../db';
 import type { IpWhitelist, CreateWhitelistRequest, WhitelistScope } from '@obliview/shared';
+import { isMasterTenant } from '@obliview/shared';
 
 // ── Row interface ────────────────────────────────────────────────────────────
 
@@ -50,7 +51,11 @@ class WhitelistService {
     } else if (scope === 'tenant') {
       if (!isAdmin) {
         // Tenant members may only see their own tenant entries
-        query.where({ scope: 'tenant', tenant_id: tenantId });
+        if (isMasterTenant(tenantId)) {
+          query.where({ scope: 'tenant' });
+        } else {
+          query.where({ scope: 'tenant', tenant_id: tenantId });
+        }
       } else {
         query.where({ scope: 'tenant' });
       }
@@ -74,7 +79,7 @@ class WhitelistService {
    */
   async listAll(tenantId: number, isAdmin: boolean): Promise<IpWhitelist[]> {
     const query = db<IpWhitelistRow>('ip_whitelist');
-    if (!isAdmin) {
+    if (!isAdmin && !isMasterTenant(tenantId)) {
       query.where((b) =>
         b.where({ scope: 'global' })
           .orWhere({ scope: 'tenant', tenant_id: tenantId })

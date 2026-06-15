@@ -1,4 +1,5 @@
 import { db } from '../db';
+import { isMasterTenant } from '@obliview/shared';
 
 export interface IpDisplayName {
   ip: string;
@@ -16,7 +17,11 @@ export const ipDisplayNamesService = {
     const rows = await db('ip_display_names')
       .where(function () {
         this.whereNull('tenant_id');
-        if (tenantId) this.orWhere('tenant_id', tenantId);
+        if (isMasterTenant(tenantId)) {
+          this.orWhereNotNull('tenant_id');
+        } else if (tenantId) {
+          this.orWhere('tenant_id', tenantId);
+        }
       })
       .select('ip', 'label', 'tenant_id as tenantId')
       .orderBy('ip');

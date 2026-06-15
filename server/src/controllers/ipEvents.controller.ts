@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction } from 'express';
 import { db } from '../db';
 import { AppError } from '../middleware/errorHandler';
+import { isMasterTenant } from '@obliview/shared';
 
 export async function listEvents(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -17,6 +18,8 @@ export async function listEvents(req: Request, res: Response, next: NextFunction
     const pageSize = req.query.pageSize !== undefined ? parseInt(req.query.pageSize as string, 10) : 50;
 
     const offset = (page - 1) * pageSize;
+
+    const tenantId = req.tenantId;
 
     let query = db('ip_events as e')
       .leftJoin('agent_devices as d', 'e.device_id', 'd.id')
@@ -35,10 +38,14 @@ export async function listEvents(req: Request, res: Response, next: NextFunction
         'e.source_agent_id',
         'e.source_ip_type',
         'd.hostname',
-      )
-      .where('e.tenant_id', req.tenantId);
+      );
 
-    let countQuery = db('ip_events as e').where('e.tenant_id', req.tenantId);
+    let countQuery = db('ip_events as e');
+
+    if (!isMasterTenant(tenantId)) {
+      query = query.where('e.tenant_id', tenantId);
+      countQuery = countQuery.where('e.tenant_id', tenantId);
+    }
 
     if (ip) {
       query = query.whereRaw('e.ip::text ILIKE ?', [`%${ip}%`]);
@@ -94,7 +101,9 @@ export async function getEventsByIp(req: Request, res: Response, next: NextFunct
       throw new AppError(400, 'IP address is required');
     }
 
-    const rows = await db('ip_events as e')
+    const tenantId = req.tenantId;
+
+    let q = db('ip_events as e')
       .leftJoin('agent_devices as d', 'e.device_id', 'd.id')
       .select(
         'e.id',
@@ -111,8 +120,11 @@ export async function getEventsByIp(req: Request, res: Response, next: NextFunct
         'e.source_agent_id',
         'e.source_ip_type',
         'd.hostname',
-      )
-      .where('e.tenant_id', req.tenantId)
+      );
+
+    if (!isMasterTenant(tenantId)) q = q.where('e.tenant_id', tenantId);
+
+    const rows = await q
       .whereRaw('e.ip::text = ?', [ip])
       .orderBy('e.timestamp', 'desc')
       .limit(200);
