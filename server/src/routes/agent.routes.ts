@@ -14,6 +14,8 @@ import {
   agentInstallerWindowsMsi,
   agentInstallerMacos,
   agentInstallerFreeBSD,
+  agentInstallerWizard,
+  agentInstallerWizardLinux,
   listKeys,
   createKey,
   deleteKey,
@@ -80,6 +82,11 @@ router.post('/mikrotik/ingest', express.text({ type: '*/*', limit: '1mb' }), ing
 router.get('/keys', requireAuth, requireRole('admin'), requireTenant, listKeys);
 router.post('/keys', requireAuth, requireRole('admin'), requireTenant, createKey);
 router.delete('/keys/:id', requireAuth, requireRole('admin'), requireTenant, deleteKey);
+
+// Offline install wizard downloads — pre-baked with the selected API key + server
+// URL (OBLI_CFG tail-blob). Admin-gated + tenant-scoped, same policy as /keys.
+router.get('/installer/wizard.exe', requireAuth, requireRole('admin'), requireTenant, agentInstallerWizard);
+router.get('/installer/wizard-linux-amd64', requireAuth, requireRole('admin'), requireTenant, agentInstallerWizardLinux);
 
 // ⚠️ Static routes MUST be declared before /:id routes — otherwise Express matches
 //    the literal segment as a device ID and the wrong handler fires.

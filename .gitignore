@@ -3,6 +3,12 @@ dist/
 !agent/dist/
 agent/dist/*.exe
 agent/bin/*.exe
+
+# Wizard embed artifacts — copied in transiently by build-wizard*.bat, then deleted.
+# Listed so an interrupted build never commits the (large) embedded MSI/binary.
+agent/wizard/windows/obliguard-agent.msi
+agent/wizard/windows/rsrc_windows.syso
+agent/wizard/linux/obliguard-agent
 !desktop-app/dist/
 .env
 *.log

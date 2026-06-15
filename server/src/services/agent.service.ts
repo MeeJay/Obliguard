@@ -321,6 +321,18 @@ export const agentService = {
     return count > 0;
   },
 
+  /**
+   * Returns the raw key string for a key id, scoped to the tenant — used by the
+   * offline-wizard download endpoints to bake the key into the installer. Never
+   * exposes a key the caller couldn't already see via listKeys (same tenant scope).
+   */
+  async getKeyById(id: number, tenantId: number): Promise<string | null> {
+    const row = await db('agent_api_keys')
+      .where({ id, tenant_id: tenantId })
+      .first() as { key: string } | undefined;
+    return row?.key ?? null;
+  },
+
   // ── Devices ─────────────────────────────────────────────
 
   async listDevices(tenantId: number, status?: AgentDevice['status']): Promise<AgentDevice[]> {

@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+    <!--
+      Manifest for obliguard-installer-wizard.exe, compiled into a .syso by
+      `rsrc` at build time (see build-wizard.bat). Two reasons it's required:
+        1. Common Controls v6 — without it, lxn/walk crashes on the first
+           widget ("TTM_ADDTOOL failed") and renders with the Win95 look.
+        2. DPI awareness — per-monitor v2 so HiDPI desktops aren't blurry.
+      trustInfo keeps the wizard at asInvoker — msiexec raises its own UAC
+      prompt for the actual elevation.
+    -->
+    <assemblyIdentity
+        version="1.0.0.0"
+        processorArchitecture="*"
+        name="Obliguard.InstallerWizard"
+        type="win32"
+    />
+    <dependency>
+        <dependentAssembly>
+            <assemblyIdentity
+                type="win32"
+                name="Microsoft.Windows.Common-Controls"
+                version="6.0.0.0"
+                processorArchitecture="*"
+                publicKeyToken="6595b64144ccf1df"
+                language="*"
+            />
+        </dependentAssembly>
+    </dependency>
+    <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+        <security>
+            <requestedPrivileges>
+                <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
+            </requestedPrivileges>
+        </security>
+    </trustInfo>
+    <application xmlns="urn:schemas-microsoft-com:asm.v3">
+        <windowsSettings>
+            <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2,PerMonitor</dpiAwareness>
+            <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true</dpiAware>
+        </windowsSettings>
+    </application>
+</assembly>

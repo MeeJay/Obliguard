@@ -220,6 +220,71 @@ export function agentInstallerWindowsMsi(_req: Request, res: Response): void {
   res.sendFile(msiPath);
 }
 
+// ── Offline install wizard (self-contained EXE / binary) ─────────────────────
+//
+// The base wizard (built separately into agent/dist/) embeds the MSI / agent
+// binary via //go:embed. These endpoints append an "OBLI_CFG" tail-blob with
+// the selected API key + server URL so the downloaded wizard boots with its
+// fields pre-filled — the admin never pastes a key, and the target box needs
+// no network to GET the installer (USB / RDP clipboard / scp it across).
+//
+// Wire format appended to the binary:
+//   [json {serverUrl, apiKey}][magic 8B "OBLI_CFG"][len uint32 LE]
+//
+// Appending bytes breaks the wrapper's Authenticode signature (the embedded
+// MSI stays signed) — operators see a single SmartScreen "Run anyway" prompt.
+// Key lookup is tenant-scoped, mirroring listKeys, and the route is admin-gated.
+const CFG_MAGIC = Buffer.from('OBLI_CFG', 'utf8');
+
+function inferServerUrl(req: Request): string {
+  const override = typeof req.query.server === 'string' ? req.query.server.trim() : '';
+  if (override) return override;
+  const proto = (req.headers['x-forwarded-proto'] as string) || req.protocol;
+  const host = (req.headers['x-forwarded-host'] as string) || req.get('host') || '';
+  return host ? `${proto}://${host}` : '';
+}
+
+async function buildWizardPayload(req: Request, baseBin: Buffer): Promise<Buffer> {
+  const keyIdRaw = req.query.keyId;
+  const keyId = typeof keyIdRaw === 'string' ? parseInt(keyIdRaw, 10) : NaN;
+  if (!Number.isFinite(keyId)) return baseBin;
+
+  const apiKey = await agentService.getKeyById(keyId, req.tenantId);
+  if (!apiKey) return baseBin;
+
+  const cfg = JSON.stringify({ serverUrl: inferServerUrl(req), apiKey });
+  const cfgBuf = Buffer.from(cfg, 'utf8');
+  const lenBuf = Buffer.alloc(4);
+  lenBuf.writeUInt32LE(cfgBuf.length, 0);
+  return Buffer.concat([baseBin, cfgBuf, CFG_MAGIC, lenBuf]);
+}
+
+export async function agentInstallerWizard(req: Request, res: Response): Promise<void> {
+  const exePath = path.resolve(__dirname, '../../../../agent/dist/obliguard-installer-wizard.exe');
+  if (!fs.existsSync(exePath)) {
+    res.status(404).json({ error: 'Wizard installer not available (not yet built)' });
+    return;
+  }
+  const payload = await buildWizardPayload(req, fs.readFileSync(exePath));
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.setHeader('Content-Disposition', 'attachment; filename="obliguard-installer-wizard.exe"');
+  res.setHeader('Content-Length', String(payload.length));
+  res.send(payload);
+}
+
+export async function agentInstallerWizardLinux(req: Request, res: Response): Promise<void> {
+  const binPath = path.resolve(__dirname, '../../../../agent/dist/obliguard-installer-wizard-linux-amd64');
+  if (!fs.existsSync(binPath)) {
+    res.status(404).json({ error: 'Linux wizard not available (not yet built)' });
+    return;
+  }
+  const payload = await buildWizardPayload(req, fs.readFileSync(binPath));
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.setHeader('Content-Disposition', 'attachment; filename="obliguard-installer-wizard-linux-amd64"');
+  res.setHeader('Content-Length', String(payload.length));
+  res.send(payload);
+}
+
 // ── Admin: Device Stats ──────────────────────────────────────────────────────
 
 export async function getDeviceStats(req: Request, res: Response): Promise<void> {
