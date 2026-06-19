@@ -91,6 +91,20 @@ func (lw *LogWatcher) IsServiceEnabled(svc string) bool {
 	return ok && cfg.Enabled
 }
 
+// IsAnyEnabled reports whether ANY of the given service keys has an enabled
+// config. Lets a monitor (e.g. the TCP connection poller) skip its work
+// entirely when none of the services it watches is active.
+func (lw *LogWatcher) IsAnyEnabled(svcs []string) bool {
+	lw.mu.Lock()
+	defer lw.mu.Unlock()
+	for _, s := range svcs {
+		if cfg, ok := lw.configs[s]; ok && cfg.Enabled {
+			return true
+		}
+	}
+	return false
+}
+
 // DrainEvents returns accumulated events and clears the internal buffer.
 func (lw *LogWatcher) DrainEvents() []AgentIpEvent {
 	lw.mu.Lock()

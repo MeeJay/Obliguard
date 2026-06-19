@@ -3,44 +3,19 @@
 package main
 
 import (
-	"fmt"
 	"log"
 	"net"
 	"os/exec"
 	"strconv"
 	"strings"
-	"time"
 )
 
-// startNetConnMonitor polls sockstat every 5 s and emits auth_success events
-// for new inbound TCP connections to known service ports on FreeBSD.
+// startNetConnMonitor surfaces new inbound TCP connections on the NetMap (via
+// sockstat). The shared loop gates polling on whether any monitored service is
+// enabled, so sockstat is only spawned when there's something to watch.
 func startNetConnMonitor(lw *LogWatcher) {
-	go func() {
-		log.Printf("FreeBSD TCP connection monitor started (sockstat)")
-		prev := pollFreeBSDTCPConns()
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
-		for range ticker.C {
-			curr := pollFreeBSDTCPConns()
-			for conn := range curr {
-				if _, seen := prev[conn]; !seen {
-					svc, ok := servicePorts[conn.localPort]
-					if !ok {
-						continue
-					}
-					// Opt-in gate: only surface connections for services with an
-					// enabled template (mirrors the file tailer / event-log poller).
-					if !lw.IsServiceEnabled(svc) {
-						continue
-					}
-					raw := fmt.Sprintf("New connection: %s:%d → :%d (%s)",
-						conn.remoteAddr, conn.remotePort, conn.localPort, svc)
-					lw.addEvent(makeEvent(conn.remoteAddr, "", svc, "auth_success", raw))
-				}
-			}
-			prev = curr
-		}
-	}()
+	log.Printf("FreeBSD TCP connection monitor started (sockstat)")
+	go runNetConnLoop(lw, pollFreeBSDTCPConns)
 }
 
 // pollFreeBSDTCPConns uses sockstat to list established TCP connections.

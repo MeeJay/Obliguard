@@ -330,7 +330,23 @@ export function Sidebar() {
       agentApi.listDevices('approved'),
       agentApi.listDevices('suspended'),
     ])
-      .then(([approved, suspended]) => setApprovedDevices([...approved, ...suspended]))
+      .then(([approved, suspended]) => {
+        const all = [...approved, ...suspended];
+        setApprovedDevices(all);
+        // Seed the status dot from the authoritative wsConnected the SERVER already
+        // computed (live hub state + grace period), so it's correct on first paint
+        // instead of staying a grey "···" until an AGENT_STATUS_CHANGED event happens
+        // to fire. The 30s poll re-syncs from this same source of truth, and socket
+        // events give live transitions in between. A transient 'updating' override
+        // (set by a socket event) is preserved across polls.
+        setDeviceStatuses(prev => {
+          const next = new Map<number, string>();
+          for (const d of all) {
+            next.set(d.id, prev.get(d.id) === 'updating' ? 'updating' : (d.wsConnected ? 'up' : 'down'));
+          }
+          return next;
+        });
+      })
       .catch(() => {});
   }, [admin]);
 

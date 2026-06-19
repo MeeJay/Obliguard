@@ -5,45 +5,19 @@ package main
 import (
 	"bufio"
 	"encoding/hex"
-	"fmt"
 	"log"
 	"net"
 	"os"
 	"strconv"
 	"strings"
-	"time"
 )
 
-// startNetConnMonitor polls /proc/net/tcp[6] every 5 s and emits auth_success
-// events for any new inbound connections to known service ports.
-// This surfaces all TCP traffic on the NetMap, not just auth log events.
+// startNetConnMonitor surfaces new inbound TCP connections (read cheaply from
+// /proc/net/tcp[6]) on the NetMap. The shared loop gates polling on whether any
+// monitored service is enabled.
 func startNetConnMonitor(lw *LogWatcher) {
-	go func() {
-		log.Printf("Linux TCP connection monitor started (/proc/net/tcp)")
-		prev := readProcNetTCP()
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
-		for range ticker.C {
-			curr := readProcNetTCP()
-			for conn := range curr {
-				if _, seen := prev[conn]; !seen {
-					svc, ok := servicePorts[conn.localPort]
-					if !ok {
-						continue
-					}
-					// Opt-in gate: only surface connections for services with an
-					// enabled template (mirrors the file tailer / event-log poller).
-					if !lw.IsServiceEnabled(svc) {
-						continue
-					}
-					raw := fmt.Sprintf("New connection: %s:%d → :%d (%s)",
-						conn.remoteAddr, conn.remotePort, conn.localPort, svc)
-					lw.addEvent(makeEvent(conn.remoteAddr, "", svc, "auth_success", raw))
-				}
-			}
-			prev = curr
-		}
-	}()
+	log.Printf("Linux TCP connection monitor started (/proc/net/tcp)")
+	go runNetConnLoop(lw, readProcNetTCP)
 }
 
 func readProcNetTCP() map[tcpConn]struct{} {
