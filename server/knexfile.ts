@@ -25,7 +25,17 @@ const config: Knex.Config = {
   },
   pool: {
     min: 2,
-    max: 10,
+    // Env-overridable so a busy instance can be given headroom without a code
+    // change. Keep modest by default — a shared Postgres caps total connections
+    // across all Obli* instances.
+    max: Number(process.env.DATABASE_POOL_MAX) || 10,
+    // Fail fast instead of hanging forever when the pool is contended: a request
+    // that can't get a connection in 20s errors out (and the UI shows an error)
+    // rather than spinning indefinitely, and the slot is freed for the next one.
+    acquireTimeoutMillis: 20000,
+    // Release idle connections back to Postgres so they don't sit pinned.
+    idleTimeoutMillis: 30000,
+    reapIntervalMillis: 1000,
   },
 };
 

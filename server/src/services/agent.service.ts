@@ -687,10 +687,17 @@ export const agentService = {
     // We delete + reinsert on every push so stale IPs (e.g. after NIC changes) are removed.
     if (body.lanIPs && body.lanIPs.length > 0) {
       try {
+        // Dedupe the reported IPs (an agent can list the same address twice —
+        // e.g. multiple NICs / aliases) so the batch insert can't violate the
+        // (agent_id, ip_address) unique constraint on its own. onConflict.ignore()
+        // then makes it race-safe vs a concurrent push for the same device
+        // (HTTP push + WS heartbeat) — previously this produced 23505 spam.
+        const uniqueIPs = [...new Set(body.lanIPs)];
         await db('agent_ips').where({ agent_id: deviceId }).del();
-        await db('agent_ips').insert(
-          body.lanIPs.map((ip: string) => ({ agent_id: deviceId, ip_address: ip })),
-        );
+        await db('agent_ips')
+          .insert(uniqueIPs.map((ip: string) => ({ agent_id: deviceId, ip_address: ip })))
+          .onConflict(['agent_id', 'ip_address'])
+          .ignore();
       } catch (err) {
         logger.warn({ err, deviceId }, 'handlePush: failed to upsert agent_ips');
       }
@@ -699,23 +706,31 @@ export const agentService = {
     // ── e. Process services ───────────────────────────────
     if (body.services && body.services.length > 0) {
       try {
-        const serviceTypes = body.services.map(s => s.type);
-        // Delete existing entries for only the reported service types, then insert fresh
+        // Dedupe by service_type (an agent can report the same type on more than
+        // one port) and UPSERT in one statement. This replaces the old
+        // delete-then-insert, which (a) raced with concurrent pushes for the same
+        // device — HTTP push + WS heartbeat — and (b) could violate the
+        // (device_id, service_type) unique constraint from duplicates in the
+        // batch, producing the 23505 errors. onConflict.merge() updates
+        // port/active/last_seen_at in place; idempotent + race-safe.
+        const seen = new Set<string>();
+        const uniqueServices = body.services.filter(s => {
+          if (seen.has(s.type)) return false;
+          seen.add(s.type);
+          return true;
+        });
         await db('agent_services')
-          .where({ device_id: deviceId })
-          .whereIn('service_type', serviceTypes)
-          .del();
-        await db('agent_services').insert(
-          body.services.map(s => ({
+          .insert(uniqueServices.map(s => ({
             device_id: deviceId,
             service_type: s.type,
             port: s.port,
             active: s.active,
             last_seen_at: new Date(),
-          })),
-        );
+          })))
+          .onConflict(['device_id', 'service_type'])
+          .merge();
       } catch (err) {
-        logger.warn({ err, deviceId }, 'handlePush: failed to upsert agent_services (table may not exist yet)');
+        logger.warn({ err, deviceId }, 'handlePush: failed to upsert agent_services');
       }
     }
 

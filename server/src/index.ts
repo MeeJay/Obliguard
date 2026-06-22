@@ -160,21 +160,58 @@ async function main() {
   }, 10 * 60 * 1000);
 
   // 12. Graceful shutdown
+  let shuttingDown = false;
   const shutdown = async (signal: string) => {
+    if (shuttingDown) return; // ignore a second signal mid-shutdown
+    shuttingDown = true;
     logger.info(`Received ${signal}, shutting down...`);
+
+    // Last resort: never let a stuck close()/destroy() block the exit forever.
+    const hardExit = setTimeout(() => {
+      logger.warn('shutdown: forced exit after 10s timeout');
+      process.exit(0);
+    }, 10_000);
+    hardExit.unref();
+
     clearInterval(retentionTimer);
     clearInterval(agentCleanupTimer);
     clearInterval(banExpiryTimer);
     clearInterval(remoteBlocklistTimer);
     banEngine.stop();
-    agentWss.close();
-    server.close();
-    await db.destroy();
+
+    // Stop accepting new work BEFORE tearing down the DB pool.
+    try { agentWss.close(); } catch { /* ignore */ }
+    try { server.close(); } catch { /* ignore */ }
+
+    // Destroy the pool last. Any in-flight query (e.g. an agent heartbeat) gets
+    // aborted here — that's EXPECTED on shutdown; swallow the resulting "aborted"
+    // rejection so it can't escape and crash the process before we exit cleanly
+    // (previously this produced an uncaught Error: aborted and a hard crash).
+    try {
+      await db.destroy();
+    } catch (err) {
+      logger.warn({ err }, 'shutdown: db.destroy() aborted in-flight queries (expected)');
+    }
+
+    clearTimeout(hardExit);
     process.exit(0);
   };
 
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
+
+  // Safety nets: a stray promise rejection or sync throw must NOT silently kill
+  // the whole server (and take every agent's WS channel down with it).
+  // - unhandledRejection: log and keep serving (usually a single recoverable op).
+  // - uncaughtException: log and exit so the orchestrator (Docker restart policy)
+  //   restarts us cleanly rather than running on with corrupt state.
+  process.on('unhandledRejection', (reason) => {
+    logger.error({ reason }, 'Unhandled promise rejection (server kept running)');
+  });
+  process.on('uncaughtException', (err) => {
+    logger.fatal(err, 'Uncaught exception — exiting for a clean restart');
+    process.exit(1);
+  });
 }
 
 main().catch((err) => {

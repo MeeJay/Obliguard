@@ -283,6 +283,7 @@ const BAN_ENGINE_INTERVAL_MS = 30_000;
 
 class BanEngine {
   private timer: ReturnType<typeof setInterval> | null = null;
+  private running = false;
 
   start(): void {
     if (this.timer) return;
@@ -298,10 +299,20 @@ class BanEngine {
   }
 
   async run(): Promise<void> {
+    // Re-entrancy guard: if a cycle is still working (e.g. DB contention made
+    // resolveForAgent slow), skip this tick instead of stacking overlapping runs
+    // that pile onto the connection pool and spiral into a hang.
+    if (this.running) {
+      logger.warn('BanEngine: previous cycle still running — skipping this tick');
+      return;
+    }
+    this.running = true;
     try {
       await this.evaluateThresholds();
     } catch (err) {
       logger.error(err, 'BanEngine run failed');
+    } finally {
+      this.running = false;
     }
   }
 
