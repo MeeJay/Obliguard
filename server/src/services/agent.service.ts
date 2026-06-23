@@ -271,13 +271,26 @@ async function getGroupAgentThresholds(groupId: number): Promise<AgentThresholds
  * A device whose group_id is in this set inherits evaluate-only (dry-run) mode.
  * One lookup serves a whole device list, avoiding per-device ancestry queries.
  */
+// Short TTL cache: this runs inside getDeviceByUuid, which is called on every
+// agent heartbeat — re-querying two tables per heartbeat just to learn the
+// (rarely-changing) evaluate-only group set added needless pool pressure. A 15s
+// cache cuts that to ~zero; a toggle change is reflected within 15s.
+let _evalGroupCache: { set: Set<number>; at: number } | null = null;
+const EVAL_GROUP_CACHE_TTL_MS = 15_000;
+
 async function getEvaluateOnlyGroupIds(): Promise<Set<number>> {
+  const nowMs = Date.now();
+  if (_evalGroupCache && nowMs - _evalGroupCache.at < EVAL_GROUP_CACHE_TTL_MS) {
+    return _evalGroupCache.set;
+  }
   const flagged = await db('monitor_groups').where('evaluate_only', true).pluck('id') as number[];
-  if (flagged.length === 0) return new Set<number>();
-  const descendants = await db('group_closure')
-    .whereIn('ancestor_id', flagged)
-    .pluck('descendant_id') as number[];
-  return new Set<number>(descendants);
+  const set = flagged.length === 0
+    ? new Set<number>()
+    : new Set<number>(
+        await db('group_closure').whereIn('ancestor_id', flagged).pluck('descendant_id') as number[],
+      );
+  _evalGroupCache = { set, at: nowMs };
+  return set;
 }
 
 /** Resolve the effective evaluate-only state for a device row given the eval group set. */

@@ -178,6 +178,7 @@ class IpReputationService {
           total_failures,
           total_successes,
           affected_agents_count,
+          affected_device_ids,
           affected_services,
           attempted_usernames,
           first_seen,
@@ -197,6 +198,7 @@ class IpReputationService {
           ?,
           ?,
           ?,
+          ?,
           NULL,
           NULL,
           NULL,
@@ -205,10 +207,21 @@ class IpReputationService {
         ON CONFLICT (ip) DO UPDATE SET
           total_failures        = ip_reputation.total_failures + EXCLUDED.total_failures,
           total_successes       = ip_reputation.total_successes + EXCLUDED.total_successes,
+          affected_device_ids = (
+            SELECT array_agg(DISTINCT val)
+            FROM unnest(
+              COALESCE(ip_reputation.affected_device_ids, ARRAY[]::int[]) ||
+              COALESCE(EXCLUDED.affected_device_ids, ARRAY[]::int[])
+            ) AS val
+            WHERE val IS NOT NULL
+          ),
           affected_agents_count = (
-            SELECT COUNT(DISTINCT device_id)
-            FROM ip_events
-            WHERE ip_events.ip = ip_reputation.ip
+            SELECT COUNT(DISTINCT val)
+            FROM unnest(
+              COALESCE(ip_reputation.affected_device_ids, ARRAY[]::int[]) ||
+              COALESCE(EXCLUDED.affected_device_ids, ARRAY[]::int[])
+            ) AS val
+            WHERE val IS NOT NULL
           ),
           affected_services     = (
             SELECT array_agg(DISTINCT val)
@@ -235,6 +248,7 @@ class IpReputationService {
           entry.ip,
           entry.failures,
           entry.successes,
+          [entry.deviceId],      // affected_device_ids — seed with the reporting device
           [...entry.services],   // text[] — pg serialises JS array to {ssh,rdp,...}
           [...entry.usernames],  // text[] — same
           now,

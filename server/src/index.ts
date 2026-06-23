@@ -108,8 +108,10 @@ async function main() {
     obligateService.syncCapabilitySchemas().catch(() => {});
   });
 
-  // 8. ip_events retention job — purge events older than configured days every 6 hours
-  const IP_EVENTS_RETENTION_DAYS = 90;
+  // 8. ip_events retention job — purge events older than configured days every 6 hours.
+  // Env-overridable: Obliguard's connection/auth firehose fills ip_events fast, so a
+  // shorter window (e.g. 30) keeps the table — and every query over it — lean.
+  const IP_EVENTS_RETENTION_DAYS = Number(process.env.IP_EVENTS_RETENTION_DAYS) || 90;
   const retentionTimer = setInterval(async () => {
     try {
       const cutoff = new Date(Date.now() - IP_EVENTS_RETENTION_DAYS * 24 * 60 * 60 * 1000);
