@@ -127,7 +127,7 @@ export function Header() {
           actually reach (returned by /api/auth/connected-apps). Unreachable
           apps are hidden entirely rather than greyed out. */}
       {!isNativeApp && (
-        <nav className="flex items-center gap-1 ml-1">
+        <nav className="flex items-center gap-1 rounded-lg bg-bg-hover p-1 ml-1">
           {APP_ORDER
             .filter((app) => app.type === CURRENT_APP || reachable.has(app.type))
             .map((app) => {
@@ -138,22 +138,16 @@ export function Header() {
                   type="button"
                   onClick={() => goApp(app)}
                   className={cn(
-                    'flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[13px] font-medium transition-colors',
+                    'flex items-center gap-2 px-3 py-1.5 rounded-md text-[12.5px] font-medium transition-colors',
                     isCurrent
-                      ? 'text-[color:var(--app-current)]'
-                      : 'text-text-muted hover:bg-bg-hover hover:text-text-primary',
+                      ? 'bg-bg-secondary text-text-primary font-semibold shadow-[0_1px_3px_rgb(46_52_64_/_0.1)]'
+                      : 'text-text-secondary hover:bg-bg-active hover:text-text-primary',
                   )}
-                  style={isCurrent
-                    ? ({ '--app-current': app.color, backgroundColor: hexA(app.color, 0.12) } as React.CSSProperties)
-                    : undefined}
                   title={app.label}
                 >
                   <span
-                    className="w-1.5 h-1.5 rounded-full shrink-0"
-                    style={{
-                      background: app.color,
-                      boxShadow: isCurrent ? `0 0 8px ${app.color}` : undefined,
-                    }}
+                    className="w-2 h-2 rounded-full shrink-0"
+                    style={{ background: app.color }}
                   />
                   {app.label}
                 </button>
@@ -229,7 +223,7 @@ export function Header() {
 
         {user && (
           <>
-            <div className="flex items-center gap-2 pl-1.5 pr-3 py-1 rounded-full bg-bg-hover">
+            <div className="flex items-center gap-2 pl-1.5 pr-3 py-1 rounded-lg bg-bg-hover">
               <UserAvatar avatar={user.avatar} username={username} size={28} />
               <span className="text-[13px] font-medium text-text-primary">{displayedUsername}</span>
               <span className="text-[10px] font-mono uppercase tracking-wider text-accent pl-2 border-l border-border-light">
@@ -250,16 +244,3 @@ export function Header() {
   );
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-/** Convert a hex colour to an rgba() with the given alpha. */
-function hexA(hex: string, alpha: number): string {
-  const m = hex.replace('#', '');
-  const n = m.length === 3
-    ? m.split('').map(c => c + c).join('')
-    : m;
-  const r = parseInt(n.slice(0, 2), 16);
-  const g = parseInt(n.slice(2, 4), 16);
-  const b = parseInt(n.slice(4, 6), 16);
-  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-}
