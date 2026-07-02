@@ -402,7 +402,15 @@ router.get('/sso-logout-url', async (req, res) => {
  */
 router.get('/connected-apps', requireAuth, async (req, res) => {
   try {
-    const apps = await obligateService.getConnectedApps();
+    // Scope the app switcher to the caller's Obligate entitlements. Local
+    // (non-SSO) users have no Obligate id → pass null (unfiltered fallback);
+    // SSO-provisioned users get only the apps they can actually reach.
+    const row = await db('users')
+      .where({ id: req.session.userId })
+      .select('foreign_source', 'foreign_id')
+      .first() as { foreign_source: string | null; foreign_id: number | null } | undefined;
+    const obligateUserId = row?.foreign_source === 'obligate' && row.foreign_id ? row.foreign_id : null;
+    const apps = await obligateService.getConnectedApps(obligateUserId);
     res.json({ success: true, data: apps });
   } catch (err) {
     res.json({ success: true, data: [] });
