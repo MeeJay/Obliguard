@@ -8,6 +8,23 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Rajdhani:wght@500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <title>Obliguard</title>
+    <!-- FOUC prevention: set the theme before React boots so a saved light theme
+         doesn't flash dark on reload. Mirrors client/src/utils/theme.ts (key: og-theme). -->
+    <script>
+      try {
+        var t = localStorage.getItem('og-theme');
+        if (t === 'obli-operator' || t === 'obli-daylight' || t === 'modern' || t === 'neon') {
+          document.documentElement.dataset.theme = t;
+        } else {
+          document.documentElement.dataset.theme = 'obli-operator';
+        }
+      } catch (e) {
+        document.documentElement.dataset.theme = 'obli-operator';
+      }
+    </script>
+    <style>
+      [data-theme="obli-daylight"] body { background: #fafbfd; }
+    </style>
   </head>
   <body class="bg-bg-primary text-text-primary">
     <div id="root"></div>

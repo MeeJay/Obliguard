@@ -24,6 +24,34 @@ interface ThemeOption {
 
 const THEMES: ThemeOption[] = [
   {
+    id: 'obli-operator',
+    label: 'Obli Operator',
+    description: 'Thème sombre bleu nuit, accent ambre',
+    preview: {
+      bg:          '#0b0d1a',
+      card:        '#131728',
+      border:      '#2a3048',
+      accent:      '#f5a623',
+      textPrimary: '#f0f4fc',
+      textMuted:   '#828caf',
+      dot:         '#1edd8a',
+    },
+  },
+  {
+    id: 'obli-daylight',
+    label: 'Obli Daylight',
+    description: 'Thème clair, fond blanc doux, accent ambre',
+    preview: {
+      bg:          '#fafbfd',
+      card:        '#ffffff',
+      border:      '#e2e8f0',
+      accent:      '#d97706',
+      textPrimary: '#0f172a',
+      textMuted:   '#94a3b8',
+      dot:         '#10a360',
+    },
+  },
+  {
     id: 'modern',
     label: 'Modern UI',
     description: 'Interface sombre avec accent orange',

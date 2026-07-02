@@ -124,6 +124,57 @@
   --c-primary:      255 165 20;
 }
 
+/* ── Obli Daylight — light companion to Obli Operator. Soft-white surface, depth
+       via shadow (not borders), Inter/JetBrains Mono, Obliguard amber-600 accent.
+       Spec: D:\Obligate\docs\obli-daylight-theme.md. ─────────────────────────── */
+[data-theme="obli-daylight"] {
+  --c-bg-primary:            250 251 253;   /* #fafbfd  page bg */
+  --c-bg-secondary:          255 255 255;   /* #ffffff  cards */
+  --c-bg-tertiary:           243 245 249;   /* #f3f5f9  input/toolbar */
+  --c-bg-hover:              15 23 42 / 0.04;
+  --c-bg-active:             15 23 42 / 0.07;
+
+  /* On a light base the border carries its own alpha so it stays hairline —
+     Tailwind's `border-border` emits rgb(var(--c-border)) with no auto-alpha,
+     and rgb(15 23 42 / 0.08) is valid CSS. */
+  --c-border:                15 23 42 / 0.08;
+  --c-border-light:          15 23 42 / 0.12;
+
+  --c-text-primary:          15 23 42;      /* slate-900 */
+  --c-text-secondary:        71 85 105;     /* slate-600 */
+  --c-text-muted:            148 163 184;   /* slate-400 */
+
+  --c-status-up:             16 163 96;
+  --c-status-up-bg:          220 252 231;
+  --c-status-down:           148 163 184;
+  --c-status-down-bg:        241 245 249;
+  --c-status-pending:        37 99 235;
+  --c-status-pending-bg:     219 234 254;
+  --c-status-maintenance:    100 116 139;
+  --c-status-maintenance-bg: 241 245 249;
+  --c-status-paused:         148 163 184;
+  --c-status-paused-bg:      241 245 249;
+  --c-status-ssl-warning:    217 119 6;
+  --c-status-ssl-warning-bg: 254 243 199;
+  --c-status-ssl-expired:    220 38 38;
+  --c-status-ssl-expired-bg: 254 226 226;
+
+  /* Obliguard accent — amber-600 #d97706, tuned deeper to read on white */
+  --c-accent:                217 119 6;
+  --c-accent-hover:          234 88 12;
+  --c-accent-dark:           154 52 18;
+  --c-accent-text:           255 255 255;
+  --c-primary:               217 119 6;
+
+  --shadow-card: 0 1px 2px 0 rgba(15,23,42,0.04), 0 6px 24px -12px rgba(15,23,42,0.10);
+  --shadow-glow: 0 0 0 1px rgb(var(--c-accent) / 0.18) inset, 0 8px 32px -12px rgb(var(--c-accent) / 0.22);
+}
+
+[data-theme="obli-daylight"] body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: #fafbfd;
+}
+
 /* ─────────────────────────────────────────────────────────────────────────────
    Utility — hide scrollbar
    ───────────────────────────────────────────────────────────────────────────── */
