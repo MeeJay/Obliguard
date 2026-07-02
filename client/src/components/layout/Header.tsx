@@ -11,6 +11,7 @@ import { anonUsername } from '@/utils/anonymize';
 import { NotificationCenter } from './NotificationCenter';
 import { TenantSwitcher } from './TenantSwitcher';
 import { UserAvatar } from '@/components/common/UserAvatar';
+import { Logo } from '@/components/common/Logo';
 import { cn } from '@/utils/cn';
 
 /** True when running inside the native desktop app overlay. */
@@ -115,7 +116,7 @@ export function Header() {
       {/* Logo — always visible in the topbar so it stays accessible regardless
           of sidebar state (pinned, collapsed, floating). */}
       <Link to="/" className="flex items-center gap-2 shrink-0">
-        <img src="/logo.svg" alt="Obliguard" className="h-8 w-auto max-w-[160px] object-contain" />
+        <Logo className="h-8 w-auto max-w-[160px] object-contain" />
       </Link>
 
       {/* Tenant selector — sits left of the app switcher, preserving the

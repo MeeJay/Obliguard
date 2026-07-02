@@ -5,6 +5,7 @@ import { useAuthStore } from '@/store/authStore';
 import { twoFactorApi } from '@/api/twoFactor.api';
 import { Button } from '@/components/common/Button';
 import { Input } from '@/components/common/Input';
+import { Logo } from '@/components/common/Logo';
 
 type Step = 'credentials' | '2fa';
 
@@ -140,7 +141,7 @@ export function LoginPage() {
     return (
       <div className="flex min-h-screen items-center justify-center bg-bg-primary">
         <div className="text-center">
-          <img src="/logo.svg" alt="Obliguard" className="mx-auto h-24 w-24 mb-3 animate-pulse" />
+          <Logo className="mx-auto h-24 w-24 mb-3 animate-pulse" />
           <p className="text-sm text-text-secondary">
             {ssoState === 'redirecting' ? t('login.ssoRedirecting', 'Redirecting to login...') : t('login.ssoChecking', 'Checking authentication...')}
           </p>
@@ -153,7 +154,7 @@ export function LoginPage() {
     <div className="flex min-h-screen items-center justify-center bg-bg-primary p-4">
       <div className="w-full max-w-sm space-y-8 relative">
         <div className="text-center">
-          <img src="/logo.svg" alt="Obliguard" className="mx-auto h-24 w-24 mb-3" />
+          <Logo className="mx-auto h-24 w-24 mb-3" />
           <p className="mt-2 text-sm text-text-secondary">{t('login.title')}</p>
         </div>
 
