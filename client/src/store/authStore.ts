@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { User, UserPermissions, PermissionLevel } from '@obliview/shared';
+import type { User, UserPermissions, PermissionLevel, Capability } from '@obliview/shared';
 import { authApi, type LoginResult } from '../api/auth.api';
 import { connectSocket, disconnectSocket } from '../socket/socketClient';
 import { useLiveAlertsStore } from './liveAlertsStore';
@@ -36,6 +36,8 @@ interface AuthState {
 
   // Convenience permission checkers
   isAdmin: () => boolean;
+  /** Feature capability check (admin ⇒ always true). */
+  hasCapability: (capability: Capability) => boolean;
   canCreate: () => boolean;
   canWriteMonitor: (monitorId: number, groupId: number | null) => boolean;
   canWriteGroup: (groupId: number) => boolean;
@@ -143,6 +145,13 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   isAdmin: () => get().user?.role === 'admin',
+
+  hasCapability: (capability: Capability) => {
+    const { user, permissions } = get();
+    if (!user) return false;
+    if (user.role === 'admin') return true;
+    return permissions?.capabilities?.includes(capability) ?? false;
+  },
 
   canCreate: () => {
     const { user, permissions } = get();

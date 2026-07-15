@@ -1,6 +1,7 @@
 import { Router } from 'express';
+import { CAPABILITIES } from '@obliview/shared';
 import { requireAuth } from '../middleware/auth';
-import { requireRole } from '../middleware/rbac';
+import { requireCapability } from '../middleware/rbac';
 import {
   listWhitelist,
   createWhitelistEntry,
@@ -10,7 +11,7 @@ import {
 const router = Router();
 
 router.get('/', requireAuth, listWhitelist);
-router.post('/', requireAuth, requireRole('admin'), createWhitelistEntry);
-router.delete('/:id', requireAuth, requireRole('admin'), deleteWhitelistEntry);
+router.post('/', requireAuth, requireCapability(CAPABILITIES.WHITELIST), createWhitelistEntry);
+router.delete('/:id', requireAuth, requireCapability(CAPABILITIES.WHITELIST), deleteWhitelistEntry);
 
 export default router;

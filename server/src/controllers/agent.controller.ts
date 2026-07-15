@@ -3,7 +3,31 @@ import path from 'path';
 import fs from 'fs';
 import { agentService } from '../services/agent.service';
 import { serviceTemplateService } from '../services/serviceTemplate.service';
-import type { AgentThresholds } from '@obliview/shared';
+import type { AgentThresholds, AgentDevice } from '@obliview/shared';
+import { isMasterTenant } from '@obliview/shared';
+
+/**
+ * Resolve a device by :id and enforce that it belongs to the caller's tenant
+ * (the master tenant sees all). Returns null and writes a 404 otherwise — we
+ * never reveal the existence of another tenant's device. Use on every
+ * device-by-id handler now that reads/writes are open to non-admin members.
+ */
+async function requireDeviceInTenant(
+  req: Request,
+  res: Response,
+  id: number,
+): Promise<AgentDevice | null> {
+  if (isNaN(id)) {
+    res.status(400).json({ success: false, error: 'Invalid device ID' });
+    return null;
+  }
+  const device = await agentService.getDeviceById(id);
+  if (!device || (!isMasterTenant(req.tenantId) && device.tenantId !== req.tenantId)) {
+    res.status(404).json({ success: false, error: 'Device not found' });
+    return null;
+  }
+  return device;
+}
 
 // ── Push endpoint (called by agent) ──────────────────────────────────────────
 
@@ -323,12 +347,8 @@ export async function deleteKey(req: Request, res: Response): Promise<void> {
 // ── Admin: Devices ──────────────────────────────────────────────────────────
 
 export async function getDevice(req: Request, res: Response): Promise<void> {
-  const id = Number(req.params.id);
-  const device = await agentService.getDeviceById(id);
-  if (!device) {
-    res.status(404).json({ success: false, error: 'Device not found' });
-    return;
-  }
+  const device = await requireDeviceInTenant(req, res, Number(req.params.id));
+  if (!device) return;
   res.json({ success: true, data: device });
 }
 
@@ -345,6 +365,7 @@ export async function listDevices(req: Request, res: Response): Promise<void> {
 
 export async function updateDevice(req: Request, res: Response): Promise<void> {
   const id = Number(req.params.id);
+  if (!(await requireDeviceInTenant(req, res, id))) return;
   const {
     status, groupId, checkIntervalSeconds, maxMissedPushes, agentThresholds, name,
     heartbeatMonitoring, sensorDisplayNames, overrideGroupSettings, displayConfig,
@@ -438,6 +459,7 @@ export async function getDeviceMetrics(_req: Request, res: Response): Promise<vo
 
 export async function deleteDevice(req: Request, res: Response): Promise<void> {
   const id = Number(req.params.id);
+  if (!(await requireDeviceInTenant(req, res, id))) return;
   const ok = await agentService.deleteDevice(id);
   if (!ok) {
     res.status(404).json({ success: false, error: 'Device not found' });
@@ -454,7 +476,10 @@ export async function bulkDeleteDevices(req: Request, res: Response): Promise<vo
     res.status(400).json({ success: false, error: 'deviceIds array required' });
     return;
   }
-  await agentService.bulkDeleteDevices(deviceIds);
+  const ids = isMasterTenant(req.tenantId)
+    ? deviceIds
+    : await agentService.filterDeviceIdsByTenant(deviceIds, req.tenantId);
+  await agentService.bulkDeleteDevices(ids);
   res.json({ success: true });
 }
 
@@ -470,7 +495,10 @@ export async function bulkUpdateDevices(req: Request, res: Response): Promise<vo
     res.status(400).json({ success: false, error: 'deviceIds array required' });
     return;
   }
-  await agentService.bulkUpdateDevices(deviceIds, { groupId, heartbeatMonitoring, overrideGroupSettings, status });
+  const ids = isMasterTenant(req.tenantId)
+    ? deviceIds
+    : await agentService.filterDeviceIdsByTenant(deviceIds, req.tenantId);
+  await agentService.bulkUpdateDevices(ids, { groupId, heartbeatMonitoring, overrideGroupSettings, status });
   res.json({ success: true });
 }
 
@@ -484,12 +512,16 @@ export async function bulkDeviceCommand(req: Request, res: Response): Promise<vo
     res.status(400).json({ success: false, error: 'command required' });
     return;
   }
-  await agentService.bulkSendCommand(deviceIds, command);
+  const ids = isMasterTenant(req.tenantId)
+    ? deviceIds
+    : await agentService.filterDeviceIdsByTenant(deviceIds, req.tenantId);
+  await agentService.bulkSendCommand(ids, command);
   res.json({ success: true });
 }
 
 export async function sendDeviceCommand(req: Request, res: Response): Promise<void> {
   const id = Number(req.params.id);
+  if (!(await requireDeviceInTenant(req, res, id))) return;
   const { command } = req.body as { command: string };
   if (!command) {
     res.status(400).json({ success: false, error: 'command required' });
@@ -510,10 +542,7 @@ export async function sendDeviceCommand(req: Request, res: Response): Promise<vo
  */
 export async function getDeviceTemplates(req: Request, res: Response): Promise<void> {
   const id = Number(req.params.id);
-  if (isNaN(id)) {
-    res.status(400).json({ success: false, error: 'Invalid device ID' });
-    return;
-  }
+  if (!(await requireDeviceInTenant(req, res, id))) return;
   const configs = await serviceTemplateService.getResolvedForDevice(id);
   res.json({ success: true, data: configs });
 }

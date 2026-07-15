@@ -1,6 +1,7 @@
 import { Router } from 'express';
+import { CAPABILITIES } from '@obliview/shared';
 import { requireAuth } from '../middleware/auth';
-import { requireRole } from '../middleware/rbac';
+import { requireRole, requireCapability } from '../middleware/rbac';
 import {
   listBans,
   getBanById,
@@ -20,18 +21,19 @@ const router = Router();
 
 // ⚠️ /stats and /wipe-* must be before /:id
 router.get('/stats', requireAuth, getBanStats);
+// wipe-* are destructive tenant-wide resets → keep admin-only.
 router.post('/wipe-bans', requireAuth, requireRole('admin'), wipeAllBans);
 router.post('/wipe-reputation', requireAuth, requireRole('admin'), wipeAllReputation);
-router.post('/bulk-ban', requireAuth, requireRole('admin'), bulkBan);
-router.post('/bulk-whitelist', requireAuth, requireRole('admin'), bulkWhitelist);
+router.post('/bulk-ban', requireAuth, requireCapability(CAPABILITIES.BANS), bulkBan);
+router.post('/bulk-whitelist', requireAuth, requireCapability(CAPABILITIES.WHITELIST), bulkWhitelist);
 router.get('/', requireAuth, listBans);
 router.get('/:id', requireAuth, getBanById);
-router.post('/', requireAuth, requireRole('admin'), createBan);
-router.delete('/:id', requireAuth, requireRole('admin'), liftBan);
-router.post('/:id/promote-global', requireAuth, requireRole('admin'), promoteBan);
+router.post('/', requireAuth, requireCapability(CAPABILITIES.BANS), createBan);
+router.delete('/:id', requireAuth, requireCapability(CAPABILITIES.BANS), liftBan);
+router.post('/:id/promote-global', requireAuth, requireCapability(CAPABILITIES.BANS), promoteBan);
 
-// Per-tenant exclusions
-router.post('/:id/exclude', requireAuth, requireRole('admin'), excludeBan);
-router.delete('/:id/exclude', requireAuth, requireRole('admin'), removeExclusion);
+// Per-tenant exclusions (a ban-management action)
+router.post('/:id/exclude', requireAuth, requireCapability(CAPABILITIES.BANS), excludeBan);
+router.delete('/:id/exclude', requireAuth, requireCapability(CAPABILITIES.BANS), removeExclusion);
 
 export default router;

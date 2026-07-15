@@ -63,11 +63,21 @@ export default function App() {
             <Route path="/group/:id" element={<GroupDetailPage />} />
             <Route path="/group/:id/edit" element={<GroupEditPage />} />
 
+            {/* Viewable by any tenant member — "View monitors, groups, events".
+                Write actions inside are gated by capability (client) + route
+                middleware (server). */}
+            <Route path="/agents/:deviceId" element={<AgentDetailPage />} />
+            <Route path="/live-events" element={<LiveEventsPage />} />
+
+            {/* Group management → 'group_rw' capability */}
+            <Route element={<ProtectedRoute requiredCapability="group_rw" />}>
+              <Route path="/groups" element={<GroupManagePage />} />
+            </Route>
+
             {/* Admin-only routes */}
             <Route element={<ProtectedRoute requiredRole="admin" />}>
               <Route path="/bans" element={<Navigate to="/ip-reputation" replace />} />
               <Route path="/whitelist" element={<Navigate to="/ip-reputation" replace />} />
-              <Route path="/groups" element={<GroupManagePage />} />
               <Route path="/notifications" element={<NotificationsPage />} />
               <Route path="/admin/users" element={<AdminUsersPage />} />
               <Route path="/admin/agents" element={<AdminAgentPage />} />
@@ -75,8 +85,6 @@ export default function App() {
               <Route path="/admin/tenants" element={<AdminTenantsPage />} />
               <Route path="/admin/service-templates" element={<ServiceTemplatesPage />} />
               <Route path="/admin/network-limiting" element={<RateLimitPage />} />
-              <Route path="/agents/:deviceId" element={<AgentDetailPage />} />
-              <Route path="/live-events" element={<LiveEventsPage />} />
               <Route path="/settings" element={<SettingsPage />} />
             </Route>
           </Route>

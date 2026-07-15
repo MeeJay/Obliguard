@@ -41,7 +41,7 @@ import { useUiStore } from '@/store/uiStore';
 import { agentApi } from '@/api/agent.api';
 import { getSocket } from '@/socket/socketClient';
 import type { AgentDevice, MonitorStatus, GroupTreeNode } from '@obliview/shared';
-import { SOCKET_EVENTS } from '@obliview/shared';
+import { SOCKET_EVENTS, CAPABILITIES } from '@obliview/shared';
 import { groupsApi } from '@/api/groups.api';
 import { anonHostname, anonUsername } from '@/utils/anonymize';
 import { UserAvatar } from '@/components/common/UserAvatar';
@@ -285,7 +285,7 @@ interface NavItem {
 export function Sidebar() {
   const { t } = useTranslation();
   const location = useLocation();
-  const { user, isAdmin } = useAuthStore();
+  const { user, isAdmin, hasCapability } = useAuthStore();
 
   const navItems: NavItem[] = [
     { label: t('nav.dashboard'),        path: '/',                       icon: <LayoutDashboard size={18} /> },
@@ -319,13 +319,16 @@ export function Sidebar() {
 
   const agentGroups = tree.filter(n => n.kind === 'agent');
   const admin = isAdmin();
+  // Any authenticated tenant member may VIEW the agent/group tree ("View
+  // monitors, groups, events"). Editing (drag-to-move an agent) needs the
+  // agent-management capability; the server enforces it too.
+  const canManageAgents = admin || hasCapability(CAPABILITIES.MONITOR_RW);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
   );
 
   const loadDevices = useCallback(() => {
-    if (!admin) return;
     Promise.all([
       agentApi.listDevices('approved'),
       agentApi.listDevices('suspended'),
@@ -348,7 +351,7 @@ export function Sidebar() {
         });
       })
       .catch(() => {});
-  }, [admin]);
+  }, []);
 
   useEffect(() => {
     loadDevices();
@@ -357,7 +360,6 @@ export function Sidebar() {
   }, [loadDevices]);
 
   useEffect(() => {
-    if (!admin) return;
     const socket = getSocket();
     if (!socket) return;
 
@@ -395,7 +397,7 @@ export function Sidebar() {
       socket.off(SOCKET_EVENTS.AGENT_DEVICE_UPDATED, onDeviceUpdated);
       socket.off(SOCKET_EVENTS.AGENT_STATUS_CHANGED, onStatusChanged);
     };
-  }, [admin, loadDevices]);
+  }, [loadDevices]);
 
   const getMonitorStatus = useCallback(
     (deviceId: number): MonitorStatus | undefined => {
@@ -408,6 +410,7 @@ export function Sidebar() {
 
   const handleAgentDragEnd = useCallback(
     async (event: DragEndEvent) => {
+      if (!canManageAgents) return; // read-only members: no drag-to-move
       const { active, over } = event;
       if (!over) return;
 
@@ -442,7 +445,7 @@ export function Sidebar() {
         }
       }
     },
-    [loadDevices, fetchTree],
+    [loadDevices, fetchTree, canManageAgents],
   );
 
   const filteredNavItems = navItems.filter(item => {
@@ -459,7 +462,7 @@ export function Sidebar() {
 
   const ungroupedDevices = filteredDevices.filter(d => d.groupId === null);
 
-  const renderAgentContent = () => !admin ? null : (
+  const renderAgentContent = () => (
     <DndContext sensors={sensors} onDragEnd={handleAgentDragEnd}>
       <div className="mt-2 pt-2 border-t border-border">
         <div className="px-2 py-1.5 flex items-center gap-2 text-[11px] font-mono font-medium text-text-muted uppercase tracking-[0.12em]">

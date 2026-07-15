@@ -1,6 +1,7 @@
 import { Router } from 'express';
+import { CAPABILITIES } from '@obliview/shared';
 import { requireAuth } from '../middleware/auth';
-import { requireRole } from '../middleware/rbac';
+import { requireRole, requireCapability } from '../middleware/rbac';
 import { agentAuth } from '../middleware/agentAuth';
 import { requireTenant } from '../middleware/tenant';
 import {
@@ -101,24 +102,27 @@ router.get('/installer/wizard-linux-amd64', requireAuth, requireRole('admin'), r
 // WRITE endpoints (bulk, patch, delete, command, firewall, keys, wizard) stay
 // admin-only: non-admin SSO users all collapse to local role 'user' (an Obligate
 // "Viewer" included), so we must not grant mutation rights on role alone here.
+// Device management (edit/delete/command/bulk/firewall) → 'monitor_rw' capability.
+const canManageAgents = requireCapability(CAPABILITIES.MONITOR_RW);
+
 router.get('/devices/stats',          requireAuth, requireTenant, getDeviceStats);
-router.delete('/devices/bulk',        requireAuth, requireRole('admin'), requireTenant, bulkDeleteDevices);
-router.patch('/devices/bulk',         requireAuth, requireRole('admin'), requireTenant, bulkUpdateDevices);
-router.post('/devices/bulk-command',  requireAuth, requireRole('admin'), requireTenant, bulkDeviceCommand);
+router.delete('/devices/bulk',        requireAuth, canManageAgents, requireTenant, bulkDeleteDevices);
+router.patch('/devices/bulk',         requireAuth, canManageAgents, requireTenant, bulkUpdateDevices);
+router.post('/devices/bulk-command',  requireAuth, canManageAgents, requireTenant, bulkDeviceCommand);
 
 router.get('/devices', requireAuth, requireTenant, listDevices);
 router.get('/devices/:id', requireAuth, requireTenant, getDevice);
 router.get('/devices/:id/metrics', requireAuth, requireTenant, getDeviceMetrics);
 router.get('/devices/:id/templates', requireAuth, requireTenant, getDeviceTemplates);
-router.patch('/devices/:id', requireAuth, requireRole('admin'), requireTenant, updateDevice);
-router.delete('/devices/:id', requireAuth, requireRole('admin'), requireTenant, deleteDevice);
-router.post('/devices/:id/command', requireAuth, requireRole('admin'), requireTenant, sendDeviceCommand);
+router.patch('/devices/:id', requireAuth, canManageAgents, requireTenant, updateDevice);
+router.delete('/devices/:id', requireAuth, canManageAgents, requireTenant, deleteDevice);
+router.post('/devices/:id/command', requireAuth, canManageAgents, requireTenant, sendDeviceCommand);
 
-// Firewall rule management (real-time via agent WS)
+// Firewall rule management (real-time via agent WS) — device management → monitor_rw.
 import { getFirewallRules, addFirewallRule, deleteFirewallRule, toggleFirewallRule } from '../controllers/firewall.controller';
-router.get('/devices/:id/firewall/rules', requireAuth, requireRole('admin'), requireTenant, getFirewallRules);
-router.post('/devices/:id/firewall/rules', requireAuth, requireRole('admin'), requireTenant, addFirewallRule);
-router.delete('/devices/:id/firewall/rules/:ruleId', requireAuth, requireRole('admin'), requireTenant, deleteFirewallRule);
-router.patch('/devices/:id/firewall/rules/:ruleId', requireAuth, requireRole('admin'), requireTenant, toggleFirewallRule);
+router.get('/devices/:id/firewall/rules', requireAuth, canManageAgents, requireTenant, getFirewallRules);
+router.post('/devices/:id/firewall/rules', requireAuth, canManageAgents, requireTenant, addFirewallRule);
+router.delete('/devices/:id/firewall/rules/:ruleId', requireAuth, canManageAgents, requireTenant, deleteFirewallRule);
+router.patch('/devices/:id/firewall/rules/:ruleId', requireAuth, canManageAgents, requireTenant, toggleFirewallRule);
 
 export default router;

@@ -1,5 +1,6 @@
 import { db } from '../db';
-import type { PermissionLevel, UserPermissions } from '@obliview/shared';
+import type { PermissionLevel, UserPermissions, Capability } from '@obliview/shared';
+import { ALL_CAPABILITIES } from '@obliview/shared';
 
 export const permissionService = {
   /**
@@ -249,7 +250,7 @@ export const permissionService = {
    */
   async getUserPermissions(userId: number, isAdmin: boolean): Promise<UserPermissions> {
     if (isAdmin) {
-      return { canCreate: true, teams: [], permissions: {} };
+      return { canCreate: true, teams: [], permissions: {}, capabilities: [...ALL_CAPABILITIES] };
     }
 
     const teamIds = await this.getUserTeamIds(userId);
@@ -268,7 +269,44 @@ export const permissionService = {
       }
     }
 
-    return { canCreate, teams: teamIds, permissions };
+    const capabilities = await this.getUserCapabilities(userId, false);
+
+    return { canCreate, teams: teamIds, permissions, capabilities };
+  },
+
+  /**
+   * Resolve the feature capabilities a user effectively holds.
+   * Admin ⇒ all. Otherwise the union of team_permissions.capabilities across the
+   * user's teams (filtered to known capabilities). Viewing is NOT a capability —
+   * any authenticated tenant member may view; these gate mutations only.
+   */
+  async getUserCapabilities(userId: number, isAdmin: boolean): Promise<Capability[]> {
+    if (isAdmin) return [...ALL_CAPABILITIES];
+
+    const teamIds = await this.getUserTeamIds(userId);
+    if (teamIds.length === 0) return [];
+
+    const rows = await db('team_permissions')
+      .whereIn('team_id', teamIds)
+      .whereNotNull('capabilities')
+      .select('capabilities');
+
+    const held = new Set<string>();
+    for (const r of rows) {
+      const raw = (r as { capabilities: unknown }).capabilities;
+      let arr: unknown;
+      try {
+        arr = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      } catch {
+        arr = null;
+      }
+      if (Array.isArray(arr)) {
+        for (const c of arr) if (typeof c === 'string') held.add(c);
+      }
+    }
+
+    // Only surface capabilities we actually recognise/enforce.
+    return ALL_CAPABILITIES.filter((c) => held.has(c));
   },
 
   /**

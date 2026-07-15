@@ -410,6 +410,23 @@ export const agentService = {
     return rowToDevice(row, groupConfig, groupThresholds, globalConfig, evalStateFor(row, evalGroupIds));
   },
 
+  /** Tenant id that owns a device, or null if it doesn't exist. */
+  async getDeviceTenantId(deviceId: number): Promise<number | null> {
+    const row = await db('agent_devices').where({ id: deviceId }).select('tenant_id').first() as
+      { tenant_id: number } | undefined;
+    return row ? row.tenant_id : null;
+  },
+
+  /** Of the given ids, return only those that belong to the tenant (for bulk ops). */
+  async filterDeviceIdsByTenant(ids: number[], tenantId: number): Promise<number[]> {
+    if (ids.length === 0) return [];
+    const rows = await db('agent_devices')
+      .whereIn('id', ids)
+      .andWhere({ tenant_id: tenantId })
+      .select('id') as { id: number }[];
+    return rows.map((r) => r.id);
+  },
+
   async countOnlineDevices(tenantId: number): Promise<number> {
     const q = db('agent_devices').where({ status: 'approved' });
     if (!isMasterTenant(tenantId)) q.where({ tenant_id: tenantId });

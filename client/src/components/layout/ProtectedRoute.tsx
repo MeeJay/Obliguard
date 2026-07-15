@@ -1,4 +1,5 @@
 import { Navigate, Outlet, useLocation } from 'react-router-dom';
+import type { Capability } from '@obliview/shared';
 import { useAuthStore } from '@/store/authStore';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 
@@ -7,10 +8,12 @@ const REQUIRED_ENROLLMENT_VERSION = 1;
 
 interface ProtectedRouteProps {
   requiredRole?: string;
+  /** Gate the route on a feature capability (admin ⇒ always allowed). */
+  requiredCapability?: Capability;
 }
 
-export function ProtectedRoute({ requiredRole }: ProtectedRouteProps) {
-  const { user, isInitialized } = useAuthStore();
+export function ProtectedRoute({ requiredRole, requiredCapability }: ProtectedRouteProps) {
+  const { user, isInitialized, hasCapability } = useAuthStore();
   const location = useLocation();
 
   if (!isInitialized) {
@@ -37,6 +40,10 @@ export function ProtectedRoute({ requiredRole }: ProtectedRouteProps) {
   }
 
   if (requiredRole && user.role !== requiredRole) {
+    return <Navigate to="/" replace />;
+  }
+
+  if (requiredCapability && !hasCapability(requiredCapability)) {
     return <Navigate to="/" replace />;
   }
 

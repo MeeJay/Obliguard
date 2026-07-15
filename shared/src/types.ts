@@ -337,10 +337,39 @@ export interface TeamPermission {
   level: PermissionLevel;
 }
 
+/**
+ * Feature-level capabilities. These are the keys Obliguard registers with
+ * Obligate (obligate.service.syncCapabilitySchemas) and that flow back into
+ * team_permissions.capabilities on SSO login. They gate WHAT a non-admin may do
+ * (viewing is granted to any tenant member; these govern mutations).
+ * Admins implicitly hold all of them.
+ */
+export const CAPABILITIES = {
+  /** Manage agent devices (edit/delete/command, firewall rules). */
+  MONITOR_RW: 'monitor_rw',
+  /** Create / edit / delete / move groups. */
+  GROUP_RW: 'group_rw',
+  /** Manage whitelist entries. */
+  WHITELIST: 'whitelist',
+  /** Create / lift / promote bans. */
+  BANS: 'bans',
+} as const;
+
+export type Capability = typeof CAPABILITIES[keyof typeof CAPABILITIES];
+
+export const ALL_CAPABILITIES: Capability[] = [
+  CAPABILITIES.MONITOR_RW,
+  CAPABILITIES.GROUP_RW,
+  CAPABILITIES.WHITELIST,
+  CAPABILITIES.BANS,
+];
+
 export interface UserPermissions {
   canCreate: boolean;
   teams: number[];
   permissions: Record<string, PermissionLevel>;
+  /** Feature capabilities the user holds (admin ⇒ all). */
+  capabilities: Capability[];
 }
 
 // ============================================
