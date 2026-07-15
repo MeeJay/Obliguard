@@ -40,7 +40,7 @@ import { useGroupStore } from '@/store/groupStore';
 import { useUiStore } from '@/store/uiStore';
 import { agentApi } from '@/api/agent.api';
 import { getSocket } from '@/socket/socketClient';
-import type { AgentDevice, MonitorStatus, GroupTreeNode } from '@obliview/shared';
+import type { AgentDevice, MonitorStatus, GroupTreeNode, Capability } from '@obliview/shared';
 import { SOCKET_EVENTS, CAPABILITIES } from '@obliview/shared';
 import { groupsApi } from '@/api/groups.api';
 import { anonHostname, anonUsername } from '@/utils/anonymize';
@@ -278,6 +278,8 @@ interface NavItem {
   path: string;
   icon: React.ReactNode;
   adminOnly?: boolean;
+  /** Visible to non-admins holding this capability (admins always see it). */
+  capability?: Capability;
 }
 
 // ── Main Sidebar ──────────────────────────────────────────────────────────────
@@ -291,13 +293,13 @@ export function Sidebar() {
     { label: t('nav.dashboard'),        path: '/',                       icon: <LayoutDashboard size={18} /> },
     { label: t('nav.netmap'),           path: '/netmap',                  icon: <Network size={18} /> },
     { label: t('nav.ipReputation'),     path: '/ip-reputation',           icon: <Shield size={18} /> },
-    { label: t('nav.groups'),           path: '/groups',                  icon: <FolderTree size={18} />,   adminOnly: true },
+    { label: t('nav.agents'),           path: '/admin/agents',            icon: <Cpu size={18} />,          capability: CAPABILITIES.MONITOR_RW },
+    { label: t('nav.groups'),           path: '/groups',                  icon: <FolderTree size={18} />,   capability: CAPABILITIES.GROUP_RW },
     { label: t('nav.notifications'),    path: '/notifications',           icon: <Bell size={18} />,         adminOnly: true },
     { label: t('nav.serviceTemplates'), path: '/admin/service-templates', icon: <ScanSearch size={18} />,   adminOnly: true },
     { label: t('nav.networkLimiting'),  path: '/admin/network-limiting',  icon: <Gauge size={18} />,        adminOnly: true },
     { label: t('nav.workspaces'),        path: '/admin/tenants',           icon: <Building2 size={18} />,    adminOnly: true },
     { label: t('nav.users'),            path: '/admin/users',             icon: <Users size={18} />,        adminOnly: true },
-    { label: t('nav.agents'),           path: '/admin/agents',            icon: <Cpu size={18} />,          adminOnly: true },
     { label: t('nav.importExport'),     path: '/admin/import-export',     icon: <PackageOpen size={18} />,  adminOnly: true },
     { label: t('nav.settings'),         path: '/settings',                icon: <Settings size={18} />,     adminOnly: true },
   ];
@@ -450,6 +452,7 @@ export function Sidebar() {
 
   const filteredNavItems = navItems.filter(item => {
     if (item.adminOnly && !admin) return false;
+    if (item.capability && !admin && !hasCapability(item.capability)) return false;
     if (!search) return true;
     return item.label.toLowerCase().includes(search.toLowerCase());
   });

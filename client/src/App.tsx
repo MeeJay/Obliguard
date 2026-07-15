@@ -69,6 +69,12 @@ export default function App() {
             <Route path="/agents/:deviceId" element={<AgentDetailPage />} />
             <Route path="/live-events" element={<LiveEventsPage />} />
 
+            {/* Agent-device management → 'monitor_rw' (keys tab hidden for
+                non-admins inside the page) */}
+            <Route element={<ProtectedRoute requiredCapability="monitor_rw" />}>
+              <Route path="/admin/agents" element={<AdminAgentPage />} />
+            </Route>
+
             {/* Group management → 'group_rw' capability */}
             <Route element={<ProtectedRoute requiredCapability="group_rw" />}>
               <Route path="/groups" element={<GroupManagePage />} />
@@ -80,7 +86,6 @@ export default function App() {
               <Route path="/whitelist" element={<Navigate to="/ip-reputation" replace />} />
               <Route path="/notifications" element={<NotificationsPage />} />
               <Route path="/admin/users" element={<AdminUsersPage />} />
-              <Route path="/admin/agents" element={<AdminAgentPage />} />
               <Route path="/admin/import-export" element={<ImportExportPage />} />
               <Route path="/admin/tenants" element={<AdminTenantsPage />} />
               <Route path="/admin/service-templates" element={<ServiceTemplatesPage />} />

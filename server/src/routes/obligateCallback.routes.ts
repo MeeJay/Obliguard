@@ -125,6 +125,40 @@ router.get('/callback', async (req, res) => {
           .onConflict(['user_id', 'tenant_id'])
           .merge({ role: t.role === 'admin' ? 'admin' : 'member' });
 
+        // ── Sync local team memberships from the Obligate assertion ───────────
+        // Previously SSO created tenant access but NOT team memberships, so the
+        // user landed in a tenant with no group visibility — empty sidebar tree
+        // and no group-scoped permissions — until an admin ticked the box by
+        // hand. Match each asserted team to a local team in THIS tenant by id OR
+        // name and ensure a membership row exists. Additive only (never removes)
+        // so manually-granted memberships are preserved.
+        const assertedTeams = new Set((assertion.teams ?? []).map((s) => String(s)));
+        if (assertedTeams.size > 0) {
+          const localTeams = await db('user_teams')
+            .where({ tenant_id: tenant.id })
+            .select('id', 'name') as Array<{ id: number; name: string }>;
+          const matchedTeamIds = localTeams
+            .filter((lt) => assertedTeams.has(String(lt.id)) || assertedTeams.has(lt.name))
+            .map((lt) => lt.id);
+          for (const teamId of matchedTeamIds) {
+            await db('team_memberships')
+              .insert({ user_id: localUserId, team_id: teamId })
+              .onConflict(['team_id', 'user_id'])
+              .ignore();
+          }
+          if (matchedTeamIds.length > 0) {
+            logger.info(
+              { userId: localUserId, tenant: t.slug, teamIds: matchedTeamIds },
+              'Obligate SSO: synced team membership(s)',
+            );
+          } else {
+            logger.warn(
+              { userId: localUserId, tenant: t.slug, asserted: [...assertedTeams] },
+              'Obligate SSO: no local team matched the asserted teams (check team name/id mapping)',
+            );
+          }
+        }
+
         if (t.capabilities?.length) {
           const userTeamIds = await db('team_memberships')
             .join('user_teams', 'user_teams.id', 'team_memberships.team_id')

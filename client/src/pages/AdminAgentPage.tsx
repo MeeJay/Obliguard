@@ -30,6 +30,7 @@ import { getSocket } from '@/socket/socketClient';
 import { Button } from '@/components/common/Button';
 import { Input } from '@/components/common/Input';
 import { useUiStore } from '@/store/uiStore';
+import { useAuthStore } from '@/store/authStore';
 import { AddMikroTikModal } from '@/components/mikrotik/AddMikroTikModal';
 import { anonHostname, anonIp } from '@/utils/anonymize';
 import toast from 'react-hot-toast';
@@ -507,6 +508,9 @@ function BulkEditAgentModal({
 
 export function AdminAgentPage() {
   const { t } = useTranslation();
+  // API-key management is admin-only; a 'monitor_rw' non-admin only gets the
+  // devices tab. Keep the sensitive keys tab hidden for them.
+  const isAdmin = useAuthStore((s) => s.user?.role === 'admin');
   const [tab, setTab] = useState<Tab>('devices');
   const [deviceFilter, setDeviceFilter] = useState<DeviceStatusFilter>('all');
 
@@ -868,15 +872,17 @@ export function AdminAgentPage() {
             </span>
           )}
         </button>
-        <button
-          onClick={() => setTab('keys')}
-          className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${
-            tab === 'keys' ? 'bg-accent text-white' : 'text-text-muted hover:text-text-primary'
-          }`}
-        >
-          <Key size={13} className="inline mr-1.5" />
-          {t('agents.tabKeys')}
-        </button>
+        {isAdmin && (
+          <button
+            onClick={() => setTab('keys')}
+            className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${
+              tab === 'keys' ? 'bg-accent text-white' : 'text-text-muted hover:text-text-primary'
+            }`}
+          >
+            <Key size={13} className="inline mr-1.5" />
+            {t('agents.tabKeys')}
+          </button>
+        )}
       </div>
 
       {/* ── Devices Tab ── */}
@@ -1114,8 +1120,8 @@ export function AdminAgentPage() {
         </>
       )}
 
-      {/* ── API Keys Tab ── */}
-      {tab === 'keys' && (
+      {/* ── API Keys Tab (admin-only) ── */}
+      {isAdmin && tab === 'keys' && (
         <>
           <div className="flex items-center justify-between mb-4">
             <p className="text-sm text-text-muted">API Keys are used to authenticate agents during installation.</p>
