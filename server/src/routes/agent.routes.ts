@@ -90,15 +90,26 @@ router.get('/installer/wizard-linux-amd64', requireAuth, requireRole('admin'), r
 
 // ⚠️ Static routes MUST be declared before /:id routes — otherwise Express matches
 //    the literal segment as a device ID and the wrong handler fires.
-router.get('/devices/stats',          requireAuth, requireRole('admin'), requireTenant, getDeviceStats);
+//
+// READ endpoints are tenant-scoped (requireTenant) but intentionally NOT
+// admin-only: any authenticated member of the tenant may VIEW its devices.
+// This matches the "View monitors, groups, events" capability granted to the
+// User/Viewer permission sets, and mirrors the bans / ip-reputation read routes
+// (which are requireAuth only). Previously these were requireRole('admin'),
+// so every non-admin got a 403 → empty Dashboard/NetMap (agents, online count).
+//
+// WRITE endpoints (bulk, patch, delete, command, firewall, keys, wizard) stay
+// admin-only: non-admin SSO users all collapse to local role 'user' (an Obligate
+// "Viewer" included), so we must not grant mutation rights on role alone here.
+router.get('/devices/stats',          requireAuth, requireTenant, getDeviceStats);
 router.delete('/devices/bulk',        requireAuth, requireRole('admin'), requireTenant, bulkDeleteDevices);
 router.patch('/devices/bulk',         requireAuth, requireRole('admin'), requireTenant, bulkUpdateDevices);
 router.post('/devices/bulk-command',  requireAuth, requireRole('admin'), requireTenant, bulkDeviceCommand);
 
-router.get('/devices', requireAuth, requireRole('admin'), requireTenant, listDevices);
-router.get('/devices/:id', requireAuth, requireRole('admin'), requireTenant, getDevice);
-router.get('/devices/:id/metrics', requireAuth, requireRole('admin'), requireTenant, getDeviceMetrics);
-router.get('/devices/:id/templates', requireAuth, requireRole('admin'), requireTenant, getDeviceTemplates);
+router.get('/devices', requireAuth, requireTenant, listDevices);
+router.get('/devices/:id', requireAuth, requireTenant, getDevice);
+router.get('/devices/:id/metrics', requireAuth, requireTenant, getDeviceMetrics);
+router.get('/devices/:id/templates', requireAuth, requireTenant, getDeviceTemplates);
 router.patch('/devices/:id', requireAuth, requireRole('admin'), requireTenant, updateDevice);
 router.delete('/devices/:id', requireAuth, requireRole('admin'), requireTenant, deleteDevice);
 router.post('/devices/:id/command', requireAuth, requireRole('admin'), requireTenant, sendDeviceCommand);

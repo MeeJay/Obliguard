@@ -1,0 +1,155 @@
+{
+  "shelf": {
+    "name": "ObliTools",
+    "description": "Documentation de la suite ObliTools — outils internes de l'écosystème Obli."
+  },
+  "book": {
+    "name": "Obliguard",
+    "description": "Obliguard — système de prévention d'intrusion (IPS) réseau auto-hébergé pour la suite Obli*. Détection des attaques par force brute (SSH, RDP, Nginx, Apache, IIS, FTP, Mail, MySQL, MikroTik) via des agents distribués, bannissement automatique au niveau du pare-feu sur tous les agents simultanément, multi-tenant, groupes hiérarchiques, réputation IP, NetMap 2D/3D et partage de blocklists via guard.obli.tools.",
+    "priority": 3
+  },
+  "chapters": [
+    {
+      "name": "Présentation",
+      "priority": 1,
+      "pages": [
+        { "name": "Vue d'ensemble & positionnement", "file": "01-presentation/01-vue-d-ensemble.md", "priority": 1 },
+        { "name": "Concepts clés & glossaire", "file": "01-presentation/02-concepts-cles.md", "priority": 2 },
+        { "name": "Panorama des fonctionnalités & modules", "file": "01-presentation/03-panorama-fonctionnel.md", "priority": 3 }
+      ]
+    },
+    {
+      "name": "Architecture technique",
+      "priority": 2,
+      "pages": [
+        { "name": "Stack technique & monorepo", "file": "02-architecture/01-stack-et-monorepo.md", "priority": 1 },
+        { "name": "Architecture serveur (services & routes)", "file": "02-architecture/02-architecture-serveur.md", "priority": 2 },
+        { "name": "Architecture client (SPA React)", "file": "02-architecture/03-architecture-client.md", "priority": 3 },
+        { "name": "Architecture de l'agent Go", "file": "02-architecture/04-architecture-agent-go.md", "priority": 4 }
+      ]
+    },
+    {
+      "name": "Installation & configuration",
+      "priority": 3,
+      "pages": [
+        { "name": "Démarrage rapide (Docker)", "file": "03-installation/01-demarrage-docker.md", "priority": 1 },
+        { "name": "Développement local", "file": "03-installation/02-developpement-local.md", "priority": 2 },
+        { "name": "Référence des variables d'environnement", "file": "03-installation/03-variables-environnement.md", "priority": 3 },
+        { "name": "Build de l'agent Go & de l'app desktop", "file": "03-installation/04-build-agent-et-desktop.md", "priority": 4 }
+      ]
+    },
+    {
+      "name": "Moteur de bans (Ban Engine)",
+      "priority": 4,
+      "pages": [
+        { "name": "Cycle d'évaluation & auto-ban", "file": "04-ban-engine/01-cycle-evaluation-et-auto-ban.md", "priority": 1 },
+        { "name": "Scoping & types de bans", "file": "04-ban-engine/02-scoping-et-types-de-bans.md", "priority": 2 },
+        { "name": "TTL, exclusions & notifications", "file": "04-ban-engine/03-ttl-exclusions-et-notifications.md", "priority": 3 }
+      ]
+    },
+    {
+      "name": "Hub WebSocket agent",
+      "priority": 5,
+      "pages": [
+        { "name": "Protocole WS & heartbeat", "file": "05-hub-websocket/01-protocole-ws-et-heartbeat.md", "priority": 1 },
+        { "name": "Détection hors ligne & grace period", "file": "05-hub-websocket/02-detection-hors-ligne-et-grace-period.md", "priority": 2 },
+        { "name": "Commandes & pushAndWait", "file": "05-hub-websocket/03-commandes-et-pushandwait.md", "priority": 3 }
+      ]
+    },
+    {
+      "name": "Agent Go",
+      "priority": 6,
+      "pages": [
+        { "name": "Détection de services & logwatcher", "file": "06-agent-go/01-detection-services-et-logwatcher.md", "priority": 1 },
+        { "name": "Pare-feu multiplateforme", "file": "06-agent-go/02-pare-feu-multiplateforme.md", "priority": 2 },
+        { "name": "Auto-update & désinstallation", "file": "06-agent-go/03-auto-update-et-desinstallation.md", "priority": 3 },
+        { "name": "Gestion des règles pare-feu", "file": "06-agent-go/04-gestion-regles-pare-feu.md", "priority": 4 }
+      ]
+    },
+    {
+      "name": "Templates de services",
+      "priority": 7,
+      "pages": [
+        { "name": "Parsers intégrés & regex custom", "file": "07-templates-services/01-parsers-integres-et-regex-custom.md", "priority": 1 },
+        { "name": "Seuils, modes & assignation hiérarchique", "file": "07-templates-services/02-seuils-modes-et-assignation-hierarchique.md", "priority": 2 }
+      ]
+    },
+    {
+      "name": "Listes de blocage distantes",
+      "priority": 8,
+      "pages": [
+        { "name": "Remote blocklists & guard.obli.tools", "file": "08-blocklists-distantes/01-remote-blocklists-et-guard-obli-tools.md", "priority": 1 }
+      ]
+    },
+    {
+      "name": "Réputation IP",
+      "priority": 9,
+      "pages": [
+        { "name": "Agrégation & GeoIP", "file": "09-reputation-ip/01-agregation-et-geoip.md", "priority": 1 },
+        { "name": "Statuts & soft-delete", "file": "09-reputation-ip/02-statuts-et-soft-delete.md", "priority": 2 }
+      ]
+    },
+    {
+      "name": "Whitelist & étiquettes IP",
+      "priority": 10,
+      "pages": [
+        { "name": "Whitelist CIDR & scoping hiérarchique", "file": "10-whitelist-et-labels/01-whitelist-cidr-et-scoping.md", "priority": 1 },
+        { "name": "Noms d'affichage IP", "file": "10-whitelist-et-labels/02-noms-daffichage-ip.md", "priority": 2 }
+      ]
+    },
+    {
+      "name": "NetMap",
+      "priority": 11,
+      "pages": [
+        { "name": "NetMap 2D", "file": "11-netmap/01-netmap-2d.md", "priority": 1 },
+        { "name": "NetMap 3D", "file": "11-netmap/02-netmap-3d.md", "priority": 2 }
+      ]
+    },
+    {
+      "name": "Multi-tenant & permissions",
+      "priority": 12,
+      "pages": [
+        { "name": "Tenants & groupes hiérarchiques", "file": "12-multi-tenant-et-permissions/01-tenants-et-groupes-hierarchiques.md", "priority": 1 },
+        { "name": "RBAC & héritage des paramètres", "file": "12-multi-tenant-et-permissions/02-rbac-et-heritage-des-parametres.md", "priority": 2 }
+      ]
+    },
+    {
+      "name": "Notifications",
+      "priority": 13,
+      "pages": [
+        { "name": "Plugins de notification", "file": "13-notifications/01-plugins-de-notification.md", "priority": 1 }
+      ]
+    },
+    {
+      "name": "Modèle de données",
+      "priority": 14,
+      "pages": [
+        { "name": "Vue d'ensemble des 20 migrations", "file": "14-modele-donnees/01-vue-ensemble-migrations.md", "priority": 1 },
+        { "name": "Tables clés (IPs, bans, templates)", "file": "14-modele-donnees/02-tables-cles-ips-bans.md", "priority": 2 }
+      ]
+    },
+    {
+      "name": "Référence API",
+      "priority": 15,
+      "pages": [
+        { "name": "Routes IPs, bans & templates", "file": "15-api/01-routes-ips-bans-et-templates.md", "priority": 1 },
+        { "name": "Routes agent & pare-feu", "file": "15-api/02-routes-agent-et-firewall.md", "priority": 2 },
+        { "name": "Routes admin, auth & tenants", "file": "15-api/03-routes-admin-auth-et-tenants.md", "priority": 3 }
+      ]
+    },
+    {
+      "name": "Internationalisation",
+      "priority": 16,
+      "pages": [
+        { "name": "Internationalisation (i18next)", "file": "16-i18n/01-internationalisation.md", "priority": 1 }
+      ]
+    },
+    {
+      "name": "État & feuille de route",
+      "priority": 17,
+      "pages": [
+        { "name": "Fonctionnalités & état actuel", "file": "17-etat-et-roadmap/01-fonctionnalites-et-etat-actuel.md", "priority": 1 }
+      ]
+    }
+  ]
+}

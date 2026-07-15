@@ -395,7 +395,9 @@ class IpReputationService {
     // Per-tenant clear baseline — join only for non-admin tenant users
     if (tenantId && !isAdmin && !isMasterTenant(tenantId)) {
       baseQuery.leftJoin('ip_reputation_tenant_clears as clr', function () {
-        this.on('clr.ip', '=', 'r.ip').andOnVal('clr.tenant_id', '=', tenantId);
+        // clr.ip is text, r.ip is inet — cast to compare, else Postgres throws
+        // "operator does not exist: text = inet" (500 on the non-admin path).
+        this.on(db.raw('clr.ip::inet = r.ip')).andOnVal('clr.tenant_id', '=', tenantId);
       });
       // Also expose whether this tenant has a clear record
       baseQuery.select(db.raw('clr.baseline_failures IS NOT NULL AS cleared_for_tenant'));
@@ -430,7 +432,8 @@ class IpReputationService {
 
     if (tenantId && !isAdmin && !isMasterTenant(tenantId)) {
       countQuery.leftJoin('ip_reputation_tenant_clears as clr', function () {
-        this.on('clr.ip', '=', 'r.ip').andOnVal('clr.tenant_id', '=', tenantId);
+        // clr.ip is text, r.ip is inet — cast to compare (see baseQuery above).
+        this.on(db.raw('clr.ip::inet = r.ip')).andOnVal('clr.tenant_id', '=', tenantId);
       });
       countQuery.whereExists(
         db('ip_events as e')
