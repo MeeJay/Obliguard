@@ -47,8 +47,18 @@ type FirewallManager interface {
 func DetectFirewall() FirewallManager {
 	switch runtime.GOOS {
 	case "windows":
+		// Prefer the WFP-native backend (persistent kernel filters, scales to
+		// 30K–100K bans with a flat working set). Fall back to the netsh
+		// grouped-rule backend if WFP init fails (e.g. not enough privilege).
+		if wfp, err := newWFPFirewall(); err == nil && wfp.IsAvailable() {
+			log.Printf("Firewall: using %s (WFP-native)", wfp.Name())
+			return wfp
+		} else if err != nil {
+			log.Printf("Firewall: WFP init failed (%v) — falling back to netsh", err)
+		}
 		fw := &WindowsFirewall{}
 		if fw.IsAvailable() {
+			log.Printf("Firewall: using %s (netsh)", fw.Name())
 			return fw
 		}
 		return &NoOpFirewall{}

@@ -86,9 +86,27 @@ type winRateLimiter struct {
 	counters map[uint32]*ipCounter // srcIP → current 1s window
 	bans     map[uint32]time.Time  // srcIP → ban expiry (zero = permanent)
 
-	fw           *WindowsFirewall
+	fwMu         sync.Mutex      // guards fw (written in ApplyRateLimits, read in escalate/janitor)
+	fw           FirewallManager // active ban backend (WFP-native or netsh)
 	connTypeWarn sync.Once
 	shapeWarn    sync.Once
+}
+
+// setFW / getFW guard the active ban backend pointer. ApplyRateLimits runs on
+// the server-config goroutine while escalateBan/janitor run on the WinDivert
+// goroutines, so the interface value (two words) must not be written and read
+// concurrently without synchronization. fwMu is a leaf lock — never take another
+// lock while holding it.
+func (rl *winRateLimiter) setFW(fw FirewallManager) {
+	rl.fwMu.Lock()
+	rl.fw = fw
+	rl.fwMu.Unlock()
+}
+
+func (rl *winRateLimiter) getFW() FirewallManager {
+	rl.fwMu.Lock()
+	defer rl.fwMu.Unlock()
+	return rl.fw
 }
 
 // winDivertDLLPath returns the path to WinDivert.dll if it is bundled next to
@@ -110,7 +128,7 @@ func (f *WindowsFirewall) IsRateLimitSupported() bool {
 }
 
 func (f *WindowsFirewall) ApplyRateLimits(rules []RateLimitRule) error {
-	winRL.fw = f
+	winRL.setFW(f)
 	return winRL.apply(rules)
 }
 
@@ -445,9 +463,9 @@ func (rl *winRateLimiter) escalateBan(srcIP uint32, r *RateLimitRule) {
 	rl.bans[srcIP] = exp
 
 	ipStr := net.IPv4(byte(srcIP>>24), byte(srcIP>>16), byte(srcIP>>8), byte(srcIP)).String()
-	if rl.fw != nil {
-		if err := rl.fw.BanIP(ipStr); err == nil {
-			_ = rl.fw.Flush()
+	if fw := rl.getFW(); fw != nil {
+		if err := fw.BanIP(ipStr); err == nil {
+			_ = fw.Flush()
 			log.Printf("Firewall: rate limit escalated → banned %s", ipStr)
 		}
 	}
@@ -479,9 +497,9 @@ func (rl *winRateLimiter) janitor(stop chan struct{}) {
 
 			for _, ip := range lift {
 				ipStr := net.IPv4(byte(ip>>24), byte(ip>>16), byte(ip>>8), byte(ip)).String()
-				if rl.fw != nil {
-					_ = rl.fw.UnbanIP(ipStr)
-					_ = rl.fw.Flush()
+				if fw := rl.getFW(); fw != nil {
+					_ = fw.UnbanIP(ipStr)
+					_ = fw.Flush()
 				}
 				rl.cmu.Lock()
 				delete(rl.bans, ip)
