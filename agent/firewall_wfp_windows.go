@@ -45,7 +45,6 @@ import (
 	"log"
 	"net/netip"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -585,11 +584,11 @@ func (f *WFPFirewall) reconcile() {
 		}
 	}
 
-	// 3. Merge legacy per-IP netsh rules (Obliguard-Block-A-B-C-D-*, IPv4 only).
+	// 3. Merge legacy per-IP netsh rules (Obliguard-Block-A-B-C-D-*, IPv4 only)
+	//    into desired so those IPs get WFP filters before we remove the netsh
+	//    rules below.
 	legacy := &WindowsFirewall{}
-	legacyIPs := legacy.getLegacyIPs()
-	hadNetsh := len(legacyIPs) > 0 || groupedRulesExist()
-	for _, ip := range legacyIPs {
+	for _, ip := range legacy.getLegacyIPs() {
 		if k, p, e := canon(ip); e == nil {
 			f.mu.Lock()
 			f.desired[k] = p
@@ -616,11 +615,14 @@ func (f *WFPFirewall) reconcile() {
 		}
 		f.mu.Unlock()
 		if missing == 0 {
-			if hadNetsh {
-				legacy.deleteGroupedRules()
-				legacy.cleanupLegacyRules()
-				log.Printf("Firewall(WFP): migration complete — removed legacy netsh rules")
-			}
+			// WFP now enforces the full set → unconditionally clear the old netsh
+			// backend's rules. We do NOT gate on a `netsh show rule` probe:
+			// on a large ruleset that probe errors/truncates and returned false,
+			// which left ~70 grouped rules (and their MpsSvc/BFE cost) in place
+			// alongside the WFP filters. Both deleters are idempotent no-ops.
+			legacy.deleteGroupedRules()
+			legacy.cleanupLegacyRules()
+			log.Printf("Firewall(WFP): migration — cleared any legacy netsh ban rules")
 		} else {
 			log.Printf("Firewall(WFP): verify incomplete (%d desired filters missing) — keeping netsh rules, will retry next start", missing)
 		}
@@ -678,16 +680,6 @@ func (f *WFPFirewall) enumLocked() (map[string]wf.RuleID, error) {
 	f.opMu.Lock()
 	defer f.opMu.Unlock()
 	return f.enumerate()
-}
-
-// groupedRulesExist reports whether any old netsh grouped ban rule is present.
-func groupedRulesExist() bool {
-	out, err := exec.Command("netsh", "advfirewall", "firewall", "show", "rule",
-		"name=all", "dir=in").Output()
-	if err != nil {
-		return false
-	}
-	return strings.Contains(string(out), winRuleIn)
 }
 
 // ── Rate limiting (delegates to the WinDivert path) ──────────────────────────

@@ -1164,16 +1164,31 @@ func (f *WindowsFirewall) syncRules(ips []string) error {
 }
 
 // deleteGroupedRules removes all Obliguard-Block-in/out rules by exact name.
-// Tries names -1 through -50 to cover any possible chunk count.
+// It walks the numbered chunks (-1, -2, …) until several consecutive names are
+// absent, so it scales to ANY chunk count — 34920 IPs at 500/rule = 70 chunks,
+// which the old fixed -1..-50 limit left half-cleaned. Deletion is by known
+// name only (no `netsh show rule` parse — that call is slow/unreliable on a
+// huge ruleset and is exactly what made the WFP migration skip cleanup).
 func (f *WindowsFirewall) deleteGroupedRules() {
-	// Delete the base names (no suffix — single-chunk case)
-	exec.Command("netsh", "advfirewall", "firewall", "delete", "rule", "name="+winRuleIn).Run()
-	exec.Command("netsh", "advfirewall", "firewall", "delete", "rule", "name="+winRuleOut).Run()
-	// Delete numbered chunks
-	for i := 1; i <= 50; i++ {
+	// netsh exits 0 when it removed ≥1 rule, non-zero ("No rules match") when
+	// nothing matched → err==nil means a rule with that name was deleted.
+	del := func(name string) bool {
+		return exec.Command("netsh", "advfirewall", "firewall", "delete", "rule", "name="+name).Run() == nil
+	}
+	del(winRuleIn)  // base names (single-chunk case)
+	del(winRuleOut)
+	misses := 0
+	for i := 1; misses < 8 && i <= 100000; i++ {
 		suffix := fmt.Sprintf("-%d", i)
-		exec.Command("netsh", "advfirewall", "firewall", "delete", "rule", "name="+winRuleIn+suffix).Run()
-		exec.Command("netsh", "advfirewall", "firewall", "delete", "rule", "name="+winRuleOut+suffix).Run()
+		hit := del(winRuleIn + suffix)
+		if del(winRuleOut+suffix) {
+			hit = true
+		}
+		if hit {
+			misses = 0
+		} else {
+			misses++
+		}
 	}
 }
 
