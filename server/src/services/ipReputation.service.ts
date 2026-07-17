@@ -334,6 +334,8 @@ class IpReputationService {
           db.raw('r.asn'),
           db.raw('COALESCE(r.updated_at, b.banned_at) AS updated_at'),
           'b.id as active_ban_id',
+          'b.scope as active_ban_scope',
+          'b.origin_tenant_id as active_ban_origin_tenant_id',
           'b.ban_type as ban_type',
           'b.banned_by_user_id as banned_by_user_id',
         )
@@ -341,6 +343,16 @@ class IpReputationService {
         .where(function () {
           this.whereNull('b.expires_at').orWhere('b.expires_at', '>', new Date());
         });
+
+      // Has THIS tenant already overridden the ban locally? (unique(ban_id,tenant_id)
+      // ⇒ at most one match, so the row count / total stays correct)
+      if (tenantId != null) {
+        q = q
+          .leftJoin('ip_ban_exclusions as bex', function () {
+            this.on('bex.ban_id', '=', 'b.id').andOnVal('bex.tenant_id', '=', tenantId);
+          })
+          .select(db.raw('bex.id IS NOT NULL AS active_ban_excluded'));
+      }
 
       if (filters.search) {
         q.whereRaw("b.ip::text ILIKE ?", [`%${filters.search}%`]);
@@ -350,12 +362,25 @@ class IpReputationService {
       const total = Number(countResult?.count ?? 0);
 
       const rows = await q.orderBy('b.banned_at', 'desc').limit(limit).offset(offset) as Array<
-        IpReputationRow & { active_ban_id: number | null; ban_type: string | null; banned_by_user_id: number | null }
+        IpReputationRow & {
+          active_ban_id: number | null;
+          active_ban_scope: string | null;
+          active_ban_origin_tenant_id: number | null;
+          active_ban_excluded?: boolean;
+          ban_type: string | null;
+          banned_by_user_id: number | null;
+        }
       >;
 
       const data = rows.map((row) => ({
         ...rowToReputation(row, 'banned'),
         activeBanId: row.active_ban_id ?? null,
+        activeBanScope: (row.active_ban_scope as IpReputation['activeBanScope']) ?? null,
+        activeBanIsOrigin:
+          tenantId != null &&
+          row.active_ban_origin_tenant_id != null &&
+          row.active_ban_origin_tenant_id === tenantId,
+        activeBanExcluded: row.active_ban_excluded ?? false,
         banType: row.ban_type ?? null,
         bannedByUserId: row.banned_by_user_id ?? null,
       }));
@@ -389,8 +414,19 @@ class IpReputationService {
       .select(
         'r.*',
         'b.id as active_ban_id',
+        'b.scope as active_ban_scope',
+        'b.origin_tenant_id as active_ban_origin_tenant_id',
         db.raw(`${STATUS_CASE} AS computed_status`),
       );
+
+    // Has THIS tenant already overridden the active ban locally?
+    if (tenantId != null) {
+      baseQuery
+        .leftJoin('ip_ban_exclusions as bex', function () {
+          this.on('bex.ban_id', '=', 'b.id').andOnVal('bex.tenant_id', '=', tenantId);
+        })
+        .select(db.raw('bex.id IS NOT NULL AS active_ban_excluded'));
+    }
 
     // Per-tenant clear baseline — join only for non-admin tenant users
     if (tenantId && !isAdmin && !isMasterTenant(tenantId)) {
@@ -462,10 +498,19 @@ class IpReputationService {
     const data = (rows as Array<IpReputationRow & {
       computed_status: string;
       active_ban_id: number | null;
+      active_ban_scope: string | null;
+      active_ban_origin_tenant_id: number | null;
+      active_ban_excluded?: boolean;
       cleared_for_tenant?: boolean;
     }>).map((row) => ({
       ...rowToReputation(row, row.computed_status as IpStatus, row.cleared_for_tenant ?? false),
       activeBanId: row.active_ban_id ?? null,
+      activeBanScope: (row.active_ban_scope as IpReputation['activeBanScope']) ?? null,
+      activeBanIsOrigin:
+        tenantId != null &&
+        row.active_ban_origin_tenant_id != null &&
+        row.active_ban_origin_tenant_id === tenantId,
+      activeBanExcluded: row.active_ban_excluded ?? false,
     }));
 
     return { data, total };

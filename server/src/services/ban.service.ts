@@ -32,7 +32,7 @@ interface BanRow {
   is_active: boolean;
 }
 
-function rowToBan(row: BanRow, isAdmin = false): IpBan {
+function rowToBan(row: BanRow, isAdmin = false, callerTenantId?: number): IpBan {
   return {
     id: row.id,
     ip: row.ip,
@@ -42,9 +42,15 @@ function rowToBan(row: BanRow, isAdmin = false): IpBan {
     scope: row.scope as BanScope,
     scopeId: row.scope_id,
     tenantId: row.tenant_id,
-    // Only expose origin to platform admins
+    // Only expose WHICH tenant the ban came from to platform admins (god view).
     originTenantId: isAdmin ? row.origin_tenant_id : null,
     originTenantName: isAdmin ? row.origin_tenant_name : undefined,
+    // Safe for every tenant: "this ban is mine" without naming any other tenant.
+    // Drives whether the UI offers Lift (global) or Exclude (local override).
+    isOriginTenant:
+      callerTenantId != null &&
+      row.origin_tenant_id != null &&
+      row.origin_tenant_id === callerTenantId,
     bannedByUserId: row.banned_by_user_id,
     bannedAt: row.banned_at.toISOString(),
     expiresAt: row.expires_at ? row.expires_at.toISOString() : null,
@@ -97,7 +103,7 @@ class BanService {
 
     const rows = await q.orderBy('ip_bans.banned_at', 'desc').limit(limit).offset(offset) as (BanRow & { is_excluded_by_tenant: boolean })[];
     return {
-      data: rows.map((r) => ({ ...rowToBan(r, isAdmin), isExcludedByTenant: r.is_excluded_by_tenant ?? false })),
+      data: rows.map((r) => ({ ...rowToBan(r, isAdmin, tenantId), isExcludedByTenant: r.is_excluded_by_tenant ?? false })),
       total: Number(count),
     };
   }
@@ -136,7 +142,9 @@ class BanService {
         scope,
         scope_id: data.scopeId ?? null,
         tenant_id: scope === 'global' ? null : tenantId,
-        origin_tenant_id: null,
+        // Record who created it, so the creating tenant can lift its own ban
+        // (same origin rule as auto-bans).
+        origin_tenant_id: tenantId,
         banned_by_user_id: userId,
         expires_at: data.expiresAt ?? null,
         is_active: true,
@@ -165,21 +173,32 @@ class BanService {
     return rowToBan(row, true);
   }
 
-  /** Lift (deactivate) a ban — platform admins only for global-scope bans */
-  async lift(banId: number, tenantId: number, isAdmin: boolean): Promise<void> {
+  /**
+   * Lift (deactivate) a ban.
+   *
+   * Authority is TENANT-based, not role-based (the route already gates on the
+   * 'bans' capability). For a GLOBAL ban — enforced on every tenant — lifting
+   * affects everyone, so it is allowed only for:
+   *   - the Default/master tenant (god view), and
+   *   - the ORIGIN tenant, i.e. the tenant whose own agents triggered the ban.
+   *     It is their detection: if they call it a false positive it must
+   *     disappear everywhere.
+   * Any OTHER tenant sees the ban but must use excludeForTenant() ("Exclude")
+   * to stop enforcing it locally, leaving every other tenant untouched.
+   */
+  async lift(banId: number, tenantId: number, _isAdmin: boolean): Promise<void> {
     const ban = await db('ip_bans').where('id', banId).first() as BanRow | undefined;
     if (!ban) throw new AppError(404, 'Ban not found');
 
-    // A GLOBAL ban is authoritative for every tenant, so lifting it removes it
-    // everywhere. That authority belongs ONLY to the default/master tenant (the
-    // god view). Any other tenant must use excludeForTenant() to opt out locally
-    // without affecting the tenant that created the ban.
-    if (ban.scope === 'global' && !isMasterTenant(tenantId)) {
-      throw new AppError(403, 'Global bans can only be lifted from the Default tenant. Use "Exclude" to stop enforcing this ban on the current tenant.');
-    }
+    const isGodView = isMasterTenant(tenantId);
+    const isOrigin = ban.origin_tenant_id != null && ban.origin_tenant_id === tenantId;
 
-    // Tenant admins can only lift their own tenant-scoped bans.
-    if (!isAdmin && (ban.scope !== 'tenant' || ban.tenant_id !== tenantId)) {
+    if (ban.scope === 'global') {
+      if (!isGodView && !isOrigin) {
+        throw new AppError(403, 'This global ban originates from another tenant. Use "Exclude" to stop enforcing it on your tenant — the other tenants keep it.');
+      }
+    } else if (!isGodView && ban.tenant_id !== tenantId) {
+      // Tenant/group/agent-scoped ban: only its owning tenant (or god view).
       throw new AppError(403, 'Insufficient permissions to lift this ban');
     }
 

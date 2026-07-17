@@ -34,10 +34,12 @@ import type {
   IpBan,
   CreateBanRequest,
 } from '@obliview/shared';
+import { isMasterTenant } from '@obliview/shared';
 import { Button } from '@/components/common/Button';
 import { Input } from '@/components/common/Input';
 import { cn } from '@/utils/cn';
 import { useAuthStore } from '@/store/authStore';
+import { useTenantStore } from '@/store/tenantStore';
 import toast from 'react-hot-toast';
 import apiClient from '../api/client';
 import { ipLabelsApi } from '../api/ipLabels.api';
@@ -220,13 +222,17 @@ interface IPDetailDrawerProps {
   onBan: (ip: string, scope: BanScope, reason: string) => Promise<void>;
   onWhitelist: (ip: string, label: string) => Promise<void>;
   onLiftBan: () => Promise<void>;
+  /** Local override: stop enforcing a global ban on this tenant only. */
+  onExclude: () => Promise<void>;
+  /** Re-enable enforcement of a previously excluded global ban. */
+  onRemoveExclusion: () => Promise<void>;
   onClear: (ip: string) => Promise<void>;
   onRename: (ip: string, label: string) => Promise<void>;
   currentLabel?: string;
   isAdmin: boolean;
 }
 
-function IPDetailDrawer({ ip, onClose, onBan, onWhitelist, onLiftBan, onClear, onRename, currentLabel, isAdmin }: IPDetailDrawerProps) {
+function IPDetailDrawer({ ip, onClose, onBan, onWhitelist, onLiftBan, onExclude, onRemoveExclusion, onClear, onRename, currentLabel, isAdmin }: IPDetailDrawerProps) {
   const [events, setEvents] = useState<IpEvent[]>([]);
   const [loadingEvents, setLoadingEvents] = useState(true);
   const [banScope, setBanScope] = useState<BanScope>('global');
@@ -239,6 +245,16 @@ function IPDetailDrawer({ ip, onClose, onBan, onWhitelist, onLiftBan, onClear, o
   const [renameValue, setRenameValue] = useState(currentLabel ?? '');
   const [banInfo, setBanInfo] = useState<{ banType?: string; reason?: string; bannedByUserId?: number | null; bannedByUsername?: string | null; scope?: string } | null>(null);
   const [whitelistInfo, setWhitelistInfo] = useState<{ createdByUsername?: string | null; label?: string | null } | null>(null);
+
+  // Who may lift this ban — TENANT-based, mirroring ban.service.lift().
+  // A global ban is enforced everywhere, so only the Default/master tenant (god
+  // view) or the ORIGIN tenant may lift it outright; anyone else gets the local
+  // override (exclusion) path. If the scope is unknown we still show Lift and let
+  // the server answer with its explicit 403 message rather than hiding the action.
+  const currentTenantId = useTenantStore(s => s.currentTenantId);
+  const isGodView = currentTenantId != null && isMasterTenant(currentTenantId);
+  const isGlobalBan = ip.activeBanScope === 'global';
+  const canLiftBan = !isGlobalBan || isGodView || !!ip.activeBanIsOrigin;
 
   // Fetch ban details if IP is banned
   useEffect(() => {
@@ -572,23 +588,74 @@ function IPDetailDrawer({ ip, onClose, onBan, onWhitelist, onLiftBan, onClear, o
               </div>
             )}
 
-            {/* Lift ban */}
+            {/* Ban actions — authority is TENANT-based and mirrors ban.service.lift():
+                a GLOBAL ban is enforced on every tenant, so lifting it is allowed
+                only from the Default/master tenant (god view) or from the ORIGIN
+                tenant (their agents detected it → their false positive). Any other
+                tenant can only override it LOCALLY via an exclusion, which leaves
+                every other tenant untouched. */}
             {ip.status === 'banned' && (
-              <Button
-                variant="secondary"
-                size="sm"
-                loading={actionLoading}
-                onClick={async () => {
-                  setActionLoading(true);
-                  try {
-                    await onLiftBan();
-                  } finally {
-                    setActionLoading(false);
-                  }
-                }}
-              >
-                <Shield size={13} className="mr-1.5" />Lift ban
-              </Button>
+              canLiftBan ? (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  loading={actionLoading}
+                  onClick={async () => {
+                    setActionLoading(true);
+                    try {
+                      await onLiftBan();
+                    } finally {
+                      setActionLoading(false);
+                    }
+                  }}
+                  title={isGlobalBan ? 'Lift this ban for every tenant' : 'Lift this ban'}
+                >
+                  <Shield size={13} className="mr-1.5" />
+                  {isGlobalBan ? 'Lift ban (global)' : 'Lift ban'}
+                </Button>
+              ) : (
+                <div className="rounded-lg border border-border bg-bg-secondary p-3 space-y-2">
+                  <p className="text-xs text-text-muted">
+                    This global ban comes from another tenant, so it can't be lifted here.
+                    You can stop enforcing it on your own network — the other tenants keep it.
+                  </p>
+                  {ip.activeBanExcluded ? (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      loading={actionLoading}
+                      onClick={async () => {
+                        setActionLoading(true);
+                        try {
+                          await onRemoveExclusion();
+                        } finally {
+                          setActionLoading(false);
+                        }
+                      }}
+                      title="Re-enable enforcement of this ban on your network"
+                    >
+                      <Eye size={13} className="mr-1.5" />Re-enable on my tenant
+                    </Button>
+                  ) : (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      loading={actionLoading}
+                      onClick={async () => {
+                        setActionLoading(true);
+                        try {
+                          await onExclude();
+                        } finally {
+                          setActionLoading(false);
+                        }
+                      }}
+                      title="Stop enforcing this ban on your network only"
+                    >
+                      <EyeOff size={13} className="mr-1.5" />Exclude on my tenant
+                    </Button>
+                  )}
+                </div>
+              )
             )}
 
             {/* Clear suspicious — shown for suspicious IPs */}
@@ -884,6 +951,11 @@ function ActivityTab({ isAdmin }: ActivityTabProps) {
     } catch { toast.error('Bulk whitelist failed'); }
   };
 
+  /** Pull the server's explanation out of an axios error (e.g. the 403 telling
+   *  a non-origin tenant to use Exclude) instead of swallowing it. */
+  const serverError = (err: unknown, fallback: string): string =>
+    (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? fallback;
+
   const handleLiftBanById = async (banId: number, ipAddr?: string) => {
     try {
       await apiClient.delete(`/bans/${banId}`);
@@ -893,9 +965,37 @@ function ActivityTab({ isAdmin }: ActivityTabProps) {
         setSelectedIp(prev => prev ? { ...prev, status: 'clean' } : prev);
         setSelectedBanId(null);
       }
-    } catch {
-      toast.error('Failed to lift ban');
-      throw new Error('Failed to lift ban');
+    } catch (err) {
+      const msg = serverError(err, 'Failed to lift ban');
+      toast.error(msg);
+      throw new Error(msg);
+    }
+  };
+
+  /** Local override: stop enforcing a global ban on this tenant only. */
+  const handleExcludeBanById = async (banId: number, ipAddr?: string) => {
+    try {
+      await apiClient.post(`/bans/${banId}/exclude`);
+      toast.success('Ban excluded — no longer enforced on your tenant');
+      setRows(prev => prev.map(r => (!ipAddr || r.ip === ipAddr) ? { ...r, activeBanExcluded: true } : r));
+      setSelectedIp(prev => prev && (!ipAddr || prev.ip === ipAddr) ? { ...prev, activeBanExcluded: true } : prev);
+    } catch (err) {
+      const msg = serverError(err, 'Failed to exclude ban');
+      toast.error(msg);
+      throw new Error(msg);
+    }
+  };
+
+  const handleRemoveExclusionById = async (banId: number, ipAddr?: string) => {
+    try {
+      await apiClient.delete(`/bans/${banId}/exclude`);
+      toast.success('Ban re-enabled on your tenant');
+      setRows(prev => prev.map(r => (!ipAddr || r.ip === ipAddr) ? { ...r, activeBanExcluded: false } : r));
+      setSelectedIp(prev => prev && (!ipAddr || prev.ip === ipAddr) ? { ...prev, activeBanExcluded: false } : prev);
+    } catch (err) {
+      const msg = serverError(err, 'Failed to re-enable ban');
+      toast.error(msg);
+      throw new Error(msg);
     }
   };
 
@@ -1246,6 +1346,16 @@ function ActivityTab({ isAdmin }: ActivityTabProps) {
               }
               toast.error('Could not find active ban for this IP');
             }
+          }}
+          onExclude={async () => {
+            const banId = selectedBanId ?? selectedIp.activeBanId;
+            if (!banId) { toast.error('Could not find active ban for this IP'); return; }
+            await handleExcludeBanById(banId, selectedIp.ip);
+          }}
+          onRemoveExclusion={async () => {
+            const banId = selectedBanId ?? selectedIp.activeBanId;
+            if (!banId) { toast.error('Could not find active ban for this IP'); return; }
+            await handleRemoveExclusionById(banId, selectedIp.ip);
           }}
           onClear={handleClear}
           isAdmin={isAdmin}

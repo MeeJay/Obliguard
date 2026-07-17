@@ -967,6 +967,17 @@ export interface IpReputation {
   status?: IpStatus;
   /** ID of the currently active ban (only set when status='banned') */
   activeBanId?: number | null;
+  /** Scope of the active ban — drives whether Lift (global) or Exclude (local) is offered. */
+  activeBanScope?: BanScope | null;
+  /**
+   * True when the active ban originated from the calling tenant's own agents.
+   * Only the origin tenant — or the Default/master tenant (god view) — may lift a
+   * GLOBAL ban; every other tenant must override it locally via an exclusion.
+   * Never reveals WHICH other tenant a ban came from.
+   */
+  activeBanIsOrigin?: boolean;
+  /** True when the calling tenant has already excluded (locally overridden) the active ban. */
+  activeBanExcluded?: boolean;
   /**
    * True when the calling tenant has issued a "clear suspicious" for this IP,
    * snapshotting the current total_failures as a baseline.
@@ -1001,6 +1012,14 @@ export interface IpBan {
   originTenantId: number | null;
   /** origin_tenant_id resolved to a name (admin only) */
   originTenantName?: string;
+  /**
+   * True when THIS ban originated from the calling tenant's own agents.
+   * Exposed to every tenant (it reveals "it's mine", never which other tenant
+   * it came from). The origin tenant may lift a global ban outright — it is
+   * their detection, so their false positive must disappear everywhere. Any
+   * other tenant can only opt out locally via an exclusion.
+   */
+  isOriginTenant: boolean;
   bannedByUserId: number | null;
   bannedAt: string;
   expiresAt: string | null;
