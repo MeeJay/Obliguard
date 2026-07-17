@@ -2,6 +2,7 @@ import type { Server as SocketIOServer } from 'socket.io';
 import { db } from '../db';
 import type { IpBan, CreateBanRequest, BanScope } from '@obliview/shared';
 import { isMasterTenant } from '@obliview/shared';
+import { AppError } from '../middleware/errorHandler';
 import { logger } from '../utils/logger';
 import { serviceTemplateService } from './serviceTemplate.service';
 import { ipReputationService } from './ipReputation.service';
@@ -112,7 +113,7 @@ class BanService {
 
     // Non-admins can only create tenant-scoped bans
     if (!isAdmin && scope !== 'tenant') {
-      throw new Error('Only platform admins can create non-tenant-scoped bans');
+      throw new AppError(403, 'Only platform admins can create non-tenant-scoped bans');
     }
 
     // Reject if this IP already has an active ban
@@ -123,7 +124,7 @@ class BanService {
       })
       .first();
     if (existing) {
-      throw new Error('This IP is already banned');
+      throw new AppError(409, 'This IP is already banned');
     }
 
     const [row] = await db('ip_bans')
@@ -159,7 +160,7 @@ class BanService {
       .update({ scope: 'global', scope_id: null, tenant_id: null })
       .returning('*') as BanRow[];
 
-    if (!row) throw new Error('Ban not found');
+    if (!row) throw new AppError(404, 'Ban not found');
     _io?.emit('ban:updated', rowToBan(row, true));
     return rowToBan(row, true);
   }
@@ -167,19 +168,19 @@ class BanService {
   /** Lift (deactivate) a ban — platform admins only for global-scope bans */
   async lift(banId: number, tenantId: number, isAdmin: boolean): Promise<void> {
     const ban = await db('ip_bans').where('id', banId).first() as BanRow | undefined;
-    if (!ban) throw new Error('Ban not found');
+    if (!ban) throw new AppError(404, 'Ban not found');
 
     // A GLOBAL ban is authoritative for every tenant, so lifting it removes it
     // everywhere. That authority belongs ONLY to the default/master tenant (the
     // god view). Any other tenant must use excludeForTenant() to opt out locally
     // without affecting the tenant that created the ban.
     if (ban.scope === 'global' && !isMasterTenant(tenantId)) {
-      throw new Error('Global bans can only be lifted from the Default tenant. Use "Exclude" to override this ban on the current tenant.');
+      throw new AppError(403, 'Global bans can only be lifted from the Default tenant. Use "Exclude" to stop enforcing this ban on the current tenant.');
     }
 
     // Tenant admins can only lift their own tenant-scoped bans.
     if (!isAdmin && (ban.scope !== 'tenant' || ban.tenant_id !== tenantId)) {
-      throw new Error('Insufficient permissions to lift this ban');
+      throw new AppError(403, 'Insufficient permissions to lift this ban');
     }
 
     await db('ip_bans').where('id', banId).update({ is_active: false });
@@ -197,9 +198,9 @@ class BanService {
    */
   async excludeForTenant(banId: number, tenantId: number, userId: number): Promise<void> {
     const ban = await db('ip_bans').where('id', banId).first() as BanRow | undefined;
-    if (!ban) throw new Error('Ban not found');
-    if (ban.scope !== 'global') throw new Error('Only global bans can be excluded per-tenant');
-    if (!ban.is_active) throw new Error('Ban is no longer active');
+    if (!ban) throw new AppError(404, 'Ban not found');
+    if (ban.scope !== 'global') throw new AppError(400, 'Only global bans can be excluded per-tenant');
+    if (!ban.is_active) throw new AppError(409, 'Ban is no longer active');
 
     // Insert — ignore duplicate (already excluded)
     await db('ip_ban_exclusions')
@@ -217,7 +218,7 @@ class BanService {
     const deleted = await db('ip_ban_exclusions')
       .where({ ban_id: banId, tenant_id: tenantId })
       .delete();
-    if (!deleted) throw new Error('No exclusion found for this ban and tenant');
+    if (!deleted) throw new AppError(404, 'No exclusion found for this ban and tenant');
     _io?.emit('ban:exclusionRemoved', { banId, tenantId });
   }
 
