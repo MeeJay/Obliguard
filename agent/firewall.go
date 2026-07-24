@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // ── FirewallManager interface ─────────────────────────────────────────────────
@@ -344,10 +345,19 @@ func (f *NftablesFirewall) nftRateRules(chainName, chainTag string, r RateLimitR
 const fwdSetName = "obliguard"
 
 type FirewalldFirewall struct {
+	// mu serializes all firewall access. The command handler (cmd_ws.go) spawns
+	// a fresh goroutine per config response that runs BanIP/UnbanIP/Flush, while
+	// the heartbeat goroutine concurrently calls GetBannedIPs → init(). Without
+	// this lock those race the pendingAdd/pendingDel slices and the initialized
+	// flag (double init → double ipset-create + double --reload on a fresh box).
+	mu          sync.Mutex
 	hasIpset    bool
 	initialized bool
 	pendingAdd  []string
 	pendingDel  []string
+	// entriesFromFile caches the firewalld capability probe for
+	// --add-entries-from-file / --remove-entries-from-file: 0=unknown, 1=yes, -1=no.
+	entriesFromFile int
 }
 
 func (f *FirewalldFirewall) Name() string { return "firewalld" }
@@ -357,43 +367,99 @@ func (f *FirewalldFirewall) IsAvailable() bool {
 	return err == nil && strings.TrimSpace(string(out)) == "running"
 }
 
+//
+// init() is always called with f.mu held (from BanIP/UnbanIP/GetBannedIPs), so
+// it does NOT lock itself.
 func (f *FirewalldFirewall) init() {
 	if f.initialized {
 		return
 	}
 	f.initialized = true
-	// Try to create/use a firewalld ipset
-	err := exec.Command("firewall-cmd", "--permanent", "--new-ipset="+fwdSetName, "--type=hash:ip").Run()
-	if err != nil {
-		// May already exist
-		out, _ := exec.Command("firewall-cmd", "--permanent", "--get-ipsets").Output()
-		f.hasIpset = strings.Contains(string(out), fwdSetName)
-	} else {
+
+	// changed tracks whether we mutated PERMANENT config, so we reload at most
+	// once (and only when necessary) to materialize the runtime ipset + rules.
+	changed := false
+
+	// Create the ipset if missing (ipset *creation* is permanent-only). maxelem
+	// is raised well above any realistic ban volume (default is 65536; large
+	// fleets have reported 30K+ bans) so adds never silently fail on a full set.
+	permIpsets, _ := exec.Command("firewall-cmd", "--permanent", "--get-ipsets").Output()
+	if strings.Contains(string(permIpsets), fwdSetName) {
 		f.hasIpset = true
+	} else if err := exec.Command("firewall-cmd", "--permanent", "--new-ipset="+fwdSetName, "--type=hash:ip", "--option=maxelem=1048576").Run(); err == nil {
+		f.hasIpset = true
+		changed = true
+	} else {
+		// Re-check (created concurrently / already exists).
+		reCheck, _ := exec.Command("firewall-cmd", "--permanent", "--get-ipsets").Output()
+		f.hasIpset = strings.Contains(string(reCheck), fwdSetName)
 	}
-	if f.hasIpset {
-		// Ensure drop rules referencing the ipset exist
-		ruleIn := fmt.Sprintf("rule family=ipv4 source ipset=%s drop", fwdSetName)
-		ruleOut := fmt.Sprintf("rule family=ipv4 destination ipset=%s drop", fwdSetName)
+	if !f.hasIpset {
+		return
+	}
+
+	// Ensure the two ipset drop rich-rules exist (permanent). Only add when
+	// absent so agent restarts don't churn permanent config / force reloads.
+	existingRules, _ := exec.Command("firewall-cmd", "--permanent", "--list-rich-rules").Output()
+	rules := string(existingRules)
+	ruleIn := fmt.Sprintf("rule family=ipv4 source ipset=%s drop", fwdSetName)
+	ruleOut := fmt.Sprintf("rule family=ipv4 destination ipset=%s drop", fwdSetName)
+	if !strings.Contains(rules, "source ipset=\""+fwdSetName+"\"") && !strings.Contains(rules, "source ipset="+fwdSetName) {
 		exec.Command("firewall-cmd", "--permanent", "--add-rich-rule="+ruleIn).Run()
+		changed = true
+	}
+	if !strings.Contains(rules, "destination ipset=\""+fwdSetName+"\"") && !strings.Contains(rules, "destination ipset="+fwdSetName) {
 		exec.Command("firewall-cmd", "--permanent", "--add-rich-rule="+ruleOut).Run()
+		changed = true
+	}
 
-		// Migrate legacy per-IP rich-rules into ipset and remove them
-		f.migrateLegacyRichRules()
+	// Migrate legacy per-IP rich-rules into the ipset and remove them (one-time;
+	// bounded by the number of pre-existing legacy rules, ~0 on a fresh deploy).
+	if f.migrateLegacyRichRules() {
+		changed = true
+	}
 
+	// Reload ONCE — only if we changed permanent config, or if the RUNTIME state
+	// is incomplete. "Incomplete" means either the runtime ipset is absent, or
+	// one of the two drop rich-rules is missing at runtime. The rich-rule check
+	// closes a silent enforcement hole: a partial/failed prior reload can
+	// materialize the ipset in the runtime WITHOUT its referencing drop rules —
+	// Flush would then add IPs to a set nothing drops on, so GetBannedIPs reports
+	// them "banned" while attacker traffic still flows. Never reloaded again after
+	// init(): steady-state Flush() applies to the runtime set directly, so there
+	// is no per-cycle --reload storm.
+	needReload := changed
+	if !needReload {
+		runtimeIpsets, _ := exec.Command("firewall-cmd", "--get-ipsets").Output()
+		if !strings.Contains(string(runtimeIpsets), fwdSetName) {
+			needReload = true
+		} else {
+			runtimeRules, _ := exec.Command("firewall-cmd", "--list-rich-rules").Output()
+			rr := string(runtimeRules)
+			haveIn := strings.Contains(rr, "source ipset=\""+fwdSetName+"\"") || strings.Contains(rr, "source ipset="+fwdSetName)
+			haveOut := strings.Contains(rr, "destination ipset=\""+fwdSetName+"\"") || strings.Contains(rr, "destination ipset="+fwdSetName)
+			if !haveIn || !haveOut {
+				needReload = true
+			}
+		}
+	}
+	if needReload {
 		exec.Command("firewall-cmd", "--reload").Run()
 	}
 }
 
 // migrateLegacyRichRules finds individual "source address=X.X.X.X drop" rich-rules,
 // imports their IPs into the ipset, and removes the rules.
-func (f *FirewalldFirewall) migrateLegacyRichRules() {
+// migrateLegacyRichRules returns true if it migrated at least one rule (so the
+// caller knows permanent config changed and a single reload is warranted).
+func (f *FirewalldFirewall) migrateLegacyRichRules() bool {
 	out, err := exec.Command("firewall-cmd", "--permanent", "--list-rich-rules").Output()
 	if err != nil {
-		return
+		return false
 	}
 	ipRe := ipPattern()
-	migrated := 0
+	var legacyIPs []string
+	var legacyLines []string
 	for _, line := range strings.Split(string(out), "\n") {
 		line = strings.TrimSpace(line)
 		if !strings.Contains(line, "drop") {
@@ -405,19 +471,26 @@ func (f *FirewalldFirewall) migrateLegacyRichRules() {
 		}
 		// Extract IP from "rule family=ipv4 source address=X.X.X.X drop"
 		if m := ipRe.FindString(line); m != "" {
-			// Add IP to ipset
-			exec.Command("firewall-cmd", "--permanent", "--ipset="+fwdSetName, "--add-entry="+m).Run()
-			// Remove the legacy rich-rule
-			exec.Command("firewall-cmd", "--permanent", "--remove-rich-rule="+line).Run()
-			migrated++
+			legacyIPs = append(legacyIPs, m)
+			legacyLines = append(legacyLines, line)
 		}
 	}
-	if migrated > 0 {
-		log.Printf("Firewall: migrated %d legacy firewalld rich-rules to ipset", migrated)
+	if len(legacyIPs) == 0 {
+		return false
 	}
+	// Import all legacy IPs into the permanent ipset in as few calls as possible
+	// (batch), then remove the legacy rich-rules.
+	f.applyEntries(legacyIPs, true, true)
+	for _, line := range legacyLines {
+		exec.Command("firewall-cmd", "--permanent", "--remove-rich-rule="+line).Run()
+	}
+	log.Printf("Firewall: migrated %d legacy firewalld rich-rules to ipset", len(legacyIPs))
+	return true
 }
 
 func (f *FirewalldFirewall) BanIP(ip string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.init()
 	if f.hasIpset {
 		f.pendingAdd = append(f.pendingAdd, ip)
@@ -431,6 +504,8 @@ func (f *FirewalldFirewall) BanIP(ip string) error {
 }
 
 func (f *FirewalldFirewall) UnbanIP(ip string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.init()
 	if f.hasIpset {
 		f.pendingDel = append(f.pendingDel, ip)
@@ -443,31 +518,191 @@ func (f *FirewalldFirewall) UnbanIP(ip string) error {
 	return exec.Command("firewall-cmd", "--reload").Run()
 }
 
+// hasEntriesFromFile probes (once) whether this firewalld build supports the
+// batch --add-entries-from-file / --remove-entries-from-file options (firewalld
+// >= 0.6.0; present on all RHEL/Rocky/Alma 8/9 and Fedora). Result is cached.
+func (f *FirewalldFirewall) hasEntriesFromFile() bool {
+	if f.entriesFromFile == 0 {
+		out, _ := exec.Command("firewall-cmd", "--help").CombinedOutput()
+		if strings.Contains(string(out), "--add-entries-from-file") {
+			f.entriesFromFile = 1
+		} else {
+			f.entriesFromFile = -1
+		}
+	}
+	return f.entriesFromFile == 1
+}
+
+// writeEntriesFile writes IPs (one per line) to a temp file firewalld can read
+// via --add-entries-from-file / --remove-entries-from-file. Caller removes it.
+func writeEntriesFile(ips []string) (string, error) {
+	tmp, err := os.CreateTemp("", "obliguard-ipset-*.txt")
+	if err != nil {
+		return "", err
+	}
+	name := tmp.Name()
+	_, werr := tmp.WriteString(strings.Join(ips, "\n") + "\n")
+	cerr := tmp.Close()
+	if werr != nil {
+		os.Remove(name)
+		return "", werr
+	}
+	if cerr != nil {
+		os.Remove(name)
+		return "", cerr
+	}
+	return name, nil
+}
+
+// fwdBatchSize bounds how many IPs go into one --add-entries-from-file call, so
+// a single firewall-cmd invocation can't hold firewalld's dbus lock for an
+// unbounded time on a very large cold sync.
+const fwdBatchSize = 1000
+
+// applyEntries adds (add=true) or removes (add=false) a batch of IPs to/from the
+// obliguard ipset. permanent=false targets the live RUNTIME set (immediate
+// enforcement, no --reload, no permanent-XML reparse); permanent=true mirrors
+// into the on-disk config (persist + legacy migration). Empty batch = zero
+// processes.
+//
+// ADD and REMOVE take deliberately different paths:
+//
+//   - ADD uses --add-entries-from-file: ONE firewall-cmd process per <=1000-IP
+//     chunk (a tiny constant number of processes for a 4000-IP cold sync),
+//     instead of the old one-process-per-IP loop that was O(n) processes AND
+//     O(n^2) permanent-XML reparses — the root cause of the incident. Adding an
+//     already-present hash:ip entry only warns, so a duplicated add is safe. If
+//     a whole batch call fails (older firewalld that aborts the batch atomically,
+//     or a bad line), it falls back to a per-entry loop so one line can't drop
+//     the batch and stall convergence.
+//
+//   - REMOVE is ALWAYS per-entry, never --remove-entries-from-file. On the
+//     nftables backend, removing an entry that isn't present raises a CRITICAL
+//     COMMAND_FAILED (firewalld#794) that ABORTS the whole batch — so a single
+//     stale IP would drop every other valid removal, leave them reported by
+//     GetBannedIPs, and make the server re-send the same remove[] forever. An
+//     isolated per-entry .Run() swallows the "not present" error so removals are
+//     idempotent and always converge. Removals are tiny at steady state.
+func (f *FirewalldFirewall) applyEntries(ips []string, add bool, permanent bool) {
+	if len(ips) == 0 {
+		return
+	}
+	base := []string{}
+	if permanent {
+		base = append(base, "--permanent")
+	}
+	base = append(base, "--ipset="+fwdSetName)
+
+	if !add {
+		// Per-entry, idempotent, isolated — see firewalld#794 note above.
+		for _, ip := range ips {
+			args := append(append([]string{}, base...), "--remove-entry="+ip)
+			exec.Command("firewall-cmd", args...).Run()
+		}
+		return
+	}
+
+	if f.hasEntriesFromFile() {
+		if f.addEntriesFromFile(base, ips) {
+			return
+		}
+		// Batch path failed as a whole — fall through to the per-entry loop.
+		log.Printf("Firewall: batch add fell back to per-entry")
+	}
+
+	// Fallback for firewalld < 0.6 (no *-entries-from-file), or when the batch
+	// path failed. firewall-cmd argparse keeps only the LAST --add-entry, so
+	// entries CANNOT be combined into one call — we must loop. O(n) processes,
+	// but each is a cheap runtime (or permanent, no-reload) op with no ruleset
+	// rebuild — NOT the old O(n^2)+per-cycle-reload storm. Idempotent.
+	for _, ip := range ips {
+		args := append(append([]string{}, base...), "--add-entry="+ip)
+		exec.Command("firewall-cmd", args...).Run()
+	}
+}
+
+// addEntriesFromFile applies adds in <=fwdBatchSize chunks via
+// --add-entries-from-file (one firewall-cmd process per chunk). Returns true if
+// every chunk succeeded; false (caller falls back to per-entry) on any failure.
+func (f *FirewalldFirewall) addEntriesFromFile(base, ips []string) bool {
+	for _, chunk := range chunkStrings(ips, fwdBatchSize) {
+		path, err := writeEntriesFile(chunk)
+		if err != nil {
+			log.Printf("Firewall: could not write entries file: %v", err)
+			return false
+		}
+		args := append(append([]string{}, base...), "--add-entries-from-file="+path)
+		out, e := exec.Command("firewall-cmd", args...).CombinedOutput()
+		os.Remove(path)
+		if e != nil {
+			log.Printf("Firewall: batch add returned %v: %s", e, strings.TrimSpace(string(out)))
+			return false
+		}
+	}
+	return true
+}
+
+// persist mirrors the just-applied delta into PERMANENT config so bans survive
+// BOTH a reboot AND an unrelated `firewall-cmd --reload` (a reload repopulates
+// the runtime ipset from permanent, so anything not persisted would be silently
+// un-banned).
+//
+// It is deliberately SCOPED to the obliguard ipset (--permanent --ipset=...):
+// it touches only /etc/firewalld/ipsets/obliguard.xml and never runs --reload.
+// We do NOT use `firewall-cmd --runtime-to-permanent`: that serializes the
+// ENTIRE runtime firewall into permanent, which on a prod box freezes any
+// admin runtime-only change (a temporarily opened rescue port, a diagnostic
+// rule) into permanent the next time a single IP is banned, and wipes any
+// permanent-only rule not yet reloaded — unacceptable collateral on the exact
+// host class in the incident.
+//
+// Adds go through the same chunked batch path as runtime (a tiny constant
+// number of processes); removes are per-entry idempotent (firewalld#794). Only
+// reached on cycles that actually changed something — empty deltas never get
+// here (Flush short-circuits).
+func (f *FirewalldFirewall) persist(adds, dels []string) {
+	f.applyEntries(adds, true, true)
+	f.applyEntries(dels, false, true)
+}
+
 func (f *FirewalldFirewall) Flush() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if !f.hasIpset {
 		return nil
 	}
-	needReload := false
-	for _, ip := range f.pendingAdd {
-		exec.Command("firewall-cmd", "--permanent", "--ipset="+fwdSetName, "--add-entry="+ip).Run()
-		needReload = true
+	// Empty flush = zero firewall-cmd calls.
+	if len(f.pendingAdd) == 0 && len(f.pendingDel) == 0 {
+		return nil
 	}
-	for _, ip := range f.pendingDel {
-		exec.Command("firewall-cmd", "--permanent", "--ipset="+fwdSetName, "--remove-entry="+ip).Run()
-		needReload = true
-	}
+	adds := f.pendingAdd
+	dels := f.pendingDel
 	f.pendingAdd = nil
 	f.pendingDel = nil
-	if needReload {
-		return exec.Command("firewall-cmd", "--reload").Run()
-	}
+
+	// 1) Enforce on the RUNTIME ipset — immediate, no --reload, no permanent
+	//    reparse. Adds batch into a tiny constant number of firewall-cmd
+	//    processes; removes are per-entry idempotent.
+	f.applyEntries(adds, true, false)
+	f.applyEntries(dels, false, false)
+
+	// 2) Mirror the delta into PERMANENT (scoped to our ipset) for reboot AND
+	//    --reload survival. No per-cycle --reload, ever; only touches
+	//    obliguard.xml. Only cycles that changed something reach here.
+	f.persist(adds, dels)
 	return nil
 }
 
 func (f *FirewalldFirewall) GetBannedIPs() ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.init()
 	if f.hasIpset {
-		out, err := exec.Command("firewall-cmd", "--permanent", "--ipset="+fwdSetName, "--get-entries").Output()
+		// Read the RUNTIME set (drop --permanent): this is what is actually
+		// enforced, so the server's ban delta (desired − reported) converges to
+		// empty as soon as a runtime add lands, instead of trailing permanent
+		// writes and re-sending adds.
+		out, err := exec.Command("firewall-cmd", "--ipset="+fwdSetName, "--get-entries").Output()
 		if err != nil {
 			return nil, nil
 		}
