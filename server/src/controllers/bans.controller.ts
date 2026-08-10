@@ -2,6 +2,7 @@ import type { Request, Response, NextFunction } from 'express';
 import { banService } from '../services/ban.service';
 import { AppError } from '../middleware/errorHandler';
 import { db } from '../db';
+import { isMasterTenant } from '@obliview/shared';
 
 export interface CreateBanRequest {
   ip: string;
@@ -78,11 +79,22 @@ export async function bulkWhitelist(req: Request, res: Response, next: NextFunct
   try {
     const { ips, label } = req.body as { ips: string[]; label?: string };
     if (!Array.isArray(ips) || ips.length === 0) throw new AppError(400, 'ips array required');
+    // Global-vs-local is decided by the operating tenant (mirrors whitelistService):
+    // the Default/master tenant whitelists globally, any other tenant locally.
+    const scope = isMasterTenant(req.tenantId) ? 'global' : 'tenant';
+    const tenantId = scope === 'global' ? null : req.tenantId;
     let created = 0;
     for (const ip of ips) {
       const existing = await db('ip_whitelist').where({ ip }).first();
       if (existing) continue;
-      await db('ip_whitelist').insert({ ip, label: label || null, scope: 'global', created_by: req.session?.userId, tenant_id: req.tenantId });
+      await db('ip_whitelist').insert({
+        ip: db.raw('?::cidr', [ip]),
+        label: label || null,
+        scope,
+        scope_id: null,
+        created_by: req.session?.userId,
+        tenant_id: tenantId,
+      });
       created++;
     }
     res.json({ success: true, created });
@@ -171,8 +183,7 @@ export async function liftBan(req: Request, res: Response, next: NextFunction): 
       throw new AppError(400, 'Invalid ban ID');
     }
 
-    const isAdmin = req.session?.role === 'admin';
-    await banService.lift(id, req.tenantId, isAdmin);
+    await banService.lift(id, req.tenantId, req.session?.userId ?? 0);
 
     res.json({ success: true });
   } catch (err) {

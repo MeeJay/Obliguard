@@ -18,7 +18,11 @@ export function requireCapability(capability: Capability) {
       }
       if (req.session.role === 'admin') { next(); return; }
 
-      const caps = await permissionService.getUserCapabilities(req.session.userId, false);
+      const caps = await permissionService.getUserCapabilities(
+        req.session.userId,
+        false,
+        req.session.currentTenantId,
+      );
       if (!caps.includes(capability)) {
         next(new AppError(403, 'Insufficient permissions'));
         return;

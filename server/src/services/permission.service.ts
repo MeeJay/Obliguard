@@ -248,7 +248,7 @@ export const permissionService = {
    * Build the full UserPermissions object for the current user.
    * Sent to the client on login/session check so the UI can adapt.
    */
-  async getUserPermissions(userId: number, isAdmin: boolean): Promise<UserPermissions> {
+  async getUserPermissions(userId: number, isAdmin: boolean, tenantId?: number): Promise<UserPermissions> {
     if (isAdmin) {
       return { canCreate: true, teams: [], permissions: {}, capabilities: [...ALL_CAPABILITIES] };
     }
@@ -269,39 +269,68 @@ export const permissionService = {
       }
     }
 
-    const capabilities = await this.getUserCapabilities(userId, false);
+    const capabilities = await this.getUserCapabilities(userId, false, tenantId);
 
     return { canCreate, teams: teamIds, permissions, capabilities };
   },
 
   /**
-   * Resolve the feature capabilities a user effectively holds.
-   * Admin ⇒ all. Otherwise the union of team_permissions.capabilities across the
-   * user's teams (filtered to known capabilities). Viewing is NOT a capability —
-   * any authenticated tenant member may view; these gate mutations only.
+   * Resolve the feature capabilities a user effectively holds for a tenant.
+   *
+   * Platform admin ⇒ all. Otherwise capabilities are derived from TENANT
+   * MEMBERSHIP: Obligate transmits only a tenant *role* (the permission-set
+   * name) in the SSO assertion — it no longer ships a granular capability list
+   * (`permissionGroup.service.resolveForUserAndApp` returns `{ slug, role }`
+   * per tenant, no `capabilities`). The app therefore owns the role→capability
+   * matrix. Any member of the current tenant (admin or member) is operational:
+   * they may manage bans / whitelist / devices / groups *within that tenant*
+   * (the routes' tenant-scoping still constrains WHICH resources they touch;
+   * platform-admin-only actions stay behind `requireRole('admin')`).
+   *
+   * Viewing is NOT a capability — any authenticated tenant member may view;
+   * these gate mutations only. A tenantId is required to grant tenant-derived
+   * capabilities; without it we fall back to the legacy team_permissions store.
    */
-  async getUserCapabilities(userId: number, isAdmin: boolean): Promise<Capability[]> {
+  async getUserCapabilities(
+    userId: number,
+    isAdmin: boolean,
+    tenantId?: number,
+  ): Promise<Capability[]> {
     if (isAdmin) return [...ALL_CAPABILITIES];
 
-    const teamIds = await this.getUserTeamIds(userId);
-    if (teamIds.length === 0) return [];
-
-    const rows = await db('team_permissions')
-      .whereIn('team_id', teamIds)
-      .whereNotNull('capabilities')
-      .select('capabilities');
-
     const held = new Set<string>();
-    for (const r of rows) {
-      const raw = (r as { capabilities: unknown }).capabilities;
-      let arr: unknown;
-      try {
-        arr = typeof raw === 'string' ? JSON.parse(raw) : raw;
-      } catch {
-        arr = null;
+
+    // Primary source: tenant membership. Membership in the current tenant grants
+    // the full operational capability set (see doc comment above).
+    if (tenantId != null) {
+      const membership = await db('user_tenants')
+        .where({ user_id: userId, tenant_id: tenantId })
+        .first();
+      if (membership) {
+        for (const c of ALL_CAPABILITIES) held.add(c);
       }
-      if (Array.isArray(arr)) {
-        for (const c of arr) if (typeof c === 'string') held.add(c);
+    }
+
+    // Legacy/explicit source: capabilities pinned onto team_permissions rows.
+    // Obligate no longer populates these, but keep honouring any that exist so
+    // manual grants (or a future Obligate that ships capabilities) still work.
+    const teamIds = await this.getUserTeamIds(userId);
+    if (teamIds.length > 0) {
+      const rows = await db('team_permissions')
+        .whereIn('team_id', teamIds)
+        .whereNotNull('capabilities')
+        .select('capabilities');
+      for (const r of rows) {
+        const raw = (r as { capabilities: unknown }).capabilities;
+        let arr: unknown;
+        try {
+          arr = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        } catch {
+          arr = null;
+        }
+        if (Array.isArray(arr)) {
+          for (const c of arr) if (typeof c === 'string') held.add(c);
+        }
       }
     }
 

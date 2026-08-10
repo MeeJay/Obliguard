@@ -174,41 +174,59 @@ class BanService {
   }
 
   /**
-   * Lift (deactivate) a ban.
+   * Lift a ban. Authority is TENANT-based (the route already gates on the
+   * 'bans' capability), and the SCOPE of the lift is decided here so the client
+   * only ever needs one "Lift" button:
    *
-   * Authority is TENANT-based, not role-based (the route already gates on the
-   * 'bans' capability). For a GLOBAL ban — enforced on every tenant — lifting
-   * affects everyone, so it is allowed only for:
-   *   - the Default/master tenant (god view), and
-   *   - the ORIGIN tenant, i.e. the tenant whose own agents triggered the ban.
-   *     It is their detection: if they call it a false positive it must
-   *     disappear everywhere.
-   * Any OTHER tenant sees the ban but must use excludeForTenant() ("Exclude")
-   * to stop enforcing it locally, leaving every other tenant untouched.
+   *   - Default/master tenant (god view) → an AUTHORITATIVE GLOBAL lift: the ban
+   *     is deactivated for every tenant, in all cases.
+   *   - Any OTHER tenant → a LOCAL lift, always. It never removes the ban for
+   *     everyone, even a ban its own agents triggered:
+   *       • global ban  → a per-tenant exclusion (ban stays active elsewhere);
+   *       • its own tenant/group/agent-scoped ban → deactivated (it was only
+   *         ever enforced on this tenant anyway).
+   *     A ban belonging to another tenant is never enforced here and cannot be
+   *     lifted from this tenant.
    */
-  async lift(banId: number, tenantId: number, _isAdmin: boolean): Promise<void> {
+  async lift(banId: number, tenantId: number, userId: number): Promise<void> {
     const ban = await db('ip_bans').where('id', banId).first() as BanRow | undefined;
     if (!ban) throw new AppError(404, 'Ban not found');
 
-    const isGodView = isMasterTenant(tenantId);
-    const isOrigin = ban.origin_tenant_id != null && ban.origin_tenant_id === tenantId;
+    const deactivateGlobally = async (): Promise<void> => {
+      await db('ip_bans').where('id', banId).update({ is_active: false });
+      _io?.emit('ban:lifted', { id: banId });
+      // Push unban to MikroTik devices (fire-and-forget)
+      import('./mikrotik/mikrotikBanSync.service')
+        .then(({ mikrotikBanSync }) => mikrotikBanSync.pushBanToAll(ban.ip, 'unban'))
+        .catch(() => {});
+    };
 
-    if (ban.scope === 'global') {
-      if (!isGodView && !isOrigin) {
-        throw new AppError(403, 'This global ban originates from another tenant. Use "Exclude" to stop enforcing it on your tenant — the other tenants keep it.');
-      }
-    } else if (!isGodView && ban.tenant_id !== tenantId) {
-      // Tenant/group/agent-scoped ban: only its owning tenant (or god view).
-      throw new AppError(403, 'Insufficient permissions to lift this ban');
+    // Default tenant: authoritative global lift, whatever the scope.
+    if (isMasterTenant(tenantId)) {
+      if (!ban.is_active) throw new AppError(409, 'Ban is no longer active');
+      await deactivateGlobally();
+      return;
     }
 
-    await db('ip_bans').where('id', banId).update({ is_active: false });
-    _io?.emit('ban:lifted', { id: banId });
+    // Non-Default tenant: the lift is ALWAYS local to this tenant.
+    if (ban.scope === 'global') {
+      if (!ban.is_active) throw new AppError(409, 'Ban is no longer active');
+      // Neutralise locally via a per-tenant exclusion; other tenants keep it.
+      await db('ip_ban_exclusions')
+        .insert({ ban_id: banId, tenant_id: tenantId, created_by: userId })
+        .onConflict(['ban_id', 'tenant_id'])
+        .ignore();
+      _io?.emit('ban:excluded', { banId, tenantId });
+      return;
+    }
 
-    // Push unban to MikroTik devices (fire-and-forget)
-    import('./mikrotik/mikrotikBanSync.service')
-      .then(({ mikrotikBanSync }) => mikrotikBanSync.pushBanToAll(ban.ip, 'unban'))
-      .catch(() => {});
+    // Non-global ban: only its owning tenant may lift it. Since it is only ever
+    // enforced on that tenant, deactivating it IS the local action.
+    if (ban.tenant_id !== tenantId) {
+      throw new AppError(403, 'This ban does not belong to your tenant');
+    }
+    if (!ban.is_active) throw new AppError(409, 'Ban is no longer active');
+    await deactivateGlobally();
   }
 
   /**

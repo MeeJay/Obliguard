@@ -351,27 +351,13 @@ export function BansPage() {
     try {
       const res = await fetch(`/api/bans/${liftingBan.id}`, { method: 'DELETE' });
       if (!res.ok) throw new Error('Failed to lift ban');
-      toast.success(`Ban on ${liftingBan.ip} lifted`);
+      toast.success(isMaster ? `Ban on ${liftingBan.ip} lifted` : `Ban on ${liftingBan.ip} lifted on your tenant`);
       setLiftingBan(null);
       load();
     } catch {
       toast.error('Failed to lift ban');
     } finally {
       setConfirmLiftLoading(false);
-    }
-  };
-
-  const handleExclude = async (ban: IpBan) => {
-    setExcludingBanId(ban.id);
-    try {
-      const res = await fetch(`/api/bans/${ban.id}/exclude`, { method: 'POST' });
-      if (!res.ok) throw new Error('Failed to exclude ban');
-      toast.success(`${ban.ip} excluded from your network`);
-      load();
-    } catch {
-      toast.error('Failed to exclude ban');
-    } finally {
-      setExcludingBanId(null);
     }
   };
 
@@ -535,33 +521,13 @@ export function BansPage() {
                     </td>
                     <td className="px-4 py-3 text-right">
                       <div className="flex items-center justify-end gap-1 flex-wrap">
-                        {/* Lift ban: GLOBAL bans only from the Default tenant (lifts everywhere);
-                            tenant-scoped bans by their owner / any admin. */}
-                        {ban.isActive && !isExpired(ban.expiresAt) &&
-                          (ban.scope === 'global' ? (isMaster && isAdmin) : (isAdmin || ban.scope === 'tenant')) && (
-                          <Button
-                            size="sm"
-                            variant="secondary"
-                            onClick={() => setLiftingBan(ban)}
-                          >
-                            <Shield size={11} className="mr-1" />Lift ban
-                          </Button>
-                        )}
-                        {/* Promote: admin only, non-global bans */}
-                        {isAdmin && ban.scope !== 'global' && ban.isActive && !isExpired(ban.expiresAt) && (
-                          <Button
-                            size="sm"
-                            variant="secondary"
-                            loading={promotingBanId === ban.id}
-                            onClick={() => handlePromoteGlobal(ban)}
-                          >
-                            <Globe size={11} className="mr-1" />Promote global
-                          </Button>
-                        )}
-                        {/* Exclude / Remove exclusion: any NON-default tenant, on global bans
-                            (per-tenant override — the Default tenant lifts globally instead). */}
-                        {!isMaster && isAdmin && ban.scope === 'global' && ban.isActive && !isExpired(ban.expiresAt) && (
-                          ban.isExcludedByTenant ? (
+                        {/* Lift ban — ONE button; the server decides its scope:
+                            the Default/master tenant lifts GLOBALLY (for every
+                            tenant), any other tenant lifts LOCALLY (a per-tenant
+                            exclusion for global bans). Once a non-Default tenant
+                            has locally lifted a global ban we show "Re-enable". */}
+                        {ban.isActive && !isExpired(ban.expiresAt) && (
+                          !isMaster && ban.scope === 'global' && ban.isExcludedByTenant ? (
                             <Button
                               size="sm"
                               variant="secondary"
@@ -575,13 +541,23 @@ export function BansPage() {
                             <Button
                               size="sm"
                               variant="secondary"
-                              loading={excludingBanId === ban.id}
-                              onClick={() => handleExclude(ban)}
-                              title="Exclude this ban from your network without lifting it globally"
+                              onClick={() => setLiftingBan(ban)}
+                              title={isMaster ? 'Lift this ban for every tenant' : 'Lift this ban on your tenant (other tenants keep it)'}
                             >
-                              <EyeOff size={11} className="mr-1" />Exclude
+                              <Shield size={11} className="mr-1" />Lift ban
                             </Button>
                           )
+                        )}
+                        {/* Promote: admin only, non-global bans */}
+                        {isAdmin && ban.scope !== 'global' && ban.isActive && !isExpired(ban.expiresAt) && (
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            loading={promotingBanId === ban.id}
+                            onClick={() => handlePromoteGlobal(ban)}
+                          >
+                            <Globe size={11} className="mr-1" />Promote global
+                          </Button>
                         )}
                       </div>
                     </td>
@@ -632,7 +608,9 @@ export function BansPage() {
       {liftingBan && (
         <ConfirmDialog
           title="Lift ban"
-          message={`Are you sure you want to lift the ban on ${liftingBan.ip}? This will allow the IP to connect again.`}
+          message={isMaster
+            ? `Lift the ban on ${liftingBan.ip} for every tenant? This removes it globally and the IP will be able to connect again.`
+            : `Lift the ban on ${liftingBan.ip} on your tenant? Your agents stop enforcing it; other tenants keep it.`}
           confirmLabel="Lift ban"
           variant="primary"
           loading={confirmLiftLoading}

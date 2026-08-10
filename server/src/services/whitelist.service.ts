@@ -1,6 +1,7 @@
 import { db } from '../db';
 import type { IpWhitelist, CreateWhitelistRequest, WhitelistScope } from '@obliview/shared';
 import { isMasterTenant } from '@obliview/shared';
+import { AppError } from '../middleware/errorHandler';
 
 // ── Row interface ────────────────────────────────────────────────────────────
 
@@ -46,7 +47,8 @@ class WhitelistService {
     const query = db<IpWhitelistRow>('ip_whitelist');
 
     if (scope === 'global') {
-      if (!isAdmin) throw new Error('Only admins can view global whitelist entries');
+      // Global entries apply to every tenant and are not locally overridable, so
+      // any authenticated member may VIEW them (removal is still gated in delete()).
       query.where({ scope: 'global' });
     } else if (scope === 'tenant') {
       if (!isAdmin) {
@@ -92,16 +94,33 @@ class WhitelistService {
 
   /**
    * Creates a new whitelist entry.
+   *
+   * The global-vs-local dimension is decided by the OPERATING TENANT, not by the
+   * caller, mirroring the ban model:
+   *   - Default/master tenant → a GLOBAL entry (applies to every tenant and is
+   *     NOT locally overridable — no other tenant can remove it).
+   *   - Any other tenant → a LOCAL (tenant-scoped) entry.
+   * Explicit group/agent scopes are kept as-is (local sub-scopes owned by the
+   * tenant); a non-Default tenant can therefore never mint a global entry.
    */
   async create(
     data: CreateWhitelistRequest,
     userId: number,
     tenantId: number,
   ): Promise<IpWhitelist> {
-    const scope: WhitelistScope = data.scope ?? 'tenant';
+    const requested: WhitelistScope = data.scope ?? 'tenant';
 
-    if ((scope === 'group' || scope === 'agent') && data.scopeId == null) {
-      throw new Error('scopeId is required for group/agent scope');
+    let scope: WhitelistScope;
+    let scopeId: number | null = null;
+    if (requested === 'group' || requested === 'agent') {
+      if (data.scopeId == null) {
+        throw new AppError(400, 'scopeId is required for group/agent scope');
+      }
+      scope = requested;
+      scopeId = data.scopeId;
+    } else {
+      // Main whitelist dimension: authority derived from the operating tenant.
+      scope = isMasterTenant(tenantId) ? 'global' : 'tenant';
     }
 
     // Validate the IP/CIDR value via Postgres (will throw on invalid input)
@@ -110,37 +129,39 @@ class WhitelistService {
         ip: db.raw('?::cidr', [data.ip]),
         label: data.label ?? null,
         scope,
-        scope_id: data.scopeId ?? null,
+        scope_id: scopeId,
         tenant_id: scope === 'global' ? null : tenantId,
         created_by: userId,
         created_at: new Date(),
       } as unknown as IpWhitelistRow)
       .returning('*');
 
-    if (!row) throw new Error('Failed to create whitelist entry');
+    if (!row) throw new AppError(500, 'Failed to create whitelist entry');
     return rowToWhitelist(row);
   }
 
   /**
    * Deletes a whitelist entry by ID.
-   * Tenants can only delete their own entries; admins can delete any.
+   *
+   * A GLOBAL entry is authoritative and NOT locally overridable: only a platform
+   * admin or the Default/master tenant may remove it. A non-Default tenant may
+   * only remove its own local (tenant/group/agent) entries.
    */
   async delete(id: number, tenantId: number, isAdmin: boolean): Promise<void> {
     const row = await db<IpWhitelistRow>('ip_whitelist').where({ id }).first();
-    if (!row) throw new Error('Whitelist entry not found');
+    if (!row) throw new AppError(404, 'Whitelist entry not found');
 
-    if (!isAdmin) {
-      // Non-admin: must belong to this tenant and be a non-global scope
+    if (!isAdmin && !isMasterTenant(tenantId)) {
       if (row.scope === 'global') {
-        throw new Error('Only admins can delete global whitelist entries');
+        throw new AppError(403, 'A global whitelist entry can only be removed from the Default tenant');
       }
       if (row.tenant_id !== tenantId) {
-        throw new Error('Whitelist entry does not belong to your tenant');
+        throw new AppError(403, 'Whitelist entry does not belong to your tenant');
       }
     }
 
     const deleted = await db('ip_whitelist').where({ id }).del();
-    if (!deleted) throw new Error('Whitelist entry not found');
+    if (!deleted) throw new AppError(404, 'Whitelist entry not found');
   }
 
   /**

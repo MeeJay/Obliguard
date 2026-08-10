@@ -7,12 +7,15 @@ import {
   X,
   AlertTriangle,
   Globe,
+  Lock,
 } from 'lucide-react';
 import type { IpWhitelist, WhitelistScope, CreateWhitelistRequest } from '@obliview/shared';
+import { isMasterTenant } from '@obliview/shared';
 import { Button } from '@/components/common/Button';
 import { Input } from '@/components/common/Input';
 import { cn } from '@/utils/cn';
 import { anonIp } from '@/utils/anonymize';
+import { useTenantStore } from '@/store/tenantStore';
 import toast from 'react-hot-toast';
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -103,13 +106,21 @@ interface AddWhitelistModalProps {
 }
 
 function AddWhitelistModal({ onSave, onClose }: AddWhitelistModalProps) {
+  // The global-vs-local dimension is decided by the operating tenant (mirrors
+  // the server): the Default/master tenant issues GLOBAL entries (apply to
+  // every tenant, not locally overridable); any other tenant issues LOCAL
+  // (tenant-scoped) entries. group/agent remain explicit sub-scopes.
+  const currentTenantId = useTenantStore(s => s.currentTenantId);
+  const isMaster = currentTenantId != null && isMasterTenant(currentTenantId);
+  const mainScope: WhitelistScope = isMaster ? 'global' : 'tenant';
+
   const [ip, setIp] = useState('');
   const [label, setLabel] = useState('');
-  const [scope, setScope] = useState<WhitelistScope>('global');
+  const [scope, setScope] = useState<WhitelistScope>(mainScope);
   const [scopeId, setScopeId] = useState('');
   const [saving, setSaving] = useState(false);
 
-  const needsScopeId = scope !== 'global';
+  const needsScopeId = scope === 'group' || scope === 'agent';
 
   const handleSubmit = async () => {
     if (!ip.trim()) {
@@ -170,11 +181,17 @@ function AddWhitelistModal({ onSave, onClose }: AddWhitelistModalProps) {
               onChange={e => { setScope(e.target.value as WhitelistScope); setScopeId(''); }}
               className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
             >
-              <option value="global">Global</option>
-              <option value="tenant">Tenant</option>
+              <option value={mainScope}>
+                {isMaster ? 'Global (all tenants)' : 'My tenant (local)'}
+              </option>
               <option value="group">Group</option>
               <option value="agent">Agent</option>
             </select>
+            <p className="text-xs text-text-muted">
+              {isMaster
+                ? 'From the Default tenant, entries are global and apply to every tenant (not locally overridable).'
+                : 'Your entries are local to your tenant. Global entries can only be issued from the Default tenant.'}
+            </p>
           </div>
 
           {needsScopeId && (
@@ -212,6 +229,10 @@ const SCOPE_FILTERS: { key: WhitelistScope | 'all'; label: string }[] = [
 ];
 
 export function WhitelistPage() {
+  // A global entry is authoritative and not locally overridable: only the
+  // Default/master tenant can remove it.
+  const currentTenantId = useTenantStore(s => s.currentTenantId);
+  const isMaster = currentTenantId != null && isMasterTenant(currentTenantId);
   const [entries, setEntries] = useState<IpWhitelist[]>([]);
   const [loading, setLoading] = useState(true);
   const [scopeFilter, setScopeFilter] = useState<WhitelistScope | 'all'>('all');
@@ -372,13 +393,22 @@ export function WhitelistPage() {
                       {formatDate(entry.createdAt)}
                     </td>
                     <td className="px-4 py-3 text-right">
-                      <button
-                        onClick={() => setDeletingEntry(entry)}
-                        className="p-1.5 rounded-md text-text-muted hover:text-status-down hover:bg-status-down/10 transition-colors"
-                        title="Remove from whitelist"
-                      >
-                        <Trash2 size={14} />
-                      </button>
+                      {(isMaster || entry.scope !== 'global') ? (
+                        <button
+                          onClick={() => setDeletingEntry(entry)}
+                          className="p-1.5 rounded-md text-text-muted hover:text-status-down hover:bg-status-down/10 transition-colors"
+                          title="Remove from whitelist"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      ) : (
+                        <span
+                          className="inline-flex p-1.5 text-text-muted/60"
+                          title="Global entry — only the Default tenant can remove it"
+                        >
+                          <Lock size={14} />
+                        </span>
+                      )}
                     </td>
                   </tr>
                 ))}
