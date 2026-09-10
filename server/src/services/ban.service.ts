@@ -26,6 +26,8 @@ interface BanRow {
   tenant_id: number | null;
   origin_tenant_id: number | null;
   origin_tenant_name?: string;
+  /** Set when the ban came from an external Obli app via /api/external-bans. Nullable. */
+  origin_app: string | null;
   banned_by_user_id: number | null;
   banned_at: Date;
   expires_at: Date | null;
@@ -308,6 +310,68 @@ class BanService {
     const remove = [...currentSet].filter((ip) => !shouldBeBanned.has(ip));
 
     return { add, remove };
+  }
+
+  /**
+   * Create (or refresh) a ban received from another Obli suite app via `/api/external-bans`.
+   *
+   * The caller is authenticated via a delegation token whose `sub` starts with `app:` — this
+   * function trusts the source app's identity to record `origin_app`, but is idempotent:
+   *   - New IP → INSERT with ban_type='external', scope='global'
+   *   - Existing active ban → keep the row, extend expires_at if the new window is longer
+   *     (null = permanent absorbs any timestamp). Preserves the audit trail (banned_at,
+   *     original reason) but bumps the record so downstream sync workers pick up the refresh.
+   *
+   * Non-active existing row (previously lifted) is REACTIVATED — the source app pushed it
+   * again, presumably after a fresh hit. If an operator manually unbanned this IP, that hit
+   * will re-ban it; the operator can add it to the whitelist to make the lift stick.
+   */
+  async createFromExternal(args: {
+    ip: string;
+    reason: string | null;
+    sourceApp: string;                  // 'oblihub' etc.
+    expiresAt: Date | null;             // null = permanent
+    masterTenantId: number;             // the platform tenant that owns cross-suite bans
+  }): Promise<{ ban: IpBan; isNew: boolean }> {
+    const existing = await db('ip_bans').where({ ip: args.ip }).first() as BanRow | undefined;
+    if (existing) {
+      // Reconcile expires_at (null = permanent wins).
+      let nextExpires: Date | null = existing.expires_at ? new Date(existing.expires_at as unknown as string) : null;
+      if (args.expiresAt == null) nextExpires = null;
+      else if (nextExpires != null && args.expiresAt > nextExpires) nextExpires = args.expiresAt;
+      const [row] = await db('ip_bans').where({ id: existing.id }).update({
+        is_active: true,
+        expires_at: nextExpires,
+        // Keep the original ban_type ('auto'/'manual') if it existed — don't demote it to
+        // 'external'. If ban_type was previously 'external' and origin_app was NULL, backfill.
+        origin_app: existing.ban_type === 'external' ? args.sourceApp : existing.ban_type === 'auto' || existing.ban_type === 'manual' ? existing.origin_app : args.sourceApp,
+      }).returning('*') as BanRow[];
+      _io?.emit('ban:updated', rowToBan(row));
+      return { ban: rowToBan(row), isNew: false };
+    }
+
+    const [row] = await db('ip_bans').insert({
+      ip: args.ip,
+      cidr_prefix: null,
+      reason: args.reason,
+      ban_type: 'external',
+      scope: 'global',
+      scope_id: null,
+      tenant_id: null,
+      origin_tenant_id: args.masterTenantId,
+      origin_app: args.sourceApp,
+      banned_by_user_id: null,
+      expires_at: args.expiresAt,
+      is_active: true,
+    }).returning('*') as BanRow[];
+    _io?.emit('ban:created', rowToBan(row));
+
+    // Sync downstream (MikroTik + remote blocklists) — same fire-and-forget as manual bans.
+    import('./mikrotik/mikrotikBanSync.service')
+      .then(({ mikrotikBanSync }) => mikrotikBanSync.pushBanToAll(args.ip, 'ban'))
+      .catch(() => {});
+
+    return { ban: rowToBan(row), isNew: true };
   }
 }
 

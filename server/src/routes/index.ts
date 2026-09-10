@@ -29,8 +29,14 @@ import permissionSetsRoutes from './permissionSets.routes';
 import mikrotikRoutes from './mikrotik.routes';
 import remoteBlocklistRoutes from './remoteBlocklist.routes';
 import rateLimitPoliciesRoutes from './rateLimitPolicies.routes';
+import externalBansRoutes from './externalBans.routes';
 
 const router = Router();
+
+// ── Cross-suite endpoints (delegation-token auth, not user session) ──────────
+// Called by sibling Obli apps (Oblihub honeypot pushes here). Auth is JWKS-verified via
+// Obligate; no requireAuth / requireTenant.
+router.use('/external-bans', externalBansRoutes);
 
 // ── Global (no tenant required) ──────────────────────────────────────────────
 router.use('/auth', authRoutes);
