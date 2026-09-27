@@ -17,11 +17,22 @@ export function LoginPage() {
 
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
-  const [error, setError] = useState(searchParams.get('error') === 'sso_failed' ? 'SSO authentication failed. Please try local login.' : '');
+  // sso_failed: the SSO round-trip failed. sso_misconfigured: this address is
+  // not an allowed SSO origin (configuration issue, not an outage) — never
+  // auto-redirect or poll in that case, it would only bounce back here.
+  const ssoError = searchParams.get('error');
+  const ssoMisconfigured = ssoError === 'sso_misconfigured';
+  const [error, setError] = useState(
+    ssoError === 'sso_failed'
+      ? 'SSO authentication failed. Please try local login.'
+      : ssoMisconfigured
+        ? t('login.ssoMisconfigured', 'Single sign-on is not available on this address. Open the configured URL of this instance, or sign in with a local account.')
+        : '',
+  );
   const [serverVersion, setServerVersion] = useState<string | null>(null);
 
-  // If we arrived here with ?error=sso_failed, don't auto-redirect to Obligate again
-  const ssoFailed = searchParams.get('error') === 'sso_failed';
+  // If we arrived here after an SSO failure, don't auto-redirect to Obligate again
+  const ssoFailed = ssoError === 'sso_failed' || ssoMisconfigured;
 
   const [step, setStep] = useState<Step>('credentials');
   const [mfaMethods, setMfaMethods] = useState<{ totp: boolean; email: boolean }>({ totp: false, email: false });
@@ -77,14 +88,16 @@ export function LoginPage() {
       .catch(() => { if (!ssoFailed) checkSso(); });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Poll Obligate every 60s when unavailable — redirect as soon as it comes back
+  // Poll Obligate every 60s when unavailable — redirect as soon as it comes back.
+  // Not on a misconfigured address (it would bounce back every minute) and not
+  // during the 2FA step (the redirect would throw the user out of it).
   useEffect(() => {
-    if (ssoState !== 'unavailable') return;
+    if (ssoState !== 'unavailable' || ssoMisconfigured || step === '2fa') return;
     const interval = setInterval(() => {
       checkSso();
     }, 60_000);
     return () => clearInterval(interval);
-  }, [ssoState]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [ssoState, step]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -158,7 +171,7 @@ export function LoginPage() {
           <p className="mt-2 text-sm text-text-secondary">{t('login.title')}</p>
         </div>
 
-        {ssoState === 'unavailable' && (
+        {ssoState === 'unavailable' && !ssoMisconfigured && (
           <div className="bg-status-pending-bg border border-status-pending/30 rounded-lg p-3 text-sm text-status-pending">
             {t('login.ssoUnavailable', 'Centralized login (Obligate) is unavailable. Using local authentication.')}
           </div>

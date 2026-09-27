@@ -175,7 +175,7 @@ export function GlobalAddAgentModal() {
                               </div>
                             </div>
                             <a
-                              href={`/api/agent/installer/wizard.exe?keyId=${selectedKey.id}`}
+                              href={`/api/agent/installer/wizard.exe?keyId=${selectedKey.id}&server=${encodeURIComponent(window.location.origin)}`}
                               download="obliguard-installer-wizard.exe"
                               className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-accent text-white hover:bg-accent/80 transition-colors"
                             >
@@ -217,7 +217,7 @@ export function GlobalAddAgentModal() {
                               </div>
                             </div>
                             <a
-                              href={`/api/agent/installer/wizard-linux-amd64?keyId=${selectedKey.id}`}
+                              href={`/api/agent/installer/wizard-linux-amd64?keyId=${selectedKey.id}&server=${encodeURIComponent(window.location.origin)}`}
                               download="obliguard-installer-wizard-linux-amd64"
                               className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-accent text-white hover:bg-accent/80 transition-colors"
                             >

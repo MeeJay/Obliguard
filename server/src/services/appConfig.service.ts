@@ -25,7 +25,7 @@ export const appConfigService = {
     /** Extract only the URL from a JSON config blob (never expose apiKey) */
     const parseUrl = (key: string): string | null => {
       if (!map[key]) return null;
-      try { return (JSON.parse(map[key]) as { url?: string }).url || null; } catch { return null; }
+      try { return (JSON.parse(map[key]) as { url?: string }).url?.trim() || null; } catch { return null; }
     };
 
     return {
@@ -49,7 +49,7 @@ export const appConfigService = {
     if (!raw) return { url: null, apiKeySet: false, enabled: enabled === 'true' };
     try {
       const cfg = JSON.parse(raw) as { url?: string; apiKey?: string };
-      return { url: cfg.url ?? null, apiKeySet: !!cfg.apiKey, enabled: enabled === 'true' };
+      return { url: cfg.url?.trim() || null, apiKeySet: !!cfg.apiKey?.trim(), enabled: enabled === 'true' };
     } catch { return { url: null, apiKeySet: false, enabled: enabled === 'true' }; }
   },
 
@@ -58,15 +58,18 @@ export const appConfigService = {
     if (!raw) return { url: null, apiKey: null };
     try {
       const cfg = JSON.parse(raw) as { url?: string; apiKey?: string };
-      return { url: cfg.url ?? null, apiKey: cfg.apiKey ?? null };
+      // Trimmed on read too, for rows saved before values were normalised: a
+      // stray whitespace would make the hashed public client id mismatch.
+      return { url: cfg.url?.trim() || null, apiKey: cfg.apiKey?.trim() || null };
     } catch { return { url: null, apiKey: null }; }
   },
 
   async patchObligateConfig(patch: { url?: string | null; apiKey?: string | null; enabled?: boolean }): Promise<ObligateConfig> {
     const existing = await this.getObligateRaw();
+    const newKey = typeof patch.apiKey === 'string' ? patch.apiKey.trim() : patch.apiKey;
     const merged = {
-      url: 'url' in patch ? (patch.url ?? null) : existing.url,
-      apiKey: ('apiKey' in patch && patch.apiKey) ? patch.apiKey : existing.apiKey,
+      url: 'url' in patch ? (patch.url?.trim() || null) : existing.url,
+      apiKey: ('apiKey' in patch && newKey) ? newKey : existing.apiKey,
     };
     await this.set(OBLIGATE_CONFIG_KEY, JSON.stringify(merged));
     if ('enabled' in patch) {

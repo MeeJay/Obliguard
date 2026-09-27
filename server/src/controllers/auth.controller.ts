@@ -8,6 +8,7 @@ import { AppError } from '../middleware/errorHandler';
 import { obligateService } from '../services/obligate.service';
 import { db } from '../db';
 import { config } from '../config';
+import { regenerateSession } from '../utils/regenerateSession';
 import type { LoginInput } from '../validators/auth.schema';
 
 /** Helper: resolve & store the first accessible tenant in the session. */
@@ -40,6 +41,9 @@ export const authController = {
       if (!user) {
         throw new AppError(401, 'Invalid username or password');
       }
+
+      // Fresh session id before any identity is written (anti session-fixation).
+      await regenerateSession(req);
 
       const hasMfa = user.totpEnabled || user.emailOtpEnabled;
 

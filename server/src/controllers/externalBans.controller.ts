@@ -88,3 +88,53 @@ export async function postExternalBan(req: Request, res: Response, next: NextFun
     res.status(isNew ? 201 : 200).json({ success: true, data: { banId: ban.id, isNew, ip: ban.ip } });
   } catch (err) { next(err); }
 }
+
+/**
+ * DELETE /api/external-bans/:ip
+ *
+ * Withdraw a ban previously pushed by the calling app. Filtered by origin_app from the
+ * delegation token — an admin from app A cannot delete app B's bans, even if both share this
+ * Obliguard tenant. Returns 200 with { deleted: n } even when n=0 so the caller can distinguish
+ * "we tried" from "auth failed". Idempotent — deleting a non-existent ban is not an error.
+ */
+export async function deleteExternalBan(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const delegated = (req as unknown as { delegated: { subjectType: 'user' | 'app'; sourceAppType: string | null } }).delegated;
+    if (delegated.subjectType !== 'app' || !delegated.sourceAppType) {
+      res.status(403).json({ success: false, code: 'user_token_refused', error: 'External bans require an app-scoped delegation token' });
+      return;
+    }
+    if (!ALLOWED_SOURCE_APPS.includes(delegated.sourceAppType)) {
+      res.status(403).json({ success: false, code: 'source_app_not_allowed', error: `App ${delegated.sourceAppType} is not allowed to manage bans` });
+      return;
+    }
+    const ip = req.params.ip;
+    if (!ip || ip.length > 45) {
+      res.status(400).json({ success: false, error: 'ip required (string, ≤ 45 chars)' });
+      return;
+    }
+    const deleted = await db('ip_bans')
+      .where({ ip, origin_app: delegated.sourceAppType })
+      .update({ is_active: false, updated_at: new Date() });
+    logger.info({ ip, sourceApp: delegated.sourceAppType, deleted }, 'external ban withdrawn');
+    res.json({ success: true, data: { ip, deleted } });
+  } catch (err) { next(err); }
+}
+
+/**
+ * GET /api/external-bans/ping
+ *
+ * End-to-end auth chain probe. No side effects. Returns 200 with the calling app's identity
+ * if the delegation token validates. Used by Oblihub's Settings 'Test' button to distinguish
+ * 'target unreachable' from 'token invalid' from 'all good'.
+ */
+export async function pingExternal(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const delegated = (req as unknown as { delegated: { subjectType: 'user' | 'app'; sourceAppType: string | null } }).delegated;
+    if (delegated.subjectType !== 'app' || !delegated.sourceAppType) {
+      res.status(403).json({ success: false, code: 'user_token_refused', error: 'External endpoints require an app-scoped delegation token' });
+      return;
+    }
+    res.json({ success: true, data: { sourceApp: delegated.sourceAppType, allowed: ALLOWED_SOURCE_APPS.includes(delegated.sourceAppType) } });
+  } catch (err) { next(err); }
+}

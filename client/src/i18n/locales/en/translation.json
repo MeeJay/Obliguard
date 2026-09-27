@@ -104,6 +104,7 @@
     "passwordPlaceholder": "Enter your password",
     "signIn": "Sign in",
     "forgotPassword": "Forgot password?",
+    "ssoMisconfigured": "Single sign-on is not available on this address. Open the configured URL of this instance, or sign in with a local account.",
     "twoFactor": {
       "title": "Two-Factor Authentication",
       "description": "Enter the verification code to continue.",

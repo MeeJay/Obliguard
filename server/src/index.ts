@@ -12,6 +12,7 @@ import { logger } from './utils/logger';
 import { authService } from './services/auth.service';
 import { setAgentServiceIO, agentService } from './services/agent.service';
 import { setLiveAlertIO } from './services/liveAlert.service';
+import { setUserSessionsIO } from './services/userSessions.service';
 import { banEngine } from './services/ban.service';
 import { obliguardHub } from './services/obliguardHub.service';
 import { obligateService } from './services/obligate.service';
@@ -41,6 +42,7 @@ async function main() {
   // Provide io to services for real-time push events
   setAgentServiceIO(io);
   setLiveAlertIO(io);
+  setUserSessionsIO(io);
 
   // ── Obliguard agent WebSocket command channel ────────────────────────────
   // We intercept 'upgrade' events on the same HTTP server used by Socket.io

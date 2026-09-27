@@ -2,8 +2,6 @@ import express from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
-import session from 'express-session';
-import connectPgSimple from 'connect-pg-simple';
 import path from 'path';
 import { readFileSync, existsSync } from 'fs';
 import { join } from 'path';
@@ -19,9 +17,8 @@ import { config } from './config';
 import { errorHandler } from './middleware/errorHandler';
 import { apiLimiter } from './middleware/rateLimiter';
 import { routes } from './routes';
-import { logger } from './utils/logger';
-
-const PgSession = connectPgSimple(session);
+import { sessionMiddleware } from './session';
+import { sessionUserGuard } from './middleware/sessionUserGuard';
 
 export function createApp() {
   const app = express();
@@ -63,35 +60,14 @@ export function createApp() {
   app.use(express.json({ limit: '1mb' }));
   app.use(cookieParser());
 
-  // Sessions — stored in PostgreSQL via connect-pg-simple.
+  // Sessions — stored in PostgreSQL via connect-pg-simple (see session.ts;
+  // the same store/middleware also authenticates Socket.io handshakes).
   // MUST be set up before apiLimiter so that req.session.userId is available
   // in the limiter's skip() function (authenticated users are excluded from
   // rate limiting to avoid shared-IP false positives behind a reverse proxy).
-  // Log errors so we can diagnose DB connection drops that would otherwise
-  // silently cause "Invalid username or password" on the login page.
-  const sessionStore = new PgSession({
-    conString: config.databaseUrl,
-    tableName: 'session',
-    createTableIfMissing: false,
-  });
-  sessionStore.on('error', (err: Error) => {
-    logger.error(err, 'Session store error — sessions may fail until DB connection recovers');
-  });
-
-  app.use(
-    session({
-      store: sessionStore,
-      secret: config.sessionSecret,
-      resave: false,
-      saveUninitialized: false,
-      cookie: {
-        secure: config.forceHttps,
-        httpOnly: true,
-        maxAge: config.sessionMaxAge,
-        sameSite: 'lax',
-      },
-    }),
-  );
+  app.use(sessionMiddleware);
+  // Re-check the account behind the session (disabled / deleted / demoted).
+  app.use(sessionUserGuard);
 
   // Rate limiting — runs after session so authenticated users can be skipped.
   // Only unauthenticated endpoints (login page, public health, etc.) are limited.

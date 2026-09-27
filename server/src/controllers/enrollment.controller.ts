@@ -28,7 +28,8 @@ export const enrollmentController = {
       // Skip for Obligate SSO users — their email comes from Obligate and may
       // already exist on an older local account (before SSO migration).
       const currentUser = await db('users').where({ id: req.session.userId }).select('foreign_source').first() as { foreign_source: string | null } | undefined;
-      if (currentUser?.foreign_source !== 'obligate') {
+      const isObligateAccount = currentUser?.foreign_source === 'obligate';
+      if (!isObligateAccount) {
         const existing = await db('users')
           .where({ email })
           .whereNot({ id: req.session.userId })
@@ -44,7 +45,9 @@ export const enrollmentController = {
         .where({ id: req.session.userId })
         .update({
           display_name: displayName !== undefined ? displayName : db.raw('display_name'),
-          email,
+          // The email of an Obligate account is owned by Obligate (re-synced at
+          // every SSO sign-in): keep the stored one, as PUT /profile does.
+          email: isObligateAccount ? db.raw('email') : email,
           preferred_language: preferredLanguage,
           preferences: JSON.stringify(preferences),
           enrollment_version: REQUIRED_ENROLLMENT_VERSION,

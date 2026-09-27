@@ -55,10 +55,10 @@ export function TenantSwitcher() {
         useGroupStore.getState().fetchTree(),
       ]);
 
-      // Reconnect socket with new tenantId
+      // Reconnect the socket: the server reads the new tenant from the session
       if (user) {
         disconnectSocket();
-        connectSocket(user.id, tenantId);
+        connectSocket();
       }
     } finally {
       setSwitching(false);

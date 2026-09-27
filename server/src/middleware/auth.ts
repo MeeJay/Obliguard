@@ -9,6 +9,9 @@ declare module 'express-session' {
     role: string;
     currentTenantId: number;
     oauthState: string;
+    // redirect_uri sent to Obligate by /auth/sso-redirect, replayed verbatim by
+    // /auth/callback for the code exchange (never rebuilt from request headers).
+    oauthRedirectUri?: string;
     requestedTenantSlug?: string;
   }
 }

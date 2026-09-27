@@ -29,6 +29,9 @@ services:
       DATABASE_URL: postgres://obliguard:${DB_PASSWORD:-changeme}@postgres:5432/obliguard
       SESSION_SECRET: ${SESSION_SECRET:-change-this-in-production}
       CLIENT_ORIGIN: ${CLIENT_ORIGIN:-http://localhost}
+      # Public URL of this instance (SSO redirect_uri, e-mail links) + extra hostnames allowed for SSO
+      APP_URL: ${APP_URL:-}
+      SSO_ALLOWED_HOSTS: ${SSO_ALLOWED_HOSTS:-}
       DEFAULT_ADMIN_USERNAME: ${DEFAULT_ADMIN_USERNAME:-admin}
       DEFAULT_ADMIN_PASSWORD: ${DEFAULT_ADMIN_PASSWORD:-admin123}
     volumes:

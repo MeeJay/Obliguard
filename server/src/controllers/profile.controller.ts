@@ -51,10 +51,17 @@ export const profileController = {
       if ('email' in data) updatePayload.email = data.email || null;
       if ('preferredLanguage' in data) updatePayload.preferred_language = data.preferredLanguage;
 
-      // If email changes and email OTP is enabled, disable it for security
-      if ('email' in data && data.email) {
-        const current = await db('users').select('email', 'email_otp_enabled').where({ id: req.session.userId }).first();
-        if (current?.email_otp_enabled && current.email !== data.email) {
+      if ('email' in data) {
+        const current = await db('users').select('email', 'email_otp_enabled', 'foreign_source').where({ id: req.session.userId }).first();
+        const nextEmail = data.email || null;
+        // Obligate-provisioned accounts: the address is owned by Obligate and
+        // re-synced at every SSO sign-in. A local change would let a stolen
+        // session cookie redirect account mail (OTP codes, notifications).
+        if (current?.foreign_source === 'obligate' && (current.email || null) !== nextEmail) {
+          throw new AppError(400, 'The email of an Obligate account is managed in Obligate');
+        }
+        // If email changes and email OTP is enabled, disable it for security
+        if (data.email && current?.email_otp_enabled && current.email !== data.email) {
           updatePayload.email_otp_enabled = false;
         }
       }
@@ -76,8 +83,12 @@ export const profileController = {
     try {
       const { currentPassword, newPassword } = req.body as ChangePasswordInput;
 
-      const user = await db('users').select('password_hash').where({ id: req.session.userId }).first();
+      const user = await db('users').select('password_hash', 'foreign_source').where({ id: req.session.userId }).first();
       if (!user) throw new AppError(404, 'User not found');
+      // Obligate accounts have no usable local password (they sign in through Obligate).
+      if (user.foreign_source === 'obligate' || !user.password_hash) {
+        throw new AppError(400, 'This account signs in through Obligate — change the password in Obligate');
+      }
 
       const valid = await comparePassword(currentPassword, user.password_hash);
       if (!valid) throw new AppError(400, 'Current password is incorrect');

@@ -65,6 +65,15 @@ export const authService = {
       throw new SsoOnlyError(row.foreign_source ?? 'obliview');
     }
 
+    // Obligate-provisioned accounts (og_*) sign in through Obligate only, even
+    // if a local password was ever set on them: a local password would bypass
+    // Obligate's MFA/credential changes and survive the account being disabled
+    // there, and a role pushed through sso-user-sync must never become usable
+    // through a password session.
+    if (row.foreign_source === 'obligate') {
+      throw new SsoOnlyError('obligate');
+    }
+
     const valid = await comparePassword(password, row.password_hash);
     if (!valid) return null;
 

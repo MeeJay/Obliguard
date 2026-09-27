@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import { agentService } from '../services/agent.service';
 import { serviceTemplateService } from '../services/serviceTemplate.service';
+import { configuredPublicOrigins, requestAuthority, requestProto } from '../utils/publicOrigin';
 import type { AgentThresholds, AgentDevice } from '@obliview/shared';
 import { isMasterTenant } from '@obliview/shared';
 
@@ -260,12 +261,46 @@ export function agentInstallerWindowsMsi(_req: Request, res: Response): void {
 // Key lookup is tenant-scoped, mirroring listKeys, and the route is admin-gated.
 const CFG_MAGIC = Buffer.from('OBLI_CFG', 'utf8');
 
+/**
+ * The ?server= override embedded in a wizard, validated: it ends up as the
+ * agents' server (enrollment key + auto-update source), so a crafted download
+ * link must not be able to plant a server (another host, another port, or an
+ * http downgrade of the admin's own host). It is honoured only when:
+ *   - the browser says the request comes from the app itself
+ *     (Sec-Fetch-Site: same-origin — a link opened from a mail or another site
+ *     arrives as "none" / "cross-site"), i.e. GlobalAddAgentModal sending
+ *     window.location.origin;
+ *   - it is a bare http(s) origin on the hostname in use or a configured one;
+ *   - it does not downgrade https to http.
+ * Otherwise it is ignored (APP_URL / request headers are used).
+ */
+function validatedServerOverride(req: Request): string | null {
+  const raw = typeof req.query.server === 'string' ? req.query.server.trim() : '';
+  if (!raw || raw.length > 2048) return null;
+  if (req.headers['sec-fetch-site'] !== 'same-origin') return null;
+  let u: URL;
+  try { u = new URL(raw); } catch { return null; }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+  if (u.username || u.password || u.search || u.hash || (u.pathname !== '/' && u.pathname !== '')) return null;
+  if (u.protocol === 'http:' && requestProto(req) === 'https') return null;
+  const allowed = new Set<string>(configuredPublicOrigins().entries.map((e) => e.hostname));
+  const here = requestAuthority(req)?.hostname;
+  if (here) allowed.add(here);
+  return allowed.has(u.hostname.toLowerCase()) ? u.origin : null;
+}
+
 function inferServerUrl(req: Request): string {
-  const override = typeof req.query.server === 'string' ? req.query.server.trim() : '';
+  // 1. Validated ?server= (the client sends window.location.origin, i.e. the
+  //    exact public URL the admin is using, port included).
+  const override = validatedServerOverride(req);
   if (override) return override;
-  const proto = (req.headers['x-forwarded-proto'] as string) || req.protocol;
-  const host = (req.headers['x-forwarded-host'] as string) || req.get('host') || '';
-  return host ? `${proto}://${host}` : '';
+  // 2. The configured public URL of this instance.
+  if (process.env.APP_URL) {
+    try { return new URL(process.env.APP_URL.includes('://') ? process.env.APP_URL : `https://${process.env.APP_URL}`).origin; } catch { /* malformed: fall through */ }
+  }
+  // 3. Best effort from the request (first X-Forwarded-Proto value, Host authority).
+  const authority = requestAuthority(req)?.authority ?? '';
+  return authority ? `${requestProto(req)}://${authority}` : '';
 }
 
 async function buildWizardPayload(req: Request, baseBin: Buffer): Promise<Buffer> {

@@ -104,6 +104,7 @@
     "passwordPlaceholder": "Saisissez votre mot de passe",
     "signIn": "Se connecter",
     "forgotPassword": "Mot de passe oublié ?",
+    "ssoMisconfigured": "La connexion unique (SSO) n’est pas disponible sur cette adresse. Ouvrez l’URL configurée de cette instance, ou connectez-vous avec un compte local.",
     "twoFactor": {
       "title": "Authentification à deux facteurs",
       "description": "Saisissez le code de vérification pour continuer.",

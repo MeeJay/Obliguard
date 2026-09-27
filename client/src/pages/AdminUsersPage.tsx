@@ -603,7 +603,9 @@ export function AdminUsersPage() {
                       <Building2 size={13} />
                     </button>
                     )}
-                    {user.id !== currentUser?.id && user.foreignSource !== 'obligate' && (
+                    {/* SSO accounts are managed in Obligate; a disabled one (e.g. deleted
+                        in Obligate) can be removed here. */}
+                    {user.id !== currentUser?.id && (user.foreignSource !== 'obligate' || !user.isActive) && (
                       <button onClick={() => handleDeleteUser(user)}
                         className="shrink-0 p-1 text-text-muted hover:text-status-down opacity-0 group-hover:opacity-100" title={t('common.delete')}>
                         <Trash2 size={13} />

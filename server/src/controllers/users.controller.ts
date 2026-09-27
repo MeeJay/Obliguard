@@ -1,6 +1,8 @@
 import type { Request, Response, NextFunction } from 'express';
 import { userService } from '../services/user.service';
 import { teamService } from '../services/team.service';
+import { userSessionsService } from '../services/userSessions.service';
+import { invalidateUserState } from '../middleware/sessionUserGuard';
 import { AppError } from '../middleware/errorHandler';
 import type {
   CreateUserInput,
@@ -82,6 +84,13 @@ export const usersController = {
 
       const user = await userService.update(id, data);
       if (!user) throw new AppError(404, 'User not found');
+      // Sessions cache userId + role: a demoted or disabled account must not
+      // keep its current sessions (or sockets) with the old privileges.
+      if (targetUser && (targetUser.role !== user.role || (targetUser.isActive && !user.isActive))) {
+        await userSessionsService.destroyForUser(id);
+      } else {
+        invalidateUserState(id); // e.g. re-enabled: don't keep serving a cached "disabled"
+      }
       res.json({ success: true, data: user });
     } catch (err: unknown) {
       if (err instanceof Error && err.message.includes('unique')) {
@@ -123,9 +132,10 @@ export const usersController = {
 
       const user = await userService.getById(id);
 
-      // Block deletion of SSO users — manage from Obligate
-      if (user?.foreignSource === 'obligate') {
-        throw new AppError(400, 'Cannot delete SSO user — manage from Obligate');
+      // Block deletion of active SSO users — manage from Obligate. A disabled
+      // one (e.g. deleted in Obligate: sso-user-sync disables it) may be removed.
+      if (user?.foreignSource === 'obligate' && user.isActive) {
+        throw new AppError(400, 'Cannot delete an active SSO user — manage from Obligate');
       }
 
       if (user?.role === 'admin') {
@@ -138,6 +148,7 @@ export const usersController = {
 
       const deleted = await userService.delete(id);
       if (!deleted) throw new AppError(404, 'User not found');
+      await userSessionsService.destroyForUser(id);
       res.json({ success: true, message: 'User deleted' });
     } catch (err) {
       next(err);

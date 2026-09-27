@@ -12,7 +12,14 @@ const TOKEN_EXPIRY_MS = 60 * 60 * 1000; // 1 hour
 export const passwordResetService = {
   /** Generate a reset token, store its hash, send the email. Always resolves (no enumeration). */
   async requestReset(email: string): Promise<void> {
-    const user = await db('users').where({ email }).first();
+    // Obligate-provisioned accounts never get a local password (their
+    // credentials live in Obligate): they are filtered out in the query, so an
+    // og_ account sharing its address with a local account can't shadow it.
+    const user = await db('users')
+      .where({ email })
+      .where((q) => q.whereNull('foreign_source').orWhereNot('foreign_source', 'obligate'))
+      .orderBy('id')
+      .first();
     if (!user) {
       // Silently succeed to prevent email enumeration
       return;
@@ -77,11 +84,14 @@ export const passwordResetService = {
   /** Validate a raw token. Returns the user_id if valid, null otherwise. */
   async validateToken(rawToken: string): Promise<number | null> {
     const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
-    const row = await db('password_reset_tokens')
-      .where({ token_hash: tokenHash })
-      .whereNull('used_at')
-      .where('expires_at', '>', new Date())
-      .first();
+    const row = await db('password_reset_tokens as t')
+      .join('users as u', 'u.id', 't.user_id')
+      .where({ 't.token_hash': tokenHash })
+      .whereNull('t.used_at')
+      .where('t.expires_at', '>', new Date())
+      // Tokens issued before SSO accounts were excluded must not work either.
+      .where((q) => q.whereNull('u.foreign_source').orWhereNot('u.foreign_source', 'obligate'))
+      .first('t.user_id');
 
     return row ? row.user_id : null;
   },
@@ -89,11 +99,14 @@ export const passwordResetService = {
   /** Consume a raw token and update the user's password. */
   async resetPassword(rawToken: string, newPassword: string): Promise<boolean> {
     const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
-    const row = await db('password_reset_tokens')
-      .where({ token_hash: tokenHash })
-      .whereNull('used_at')
-      .where('expires_at', '>', new Date())
-      .first();
+    const row = await db('password_reset_tokens as t')
+      .join('users as u', 'u.id', 't.user_id')
+      .where({ 't.token_hash': tokenHash })
+      .whereNull('t.used_at')
+      .where('t.expires_at', '>', new Date())
+      // Tokens issued before SSO accounts were excluded must not work either.
+      .where((q) => q.whereNull('u.foreign_source').orWhereNot('u.foreign_source', 'obligate'))
+      .first('t.id', 't.user_id') as { id: number; user_id: number } | undefined;
 
     if (!row) return false;
 

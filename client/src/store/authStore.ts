@@ -66,7 +66,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       const user = result.user;
       set({ user, isLoading: false });
       syncPreferencesToStore(user);
-      connectSocket(user.id);
+      connectSocket();
       useTenantStore.getState().fetchTenants();
       useLiveAlertsStore.getState().fetchAlerts();
       // Fetch permissions in the background; failure is non-fatal here.
@@ -123,7 +123,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       const { user, permissions, requires2faSetup, currentTenantId } = await authApi.me();
       set({ user, permissions, requires2faSetup: requires2faSetup ?? false, isInitialized: true });
       syncPreferencesToStore(user);
-      connectSocket(user.id, currentTenantId ?? undefined);
+      connectSocket();
       useTenantStore.getState().fetchTenants();
       useLiveAlertsStore.getState().fetchAlerts();
       useGroupStore.getState().fetchTree();

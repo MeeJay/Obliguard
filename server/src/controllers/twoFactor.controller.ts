@@ -6,6 +6,7 @@ import { authService } from '../services/auth.service';
 import { tenantService } from '../services/tenant.service';
 import { AppError } from '../middleware/errorHandler';
 import { logger } from '../utils/logger';
+import { regenerateSession } from '../utils/regenerateSession';
 
 // Extend session type for 2FA state
 declare module 'express-session' {
@@ -78,6 +79,12 @@ export const twoFactorController = {
     try {
       const { email } = req.body;
       if (!email) throw new AppError(400, 'Missing email');
+      // The email of an Obligate account is owned by Obligate: email OTP may
+      // only target the stored address (emailEnable writes it to users.email).
+      const current = await db('users').where({ id: req.session.userId }).first('email', 'foreign_source') as { email: string | null; foreign_source: string | null } | undefined;
+      if (current?.foreign_source === 'obligate' && String(email) !== (current.email ?? '')) {
+        throw new AppError(400, 'The email of an Obligate account is managed in Obligate');
+      }
       const cfg = await appConfigService.getAll();
       if (!cfg.otp_smtp_server_id) throw new AppError(400, 'No SMTP server configured for OTP. Ask your administrator.');
       const code = twoFactorService.generateEmailOtp();
@@ -95,6 +102,11 @@ export const twoFactorController = {
       if (!pending) throw new AppError(400, 'No pending email OTP setup. Call /setup first.');
       if (Date.now() > pending.expires) throw new AppError(400, 'Code expired');
       if (pending.code !== String(code)) throw new AppError(400, 'Invalid code');
+      const current = await db('users').where({ id: req.session.userId }).first('email', 'foreign_source') as { email: string | null; foreign_source: string | null } | undefined;
+      if (current?.foreign_source === 'obligate' && pending.email !== (current.email ?? '')) {
+        delete req.session.pendingEmailOtpSetup;
+        throw new AppError(400, 'The email of an Obligate account is managed in Obligate');
+      }
       await db('users').where({ id: req.session.userId }).update({
         email: pending.email,
         email_otp_enabled: true,
@@ -141,12 +153,12 @@ export const twoFactorController = {
 
       if (!valid) throw new AppError(401, 'Invalid code');
 
-      // Complete the session
+      // Complete the session on a FRESH session id (anti session-fixation);
+      // regenerate() also drops pendingMfaUserId / pendingEmailOtp.
+      await regenerateSession(req);
       req.session.userId = row.id;
       req.session.username = row.username;
       req.session.role = row.role;
-      delete req.session.pendingMfaUserId;
-      delete req.session.pendingEmailOtp;
 
       // Set tenant in session
       const firstTenant = await tenantService.getFirstTenantForUser(row.id);

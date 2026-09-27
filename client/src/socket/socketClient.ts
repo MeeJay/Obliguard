@@ -24,13 +24,17 @@ export function getSocket(): Socket | null {
   return socket;
 }
 
-export function connectSocket(userId: number, tenantId?: number): Socket {
+/**
+ * Connect to Socket.io. The server resolves the user and the current tenant
+ * from the session cookie (withCredentials), so no identity is sent here; a
+ * reconnect after a tenant switch picks up the new session tenant.
+ */
+export function connectSocket(): Socket {
   if (socket?.connected) {
     return socket;
   }
 
   socket = io(window.location.origin, {
-    auth: { userId, tenantId },
     // polling first ensures the initial handshake works behind reverse proxies
     // that may not support WebSocket upgrades. socket.io then auto-upgrades
     // to WebSocket in the background if the proxy supports it.
