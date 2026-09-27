@@ -1,6 +1,11 @@
 import type { Request, Response, NextFunction } from 'express';
 import { appConfigService } from '../services/appConfig.service';
 import { AppError } from '../middleware/errorHandler';
+import { TENANT_HEADER, TENANT_CHANGED } from '../middleware/tenant';
+import { isAgentUpdatePolicy } from '../utils/agentUpdate';
+import { logger } from '../utils/logger';
+import type { AgentUpdatePolicy } from '@obliview/shared';
+import { isMasterTenant } from '@obliview/shared';
 
 const ALLOWED_KEYS = [
   'allow_2fa', 'force_2fa', 'otp_smtp_server_id',
@@ -44,7 +49,33 @@ export const appConfigController = {
       if ('heartbeatMonitoring' in req.body) patch.heartbeatMonitoring = heartbeatMonitoring;
       if ('maxMissedPushes' in req.body) patch.maxMissedPushes = maxMissedPushes;
       if ('notificationTypes' in req.body) patch.notificationTypes = notificationTypes;
+
+      // Global agent update policy (C17-1): platform admin (route guard) operating
+      // in the Default tenant only. The route has no requireTenant, so the tab's
+      // operating-tenant header is checked against the session here.
+      let before: AgentUpdatePolicy | null | undefined;
+      const hasPolicy = 'updatePolicy' in req.body;
+      if (hasPolicy) {
+        const claimedRaw = req.get(TENANT_HEADER);
+        const claimed = claimedRaw !== undefined ? Number(claimedRaw) : NaN;
+        if (Number.isSafeInteger(claimed) && claimed > 0 && claimed !== req.session.currentTenantId) {
+          throw new AppError(409, 'Workspace changed in another tab', TENANT_CHANGED);
+        }
+        if (!isMasterTenant(req.session.currentTenantId)) {
+          throw new AppError(403, 'Switch to the Default tenant to change the global update policy');
+        }
+        const v = req.body.updatePolicy;
+        if (v !== null && !isAgentUpdatePolicy(v)) throw new AppError(400, 'Invalid updatePolicy');
+        patch.updatePolicy = v;
+        before = (await appConfigService.getAgentGlobal()).updatePolicy;
+      }
+
       const updated = await appConfigService.setAgentGlobal(patch);
+      if (hasPolicy && (before ?? null) !== (updated.updatePolicy ?? null)) {
+        logger.info({
+          event: 'agent_update_global_policy', userId: req.session.userId, from: before ?? null, to: updated.updatePolicy ?? null,
+        }, 'Global agent update policy changed');
+      }
       res.json({ success: true, data: updated });
     } catch (err) { next(err); }
   },

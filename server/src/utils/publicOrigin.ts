@@ -23,7 +23,7 @@ export interface ConfiguredOrigin {
 /**
  * Public origins of this instance configured by the operator:
  *   - APP_URL (a scheme-less value is read as https://…);
- *   - CLIENT_ORIGIN, unless it is a localhost default;
+ *   - CLIENT_ORIGIN, only as a fallback when APP_URL is not set (as in Obliance), unless it is a localhost default;
  *   - SSO_ALLOWED_HOSTS: comma-separated origins "http(s)://host[:port]", or
  *     bare "host[:port]" read as https:// (the scheme is never taken from the
  *     request, whose X-Forwarded-Proto a client can set).
@@ -44,7 +44,7 @@ export function configuredPublicOrigins(): { entries: ConfiguredOrigin[]; invali
     } catch { invalid.push(`APP_URL=${appUrl}`); }
   }
 
-  const clientOrigin = (process.env.CLIENT_ORIGIN ?? '').trim();
+  const clientOrigin = appUrl ? '' : (process.env.CLIENT_ORIGIN ?? '').trim();
   if (clientOrigin) {
     // CORS-only setting historically: used as an SSO pin only when it is a
     // single bare origin; anything else (lists, paths…) is ignored here.

@@ -2,6 +2,7 @@ import { Navigate, Outlet, useLocation } from 'react-router-dom';
 import type { Capability } from '@obliview/shared';
 import { useAuthStore } from '@/store/authStore';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
+import { NoTenantPage } from '@/pages/NoTenantPage';
 
 // Must match REQUIRED_ENROLLMENT_VERSION in server/src/controllers/enrollment.controller.ts
 const REQUIRED_ENROLLMENT_VERSION = 1;
@@ -13,7 +14,7 @@ interface ProtectedRouteProps {
 }
 
 export function ProtectedRoute({ requiredRole, requiredCapability }: ProtectedRouteProps) {
-  const { user, isInitialized, hasCapability } = useAuthStore();
+  const { user, isInitialized, hasCapability, noTenantAccess } = useAuthStore();
   const location = useLocation();
 
   if (!isInitialized) {
@@ -37,6 +38,17 @@ export function ProtectedRoute({ requiredRole, requiredCapability }: ProtectedRo
     location.pathname !== '/enroll'
   ) {
     return <Navigate to="/enroll" replace />;
+  }
+
+  // Non-admin without any usable workspace: profile / 2FA / sign-out only.
+  // Both enrollment pages use global endpoints and stay reachable.
+  if (
+    noTenantAccess &&
+    user.role !== 'admin' &&
+    location.pathname !== '/enroll' &&
+    location.pathname !== '/sso-enroll'
+  ) {
+    return <NoTenantPage />;
   }
 
   if (requiredRole && user.role !== requiredRole) {

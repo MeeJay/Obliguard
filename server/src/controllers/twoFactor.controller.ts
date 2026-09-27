@@ -132,10 +132,16 @@ export const twoFactorController = {
       if (!userId) throw new AppError(400, 'No pending 2FA session');
 
       const row = await db('users')
-        .where({ id: userId })
+        .where({ id: userId, is_active: true })
         .first('id', 'username', 'role', 'totp_secret', 'totp_enabled', 'email_otp_enabled', 'email');
 
-      if (!row) throw new AppError(400, 'User not found');
+      if (!row) {
+        // Deleted or disabled while the 2FA step was pending: same answer as an
+        // expired pending session (does not reveal the disabled state).
+        delete req.session.pendingMfaUserId;
+        delete req.session.pendingEmailOtp;
+        throw new AppError(400, 'No pending 2FA session');
+      }
 
       let valid = false;
 
@@ -160,9 +166,11 @@ export const twoFactorController = {
       req.session.username = row.username;
       req.session.role = row.role;
 
-      // Set tenant in session
-      const firstTenant = await tenantService.getFirstTenantForUser(row.id);
-      req.session.currentTenantId = firstTenant?.id ?? 1;
+      // Landing tenant (favourite, else first membership, else Default for
+      // platform admins only); the session was just regenerated, so no tenant
+      // is left over when none resolves.
+      const tenantId = await tenantService.resolveLoginTenant(row.id, row.role);
+      if (tenantId !== null) req.session.currentTenantId = tenantId;
 
       const user = await authService.getUserById(row.id);
       res.json({ success: true, data: { user } });

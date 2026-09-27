@@ -1,77 +1,122 @@
 import type { Request, Response, NextFunction } from 'express';
+import type { CreateBanRequest } from '@obliview/shared';
 import { banService } from '../services/ban.service';
 import { AppError } from '../middleware/errorHandler';
 import { db } from '../db';
 import { isMasterTenant } from '@obliview/shared';
-
-export interface CreateBanRequest {
-  ip: string;
-  cidrPrefix?: number | null;
-  reason?: string | null;
-  banType?: 'auto' | 'manual';
-  scope?: 'global' | 'tenant' | 'group' | 'agent';
-  scopeId?: number | null;
-  expiresAt?: string | null;
-}
+import { parsePaging } from '../utils/pagination';
+import { parseBanTarget } from '../utils/ipValidation';
+import { logger } from '../utils/logger';
 
 export async function getBanById(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const id = parseInt(req.params.id, 10);
-    const row = await db('ip_bans').where({ id }).first();
-    if (!row) throw new AppError(404, 'Ban not found');
-    // Resolve username if manual ban
-    let bannedByUsername: string | null = null;
-    if (row.banned_by_user_id) {
-      const user = await db('users').where({ id: row.banned_by_user_id }).select('username', 'display_name').first();
-      bannedByUsername = user?.display_name || user?.username || null;
-    }
-    res.json({
-      success: true,
-      data: {
-        id: row.id,
-        ip: row.ip,
-        banType: row.ban_type,
-        reason: row.reason,
-        scope: row.scope,
-        scopeId: row.scope_id,
-        bannedByUserId: row.banned_by_user_id,
-        bannedByUsername,
-        bannedAt: row.banned_at,
-        expiresAt: row.expires_at,
-        isActive: row.is_active,
-      },
-    });
+    if (!/^[0-9]{1,9}$/.test(String(req.params.id))) throw new AppError(400, 'Invalid ban ID');
+    const id = Number(req.params.id);
+    const data = await banService.getById(id, req.tenantId, req.session?.role === 'admin');
+    if (!data) throw new AppError(404, 'Ban not found');
+    res.json({ success: true, data });
   } catch (err) { next(err); }
 }
 
-export async function wipeAllBans(_req: Request, res: Response, next: NextFunction): Promise<void> {
+export async function wipeAllBans(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
+    // Platform-wide reset: platform admin (route) AND the Default tenant.
+    if (!isMasterTenant(req.tenantId)) throw new AppError(403, 'Wipe is only available from the Default tenant');
     // Mark all active bans as inactive (not delete) so agents receive the "remove" delta
     const count = await db('ip_bans').where({ is_active: true }).update({ is_active: false });
     res.json({ success: true, message: `Lifted ${count} active bans` });
   } catch (err) { next(err); }
 }
 
-export async function wipeAllReputation(_req: Request, res: Response, next: NextFunction): Promise<void> {
+export async function wipeAllReputation(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
+    if (!isMasterTenant(req.tenantId)) throw new AppError(403, 'Wipe is only available from the Default tenant');
     const evCount = await db('ip_events').del();
     const repCount = await db('ip_reputation').del();
     res.json({ success: true, message: `Deleted ${repCount} reputation entries and ${evCount} events` });
   } catch (err) { next(err); }
 }
 
+const BULK_BAN_MAX = 1000;
+const BULK_DETAIL_MAX = 50;
+
+/**
+ * POST /api/bans/bulk-ban — 1..1000 single IPs, each through banService.create
+ * (same scope rule, validation, whitelist and duplicate checks as a single
+ * ban). Per-entry errors are contained; MikroTik pushes are serialised after
+ * the loop (tenant routers only for tenant-local bans).
+ */
 export async function bulkBan(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const { ips } = req.body as { ips: string[] };
-    if (!Array.isArray(ips) || ips.length === 0) throw new AppError(400, 'ips array required');
-    let created = 0;
-    for (const ip of ips) {
-      const existing = await db('ip_bans').where({ ip, is_active: true }).first();
-      if (existing) continue;
-      await db('ip_bans').insert({ ip, ban_type: 'manual', scope: 'global', is_active: true, banned_by_user_id: req.session?.userId });
-      created++;
+    const { ips } = (req.body ?? {}) as { ips?: unknown };
+    if (!Array.isArray(ips) || ips.length === 0 || ips.length > BULK_BAN_MAX) {
+      throw new AppError(400, `ips must be an array of 1 to ${BULK_BAN_MAX} entries`);
     }
-    res.json({ success: true, created });
+    const isAdmin = req.session?.role === 'admin';
+    const userId = req.session?.userId ?? 0;
+    const tenantId = req.tenantId;
+    // One membership refusal for the whole request.
+    await banService.assertOperatingMembership(userId, tenantId, isAdmin);
+
+    const seen = new Set<string>();
+    let created = 0;
+    let skipped = 0;
+    let invalid = 0;
+    const skippedEntries: Array<{ ip: string; reason: string }> = [];
+    const invalidEntries: Array<{ ip: string; reason: string }> = [];
+    const createdIps: string[] = [];
+    const skip = (entry: unknown, reason: string) => {
+      skipped++;
+      if (skippedEntries.length < BULK_DETAIL_MAX) skippedEntries.push({ ip: String(entry).slice(0, 64), reason });
+    };
+    const bad = (entry: unknown, reason: string) => {
+      invalid++;
+      if (invalidEntries.length < BULK_DETAIL_MAX) invalidEntries.push({ ip: String(entry).slice(0, 64), reason });
+    };
+
+    try {
+      for (const entry of ips) {
+        if (typeof entry !== 'string') { bad(entry, 'Invalid IP address'); continue; }
+        const p = parseBanTarget(entry, { allowCidr: false });
+        if (!p.ok) { bad(entry, p.message); continue; }
+        if (seen.has(p.target.cidr)) { skip(entry, 'duplicate in request'); continue; }
+        seen.add(p.target.cidr);
+        try {
+          const ban = await banService.create(
+            { ip: p.target.address, reason: 'Bulk ban (IP Reputation)' },
+            userId, tenantId, isAdmin,
+            { deferMikrotik: true, membershipChecked: true },
+          );
+          created++;
+          createdIps.push(ban.ip);
+        } catch (e) {
+          if (e instanceof AppError && e.statusCode === 409) skip(entry, e.message);
+          else if (e instanceof AppError) bad(entry, e.message);
+          else {
+            logger.error({ err: e, ip: p.target.address }, 'bulk-ban entry failed');
+            bad(entry, 'internal error');
+          }
+        }
+      }
+    } finally {
+      if (createdIps.length) {
+        void (async () => {
+          const { mikrotikBanSync } = await import('../services/mikrotik/mikrotikBanSync.service');
+          const audience = isMasterTenant(tenantId) ? undefined : { tenantId };
+          for (const ip of createdIps) await mikrotikBanSync.pushBanToAll(ip, 'ban', audience);
+        })().catch((err) => logger.warn({ err }, 'bulk-ban MikroTik push failed'));
+      }
+    }
+
+    res.json({
+      success: true,
+      created,
+      skipped,
+      invalid,
+      scope: isMasterTenant(tenantId) ? 'global' : 'tenant',
+      skippedEntries,
+      invalidEntries,
+    });
   } catch (err) { next(err); }
 }
 
@@ -103,35 +148,7 @@ export async function bulkWhitelist(req: Request, res: Response, next: NextFunct
 
 export async function getBanStats(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const isAdmin = req.session?.role === 'admin';
-
-    // Apply scope filter: admins see all bans; tenant users see global bans + their own
-    function applyTenantScope(q: ReturnType<typeof db>) {
-      if (isAdmin) return q;
-      return q.where(function (this: ReturnType<typeof db>) {
-        this.where('scope', 'global').orWhere('tenant_id', req.tenantId);
-      });
-    }
-
-    const [[activeRow], [todayRow]] = await Promise.all([
-      applyTenantScope(
-        db('ip_bans')
-          .where('is_active', true)
-          .whereRaw('(expires_at IS NULL OR expires_at > NOW())'),
-      ).count<Array<{ count: string }>>({ count: '*' }),
-      applyTenantScope(
-        db('ip_bans')
-          .whereRaw('banned_at >= CURRENT_DATE'),
-      ).count<Array<{ count: string }>>({ count: '*' }),
-    ]);
-
-    res.json({
-      success: true,
-      data: {
-        active: Number(activeRow?.count ?? 0),
-        today: Number(todayRow?.count ?? 0),
-      },
-    });
+    res.json({ success: true, data: await banService.stats(req.tenantId, req.session?.role === 'admin') });
   } catch (err) {
     next(err);
   }
@@ -142,11 +159,9 @@ export async function listBans(req: Request, res: Response, next: NextFunction):
     const active = req.query.active !== undefined
       ? req.query.active === 'true'
       : undefined;
-    const search = req.query.search as string | undefined;
-    const page = req.query.page !== undefined ? parseInt(req.query.page as string, 10) : 1;
-    const pageSize = req.query.pageSize !== undefined ? parseInt(req.query.pageSize as string, 10) : 25;
+    const search = typeof req.query.search === 'string' ? req.query.search.slice(0, 64) : undefined;
+    const { pageSize, offset } = parsePaging(req.query as Record<string, unknown>, { defaultSize: 25, max: 1000 });
     const isAdmin = req.session?.role === 'admin';
-    const offset = (page - 1) * pageSize;
 
     const result = await banService.list({ onlyActive: active, search, limit: pageSize, offset, tenantId: req.tenantId, isAdmin });
     res.json({ success: true, data: result.data, total: result.total });
@@ -157,22 +172,13 @@ export async function listBans(req: Request, res: Response, next: NextFunction):
 
 export async function createBan(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const body = req.body as CreateBanRequest;
-
-    if (!body.ip) {
-      throw new AppError(400, 'ip is required');
-    }
-
+    const body = (req.body ?? {}) as CreateBanRequest;
     const isAdmin = req.session?.role === 'admin';
     const ban = await banService.create(body, req.session?.userId ?? 0, req.tenantId, isAdmin);
 
     res.status(201).json({ success: true, data: ban });
-  } catch (err: unknown) {
-    if (err instanceof Error && err.message === 'This IP is already banned') {
-      next(new AppError(409, err.message));
-    } else {
-      next(err);
-    }
+  } catch (err) {
+    next(err);
   }
 }
 
@@ -183,7 +189,7 @@ export async function liftBan(req: Request, res: Response, next: NextFunction): 
       throw new AppError(400, 'Invalid ban ID');
     }
 
-    await banService.lift(id, req.tenantId, req.session?.userId ?? 0);
+    await banService.lift(id, req.tenantId, req.session?.userId ?? 0, req.session?.role === 'admin');
 
     res.json({ success: true });
   } catch (err) {
@@ -198,10 +204,7 @@ export async function promoteBan(req: Request, res: Response, next: NextFunction
       throw new AppError(400, 'Invalid ban ID');
     }
 
-    const ban = await banService.promoteToGlobal(id);
-    if (!ban) {
-      throw new AppError(404, 'Ban not found');
-    }
+    const ban = await banService.promoteToGlobal(id, req.tenantId, req.session?.userId ?? 0, req.session?.role === 'admin');
 
     res.json({ success: true, data: ban });
   } catch (err) {
@@ -218,7 +221,7 @@ export async function excludeBan(req: Request, res: Response, next: NextFunction
     const id = parseInt(req.params.id, 10);
     if (isNaN(id)) throw new AppError(400, 'Invalid ban ID');
 
-    await banService.excludeForTenant(id, req.tenantId, req.session?.userId ?? 0);
+    await banService.excludeForTenant(id, req.tenantId, req.session?.userId ?? 0, req.session?.role === 'admin');
     res.json({ success: true });
   } catch (err) {
     next(err);

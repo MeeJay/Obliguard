@@ -6,6 +6,22 @@ import { AppError } from '../middleware/errorHandler';
 import { logger } from '../utils/logger';
 import { serviceTemplateService } from './serviceTemplate.service';
 import { ipReputationService } from './ipReputation.service';
+import { canUseTenant } from '../middleware/tenant';
+import { parseBanTarget, banTargetRawFromRow, RESERVED_OR_PROTECTED_MESSAGE } from '../utils/ipValidation';
+import type { BanTarget } from '../utils/ipValidation';
+import { findProtectedConflict, checkBanTarget } from '../utils/protectedIps';
+import { applyBanVisibility, canSeeBan, canSeeBanAuthor } from './banVisibility';
+import { isUnsafeBanId, startBanSafetyAudit, stopBanSafetyAudit } from './banSafetyAudit';
+
+/**
+ * Manual subnet bans are refused until the agents enforce CIDR targets.
+ * D4.1 flips this once CIDR delivery is gated by agent capability. The subnet
+ * storage form (network address in ip + cidr_prefix) and D4.3's unique key,
+ * which must include COALESCE(cidr_prefix, masklen(ip)), must then agree.
+ */
+const MANUAL_SUBNET_BANS_ENABLED = false;
+
+const BAN_SCOPES = ['global', 'tenant', 'group', 'agent'] as const;
 
 // ── Socket.io instance (injected from index.ts) ─────────────────────────────
 let _io: SocketIOServer | null = null;
@@ -53,7 +69,8 @@ function rowToBan(row: BanRow, isAdmin = false, callerTenantId?: number): IpBan 
       callerTenantId != null &&
       row.origin_tenant_id != null &&
       row.origin_tenant_id === callerTenantId,
-    bannedByUserId: row.banned_by_user_id,
+    // The author is only shown to the owning/origin tenant, Default and platform admins.
+    bannedByUserId: canSeeBanAuthor(row, callerTenantId, isAdmin) ? row.banned_by_user_id : null,
     bannedAt: row.banned_at.toISOString(),
     expiresAt: row.expires_at ? row.expires_at.toISOString() : null,
     isActive: row.is_active,
@@ -88,14 +105,8 @@ class BanService {
         db.raw('ex.id IS NOT NULL AS is_excluded_by_tenant'),
       );
 
-    if (isAdmin) {
-      // Admin sees all bans (global + all tenants)
-    } else if (!isAdmin && !isMasterTenant(tenantId)) {
-      // Tenant admin sees: global bans + their own tenant bans
-      q = q.where((b) => {
-        b.where('ip_bans.scope', 'global').orWhere('ip_bans.tenant_id', tenantId);
-      });
-    }
+    // Default / platform admins see every ban; other tenants: global + their own.
+    q = applyBanVisibility(q, tenantId, isAdmin, 'ip_bans');
 
     if (onlyActive) q = q.where('ip_bans.is_active', true);
     if (search) q = q.whereRaw("ip_bans.ip::text ILIKE ?", [`%${search}%`]);
@@ -110,69 +121,289 @@ class BanService {
     };
   }
 
-  /** Create a manual ban */
+  /**
+   * Defence in depth behind requireTenant: a non-admin must be a member of the
+   * operating tenant to create, promote, lift or exclude a ban (stale session,
+   * legacy team capability). Platform admins are exempt.
+   */
+  async assertOperatingMembership(userId: number, tenantId: number, isAdmin: boolean): Promise<void> {
+    if (isAdmin) return;
+    if (!(userId > 0) || !(await canUseTenant(userId, 'user', tenantId))) {
+      throw new AppError(403, 'You are not a member of this tenant');
+    }
+  }
+
+  /** A single ban by id, when the caller may see it (null otherwise). */
+  async getById(id: number, tenantId: number, isAdmin: boolean): Promise<{
+    id: number; ip: string; cidrPrefix: number | null; banType: string; reason: string | null;
+    scope: string; scopeId: number | null; bannedByUserId: number | null; bannedByUsername: string | null;
+    bannedAt: Date; expiresAt: Date | null; isActive: boolean;
+  } | null> {
+    const row = await db('ip_bans').where({ id }).first() as BanRow | undefined;
+    if (!row || !canSeeBan(row, tenantId, isAdmin)) return null;
+    let bannedByUserId: number | null = null;
+    let bannedByUsername: string | null = null;
+    if (row.banned_by_user_id && canSeeBanAuthor(row, tenantId, isAdmin)) {
+      bannedByUserId = row.banned_by_user_id;
+      const user = await db('users').where({ id: row.banned_by_user_id }).select('username', 'display_name').first() as
+        { username: string; display_name: string | null } | undefined;
+      bannedByUsername = user?.display_name || user?.username || null;
+    }
+    return {
+      id: row.id,
+      ip: row.ip,
+      cidrPrefix: row.cidr_prefix,
+      banType: row.ban_type,
+      reason: row.reason,
+      scope: row.scope,
+      scopeId: row.scope_id,
+      bannedByUserId,
+      bannedByUsername,
+      bannedAt: row.banned_at,
+      expiresAt: row.expires_at,
+      isActive: row.is_active,
+    };
+  }
+
+  /** Active / created-today counts, with the same visibility as the list. */
+  async stats(tenantId: number, isAdmin: boolean): Promise<{ active: number; today: number }> {
+    const [[activeRow], [todayRow]] = await Promise.all([
+      applyBanVisibility(
+        db('ip_bans')
+          .where('ip_bans.is_active', true)
+          .whereRaw('(ip_bans.expires_at IS NULL OR ip_bans.expires_at > NOW())'),
+        tenantId, isAdmin, 'ip_bans',
+      ).count<Array<{ count: string }>>({ count: '*' }),
+      applyBanVisibility(
+        db('ip_bans').whereRaw('ip_bans.banned_at >= CURRENT_DATE'),
+        tenantId, isAdmin, 'ip_bans',
+      ).count<Array<{ count: string }>>({ count: '*' }),
+    ]);
+    return { active: Number(activeRow?.count ?? 0), today: Number(todayRow?.count ?? 0) };
+  }
+
+  /**
+   * Create a manual ban. The scope follows the OPERATING tenant, never the
+   * platform role: Default → global, any other tenant → tenant-local. A group
+   * or agent scope is accepted only on a target the operating tenant owns. An
+   * explicit scope that contradicts the rule is refused, never widened.
+   *
+   * `isAdmin` only drives rowToBan's admin display fields (and the membership
+   * exemption), never the scope.
+   */
   async create(
     data: CreateBanRequest,
     userId: number,
     tenantId: number,
     isAdmin: boolean,
+    opts: { deferMikrotik?: boolean; membershipChecked?: boolean } = {},
   ): Promise<IpBan> {
-    const scope: BanScope = data.scope ?? (isAdmin ? 'global' : 'tenant');
+    if (!opts.membershipChecked) await this.assertOperatingMembership(userId, tenantId, isAdmin);
 
-    // Non-admins can only create tenant-scoped bans
-    if (!isAdmin && scope !== 'tenant') {
-      throw new AppError(403, 'Only platform admins can create non-tenant-scoped bans');
+    // 1) Target
+    const rawIp: unknown = (data as { ip?: unknown }).ip;
+    if (typeof rawIp !== 'string') throw new AppError(400, 'ip is required');
+    const rawPrefix: unknown = (data as { cidrPrefix?: unknown }).cidrPrefix;
+    let raw: string = rawIp;
+    if (rawPrefix != null && rawPrefix !== '') {
+      const n = Number(rawPrefix);
+      if (!Number.isInteger(n)) throw new AppError(400, 'Invalid CIDR prefix');
+      if (rawIp.includes('/')) throw new AppError(400, 'Give the prefix either in ip or in cidrPrefix, not both');
+      raw = `${rawIp.trim()}/${n}`;
+    }
+    const r = parseBanTarget(raw, { allowCidr: true });
+    if (!r.ok) throw new AppError(400, r.message);
+    const t: BanTarget = r.target;
+    if (t.isNetwork && !MANUAL_SUBNET_BANS_ENABLED) {
+      throw new AppError(400, 'Subnet bans are not enforced by the agents yet: ban single addresses');
     }
 
-    // Reject if this IP already has an active ban
-    const existing = await db('ip_bans')
-      .where({ ip: data.ip, is_active: true })
-      .where(function () {
-        this.whereNull('expires_at').orWhere('expires_at', '>', new Date());
-      })
-      .first();
-    if (existing) {
-      throw new AppError(409, 'This IP is already banned');
+    // 2) Scope
+    const requested = (data as { scope?: unknown }).scope ?? null;
+    if (requested !== null && !(BAN_SCOPES as readonly unknown[]).includes(requested)) {
+      throw new AppError(400, 'Invalid scope');
+    }
+    const derived: BanScope = isMasterTenant(tenantId) ? 'global' : 'tenant';
+    let scope: BanScope;
+    let scopeId: number | null = null;
+    let rowTenantId: number | null;
+    if (requested === 'group' || requested === 'agent') {
+      const sid = Number((data as { scopeId?: unknown }).scopeId);
+      if (!Number.isInteger(sid) || sid <= 0) throw new AppError(400, 'scopeId is required for group/agent scope');
+      const owner = await (requested === 'agent' ? db('agent_devices') : db('monitor_groups'))
+        .where({ id: sid }).first('tenant_id') as { tenant_id: number | null } | undefined;
+      // No admin / Default bypass: the god view is read-only for writes.
+      if (!owner || Number(owner.tenant_id) !== tenantId) {
+        throw new AppError(404, requested === 'agent' ? 'Agent not found' : 'Group not found');
+      }
+      scope = requested;
+      scopeId = sid;
+      rowTenantId = tenantId;
+    } else if (requested === 'global' && derived === 'tenant') {
+      throw new AppError(403, 'Global bans can only be created from the Default tenant');
+    } else if (requested === 'tenant' && derived === 'global') {
+      throw new AppError(400, 'Bans created from the Default tenant are global: omit the scope, or use a group or agent scope');
+    } else {
+      scope = derived;
+      rowTenantId = derived === 'global' ? null : tenantId;
     }
 
-    const [row] = await db('ip_bans')
-      .insert({
-        ip: data.ip,
-        cidr_prefix: data.cidrPrefix ?? null,
-        reason: data.reason ?? null,
-        ban_type: 'manual',
-        scope,
-        scope_id: data.scopeId ?? null,
-        tenant_id: scope === 'global' ? null : tenantId,
-        // Record who created it, so the creating tenant can lift its own ban
-        // (same origin rule as auto-bans).
-        origin_tenant_id: tenantId,
-        banned_by_user_id: userId,
-        expires_at: data.expiresAt ?? null,
-        is_active: true,
-      })
-      .returning('*') as BanRow[];
+    // 3) Protected set (interface addresses matter for global bans only)
+    if (await findProtectedConflict(t, { includeInterfaces: scope === 'global' })) {
+      throw new AppError(400, RESERVED_OR_PROTECTED_MESSAGE);
+    }
+
+    // 4) Expiry and reason
+    let expiresAt: Date | null = null;
+    const rawExpires: unknown = (data as { expiresAt?: unknown }).expiresAt;
+    if (rawExpires != null && rawExpires !== '') {
+      const d = new Date(String(rawExpires));
+      if (isNaN(d.getTime())) throw new AppError(400, 'Invalid expiresAt');
+      if (d.getTime() <= Date.now()) throw new AppError(400, 'expiresAt must be in the future');
+      expiresAt = d;
+    }
+    const rawReason: unknown = (data as { reason?: unknown }).reason;
+    const reason = typeof rawReason === 'string' && rawReason.trim() ? rawReason.trim().slice(0, 500) : null;
+
+    // 5) Whitelist check, duplicate check and insert, atomic per target
+    const row = await db.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`ip_bans:${t.cidr}`]);
+
+      const wl = await trx('ip_whitelist')
+        .whereRaw('ip && ?::inet', [t.cidr])
+        .where((q) => {
+          q.where('scope', 'global');
+          if (scope !== 'global') q.orWhere((s) => s.where('scope', 'tenant').where('tenant_id', rowTenantId));
+          if (scope === 'group' || scope === 'agent') {
+            q.orWhere((s) => s.where('scope', scope).where('scope_id', scopeId).where('tenant_id', rowTenantId));
+          }
+        })
+        .first('id');
+      if (wl) throw new AppError(409, 'This IP is whitelisted');
+
+      // Duplicate: only active global rows and the caller's own scope (no
+      // oracle on other tenants' local bans).
+      const dup = await trx('ip_bans')
+        .where('is_active', true)
+        .where((q) => q.whereNull('expires_at').orWhere('expires_at', '>', trx.fn.now()))
+        .whereRaw('ip = ?::inet', [t.address])
+        .whereRaw('COALESCE(cidr_prefix, CASE WHEN family(ip) = 4 THEN 32 ELSE 128 END) = ?', [t.prefix])
+        .where((q) => {
+          q.where('scope', 'global');
+          if (scope !== 'global') {
+            q.orWhere((s) => s.where('scope', scope)
+              .whereRaw('COALESCE(scope_id, 0) = ?', [scopeId ?? 0])
+              .where('tenant_id', rowTenantId));
+          }
+        })
+        .orderByRaw("(scope = 'global') DESC")
+        .first() as BanRow | undefined;
+      if (dup) {
+        if (dup.scope === 'global' && scope !== 'global') {
+          const excluded = await trx('ip_ban_exclusions').where({ ban_id: dup.id, tenant_id: tenantId }).first('id');
+          if (excluded) throw new AppError(409, 'This IP is banned globally but lifted on your tenant: use Re-enable instead');
+          throw new AppError(409, 'This IP is already banned globally');
+        }
+        throw new AppError(409, 'This IP is already banned');
+      }
+
+      const [inserted] = await trx('ip_bans')
+        .insert({
+          ip: trx.raw('?::inet', [t.address]),
+          cidr_prefix: t.isNetwork ? t.prefix : null,
+          reason,
+          ban_type: 'manual',
+          scope,
+          scope_id: scopeId,
+          tenant_id: rowTenantId,
+          // Record who created it, so the creating tenant can lift its own ban
+          // (same origin rule as auto-bans).
+          origin_tenant_id: tenantId,
+          banned_by_user_id: userId > 0 ? userId : null,
+          expires_at: expiresAt,
+          is_active: true,
+        })
+        .returning('*') as BanRow[];
+      return inserted;
+    });
 
     _io?.emit('ban:created', rowToBan(row, isAdmin));
 
-    // Push ban to MikroTik devices (fire-and-forget)
-    import('./mikrotik/mikrotikBanSync.service')
-      .then(({ mikrotikBanSync }) => mikrotikBanSync.pushBanToAll(data.ip, 'ban'))
-      .catch(() => {});
+    // Push ban to MikroTik devices (fire-and-forget): only the tenant's routers
+    // for a tenant/group/agent ban.
+    if (!opts.deferMikrotik) {
+      const audience = scope === 'global' ? undefined : { tenantId: rowTenantId };
+      import('./mikrotik/mikrotikBanSync.service')
+        .then(({ mikrotikBanSync }) => mikrotikBanSync.pushBanToAll(row.ip, 'ban', audience))
+        .catch(() => {});
+    }
 
-    return rowToBan(row, isAdmin);
+    return rowToBan(row, isAdmin, tenantId);
   }
 
-  /** Promote a tenant ban to global (admin only) */
-  async promoteToGlobal(banId: number): Promise<IpBan> {
-    const [row] = await db('ip_bans')
-      .where('id', banId)
-      .update({ scope: 'global', scope_id: null, tenant_id: null })
-      .returning('*') as BanRow[];
+  /**
+   * Promote a tenant/group/agent ban to global. The authority action of the
+   * Default tenant (like the global Lift): Default only, for any Default
+   * member holding 'bans' — platform admins included, never from elsewhere.
+   * The address is rewritten in canonical form; the reason is kept (it becomes
+   * visible to every tenant).
+   */
+  async promoteToGlobal(banId: number, tenantId: number, userId: number, isAdmin: boolean): Promise<IpBan> {
+    if (!isMasterTenant(tenantId)) throw new AppError(403, 'Promote to global is only available from the Default tenant');
+    await this.assertOperatingMembership(userId, tenantId, isAdmin);
 
-    if (!row) throw new AppError(404, 'Ban not found');
+    const ban = await db('ip_bans').where('id', banId).first() as BanRow | undefined;
+    if (!ban) throw new AppError(404, 'Ban not found');
+    if (!ban.is_active || (ban.expires_at && new Date(ban.expires_at).getTime() <= Date.now())) {
+      throw new AppError(409, 'Ban is no longer active');
+    }
+    if (ban.scope === 'global') throw new AppError(409, 'Ban is already global');
+
+    const r = parseBanTarget(banTargetRawFromRow(String(ban.ip), ban.cidr_prefix), { allowCidr: true });
+    if (!r.ok) throw new AppError(400, `Cannot promote this ban: ${r.message}`);
+    const t = r.target;
+    if (t.isNetwork && !MANUAL_SUBNET_BANS_ENABLED) {
+      throw new AppError(400, 'Cannot promote a subnet ban: subnet bans are not enforced by the agents yet');
+    }
+    if (await findProtectedConflict(t, { includeInterfaces: true })) {
+      throw new AppError(400, RESERVED_OR_PROTECTED_MESSAGE);
+    }
+
+    const row = await db.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`ip_bans:${t.cidr}`]);
+      const wl = await trx('ip_whitelist').where('scope', 'global').whereRaw('ip && ?::inet', [t.cidr]).first('id');
+      if (wl) throw new AppError(409, 'This IP is whitelisted');
+      const dup = await trx('ip_bans')
+        .where('is_active', true)
+        .where((q) => q.whereNull('expires_at').orWhere('expires_at', '>', trx.fn.now()))
+        .whereRaw('ip = ?::inet', [t.address])
+        .whereRaw('COALESCE(cidr_prefix, CASE WHEN family(ip) = 4 THEN 32 ELSE 128 END) = ?', [t.prefix])
+        .where('scope', 'global')
+        .first('id');
+      if (dup) throw new AppError(409, 'This IP is already banned globally');
+      const [updated] = await trx('ip_bans')
+        .where({ id: banId, is_active: true })
+        .whereNot('scope', 'global')
+        .update({
+          scope: 'global',
+          scope_id: null,
+          tenant_id: null,
+          ip: trx.raw('?::inet', [t.address]),
+          cidr_prefix: null,
+        })
+        .returning('*') as BanRow[];
+      if (!updated) throw new AppError(409, 'Ban is no longer active');
+      return updated;
+    });
+
     _io?.emit('ban:updated', rowToBan(row, true));
-    return rowToBan(row, true);
+
+    // A global ban reaches every router (fire-and-forget).
+    import('./mikrotik/mikrotikBanSync.service')
+      .then(({ mikrotikBanSync }) => mikrotikBanSync.pushBanToAll(row.ip, 'ban'))
+      .catch(() => {});
+
+    return rowToBan(row, isAdmin, tenantId);
   }
 
   /**
@@ -190,7 +421,8 @@ class BanService {
    *     A ban belonging to another tenant is never enforced here and cannot be
    *     lifted from this tenant.
    */
-  async lift(banId: number, tenantId: number, userId: number): Promise<void> {
+  async lift(banId: number, tenantId: number, userId: number, isAdmin = false): Promise<void> {
+    await this.assertOperatingMembership(userId, tenantId, isAdmin);
     const ban = await db('ip_bans').where('id', banId).first() as BanRow | undefined;
     if (!ban) throw new AppError(404, 'Ban not found');
 
@@ -210,6 +442,9 @@ class BanService {
       return;
     }
 
+    // Non-Default tenant: a ban the caller cannot see does not exist for it.
+    if (!canSeeBan(ban, tenantId, isAdmin)) throw new AppError(404, 'Ban not found');
+
     // Non-Default tenant: the lift is ALWAYS local to this tenant.
     if (ban.scope === 'global') {
       if (!ban.is_active) throw new AppError(409, 'Ban is no longer active');
@@ -223,9 +458,10 @@ class BanService {
     }
 
     // Non-global ban: only its owning tenant may lift it. Since it is only ever
-    // enforced on that tenant, deactivating it IS the local action.
+    // enforced on that tenant, deactivating it IS the local action. Only a
+    // platform admin (who can see the row) reaches this refusal.
     if (ban.tenant_id !== tenantId) {
-      throw new AppError(403, 'This ban does not belong to your tenant');
+      throw new AppError(403, 'This ban belongs to another tenant');
     }
     if (!ban.is_active) throw new AppError(409, 'Ban is no longer active');
     await deactivateGlobally();
@@ -235,9 +471,10 @@ class BanService {
    * Create a per-tenant exclusion for a global ban.
    * The ban stays active globally; agents of this tenant will not enforce it.
    */
-  async excludeForTenant(banId: number, tenantId: number, userId: number): Promise<void> {
+  async excludeForTenant(banId: number, tenantId: number, userId: number, isAdmin = false): Promise<void> {
+    await this.assertOperatingMembership(userId, tenantId, isAdmin);
     const ban = await db('ip_bans').where('id', banId).first() as BanRow | undefined;
-    if (!ban) throw new AppError(404, 'Ban not found');
+    if (!ban || !canSeeBan(ban, tenantId, isAdmin)) throw new AppError(404, 'Ban not found');
     if (ban.scope !== 'global') throw new AppError(400, 'Only global bans can be excluded per-tenant');
     if (!ban.is_active) throw new AppError(409, 'Ban is no longer active');
 
@@ -294,6 +531,10 @@ class BanService {
     // Filter out whitelisted and tenant-excluded IPs
     const shouldBeBanned = new Set<string>();
     for (const ban of bans) {
+      // Unsafe legacy rows (reserved / too broad / protected, see banSafetyAudit)
+      // are never delivered: the agent receives a 'remove' for them.
+      // D4.1 must keep this exclusion when it rewrites this query.
+      if (isUnsafeBanId(ban.id)) continue;
       if (excludedBanIds.has(ban.id)) continue; // tenant opted out of this global ban
 
       const banIp = ban.ip;
@@ -333,7 +574,12 @@ class BanService {
     expiresAt: Date | null;             // null = permanent
     masterTenantId: number;             // the platform tenant that owns cross-suite bans
   }): Promise<{ ban: IpBan; isNew: boolean }> {
-    const existing = await db('ip_bans').where({ ip: args.ip }).first() as BanRow | undefined;
+    // Same contract as every ban path: strict single address, not reserved/protected.
+    const chk = await checkBanTarget(args.ip, { allowCidr: false, includeInterfaces: true });
+    if (!chk.ok) throw new AppError(400, chk.message);
+    const ip = chk.target.address;
+
+    const existing = await db('ip_bans').whereRaw('ip = ?::inet', [ip]).first() as BanRow | undefined;
     if (existing) {
       // Reconcile expires_at (null = permanent wins).
       let nextExpires: Date | null = existing.expires_at ? new Date(existing.expires_at as unknown as string) : null;
@@ -351,7 +597,7 @@ class BanService {
     }
 
     const [row] = await db('ip_bans').insert({
-      ip: args.ip,
+      ip,
       cidr_prefix: null,
       reason: args.reason,
       ban_type: 'external',
@@ -368,7 +614,7 @@ class BanService {
 
     // Sync downstream (MikroTik + remote blocklists) — same fire-and-forget as manual bans.
     import('./mikrotik/mikrotikBanSync.service')
-      .then(({ mikrotikBanSync }) => mikrotikBanSync.pushBanToAll(args.ip, 'ban'))
+      .then(({ mikrotikBanSync }) => mikrotikBanSync.pushBanToAll(ip, 'ban'))
       .catch(() => {});
 
     return { ban: rowToBan(row), isNew: true };
@@ -383,6 +629,9 @@ export const banService = new BanService();
 
 const BAN_ENGINE_INTERVAL_MS = 30_000;
 
+/** ip → last "refused auto-ban" warning (one per IP per hour). */
+const refusedAutoBanLog = new Map<string, number>();
+
 class BanEngine {
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
@@ -390,6 +639,8 @@ class BanEngine {
   start(): void {
     if (this.timer) return;
     this.timer = setInterval(() => void this.run(), BAN_ENGINE_INTERVAL_MS);
+    // Unsafe legacy rows: audited now and every 10 min, skipped at delivery.
+    startBanSafetyAudit();
     logger.info('BanEngine started');
   }
 
@@ -398,6 +649,7 @@ class BanEngine {
       clearInterval(this.timer);
       this.timer = null;
     }
+    stopBanSafetyAudit();
   }
 
   async run(): Promise<void> {
@@ -503,6 +755,19 @@ class BanEngine {
     service: string,
     failureCount: number,
   ): Promise<void> {
+    // Never auto-ban a reserved or protected address (throttled warning).
+    const chk = await checkBanTarget(ip, { allowCidr: false, includeInterfaces: true });
+    if (!chk.ok) {
+      const now = Date.now();
+      const last = refusedAutoBanLog.get(ip);
+      if (last == null || now - last > 60 * 60 * 1000) {
+        if (refusedAutoBanLog.size > 1000) refusedAutoBanLog.clear();
+        refusedAutoBanLog.set(ip, now);
+        logger.warn({ ip, reason: chk.code }, 'BanEngine: refusing to auto-ban a reserved/protected address');
+      }
+      return;
+    }
+
     // Check if already actively banned
     const existing = await db('ip_bans')
       .where('ip', ip)

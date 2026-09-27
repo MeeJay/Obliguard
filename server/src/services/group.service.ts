@@ -32,6 +32,7 @@ function rowToGroup(row: GroupRow): MonitorGroup {
     groupNotifications: row.group_notifications,
     evaluateOnly: row.evaluate_only ?? false,
     kind: (row.kind as MonitorGroup['kind']) || 'monitor',
+    tenantId: row.tenant_id,
     agentThresholds: row.agent_thresholds
       ? (typeof row.agent_thresholds === 'string' ? JSON.parse(row.agent_thresholds) : row.agent_thresholds)
       : null,

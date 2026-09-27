@@ -81,7 +81,7 @@ Côté agent, `applyOGConfig()` traite la réponse dans cet ordre :
 2. `banList.add` / `banList.remove` — appliqués en goroutine (`fw.BanIP` / `fw.UnbanIP` puis `fw.Flush()`), car le flush peut être lent sous Windows avec de nombreuses règles.
 3. `rateLimits` — toujours appelé via `fw.ApplyRateLimits()` si le backend le supporte (un tableau vide efface les règles précédentes).
 4. `services` — met à jour `LogWatcher` (`lw.UpdateConfigs`) et persiste `cfg.ServiceConfigs` sur disque (`saveConfig`).
-5. `latestVersion` — déclenche `applyUpdateIfNewer()` (auto-update MSI/binaire).
+5. `latestVersion` — déclenche `applyUpdateIfNewer()` (auto-update MSI/binaire). Le serveur n'inclut ce champ que lorsque la politique de mise à jour le permet (`auto`, ou demande explicite « Mettre à jour » active), au plus une fois toutes les 10 minutes par agent (C17-1, voir *Auto-update et désinstallation*).
 
 ### Flush des événements — debounce 500 ms
 

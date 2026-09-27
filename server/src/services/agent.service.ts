@@ -16,13 +16,30 @@ import type {
   AgentServiceConfig,
   AgentIpEvent,
   RateLimitRule,
+  AgentUpdatePolicy,
+  AgentUpdateRequestResult,
+  AgentVersionDistribution,
 } from '@obliview/shared';
 import {
   DEFAULT_AGENT_THRESHOLDS,
   DEFAULT_AGENT_GLOBAL_CONFIG,
+  DEFAULT_AGENT_UPDATE_POLICY,
   SOCKET_EVENTS,
   isMasterTenant,
 } from '@obliview/shared';
+import {
+  AGENT_UPDATE_REQUEST_TTL_MS,
+  UPDATE_OFFER_MIN_INTERVAL_MS,
+  UPDATE_REQUEST_MAX_OFFERS,
+  agentRootCandidates,
+  isAgentUpdatePolicy,
+  isStrictlyNewerAgentVersion,
+  isUpdateRequestLive,
+  isValidServedAgentVersion,
+  resolveAgentUpdatePolicy,
+  shouldAdvertiseUpdate,
+  type GroupPolicyEntry,
+} from '../utils/agentUpdate';
 import { appConfigService } from './appConfig.service';
 import { notificationService } from './notification.service';
 import { logger } from '../utils/logger';
@@ -31,6 +48,71 @@ import { whitelistService } from './whitelist.service';
 import { banService } from './ban.service';
 import { ipReputationService } from './ipReputation.service';
 import { serviceTemplateService } from './serviceTemplate.service';
+import {
+  agentKeyMayActForDevice,
+  agentKeyMayRebindDevice,
+  type AgentKeyRef,
+  type DeviceBindingRow,
+} from '../utils/agentIdentity';
+
+// ── Agent ↔ API-key binding (A5) ─────────────────────────────
+/**
+ * strict (default): a device answers only to the key it enrolled with (an admin
+ * releases the binding after a re-key). tenant: any key of the device's tenant
+ * re-binds it — first-deploy / mass re-keying only. Cross-tenant and MikroTik
+ * refusals apply in both modes.
+ */
+export const AGENT_KEY_BINDING: 'strict' | 'tenant' = process.env.AGENT_KEY_BINDING === 'tenant' ? 'tenant' : 'strict';
+if (AGENT_KEY_BINDING === 'tenant') {
+  logger.warn('AGENT_KEY_BINDING=tenant: any API key of a device\'s tenant may re-bind it (first-deploy mode)');
+}
+
+/** Max devices waiting for approval per API key. 0 = unlimited. */
+export const AGENT_MAX_PENDING_PER_KEY = (() => {
+  // Empty / whitespace = unset (Number('') would be 0 = unlimited).
+  const raw = process.env.AGENT_MAX_PENDING_PER_KEY?.trim();
+  const n = raw ? Number(raw) : 500;
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 500;
+})();
+
+/** Bounded "recently seen" map helper: refresh with delete-then-set, evict the oldest. */
+function _touchBounded<K>(map: Map<K, number>, key: K, ts: number, max: number): void {
+  map.delete(key);
+  map.set(key, ts);
+  while (map.size > max) {
+    const oldest = map.keys().next();
+    if (oldest.done) break;
+    map.delete(oldest.value);
+  }
+}
+
+const _bindingWarnAt = new Map<string, number>();
+const _rebindWarnAt = new Map<string, number>();
+const _pendingCapWarnAt = new Map<number, number>();
+const _keyUsageAt = new Map<number, number>();
+
+export interface BindingRefusedCtx {
+  deviceUuid: string;
+  deviceId: number | null;
+  apiKeyId: number;
+  keyTenantId: number;
+  deviceTenantId: number | null;
+  boundKeyId: number | null;
+  deviceType: string | null;
+  via: 'ws' | 'ws-live' | 'push' | 'notify';
+}
+
+/** Throttled (1 line / min per uuid + key) warning for a refused device/key pair. */
+export function warnBindingRefused(ctx: BindingRefusedCtx): void {
+  const k = `${ctx.deviceUuid}|${ctx.apiKeyId}`;
+  const now = Date.now();
+  const last = _bindingWarnAt.get(k);
+  if (last !== undefined && now - last < 60_000) return;
+  _touchBounded(_bindingWarnAt, k, now, 1000);
+  logger.warn(ctx, 'Agent refused: device/API-key mismatch');
+}
+
+export type HandlePushResult = ObliguardPushResponse & { enrolmentDeferred?: true };
 
 // ── MikroTik online detection ────────────────────────────────
 // A MikroTik device is considered online if we received a syslog packet
@@ -144,6 +226,11 @@ interface AgentDeviceRow {
   // Joined from mikrotik_credentials (nullable — only present for MikroTik devices)
   mt_last_syslog_at?: Date | null;
   mt_last_api_connected_at?: Date | null;
+  // migration 027 (Obliguard) — agent update control (C17-1)
+  update_policy?: string | null;
+  update_requested_at?: Date | null;
+  update_requested_version?: string | null;
+  update_requested_by?: number | null;
 }
 
 function rowToApiKey(row: AgentApiKeyRow): AgentApiKey {
@@ -158,12 +245,318 @@ function rowToApiKey(row: AgentApiKeyRow): AgentApiKey {
   };
 }
 
+// ============================================================
+// Agent update control (C17-1)
+// ============================================================
+//
+// latestVersion is advertised to an agent only when its resolved update
+// policy allows it ('auto', or a live explicit "Update now"), at most once per
+// device every 10 minutes. Every deployed agent build ignores an absent /
+// empty latestVersion, so omitting it is a verified no-op for them.
+
+let _agentRoot: string | null | undefined;
+
+/** The repo-level agent/ folder (dist layout, then src layout under tsx). Null results are not cached. */
+export function resolveAgentRoot(): string | null {
+  if (_agentRoot) return _agentRoot;
+  for (const root of agentRootCandidates(__dirname)) {
+    if (fs.existsSync(path.join(root, 'VERSION')) || fs.existsSync(path.join(root, 'dist'))) {
+      _agentRoot = root;
+      return root;
+    }
+  }
+  return null;
+}
+
+/** agent/VERSION, else the agentVersion literal of agent/main.go (not 'dev'), else null. Never '0.0.0'. */
+function readAgentVersionFromDisk(): string | null {
+  const root = resolveAgentRoot();
+  if (!root) return null;
+  try {
+    const v = fs.readFileSync(path.join(root, 'VERSION'), 'utf-8').trim();
+    if (v) return v;
+  } catch { /* not found, try main.go */ }
+  try {
+    const content = fs.readFileSync(path.join(root, 'main.go'), 'utf-8');
+    const match = content.match(/(?:var|const)\s+agentVersion\s*=\s*"([^"]+)"/);
+    if (match?.[1] && match[1] !== 'dev') return match[1];
+  } catch { /* not found */ }
+  return null;
+}
+
+let _served: { v: string | null; at: number } | null = null;
+let _servedOverride: string | null | undefined;
+
+/**
+ * The agent version this server serves (agent/VERSION), validated; null when
+ * unreadable or invalid (then nothing is advertised and no request is cleaned
+ * up). Cached 30 s (5 s for a null result).
+ */
+export function getServedAgentVersion(): string | null {
+  if (_servedOverride !== undefined) return _servedOverride;
+  const now = Date.now();
+  if (_served && now - _served.at < (_served.v === null ? 5_000 : 30_000)) return _served.v;
+  const raw = readAgentVersionFromDisk();
+  const v = raw !== null && isValidServedAgentVersion(raw) ? raw : null;
+  if (raw !== null && v === null) {
+    logger.warn({ raw: raw.slice(0, 80) }, 'agent/VERSION is not a valid version; agent updates are not advertised');
+  }
+  _served = { v, at: now };
+  return v;
+}
+
+let _now: () => number = () => Date.now();
+
+/** Per-device offer bookkeeping (10-min throttle, 3-offer cap). In-memory: one server instance assumed. */
+const _updateOffers = new Map<number, { lastAt: number; count: number; version: string }>();
+
+const REQUEST_NULLS = { update_requested_at: null, update_requested_version: null, update_requested_by: null };
+
+let _updPolicyCache: { map: Map<number, GroupPolicyEntry[]> | null; at: number } | null = null;
+let _chainsLoaderOverride: (() => Promise<Map<number, GroupPolicyEntry[]>>) | null = null;
+const UPD_POLICY_CACHE_TTL_MS = 15_000;
+/** A failed lookup is cached briefly so a persistent failure does not re-query (and warn) on every heartbeat. */
+const UPD_POLICY_FAILURE_TTL_MS = 5_000;
+
+/** Drop the cached group policy chains (group policy edited, import). */
+export function invalidateAgentUpdatePolicyCache(): void {
+  _updPolicyCache = null;
+}
+
+/** descendant group id → groups with an explicit policy in its ancestor chain, nearest first. */
+async function loadGroupUpdatePolicyChains(): Promise<Map<number, GroupPolicyEntry[]>> {
+  const rows = await db('group_closure as gc')
+    .join('monitor_groups as g', 'g.id', 'gc.ancestor_id')
+    .whereRaw("jsonb_typeof(g.agent_group_config::jsonb) = 'object'")
+    .whereRaw("g.agent_group_config::jsonb->>'updatePolicy' IN ('auto','manual','off')")
+    .select(
+      'gc.descendant_id as descendantId',
+      'gc.ancestor_id as groupId',
+      'gc.depth as depth',
+      'g.tenant_id as tenantId',
+      db.raw("g.agent_group_config::jsonb->>'updatePolicy' as policy"),
+    )
+    .orderBy([{ column: 'gc.descendant_id' }, { column: 'gc.depth', order: 'asc' }]) as Array<{
+      descendantId: number; groupId: number; depth: number; tenantId: number; policy: AgentUpdatePolicy;
+    }>;
+  const map = new Map<number, GroupPolicyEntry[]>();
+  for (const r of rows) {
+    let chain = map.get(r.descendantId);
+    if (!chain) { chain = []; map.set(r.descendantId, chain); }
+    chain.push({ groupId: r.groupId, tenantId: r.tenantId, policy: r.policy });
+  }
+  return map;
+}
+
+/** Group policy chains (15 s cache), or null when the lookup failed (failure cached 5 s: fail closed). */
+export async function getGroupUpdatePolicyChains(): Promise<Map<number, GroupPolicyEntry[]> | null> {
+  if (_updPolicyCache) {
+    const ttl = _updPolicyCache.map === null ? UPD_POLICY_FAILURE_TTL_MS : UPD_POLICY_CACHE_TTL_MS;
+    if (Date.now() - _updPolicyCache.at < ttl) return _updPolicyCache.map;
+  }
+  try {
+    const map = await (_chainsLoaderOverride ?? loadGroupUpdatePolicyChains)();
+    _updPolicyCache = { map, at: Date.now() };
+    return map;
+  } catch (err) {
+    logger.warn({ err }, 'agent update policy: group chain lookup failed; updates not advertised until it succeeds');
+    _updPolicyCache = { map: null, at: Date.now() };
+    return null;
+  }
+}
+
+// ── Test seams (verification harness only) ──
+export function __setServedAgentVersionForTest(v: string | null | undefined): void {
+  _servedOverride = v;
+  _served = null;
+}
+export function __setAgentUpdateClockForTest(fn: (() => number) | null): void {
+  _now = fn ?? (() => Date.now());
+}
+export function __setGroupUpdatePolicyChainsLoaderForTest(fn: (() => Promise<Map<number, GroupPolicyEntry[]>>) | null): void {
+  _chainsLoaderOverride = fn;
+  _updPolicyCache = null;
+}
+export function __resetAgentUpdateStateForTest(): void {
+  _served = null;
+  _servedOverride = undefined;
+  _agentRoot = undefined;
+  _updPolicyCache = null;
+  _chainsLoaderOverride = null;
+  _updateOffers.clear();
+  _now = () => Date.now();
+}
+
+type UpdCtx = { groupChain: GroupPolicyEntry[] | null; served: string | null };
+
+/** A device with no group needs no chain, so a failed lookup never freezes it. */
+function updCtx(row: AgentDeviceRow, chains: Map<number, GroupPolicyEntry[]> | null, served: string | null): UpdCtx {
+  return {
+    groupChain: row.group_id == null ? [] : chains === null ? null : (chains.get(row.group_id) ?? []),
+    served,
+  };
+}
+
+/** Update-control fields of an AgentDevice. */
+function updateFieldsFor(row: AgentDeviceRow, globalConfig: AgentGlobalConfig | null | undefined, upd: UpdCtx | undefined) {
+  const dp = isAgentUpdatePolicy(row.update_policy) ? row.update_policy : null;
+  const gp = isAgentUpdatePolicy(globalConfig?.updatePolicy) ? globalConfig!.updatePolicy! : null;
+  // Only groups of the device's own tenant count (legacy cross-tenant nesting is ignored).
+  const chain = upd?.groupChain === null ? null : (upd?.groupChain ?? []).filter((e) => Number(e.tenantId) === Number(row.tenant_id));
+  const r: { policy: AgentUpdatePolicy; source: NonNullable<AgentDevice['updatePolicySource']>; sourceGroupId: number | null } = chain === null
+    ? (gp === 'off'
+        ? { policy: 'off', source: 'global', sourceGroupId: null }
+        : { policy: 'off', source: 'unresolved', sourceGroupId: null })
+    : resolveAgentUpdatePolicy(dp, chain, gp);
+  const served = upd ? upd.served : null;
+  const updateAvailable = row.device_type !== 'mikrotik' && row.status === 'approved' && served !== null
+    && !!row.agent_version && isStrictlyNewerAgentVersion(served, row.agent_version);
+  const live = isUpdateRequestLive({
+    requestedAt: row.update_requested_at ?? null,
+    requestedVersion: row.update_requested_version ?? null,
+    served,
+    now: _now(),
+  });
+  return {
+    updatePolicy: dp,
+    resolvedUpdatePolicy: r.policy,
+    updatePolicySource: r.source,
+    updatePolicySourceGroupId: r.sourceGroupId,
+    latestAgentVersion: served,
+    updateAvailable,
+    updateRequestedAt: row.update_requested_at ? new Date(row.update_requested_at).toISOString() : null,
+    updateRequestedVersion: row.update_requested_version ?? null,
+    updatePending: live && r.policy !== 'off' && updateAvailable,
+  };
+}
+
+/**
+ * Conditional clear of an update request: only the request read at
+ * `readAtMs` is cleared (2 ms tolerance for µs→ms truncation); a newer click
+ * landing in between survives.
+ */
+export async function clearUpdateRequestIfUnchanged(id: number, readAtMs: number): Promise<boolean> {
+  const n = await db('agent_devices').where({ id })
+    .whereRaw('abs(extract(epoch from update_requested_at) * 1000 - ?) < 2', [readAtMs])
+    .update(REQUEST_NULLS);
+  return n > 0;
+}
+
+/**
+ * Close a request that can no longer be honoured (status, policy off, done,
+ * expired, superseded). A null served version or an 'unresolved' policy never
+ * clears anything. Never throws.
+ */
+async function reconcileUpdateRequest(device: AgentDevice, reported: string, now: number): Promise<AgentDevice> {
+  try {
+    const served = getServedAgentVersion();
+    if (served && !isStrictlyNewerAgentVersion(served, reported)) _updateOffers.delete(device.id);
+    if (!device.updateRequestedAt) return device;
+    const reqAtMs = Date.parse(device.updateRequestedAt);
+    const reqV = device.updateRequestedVersion ?? null;
+    let reason: string | null = null;
+    if (device.status !== 'approved') reason = 'status';
+    else if (device.resolvedUpdatePolicy === 'off' && device.updatePolicySource !== 'unresolved') reason = 'policy_off';
+    else if (!reqV) reason = 'invalid';
+    else if (!isStrictlyNewerAgentVersion(reqV, reported)) reason = 'done';
+    else if (now - reqAtMs >= AGENT_UPDATE_REQUEST_TTL_MS) reason = 'expired';
+    else if (served !== null && reqV !== served) reason = 'superseded';
+    if (reason === null) return device;
+    const cleared = await clearUpdateRequestIfUnchanged(device.id, reqAtMs);
+    if (!cleared) return device;
+    _updateOffers.delete(device.id);
+    logger.info({
+      event: 'agent_update_request_closed', deviceId: device.id, tenantId: device.tenantId, reason, requestedVersion: reqV, reported,
+    }, 'Agent update request closed');
+    return { ...device, updateRequestedAt: null, updateRequestedVersion: null, updatePending: false };
+  } catch (err) {
+    logger.warn({ err, deviceId: device.id }, 'agent update: request reconciliation skipped');
+    return device;
+  }
+}
+
+/** The latestVersion to put in this config frame, or undefined. Never throws. */
+async function resolveAdvertisedVersion(device: AgentDevice, reported: string, now: number): Promise<string | undefined> {
+  try {
+    const served = getServedAgentVersion();
+    const policy = device.resolvedUpdatePolicy ?? DEFAULT_AGENT_UPDATE_POLICY;
+    const requestLive = isUpdateRequestLive({
+      requestedAt: device.updateRequestedAt ?? null,
+      requestedVersion: device.updateRequestedVersion ?? null,
+      served,
+      now,
+    });
+    if (!shouldAdvertiseUpdate({ served, reported, policy, requestLive, deviceType: device.deviceType ?? 'agent', status: device.status })) {
+      return undefined;
+    }
+    const prev = _updateOffers.get(device.id);
+    if (prev && prev.version === served && now - prev.lastAt < UPDATE_OFFER_MIN_INTERVAL_MS) return undefined;
+    const count = prev?.version === served ? prev.count + 1 : 1;
+    if (policy !== 'auto' && count > UPDATE_REQUEST_MAX_OFFERS) {
+      if (device.updateRequestedAt) await clearUpdateRequestIfUnchanged(device.id, Date.parse(device.updateRequestedAt));
+      _updateOffers.delete(device.id);
+      logger.warn(
+        { event: 'agent_update_request_abandoned', deviceId: device.id, tenantId: device.tenantId, served, reported },
+        'Agent update request abandoned after 3 offers without the agent reporting the new version',
+      );
+      return undefined;
+    }
+    _updateOffers.set(device.id, { lastAt: now, count, version: served! });
+    return served!;
+  } catch (err) {
+    logger.warn({ err, deviceId: device.id }, 'agent update: advertisement skipped');
+    return undefined;
+  }
+}
+
+type ListRow = AgentDeviceRow & { _group_agent_config: unknown; _group_agent_thresholds: unknown; _group_name: string | null };
+
+/** Select of listDevices / getDevicesByIdsInTenant (device + group config + MikroTik status). */
+function deviceListQuery() {
+  return db('agent_devices as d')
+    .leftJoin('monitor_groups as g', 'g.id', 'd.group_id')
+    .leftJoin('mikrotik_credentials as mt', 'mt.device_id', 'd.id')
+    .select(
+      'd.*',
+      db.raw('g.agent_group_config as _group_agent_config'),
+      db.raw('g.agent_thresholds as _group_agent_thresholds'),
+      db.raw('g.name as _group_name'),
+      db.raw('mt.last_syslog_at as mt_last_syslog_at'),
+      db.raw('mt.last_api_connected_at as mt_last_api_connected_at'),
+    );
+}
+
+function hydrateDeviceRows(
+  rows: ListRow[],
+  globalConfig: AgentGlobalConfig | null,
+  evalGroupIds: Set<number>,
+  chains: Map<number, GroupPolicyEntry[]> | null,
+): AgentDevice[] {
+  const served = getServedAgentVersion();
+  return rows.map((r) => {
+    const gc = r._group_agent_config
+      ? (typeof r._group_agent_config === 'string'
+        ? JSON.parse(r._group_agent_config)
+        : r._group_agent_config) as AgentGroupConfig
+      : null;
+    const gt = r._group_agent_thresholds
+      ? (typeof r._group_agent_thresholds === 'string'
+        ? JSON.parse(r._group_agent_thresholds)
+        : r._group_agent_thresholds) as AgentThresholds
+      : null;
+    const dev = rowToDevice(r, gc, gt, globalConfig, evalStateFor(r, evalGroupIds), updCtx(r, chains, served));
+    (dev as AgentDevice & { groupName?: string | null }).groupName = r._group_name ?? null;
+    return dev;
+  });
+}
+
 function rowToDevice(
   row: AgentDeviceRow,
   groupConfig?: AgentGroupConfig | null,
   groupThresholds?: AgentThresholds | null,
   globalConfig?: AgentGlobalConfig | null,
   evalState?: { evaluateOnly: boolean; source: 'agent' | 'group' | null },
+  upd?: UpdCtx,
 ): AgentDevice {
   const override = row.override_group_settings ?? false;
 
@@ -242,6 +635,7 @@ function rowToDevice(
     ...(row.device_type === 'mikrotik' ? {
       mikrotikStatus: getMikrotikStatus(row.id, row.mt_last_syslog_at, row.mt_last_api_connected_at),
     } : {}),
+    ...updateFieldsFor(row, globalConfig, upd),
   };
 }
 
@@ -330,9 +724,130 @@ export const agentService = {
     return rowToApiKey(row);
   },
 
-  async deleteKey(id: number): Promise<boolean> {
-    const count = await db('agent_api_keys').where({ id }).del();
+  /**
+   * Tenant-scoped, with no master bypass: credentials are never god-viewed
+   * (listKeys is tenant-scoped too). The caller closes the key's live sessions.
+   */
+  async deleteKey(id: number, tenantId: number): Promise<boolean> {
+    const count = await db('agent_api_keys').where({ id, tenant_id: tenantId }).del();
     return count > 0;
+  },
+
+  // ── Agent ↔ API-key binding (A5) ────────────────────────
+
+  /**
+   * UNSAFE without tenant scope — agent channel only, always followed by
+   * ensureAgentBinding.
+   */
+  async findDeviceBindingByUuid(uuid: string): Promise<DeviceBindingRow | null> {
+    const row = await db('agent_devices')
+      .where({ uuid })
+      .first('id', 'tenant_id', 'api_key_id', 'device_type', 'status') as DeviceBindingRow | undefined;
+    return row ?? null;
+  },
+
+  /**
+   * Enforce the device ↔ key binding before any write. A NULL api_key_id (key
+   * deleted or binding released) is claimed atomically by the first same-tenant
+   * key that presents the uuid. With AGENT_KEY_BINDING=tenant, a key of the same
+   * tenant takes an existing binding over (logged). Mutates row.api_key_id when
+   * it binds. Never touches updated_at (the UI uses it as "last seen").
+   * A suspended or refused row is never claimed nor re-bound: the caller refuses
+   * it anyway, so the verdict is pure and the binding state stays unchanged.
+   */
+  async ensureAgentBinding(key: AgentKeyRef, row: DeviceBindingRow): Promise<boolean> {
+    if (row.status === 'suspended' || row.status === 'refused') {
+      return agentKeyMayActForDevice(key, row)
+        || (AGENT_KEY_BINDING === 'tenant' && agentKeyMayRebindDevice(key, row));
+    }
+    if (agentKeyMayActForDevice(key, row)) {
+      if (row.api_key_id != null) return true;
+      const n = await db('agent_devices')
+        .where({ id: row.id, tenant_id: key.tenant_id })
+        .whereNull('api_key_id')
+        .update({ api_key_id: key.id });
+      if (n === 1) {
+        logger.info({ deviceId: row.id, apiKeyId: key.id }, 'Agent device bound to API key');
+        row.api_key_id = key.id;
+        return true;
+      }
+      const fresh = await db('agent_devices').where({ id: row.id })
+        .first('tenant_id', 'api_key_id', 'device_type') as Pick<DeviceBindingRow, 'tenant_id' | 'api_key_id' | 'device_type'> | undefined;
+      return !!fresh && agentKeyMayActForDevice(key, fresh);
+    }
+
+    if (AGENT_KEY_BINDING === 'tenant' && agentKeyMayRebindDevice(key, row) && row.api_key_id != null) {
+      const fromKeyId = row.api_key_id;
+      const n = await db('agent_devices')
+        .where({ id: row.id, tenant_id: key.tenant_id, api_key_id: fromKeyId })
+        .update({ api_key_id: key.id });
+      if (n === 1) {
+        const wk = `${row.id}|${key.id}`;
+        const now = Date.now();
+        const last = _rebindWarnAt.get(wk);
+        if (last === undefined || now - last >= 60_000) {
+          _touchBounded(_rebindWarnAt, wk, now, 1000);
+          logger.warn(
+            { deviceId: row.id, fromKeyId, toKeyId: key.id },
+            'Agent device re-bound to another API key of the same tenant (AGENT_KEY_BINDING=tenant)',
+          );
+        }
+        row.api_key_id = key.id;
+        return true;
+      }
+      const fresh = await db('agent_devices').where({ id: row.id })
+        .first('tenant_id', 'api_key_id', 'device_type') as Pick<DeviceBindingRow, 'tenant_id' | 'api_key_id' | 'device_type'> | undefined;
+      return !!fresh && agentKeyMayActForDevice(key, fresh);
+    }
+
+    return false;
+  },
+
+  /** Binding check for a uuid: no row → ok (enrolment); otherwise ensureAgentBinding. */
+  async checkAgentBinding(
+    key: AgentKeyRef,
+    uuid: string,
+  ): Promise<{ ok: true; device: DeviceBindingRow | null } | { ok: false; device: DeviceBindingRow }> {
+    const device = await this.findDeviceBindingByUuid(uuid);
+    if (!device) return { ok: true, device: null };
+    const ok = await this.ensureAgentBinding(key, device);
+    return ok ? { ok: true, device } : { ok: false, device };
+  },
+
+  /** Throttled (60 s per key) fire-and-forget agent_api_keys.last_used_at update. */
+  touchApiKeyUsage(apiKeyId: number): void {
+    const now = Date.now();
+    const last = _keyUsageAt.get(apiKeyId);
+    if (last !== undefined && now - last < 60_000) return;
+    _touchBounded(_keyUsageAt, apiKeyId, now, 10_000);
+    db('agent_api_keys').where({ id: apiKeyId }).update({ last_used_at: new Date() }).catch(() => {});
+  },
+
+  async countPendingForKey(apiKeyId: number): Promise<number> {
+    const [row] = await db('agent_devices')
+      .where({ api_key_id: apiKeyId, status: 'pending' })
+      .count({ c: '*' }) as Array<{ c: string | number }>;
+    return Number(row?.c ?? 0);
+  },
+
+  /**
+   * Release a device's API-key binding (after a re-key). The caller closes the
+   * device's live channel (otherwise its next heartbeat re-claims the binding
+   * for the old key); the first key of the tenant that reconnects claims it.
+   */
+  async releaseKeyBinding(id: number, tenantId: number, byUserId: number | null): Promise<boolean> {
+    const n = await db('agent_devices')
+      .where({ id, tenant_id: tenantId })
+      .where((q) => q.whereNull('device_type').orWhereNot('device_type', 'mikrotik'))
+      .update({ api_key_id: null });
+    logger.info({ deviceId: id, tenantId, byUserId }, 'Agent device API-key binding released');
+    return n > 0;
+  },
+
+  /** A group id that exists in the tenant (kind not checked: legacy groups default to 'monitor'). */
+  async isGroupInTenant(groupId: number, tenantId: number): Promise<boolean> {
+    if (!Number.isInteger(groupId) || groupId <= 0) return false;
+    return !!(await db('monitor_groups').where({ id: groupId, tenant_id: tenantId }).first('id'));
   },
 
   /**
@@ -352,42 +867,30 @@ export const agentService = {
   async listDevices(tenantId: number, status?: AgentDevice['status']): Promise<AgentDevice[]> {
     // LEFT JOIN to fetch agent_group_config in one round-trip so resolvedSettings
     // can be computed without N+1 queries.
-    const [rows, globalConfig, evalGroupIds] = await Promise.all([
+    const [rows, globalConfig, evalGroupIds, chains] = await Promise.all([
       (async () => {
-        const query = db('agent_devices as d')
-          .leftJoin('monitor_groups as g', 'g.id', 'd.group_id')
-          .leftJoin('mikrotik_credentials as mt', 'mt.device_id', 'd.id')
-          .select(
-            'd.*',
-            db.raw('g.agent_group_config as _group_agent_config'),
-            db.raw('g.agent_thresholds as _group_agent_thresholds'),
-            db.raw('g.name as _group_name'),
-            db.raw('mt.last_syslog_at as mt_last_syslog_at'),
-            db.raw('mt.last_api_connected_at as mt_last_api_connected_at'),
-          )
-          .orderBy('d.created_at', 'desc');
+        const query = deviceListQuery().orderBy('d.created_at', 'desc');
         if (!isMasterTenant(tenantId)) query.where({ 'd.tenant_id': tenantId });
         if (status) query.where({ 'd.status': status });
-        return query as Promise<(AgentDeviceRow & { _group_agent_config: unknown; _group_agent_thresholds: unknown; _group_name: string | null })[]>;
+        return query as Promise<ListRow[]>;
       })(),
       appConfigService.getAgentGlobal(),
       getEvaluateOnlyGroupIds(),
+      getGroupUpdatePolicyChains(),
     ]);
-    return rows.map((r) => {
-      const gc = r._group_agent_config
-        ? (typeof r._group_agent_config === 'string'
-          ? JSON.parse(r._group_agent_config)
-          : r._group_agent_config) as AgentGroupConfig
-        : null;
-      const gt = r._group_agent_thresholds
-        ? (typeof r._group_agent_thresholds === 'string'
-          ? JSON.parse(r._group_agent_thresholds)
-          : r._group_agent_thresholds) as AgentThresholds
-        : null;
-      const dev = rowToDevice(r, gc, gt, globalConfig, evalStateFor(r, evalGroupIds));
-      (dev as AgentDevice & { groupName?: string | null }).groupName = r._group_name ?? null;
-      return dev;
-    });
+    return hydrateDeviceRows(rows, globalConfig, evalGroupIds, chains);
+  },
+
+  /** Devices of `ids` that belong to `tenantId` — strict, no Default god view (writes). */
+  async getDevicesByIdsInTenant(ids: number[], tenantId: number): Promise<AgentDevice[]> {
+    if (ids.length === 0) return [];
+    const [rows, globalConfig, evalGroupIds, chains] = await Promise.all([
+      deviceListQuery().whereIn('d.id', ids).andWhere({ 'd.tenant_id': tenantId }) as Promise<ListRow[]>,
+      appConfigService.getAgentGlobal(),
+      getEvaluateOnlyGroupIds(),
+      getGroupUpdatePolicyChains(),
+    ]);
+    return hydrateDeviceRows(rows, globalConfig, evalGroupIds, chains);
   },
 
   async getDeviceById(id: number): Promise<AgentDevice | null> {
@@ -401,13 +904,14 @@ export const agentService = {
       )
       .first() as AgentDeviceRow | undefined;
     if (!row) return null;
-    const [groupConfig, groupThresholds, globalConfig, evalGroupIds] = await Promise.all([
+    const [groupConfig, groupThresholds, globalConfig, evalGroupIds, chains] = await Promise.all([
       row.group_id ? getGroupAgentConfig(row.group_id) : null,
       row.group_id ? getGroupAgentThresholds(row.group_id) : null,
       appConfigService.getAgentGlobal(),
       getEvaluateOnlyGroupIds(),
+      getGroupUpdatePolicyChains(),
     ]);
-    return rowToDevice(row, groupConfig, groupThresholds, globalConfig, evalStateFor(row, evalGroupIds));
+    return rowToDevice(row, groupConfig, groupThresholds, globalConfig, evalStateFor(row, evalGroupIds), updCtx(row, chains, getServedAgentVersion()));
   },
 
   /** Tenant id that owns a device, or null if it doesn't exist. */
@@ -434,18 +938,24 @@ export const agentService = {
     return Number(row?.count ?? 0);
   },
 
+  /**
+   * UNSAFE without binding check: callers must run ensureAgentBinding. Kept
+   * unscoped on purpose: uuid is globally unique (001).
+   */
   async getDeviceByUuid(uuid: string): Promise<AgentDevice | null> {
     const row = await db('agent_devices').where({ uuid }).first() as AgentDeviceRow | undefined;
     if (!row) return null;
-    const [groupConfig, groupThresholds, globalConfig, evalGroupIds] = await Promise.all([
+    const [groupConfig, groupThresholds, globalConfig, evalGroupIds, chains] = await Promise.all([
       row.group_id ? getGroupAgentConfig(row.group_id) : null,
       row.group_id ? getGroupAgentThresholds(row.group_id) : null,
       appConfigService.getAgentGlobal(),
       getEvaluateOnlyGroupIds(),
+      getGroupUpdatePolicyChains(),
     ]);
-    return rowToDevice(row, groupConfig, groupThresholds, globalConfig, evalStateFor(row, evalGroupIds));
+    return rowToDevice(row, groupConfig, groupThresholds, globalConfig, evalStateFor(row, evalGroupIds), updCtx(row, chains, getServedAgentVersion()));
   },
 
+  /** Id-only: the caller must have enforced write access (deviceAccess.checkDeviceAccess). */
   async updateDevice(id: number, data: {
     status?: AgentDevice['status'];
     groupId?: number | null;
@@ -461,6 +971,7 @@ export const agentService = {
     notificationTypes?: NotificationTypeConfig | null;
     wanMatchingEnabled?: boolean;
     evaluateOnly?: boolean;
+    updatePolicy?: AgentUpdatePolicy | null;
   }): Promise<AgentDevice | null> {
     const update: Record<string, unknown> = { updated_at: new Date() };
     if (data.status !== undefined) update.status = data.status;
@@ -479,19 +990,30 @@ export const agentService = {
       : null;
     if (data.wanMatchingEnabled !== undefined) update.wan_matching_enabled = data.wanMatchingEnabled;
     if (data.evaluateOnly !== undefined) update.evaluate_only = data.evaluateOnly;
+    if (data.updatePolicy !== undefined) update.update_policy = data.updatePolicy;
+    // Freezing, suspending or refusing an agent drops its pending update request.
+    const dropRequest = data.updatePolicy === 'off' || data.status === 'refused' || data.status === 'suspended';
+    if (dropRequest) {
+      Object.assign(update, REQUEST_NULLS);
+      _updateOffers.delete(id);
+    }
 
     const [row] = await db('agent_devices')
       .where({ id })
       .update(update)
       .returning('*') as AgentDeviceRow[];
     if (!row) return null;
-    const [groupConfig, groupThresholds, globalConfig, evalGroupIds] = await Promise.all([
+    if (data.status === 'suspended' || data.status === 'refused') {
+      obliguardHub.disconnectDevice(row.uuid, `Device ${data.status}`);
+    }
+    const [groupConfig, groupThresholds, globalConfig, evalGroupIds, chains] = await Promise.all([
       row.group_id ? getGroupAgentConfig(row.group_id) : null,
       row.group_id ? getGroupAgentThresholds(row.group_id) : null,
       appConfigService.getAgentGlobal(),
       getEvaluateOnlyGroupIds(),
+      getGroupUpdatePolicyChains(),
     ]);
-    const device = rowToDevice(row, groupConfig, groupThresholds, globalConfig, evalStateFor(row, evalGroupIds));
+    const device = rowToDevice(row, groupConfig, groupThresholds, globalConfig, evalStateFor(row, evalGroupIds), updCtx(row, chains, getServedAgentVersion()));
 
     // Broadcast so the sidebar can update name/status/group without polling
     if (_io) {
@@ -507,22 +1029,36 @@ export const agentService = {
     return device;
   },
 
-  async deleteDevice(id: number): Promise<boolean> {
-    const count = await db('agent_devices').where({ id }).del();
-    return count > 0;
+  /** Tenant-scoped delete; closes the device's live agent channel. */
+  async deleteDevice(id: number, tenantId: number): Promise<boolean> {
+    const rows = await db('agent_devices').where({ id, tenant_id: tenantId }).del(['uuid']) as Array<{ uuid: string }>;
+    for (const r of rows) obliguardHub.disconnectDevice(r.uuid, 'Device deleted');
+    if (rows.length > 0) _updateOffers.delete(id);
+    return rows.length > 0;
   },
 
   // ── Bulk operations ──────────────────────────────────────────────────────
 
-  async bulkDeleteDevices(ids: number[]): Promise<void> {
-    if (ids.length === 0) return;
-    await db('agent_devices').whereIn('id', ids).del();
+  /**
+   * Delete devices of `tenantId`. tenantId null = internal job only
+   * (UNSAFE without tenant scope). Returns the number of deleted rows.
+   */
+  async bulkDeleteDevices(ids: number[], tenantId: number | null): Promise<number> {
+    if (ids.length === 0) return 0;
+    const q = db('agent_devices').whereIn('id', ids);
+    if (tenantId !== null) q.where({ tenant_id: tenantId });
+    const rows = await q.del(['id', 'uuid']) as Array<{ id: number; uuid: string }>;
+    for (const r of rows) {
+      obliguardHub.disconnectDevice(r.uuid, 'Device deleted');
+      _updateOffers.delete(r.id);
+    }
     // Broadcast deletion events so the frontend updates in real-time
     if (_io) {
-      for (const id of ids) {
-        _io.to('role:admin').emit(SOCKET_EVENTS.AGENT_DEVICE_DELETED, { deviceId: id });
+      for (const r of rows) {
+        _io.to('role:admin').emit(SOCKET_EVENTS.AGENT_DEVICE_DELETED, { deviceId: r.id });
       }
     }
+    return rows.length;
   },
 
   async bulkUpdateDevices(ids: number[], data: {
@@ -530,35 +1066,49 @@ export const agentService = {
     heartbeatMonitoring?: boolean;
     overrideGroupSettings?: boolean;
     status?: 'approved' | 'suspended';
-  }): Promise<void> {
-    if (ids.length === 0) return;
+    updatePolicy?: AgentUpdatePolicy | null;
+  }, tenantId: number): Promise<number> {
+    if (ids.length === 0) return 0;
     const update: Record<string, unknown> = { updated_at: new Date() };
+    if (data.updatePolicy !== undefined)         update.update_policy          = data.updatePolicy;
+    if (data.updatePolicy === 'off' || data.status === 'suspended') Object.assign(update, REQUEST_NULLS);
     if (data.groupId !== undefined)             update.group_id               = data.groupId;
     if (data.heartbeatMonitoring !== undefined)  update.heartbeat_monitoring   = data.heartbeatMonitoring;
     if (data.overrideGroupSettings !== undefined) update.override_group_settings = data.overrideGroupSettings;
     if (data.status !== undefined)               update.status                 = data.status;
-    await db('agent_devices').whereIn('id', ids).update(update);
+    const rows = await db('agent_devices')
+      .whereIn('id', ids)
+      .where({ tenant_id: tenantId })
+      .update(update, ['id', 'uuid']) as Array<{ id: number; uuid: string }>;
+    if (data.status === 'suspended') {
+      for (const r of rows) obliguardHub.disconnectDevice(r.uuid, 'Device suspended');
+    }
+    if (data.updatePolicy === 'off' || data.status === 'suspended') {
+      for (const r of rows) _updateOffers.delete(r.id);
+    }
     // Notify frontend of each updated device
     if (_io) {
-      for (const id of ids) {
-        _io.to('role:admin').emit(SOCKET_EVENTS.AGENT_DEVICE_UPDATED, { deviceId: id });
+      for (const r of rows) {
+        _io.to('role:admin').emit(SOCKET_EVENTS.AGENT_DEVICE_UPDATED, { deviceId: r.id });
       }
     }
+    return rows.length;
   },
 
-  /** Queue a command to be delivered to a device on its next push. */
-  async sendCommand(id: number, command: string): Promise<boolean> {
+  /** Queue a command to be delivered to a device of `tenantId` on its next push. */
+  async sendCommand(id: number, command: string, tenantId: number): Promise<boolean> {
     const count = await db('agent_devices')
-      .where({ id })
+      .where({ id, tenant_id: tenantId })
       .update({ pending_command: command, updated_at: new Date() });
     return count > 0;
   },
 
-  /** Queue a command for multiple devices at once. */
-  async bulkSendCommand(ids: number[], command: string): Promise<void> {
-    if (ids.length === 0) return;
-    await db('agent_devices')
+  /** Queue a command for multiple devices of `tenantId` at once. Returns the count. */
+  async bulkSendCommand(ids: number[], command: string, tenantId: number): Promise<number> {
+    if (ids.length === 0) return 0;
+    return db('agent_devices')
       .whereIn('id', ids)
+      .where({ tenant_id: tenantId })
       .update({ pending_command: command, updated_at: new Date() });
   },
 
@@ -577,13 +1127,14 @@ export const agentService = {
     if (rows.length === 0) return;
 
     const ids = rows.map(r => r.id);
-    await this.bulkDeleteDevices(ids);
+    await this.bulkDeleteDevices(ids, null);
     logger.info(`Agent cleanup: auto-deleted ${ids.length} device(s) after uninstall command.`);
   },
 
   /** Suspend a device: set status=suspended */
   async suspendDevice(id: number): Promise<void> {
-    await db('agent_devices').where({ id }).update({ status: 'suspended', updated_at: new Date() });
+    await db('agent_devices').where({ id }).update({ status: 'suspended', updated_at: new Date(), ...REQUEST_NULLS });
+    _updateOffers.delete(id);
   },
 
   /** Reinstate a suspended device: set status=approved */
@@ -650,12 +1201,46 @@ export const agentService = {
     deviceUuid: string,
     clientIp: string,
     body: ObliguardPushBody,
-  ): Promise<ObliguardPushResponse> {
+  ): Promise<HandlePushResult> {
     // ── a. Find or register device ────────────────────────
+    // The device ↔ key binding is enforced BEFORE any write (A5): a key of
+    // another tenant, another bound key or a MikroTik row gets 'refused' and
+    // the row is left untouched.
+    const key: AgentKeyRef = { id: agentApiKeyId, tenant_id: agentTenantId };
     let device = await this.getDeviceByUuid(deviceUuid);
 
+    if (device) {
+      const ok = await this.ensureAgentBinding(key, {
+        id: device.id,
+        tenant_id: device.tenantId,
+        api_key_id: device.apiKeyId,
+        device_type: device.deviceType ?? null,
+        status: device.status,
+      });
+      if (!ok) {
+        warnBindingRefused({
+          deviceUuid, deviceId: device.id, apiKeyId: agentApiKeyId, keyTenantId: agentTenantId,
+          deviceTenantId: device.tenantId, boundKeyId: device.apiKeyId, deviceType: device.deviceType ?? null, via: 'push',
+        });
+        return { status: 'refused' };
+      }
+    }
+
     if (!device) {
-      // Register new device as pending
+      // Pending cap per API key: beyond it, enrolment is deferred (no row).
+      if (AGENT_MAX_PENDING_PER_KEY > 0 && (await this.countPendingForKey(agentApiKeyId)) >= AGENT_MAX_PENDING_PER_KEY) {
+        const now = Date.now();
+        const last = _pendingCapWarnAt.get(agentApiKeyId);
+        if (last === undefined || now - last >= 10 * 60_000) {
+          _touchBounded(_pendingCapWarnAt, agentApiKeyId, now, 1000);
+          logger.warn(
+            { apiKeyId: agentApiKeyId, tenantId: agentTenantId, cap: AGENT_MAX_PENDING_PER_KEY },
+            'Pending device cap reached for API key — enrolment deferred',
+          );
+        }
+        return { status: 'pending', enrolmentDeferred: true };
+      }
+      // Register new device as pending (race-safe: uuid is UNIQUE)
       const [row] = await db('agent_devices')
         .insert({
           uuid: deviceUuid,
@@ -668,7 +1253,11 @@ export const agentService = {
           status: 'pending',
           check_interval_seconds: 300, // pending: check every 5 min
         })
+        .onConflict('uuid')
+        .ignore()
         .returning('*') as AgentDeviceRow[];
+      // Lost a race with a concurrent first push: the next heartbeat re-evaluates the binding.
+      if (!row) return { status: 'pending' };
       device = rowToDevice(row);
     } else {
       // ── b. Update device metadata ─────────────────────
@@ -692,8 +1281,10 @@ export const agentService = {
       device = (await this.getDeviceByUuid(deviceUuid))!;
     }
 
-    // Register/update device UUID with Obligate for cross-app linking (non-blocking, idempotent)
-    obligateService.registerDeviceLink(deviceUuid, `/agents/${device.id}`).catch(() => {});
+    // ── b2. Update request reconciliation (C17-1) ─────────
+    // Closes a request that can no longer be honoured (agent now current,
+    // expired, superseded, policy off, not approved). Never throws.
+    device = await reconcileUpdateRequest(device, body.agentVersion || '', _now());
 
     // ── c. Pending status ─────────────────────────────────
     if (device.status === 'pending') {
@@ -711,6 +1302,10 @@ export const agentService = {
     }
 
     const deviceId = device.id;
+
+    // Register/update device UUID with Obligate for cross-app linking (non-blocking,
+    // idempotent, throttled) — approved, bound devices only.
+    obligateService.registerDeviceLink(deviceUuid, `/agents/${device.id}`).catch(() => {});
 
     // ── e0. Rebuild LAN IP registry for this device ───────
     // agent_ips is a fast-lookup table: ip_address → agent_id (within tenant).
@@ -1081,9 +1676,12 @@ export const agentService = {
     }
 
     // ── k. Return ObliguardPushResponse ──────────────────
+    // latestVersion only when the update policy allows it (C17-1): 'auto', or a
+    // live explicit request; at most one offer per 10 min. Never throws.
+    const advertised = await resolveAdvertisedVersion(device, body.agentVersion || device.agentVersion || '', _now());
     return {
       status: 'ok',
-      latestVersion: this.getAgentVersion().version,
+      ...(advertised ? { latestVersion: advertised } : {}),
       config: { pushIntervalSeconds: device.resolvedSettings.checkIntervalSeconds },
       banList: { add: banDelta.add, remove: banDelta.remove },
       whitelist: resolvedWhitelist,
@@ -1107,20 +1705,32 @@ export const agentService = {
   ): Promise<void> {
     if (events.length === 0) return;
 
+    // Single authoritative ingestion gate (A5): the device must exist in this
+    // tenant AND be approved. Unknown / other-tenant / pending / refused /
+    // suspended devices never ingest events or reputation.
+    let dev: { group_id: number | null } | undefined;
+    try {
+      dev = await db('agent_devices')
+        .where({ id: deviceId, tenant_id: tenantId, status: 'approved' })
+        .first('group_id') as { group_id: number | null } | undefined;
+    } catch (err) {
+      logger.warn({ err, deviceId }, 'processEventsFlush: device gate lookup failed');
+      return;
+    }
+    if (!dev) return;
+
     // Resolve group ancestry (needed for track-only and peer-link lookups)
     let groupIds: number[] = [];
-    try {
-      const row = await db('agent_devices').where({ id: deviceId }).select('group_id').first() as
-        { group_id: number | null } | undefined;
-      if (row?.group_id) {
+    if (dev.group_id) {
+      try {
         const groupRows = await db('group_closure')
-          .where('descendant_id', row.group_id)
+          .where('descendant_id', dev.group_id)
           .select('ancestor_id')
           .orderBy('depth', 'asc') as { ancestor_id: number }[];
         groupIds = groupRows.map(r => r.ancestor_id);
+      } catch (err) {
+        logger.warn({ err, deviceId }, 'processEventsFlush: group ancestry lookup failed');
       }
-    } catch (err) {
-      logger.warn({ err, deviceId }, 'processEventsFlush: group ancestry lookup failed');
     }
 
     // Track-only + disabled service sets (same opt-in gate as handlePush)
@@ -1270,24 +1880,125 @@ export const agentService = {
 
   // ── Version / download endpoints ─────────────────────────
 
+  /**
+   * The served agent version for the logged-in UI (agent/VERSION, dist or src
+   * layout). Agents get the update target only through the config frame, gated
+   * by the update policy (C17-1).
+   */
   getAgentVersion(): { version: string } {
-    // 1. Try agent/VERSION (plain text "X.Y.Z\n") — present in both dev and prod
-    try {
-      const versionFilePath = path.resolve(__dirname, '../../../../agent/VERSION');
-      const v = fs.readFileSync(versionFilePath, 'utf-8').trim();
-      if (v) return { version: v };
-    } catch { /* not found, try next */ }
+    return { version: getServedAgentVersion() ?? '0.0.0' };
+  },
 
-    // 2. Dev fallback: parse `var agentVersion = "x.y.z"` from agent/main.go
-    // (main.go now uses `var agentVersion = "dev"` as default — skip "dev")
-    try {
-      const mainGoPath = path.resolve(__dirname, '../../../../agent/main.go');
-      const content = fs.readFileSync(mainGoPath, 'utf-8');
-      const match = content.match(/(?:var|const)\s+agentVersion\s*=\s*"([^"]+)"/);
-      if (match?.[1] && match[1] !== 'dev') return { version: match[1] };
-    } catch { /* not found */ }
+  // ── Agent update requests (C17-1) ────────────────────────
 
-    return { version: '0.0.0' };
+  /**
+   * Explicit "Update now" on devices of `tenantId` (strict: other tenants'
+   * ids are counted in skipped.notFound, also from Default). The request is
+   * pinned to the version served now. Does not touch updated_at ("last seen").
+   */
+  async requestUpdate(ids: number[], tenantId: number, userId: number | null): Promise<AgentUpdateRequestResult> {
+    const uniqueIds = [...new Set(ids)];
+    const served = getServedAgentVersion();
+    if (served === null) {
+      return { requested: 0, targetVersion: null, skipped: { off: 0, current: 0, notUpdatable: uniqueIds.length, notFound: 0 } };
+    }
+    const devices = await this.getDevicesByIdsInTenant(uniqueIds, tenantId);
+    const skipped = { off: 0, current: 0, notUpdatable: 0, notFound: uniqueIds.length - devices.length };
+    const eligible: number[] = [];
+    for (const d of devices) {
+      if (d.deviceType !== 'agent' || d.status !== 'approved' || !d.agentVersion || d.updatePolicySource === 'unresolved') {
+        skipped.notUpdatable++;
+      } else if (d.resolvedUpdatePolicy === 'off') {
+        skipped.off++;
+      } else if (!isStrictlyNewerAgentVersion(served, d.agentVersion)) {
+        skipped.current++;
+      } else {
+        eligible.push(d.id);
+      }
+    }
+    if (eligible.length > 0) {
+      const now = _now();
+      await db('agent_devices')
+        .whereIn('id', eligible)
+        .andWhere({ tenant_id: tenantId })
+        .update({ update_requested_at: new Date(now), update_requested_version: served, update_requested_by: userId });
+      for (const id of eligible) {
+        // A re-click restores the offer budget but keeps the 10-min throttle,
+        // so repeated clicks cannot drive a download/restart loop.
+        const prev = _updateOffers.get(id);
+        if (prev && prev.version === served && now - prev.lastAt < UPDATE_OFFER_MIN_INTERVAL_MS) {
+          _updateOffers.set(id, { ...prev, count: 0 });
+        } else {
+          _updateOffers.delete(id);
+        }
+      }
+      logger.info({
+        event: 'agent_update_requested', userId, tenantId, version: served, count: eligible.length, deviceIds: eligible.slice(0, 50),
+      }, 'Agent update requested');
+    }
+    return { requested: eligible.length, targetVersion: served, skipped };
+  },
+
+  /** Cancel a pending request of a device of `tenantId`. */
+  async cancelUpdateRequest(id: number, tenantId: number, userId: number | null): Promise<boolean> {
+    const n = await db('agent_devices')
+      .where({ id, tenant_id: tenantId })
+      .whereNotNull('update_requested_at')
+      .update(REQUEST_NULLS);
+    _updateOffers.delete(id);
+    if (n > 0) logger.info({ event: 'agent_update_request_cancelled', userId, tenantId, deviceId: id }, 'Agent update request cancelled');
+    return n > 0;
+  },
+
+  /** "Update outdated agents" of a group of `tenantId` and its sub-groups; null when the group is not in the tenant. */
+  async requestGroupUpdate(groupId: number, tenantId: number, userId: number | null): Promise<AgentUpdateRequestResult | null> {
+    if (!(await db('monitor_groups').where({ id: groupId, tenant_id: tenantId }).first('id'))) return null;
+    const ids = await db('agent_devices')
+      .whereIn('group_id', db('group_closure').where({ ancestor_id: groupId }).select('descendant_id'))
+      .andWhere({ tenant_id: tenantId, status: 'approved', device_type: 'agent' })
+      .pluck('id') as number[];
+    return this.requestUpdate(ids, tenantId, userId);
+  },
+
+  /** Version distribution of approved agents (Default: every tenant — read god view). */
+  async getVersionDistribution(tenantId: number): Promise<AgentVersionDistribution> {
+    const devices = (await this.listDevices(tenantId, 'approved')).filter((d) => d.deviceType === 'agent');
+    const served = getServedAgentVersion();
+    const global = await appConfigService.getAgentGlobal();
+    const policies: Record<AgentUpdatePolicy, number> = { auto: 0, manual: 0, off: 0 };
+    let upToDate = 0; let outdated = 0; let unknown = 0; let updatePending = 0;
+    const counts = new Map<string, number>();
+    for (const d of devices) {
+      const v = d.agentVersion;
+      if (!v) unknown++;
+      else if (served && isStrictlyNewerAgentVersion(served, v)) outdated++;
+      else upToDate++;
+      if (d.updatePending) updatePending++;
+      policies[d.resolvedUpdatePolicy ?? DEFAULT_AGENT_UPDATE_POLICY]++;
+      const key = v || 'unknown';
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    const versions = [...counts.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .slice(0, 10)
+      .map(([version, count]) => ({
+        version,
+        count,
+        isLatest: version === served,
+        outdated: served !== null && version !== 'unknown' && isStrictlyNewerAgentVersion(served, version),
+      }));
+    return {
+      latestVersion: served,
+      total: devices.length,
+      upToDate,
+      outdated,
+      unknown,
+      updatePending,
+      policies,
+      globalPolicy: isAgentUpdatePolicy(global.updatePolicy) ? global.updatePolicy : DEFAULT_AGENT_UPDATE_POLICY,
+      globalPolicyIsDefault: !isAgentUpdatePolicy(global.updatePolicy),
+      versions,
+    };
   },
 
   /**

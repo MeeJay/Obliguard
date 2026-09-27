@@ -1,4 +1,5 @@
 import { db } from '../db';
+import { MASTER_TENANT_ID } from '@obliview/shared';
 import type { Tenant, TenantWithRole } from '@obliview/shared';
 
 interface TenantRow {
@@ -39,6 +40,12 @@ export const tenantService = {
     return row ? rowToTenant(row) : null;
   },
 
+  /** True when a tenant with this id exists (rejects non-positive / unsafe ids). */
+  async exists(id: number): Promise<boolean> {
+    if (!Number.isSafeInteger(id) || id <= 0) return false;
+    return !!(await db('tenants').where({ id }).first('id'));
+  },
+
   async getBySlug(slug: string): Promise<Tenant | null> {
     const row = await db('tenants').where({ slug }).first<TenantRow>();
     return row ? rowToTenant(row) : null;
@@ -71,6 +78,41 @@ export const tenantService = {
       .orderBy('tenants.id')
       .first<TenantRow & { role: string }>('tenants.*');
     return row ? rowToTenant(row) : null;
+  },
+
+  /** The user's favourite workspace id (opened at sign-in), or null if none set. */
+  async getPreferredTenant(userId: number): Promise<number | null> {
+    const row = await db('users').where({ id: userId }).first<{ preferred_tenant_id: number | null } | undefined>('preferred_tenant_id');
+    return row?.preferred_tenant_id ?? null;
+  },
+
+  /** Set (or clear, with null) the user's favourite workspace. The caller validates access. */
+  async setPreferredTenant(userId: number, tenantId: number | null): Promise<void> {
+    await db('users').where({ id: userId }).update({ preferred_tenant_id: tenantId, updated_at: db.fn.now() });
+  },
+
+  /**
+   * Tenant a fresh session lands on (password login, 2FA verify, SSO callback
+   * fallback, /auth/me repair):
+   *   1. the user's favourite workspace, when it is still usable (platform admin:
+   *      the tenant exists; anyone else: still a member);
+   *   2. else the first membership (lowest id);
+   *   3. else Default for platform admins — they have implicit access to every
+   *      tenant and may have no user_tenants row (bootstrap admin from
+   *      ensureDefaultAdmin, SSO platform admins);
+   *   4. else null: a non-admin without membership must never be placed on the
+   *      god-view tenant; the session tenant stays unset (no tenant access).
+   * Same access predicate as middleware/tenant canUseTenant (uncached here).
+   */
+  async resolveLoginTenant(userId: number, role: string | null | undefined): Promise<number | null> {
+    const preferred = await tenantService.getPreferredTenant(userId);
+    if (preferred !== null) {
+      const usable = role === 'admin' ? await tenantService.exists(preferred) : await tenantService.userHasAccess(userId, preferred);
+      if (usable) return preferred;
+    }
+    const first = await tenantService.getFirstTenantForUser(userId);
+    if (first) return first.id;
+    return role === 'admin' ? MASTER_TENANT_ID : null;
   },
 
   /** Returns all tenants accessible by userId, with tenant-level role. */

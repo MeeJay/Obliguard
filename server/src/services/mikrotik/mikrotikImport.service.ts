@@ -21,6 +21,7 @@ import { logger } from '../../utils/logger';
 import { createRouterOSClient } from './routerosClient';
 import { decryptSecret } from '../../utils/crypto';
 import { mikrotikBanSync } from './mikrotikBanSync.service';
+import { checkBanTarget } from '../../utils/protectedIps';
 
 const POLL_INTERVAL_MS = 60_000; // 60 seconds
 
@@ -33,7 +34,7 @@ function cacheKey(deviceId: number, listName: string): string {
   return `${deviceId}:${listName}`;
 }
 
-interface ImportDevice {
+export interface ImportDevice {
   deviceId: number;
   tenantId: number;
   apiHost: string;
@@ -148,11 +149,28 @@ async function pollDevice(device: ImportDevice): Promise<void> {
  * Optimized for large imports (30K+ IPs): filters already-banned in bulk,
  * batch-inserts bans and events in chunks of 500.
  */
-async function batchImportIPs(
-  ips: string[],
+export async function batchImportIPs(
+  rawIps: string[],
   listName: string,
   device: ImportDevice,
 ): Promise<void> {
+  if (rawIps.length === 0) return;
+
+  // Same contract as every ban path (B9-1 must keep it): refuse invalid,
+  // reserved, too broad and protected entries. Subnets at or under the floor
+  // are still imported as today (masked inet form). The CANONICAL target is
+  // stored (e.g. '::ffff:1.2.3.4' -> '1.2.3.4'), so the duplicate check below
+  // and agent delivery see the same text as every other ban path.
+  const seen = new Set<string>();
+  let refused = 0;
+  for (const ip of rawIps) {
+    const c = await checkBanTarget(ip, { allowCidr: true });
+    if (c.ok) seen.add(c.target.cidr); else refused++;
+  }
+  const ips = [...seen];
+  if (refused) {
+    logger.warn({ deviceId: device.deviceId, list: listName, refused }, 'MikroTik import: refused reserved/protected/too-broad/invalid entries');
+  }
   if (ips.length === 0) return;
 
   const reason = `MikroTik import: detected in "${listName}" address-list`;

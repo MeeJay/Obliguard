@@ -1,6 +1,38 @@
 import { db } from '../db';
 import type { IpReputation, IpEvent, IpStatus } from '@obliview/shared';
 import { isMasterTenant } from '@obliview/shared';
+import { seesAllBans, canSeeBanAuthor } from './banVisibility';
+
+/** Per-IP totals computed from ONE tenant's own ip_events (restricted callers). */
+interface TenantAgg {
+  failures: number;
+  successes: number;
+  agents: number;
+  services: string[];
+  usernames: string[];
+  firstSeen: Date | null;
+  lastSeen: Date | null;
+  lastDeviceId: number | null;
+}
+
+/**
+ * Totals shown to a restricted caller (customer tenant): from its own events
+ * only (tenantId set), or zeroed (no tenant). Default / platform admins keep
+ * the global ip_reputation values (god view).
+ */
+function applyTenantTotals<T extends IpReputation>(rep: T, agg: TenantAgg | undefined): T {
+  return {
+    ...rep,
+    totalFailures: agg?.failures ?? 0,
+    totalSuccesses: agg?.successes ?? 0,
+    affectedAgentsCount: agg?.agents ?? 0,
+    affectedServices: agg?.services ?? [],
+    attemptedUsernames: agg?.usernames ?? [],
+    firstSeen: agg?.firstSeen ? new Date(agg.firstSeen).toISOString() : null,
+    lastSeen: agg?.lastSeen ? new Date(agg.lastSeen).toISOString() : null,
+    lastEventDeviceId: agg?.lastDeviceId ?? null,
+  };
+}
 
 // ── Row interfaces ───────────────────────────────────────────────────────────
 
@@ -288,18 +320,92 @@ class IpReputationService {
   }
 
   /**
+   * LATERAL joins picking at most ONE active ban and ONE whitelist entry per
+   * IP (an IP is never listed twice, even when several tenants hold local
+   * bans on it). Restricted callers only see global rows and their own.
+   */
+  private lateralJoins(restrict: boolean, tenantId: number | null | undefined): {
+    banSql: string; banBindings: unknown[]; wlSql: string; wlBindings: unknown[];
+  } {
+    const vis = (alias: string): { sql: string; bindings: unknown[] } => {
+      if (!restrict) return { sql: '', bindings: [] };
+      if (tenantId == null) return { sql: `AND ${alias}.scope = 'global'`, bindings: [] };
+      return { sql: `AND (${alias}.scope = 'global' OR ${alias}.tenant_id = ?)`, bindings: [tenantId] };
+    };
+    const banVis = vis('bb');
+    const wlVis = vis('ww');
+    return {
+      banSql: `LEFT JOIN LATERAL (SELECT bb.id, bb.scope, bb.tenant_id, bb.origin_tenant_id FROM ip_bans bb WHERE bb.ip = r.ip AND bb.is_active AND (bb.expires_at IS NULL OR bb.expires_at > now()) ${banVis.sql} ORDER BY (bb.scope = 'global') DESC, COALESCE(bb.tenant_id = ?, false) DESC, bb.banned_at DESC, bb.id DESC LIMIT 1) AS b ON true`,
+      banBindings: [...banVis.bindings, tenantId ?? 0],
+      wlSql: `LEFT JOIN LATERAL (SELECT ww.id FROM ip_whitelist ww WHERE r.ip <<= ww.ip ${wlVis.sql} ORDER BY (ww.scope = 'global') DESC, ww.id LIMIT 1) AS w ON true`,
+      wlBindings: [...wlVis.bindings],
+    };
+  }
+
+  /** Per-IP totals from one tenant's own ip_events (keyed by the ip text). */
+  private async tenantEventAggregates(ips: string[], tenantId: number): Promise<Map<string, TenantAgg>> {
+    const out = new Map<string, TenantAgg>();
+    if (ips.length === 0) return out;
+    const rows = await db('ip_events as e')
+      .whereIn('e.ip', ips)
+      .where('e.tenant_id', tenantId)
+      .groupBy('e.ip')
+      .select(
+        'e.ip',
+        db.raw("count(*) FILTER (WHERE e.event_type = 'auth_failure') AS failures"),
+        db.raw("count(*) FILTER (WHERE e.event_type = 'auth_success') AS successes"),
+        db.raw('count(DISTINCT e.device_id) AS agents'),
+        db.raw('array_remove(array_agg(DISTINCT e.service), NULL) AS services'),
+        db.raw("(array_remove(array_agg(DISTINCT NULLIF(e.username, '')), NULL))[1:100] AS usernames"),
+        db.raw('min(e.timestamp) AS first_seen'),
+        db.raw('max(e.timestamp) AS last_seen'),
+        db.raw('(array_agg(e.device_id ORDER BY e.timestamp DESC))[1] AS last_device_id'),
+      ) as Array<{
+        ip: string; failures: string; successes: string; agents: string;
+        services: string[] | string | null; usernames: string[] | string | null;
+        first_seen: Date | null; last_seen: Date | null; last_device_id: number | null;
+      }>;
+    for (const r of rows) {
+      out.set(String(r.ip), {
+        failures: Number(r.failures),
+        successes: Number(r.successes),
+        agents: Number(r.agents),
+        services: parseJsonArray(r.services),
+        usernames: parseJsonArray(r.usernames),
+        firstSeen: r.first_seen,
+        lastSeen: r.last_seen,
+        lastDeviceId: r.last_device_id ?? null,
+      });
+    }
+    return out;
+  }
+
+  /** Restricted callers: override the global totals with the tenant's own (or zero them). */
+  private async scopeTotals<T extends IpReputation>(items: T[], restrict: boolean, tenantId: number | null | undefined): Promise<T[]> {
+    if (!restrict) return items;
+    if (tenantId == null) return items.map((it) => applyTenantTotals(it, undefined));
+    const aggs = await this.tenantEventAggregates([...new Set(items.map((it) => String(it.ip)))], tenantId);
+    return items.map((it) => applyTenantTotals(it, aggs.get(String(it.ip))));
+  }
+
+  /**
    * Lists IP reputation records with optional filters.
    *
    * For status='banned': queries from ip_bans as the driving table so that
    * IPs with an active ban but no reputation row (e.g. manually-created bans
-   * or historical entries before the events fix) are always visible.
+   * or historical entries before the events fix) are always visible. One row
+   * per ban (the client keys rows by ban id).
    *
-   * For status='suspicious'/'clean'/'all': queries from ip_reputation.
+   * For status='suspicious'/'clean'/'all': queries from ip_reputation, one row
+   * per IP (LATERAL ban / whitelist joins).
    *   - When tenantId is provided, restricts to IPs that have ip_events for
    *     that tenant's agents.
    *   - Suspicious threshold is adjusted by per-tenant clears: an IP is
    *     suspicious for a tenant only when total_failures > baseline_failures
    *     (the counter value at the time of their last "clear suspicious" action).
+   *
+   * Restricted callers (customer tenants) only see global bans / whitelist
+   * entries and their own, and their totals come from their own ip_events.
    */
   async list(filters: {
     tenantId?: number;
@@ -313,6 +419,7 @@ class IpReputationService {
     const offset = filters.offset ?? 0;
     const tenantId = filters.tenantId;
     const isAdmin  = filters.isAdmin ?? false;
+    const restrict = !seesAllBans(tenantId, isAdmin);
 
     // ── "Banned" uses ip_bans as the driving table ──────────────────────────
     // This guarantees IPs that are banned but have no reputation row still appear.
@@ -335,6 +442,7 @@ class IpReputationService {
           db.raw('COALESCE(r.updated_at, b.banned_at) AS updated_at'),
           'b.id as active_ban_id',
           'b.scope as active_ban_scope',
+          'b.tenant_id as active_ban_tenant_id',
           'b.origin_tenant_id as active_ban_origin_tenant_id',
           'b.ban_type as ban_type',
           'b.banned_by_user_id as banned_by_user_id',
@@ -343,6 +451,12 @@ class IpReputationService {
         .where(function () {
           this.whereNull('b.expires_at').orWhere('b.expires_at', '>', new Date());
         });
+
+      // Restricted callers never see another tenant's local bans.
+      if (restrict) {
+        if (tenantId == null) q = q.where('b.scope', 'global');
+        else q = q.where(function () { this.where('b.scope', 'global').orWhere('b.tenant_id', tenantId); });
+      }
 
       // Has THIS tenant already overridden the ban locally? (unique(ban_id,tenant_id)
       // ⇒ at most one match, so the row count / total stays correct)
@@ -365,6 +479,7 @@ class IpReputationService {
         IpReputationRow & {
           active_ban_id: number | null;
           active_ban_scope: string | null;
+          active_ban_tenant_id: number | null;
           active_ban_origin_tenant_id: number | null;
           active_ban_excluded?: boolean;
           ban_type: string | null;
@@ -382,10 +497,13 @@ class IpReputationService {
           row.active_ban_origin_tenant_id === tenantId,
         activeBanExcluded: row.active_ban_excluded ?? false,
         banType: row.ban_type ?? null,
-        bannedByUserId: row.banned_by_user_id ?? null,
+        bannedByUserId: canSeeBanAuthor(
+          { tenant_id: row.active_ban_tenant_id, origin_tenant_id: row.active_ban_origin_tenant_id },
+          tenantId, isAdmin,
+        ) ? (row.banned_by_user_id ?? null) : null,
       }));
 
-      return { data, total };
+      return { data: await this.scopeTotals(data, restrict, tenantId), total };
     }
 
     // ── All other statuses: ip_reputation as driving table ───────────────────
@@ -403,18 +521,18 @@ class IpReputationService {
       ELSE 'clean'
     END)`;
 
+    const { banSql, banBindings, wlSql, wlBindings } = this.lateralJoins(restrict, tenantId);
+
+    // Joins stay in this order: the bex join below resolves b.id.
     const baseQuery = db
       .from('ip_reputation as r')
-      .leftJoin('ip_bans as b', function () {
-        this.on('b.ip', '=', db.raw('r.ip::inet'))
-          .andOn(db.raw('b.is_active = true'))
-          .andOn(db.raw('(b.expires_at IS NULL OR b.expires_at > NOW())'));
-      })
-      .leftJoin('ip_whitelist as w', db.raw("r.ip <<= w.ip"))
+      .joinRaw(banSql, banBindings as any[])
+      .joinRaw(wlSql, wlBindings as any[])
       .select(
         'r.*',
         'b.id as active_ban_id',
         'b.scope as active_ban_scope',
+        'b.tenant_id as active_ban_tenant_id',
         'b.origin_tenant_id as active_ban_origin_tenant_id',
         db.raw(`${STATUS_CASE} AS computed_status`),
       );
@@ -458,12 +576,8 @@ class IpReputationService {
     // Count query (same joins + same filters, no limit/offset)
     const countQuery = db
       .from('ip_reputation as r')
-      .leftJoin('ip_bans as b', function () {
-        this.on('b.ip', '=', db.raw('r.ip::inet'))
-          .andOn(db.raw('b.is_active = true'))
-          .andOn(db.raw('(b.expires_at IS NULL OR b.expires_at > NOW())'));
-      })
-      .leftJoin('ip_whitelist as w', db.raw("r.ip <<= w.ip"))
+      .joinRaw(banSql, banBindings as any[])
+      .joinRaw(wlSql, wlBindings as any[])
       .count<Array<{ count: string }>>({ count: 'r.ip' });
 
     if (tenantId && !isAdmin && !isMasterTenant(tenantId)) {
@@ -499,6 +613,7 @@ class IpReputationService {
       computed_status: string;
       active_ban_id: number | null;
       active_ban_scope: string | null;
+      active_ban_tenant_id: number | null;
       active_ban_origin_tenant_id: number | null;
       active_ban_excluded?: boolean;
       cleared_for_tenant?: boolean;
@@ -513,7 +628,26 @@ class IpReputationService {
       activeBanExcluded: row.active_ban_excluded ?? false,
     }));
 
-    return { data, total };
+    return { data: await this.scopeTotals(data, restrict, tenantId), total };
+  }
+
+  /** Active ban / whitelist lookups for one IP, scoped for restricted callers. */
+  private async statusRows(ip: string, restrict: boolean, tenantId: number | null | undefined): Promise<{ ban: unknown; wl: unknown }> {
+    const scoped = (q: ReturnType<typeof db>) => {
+      if (!restrict) return q;
+      if (tenantId == null) return q.where('scope', 'global');
+      return q.where(function () { this.where('scope', 'global').orWhere('tenant_id', tenantId); });
+    };
+    const ban = await scoped(
+      db('ip_bans')
+        .where({ is_active: true })
+        .whereRaw('ip = ?::inet', [ip])
+        .where(function () {
+          this.whereNull('expires_at').orWhere('expires_at', '>', new Date());
+        }),
+    ).first();
+    const wl = ban ? undefined : await scoped(db('ip_whitelist').whereRaw('?::inet <<= ip', [ip])).first();
+    return { ban, wl };
   }
 
   /**
@@ -522,15 +656,10 @@ class IpReputationService {
   async getByIp(ip: string, tenantId?: number, isAdmin?: boolean): Promise<IpReputation | null> {
     const row = await db<IpReputationRow>('ip_reputation').where({ ip }).first();
     if (!row) return null;
+    const restrict = !seesAllBans(tenantId, isAdmin ?? false);
 
     // Compute status
-    const ban = await db('ip_bans')
-      .where({ is_active: true })
-      .whereRaw('ip = ?::inet', [ip])
-      .where(function () {
-        this.whereNull('expires_at').orWhere('expires_at', '>', new Date());
-      })
-      .first();
+    const { ban, wl } = await this.statusRows(ip, restrict, tenantId);
 
     let status: IpStatus = 'clean';
     let cleared = false;
@@ -538,7 +667,6 @@ class IpReputationService {
     if (ban) {
       status = 'banned';
     } else {
-      const wl = await db('ip_whitelist').whereRaw('?::inet <<= ip', [ip]).first();
       if (wl) {
         status = 'whitelisted';
       } else if (Number(row.total_failures) > 0) {
@@ -559,7 +687,8 @@ class IpReputationService {
       }
     }
 
-    return rowToReputation(row, status, cleared);
+    const [rep] = await this.scopeTotals([rowToReputation(row, status, cleared)], restrict, tenantId);
+    return rep;
   }
 
   /**
@@ -567,7 +696,8 @@ class IpReputationService {
    */
   async getIpDetail(ip: string, tenantId?: number, isAdmin?: boolean): Promise<{ reputation: IpReputation | null; recentEvents: IpEvent[] } | null> {
     const row = await db<IpReputationRow>('ip_reputation').where({ ip }).first();
-    const ban = await db('ip_bans').where({ is_active: true }).whereRaw('ip = ?::inet', [ip]).first();
+    const restrict = !seesAllBans(tenantId, isAdmin ?? false);
+    const { ban, wl } = await this.statusRows(ip, restrict, tenantId);
 
     let status: IpStatus = 'clean';
     let cleared = false;
@@ -575,7 +705,6 @@ class IpReputationService {
     if (ban) {
       status = 'banned';
     } else {
-      const wl = await db('ip_whitelist').whereRaw('?::inet <<= ip', [ip]).first();
       if (wl) {
         status = 'whitelisted';
       } else if (row && Number(row.total_failures) > 0) {
@@ -595,7 +724,9 @@ class IpReputationService {
       }
     }
 
-    const reputation = row ? rowToReputation(row, status, cleared) : null;
+    const reputation = row
+      ? (await this.scopeTotals([rowToReputation(row, status, cleared)], restrict, tenantId))[0]
+      : null;
 
     const eventQ = db<IpEventRow>('ip_events as e')
       .leftJoin('agent_devices as d', 'd.id', 'e.device_id')

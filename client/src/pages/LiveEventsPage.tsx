@@ -7,6 +7,9 @@ import { bansApi } from '@/api/bans.api';
 import { whitelistApi } from '@/api/whitelist.api';
 import type { AgentDevice, ApiResponse } from '@obliview/shared';
 import { anonIp, anonHostname, anonUsername } from '@/utils/anonymize';
+import { useTranslation } from 'react-i18next';
+import { isMasterTenant } from '@obliview/shared';
+import { useTenantStore } from '@/store/tenantStore';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -204,6 +207,10 @@ function IpDrawer({
 const PAGE_SIZE = 50;
 
 export function LiveEventsPage() {
+  const { t } = useTranslation();
+  // Manual bans follow the operating tenant (Default = global, else local).
+  const currentTenantId = useTenantStore(s => s.currentTenantId);
+  const isGodView = currentTenantId != null && isMasterTenant(currentTenantId);
   // Events (paginated)
   const [events, setEvents]         = useState<IpEventRow[]>([]);
   const [total, setTotal]           = useState(0);
@@ -275,13 +282,17 @@ export function LiveEventsPage() {
 
   // ── Actions ────────────────────────────────────────────────────────────────
   const handleBan = useCallback(async (ip: string) => {
-    if (!confirm(`Ban IP ${ip}?\n\nThis IP will be blocked across all agents.`)) return;
+    if (!confirm(isGodView
+      ? t('bans.confirmBanGlobal', { ip, defaultValue: 'Ban IP {{ip}}?\n\nIt will be blocked on every agent of every tenant.' })
+      : t('bans.confirmBanLocal', { ip, defaultValue: 'Ban IP {{ip}}?\n\nIt will be blocked on the agents of this tenant.' }))) return;
     setBanningIps(prev => new Set(prev).add(ip));
     try {
       await bansApi.create({ ip, reason: 'Manual ban from live events' });
-    } catch { alert(`Failed to ban ${ip}`); }
+    } catch (err) {
+      alert((err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? `Failed to ban ${ip}`);
+    }
     finally { setBanningIps(prev => { const s = new Set(prev); s.delete(ip); return s; }); }
-  }, []);
+  }, [isGodView, t]);
 
   const handleWhitelist = useCallback(async (ip: string) => {
     if (!confirm(`Add ${ip} to the whitelist?`)) return;

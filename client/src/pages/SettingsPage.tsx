@@ -9,7 +9,9 @@ import { systemApi, type SystemInfo } from '@/api/system.api';
 import { Button } from '@/components/common/Button';
 import { Input } from '@/components/common/Input';
 import type { SmtpServer, AppConfig, AgentGlobalConfig, NotificationTypeConfig, ObligateConfig } from '@obliview/shared';
-import { DEFAULT_AGENT_GLOBAL_CONFIG } from '@obliview/shared';
+import { DEFAULT_AGENT_GLOBAL_CONFIG, DEFAULT_AGENT_UPDATE_POLICY, isMasterTenant } from '@obliview/shared';
+import type { AgentUpdatePolicy } from '@obliview/shared';
+import { useTenantStore } from '@/store/tenantStore';
 import toast from 'react-hot-toast';
 import { cn } from '@/utils/cn';
 import { useTranslation } from 'react-i18next';
@@ -49,6 +51,9 @@ export function SettingsPage() {
   const { t } = useTranslation();
   const { isAdmin } = useAuthStore();
   const admin = isAdmin();
+  // Platform-wide actions (danger zone) are only available from the Default tenant.
+  const currentTenantId = useTenantStore(s => s.currentTenantId);
+  const isDefaultTenant = currentTenantId != null && isMasterTenant(currentTenantId);
 
   // ── SMTP Servers ──
   const [servers, setServers] = useState<SmtpServer[]>([]);
@@ -222,6 +227,20 @@ export function SettingsPage() {
     }
   }
 
+  // Global agent update policy (C17-1): platform admin, from the Default tenant only.
+  async function saveAgentUpdatePolicy(v: AgentUpdatePolicy) {
+    if (v === 'auto' && !confirm(t('agentUpdate.confirmGlobalAuto',
+      'Every agent without a group/agent override will update to the latest version within ~30 s, and to every future release as soon as the server serves it. Continue?',
+    ))) return;
+    try {
+      const updated = await appConfigApi.patchAgentGlobal({ updatePolicy: v });
+      setAgentGlobal(updated);
+      toast.success(t('common.saved'));
+    } catch (err) {
+      toast.error((err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? t('settings.failedUpdate'));
+    }
+  }
+
   async function saveAgentNotifTypes(notifTypes: NotificationTypeConfig | null) {
     const updated = await appConfigApi.patchAgentGlobal({ notificationTypes: notifTypes });
     setAgentGlobal(updated);
@@ -362,6 +381,36 @@ export function SettingsPage() {
                     placeholder={String(DEFAULT_AGENT_GLOBAL_CONFIG.maxMissedPushes)}
                     className="w-20 rounded-lg border border-border bg-bg-tertiary px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:ring-1 focus:ring-accent text-right placeholder:text-text-muted"
                   />
+                </div>
+              </div>
+
+              {/* Agent updates — default policy (C17-1) */}
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <div className="text-sm font-medium text-text-primary">{t('agentUpdate.globalLabel', 'Agent updates (default policy)')}</div>
+                  <div className="text-xs text-text-muted">
+                    {t('agentUpdate.globalDesc', 'Automatic: every new release is installed within ~30 s. Manual: only on "Update now". Off: never (fleet-wide freeze, overrides every group and agent).')}
+                  </div>
+                  {!isDefaultTenant && (
+                    <div className="text-xs text-amber-400 mt-1">
+                      {t('agentUpdate.globalDefaultOnly', 'Switch to the Default tenant to change the global update policy')}
+                    </div>
+                  )}
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <select
+                    value={agentGlobal?.updatePolicy ?? DEFAULT_AGENT_UPDATE_POLICY}
+                    onChange={e => void saveAgentUpdatePolicy(e.target.value as AgentUpdatePolicy)}
+                    disabled={!isDefaultTenant || !agentGlobal}
+                    className="rounded-lg border border-border bg-bg-tertiary px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-60"
+                  >
+                    <option value="auto">{t('agentUpdate.policy.auto', 'Automatic')}</option>
+                    <option value="manual">{t('agentUpdate.policy.manual', 'Manual')}</option>
+                    <option value="off">{t('agentUpdate.policy.off', 'Off (frozen)')}</option>
+                  </select>
+                  {agentGlobal && agentGlobal.updatePolicy == null && (
+                    <span className="text-xs text-text-muted">{t('agentUpdate.builtInDefault', '(built-in default)')}</span>
+                  )}
                 </div>
               </div>
             </div>
@@ -612,8 +661,13 @@ export function SettingsPage() {
         </>
       )}
 
-      {/* ── Danger Zone ── */}
-      {admin && (
+      {/* ── Danger Zone ── (wipes apply to every tenant: Default only) */}
+      {admin && !isDefaultTenant && (
+        <p className="text-sm text-text-muted">
+          {t('bans.dangerZoneDefaultOnly', 'Switch to the Default tenant to use the danger zone: wipes apply to every tenant.')}
+        </p>
+      )}
+      {admin && isDefaultTenant && (
         <div>
           <h2 className="text-lg font-semibold text-status-down mb-4">Danger Zone</h2>
           <div className="rounded-lg border border-status-down/30 bg-status-down/5 p-5 space-y-4">
@@ -628,7 +682,9 @@ export function SettingsPage() {
                   const api = (await import('../api/client')).default;
                   await api.post('/bans/wipe-bans');
                   toast.success('All bans lifted');
-                } catch { toast.error('Failed'); }
+                } catch (err) {
+                  toast.error((err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'Failed');
+                }
               }} className="px-4 py-2 rounded-md text-sm font-medium text-status-down border border-status-down/40 hover:bg-status-down/10 transition-colors whitespace-nowrap">
                 Wipe all bans
               </button>
@@ -646,7 +702,9 @@ export function SettingsPage() {
                   const api = (await import('../api/client')).default;
                   await api.post('/bans/wipe-reputation');
                   toast.success('IP data wiped');
-                } catch { toast.error('Failed'); }
+                } catch (err) {
+                  toast.error((err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'Failed');
+                }
               }} className="px-4 py-2 rounded-md text-sm font-medium text-white bg-status-down hover:bg-status-down/80 transition-colors whitespace-nowrap">
                 Wipe all IPs
               </button>

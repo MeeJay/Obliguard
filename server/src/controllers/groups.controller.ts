@@ -5,6 +5,15 @@ import { teamService } from '../services/team.service';
 import { groupNotificationService } from '../services/groupNotification.service';
 import { AppError } from '../middleware/errorHandler';
 import type { CreateGroupInput, UpdateGroupInput, MoveGroupInput } from '../validators/group.schema';
+import { deviceAccessVerdict } from '../utils/tenantWriteRules';
+import { isAgentUpdatePolicy } from '../utils/agentUpdate';
+import { invalidateAgentUpdatePolicyCache } from '../services/agent.service';
+import { logger } from '../utils/logger';
+import type { AgentGroupConfig } from '@obliview/shared';
+import { MASTER_TENANT_ID } from '@obliview/shared';
+
+/** Keys accepted in PATCH /groups/:id/agent-config (agentGroupConfig). */
+const AGENT_GROUP_CONFIG_KEYS = ['pushIntervalSeconds', 'heartbeatMonitoring', 'maxMissedPushes', 'notificationTypes', 'updatePolicy'] as const;
 
 export const groupsController = {
   async list(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -257,16 +266,45 @@ export const groupsController = {
 
       const group = await groupService.getById(groupId);
       if (!group) throw new AppError(404, 'Group not found');
+      // Operating tenant only, no platform-admin bypass (C17-1): read-only
+      // from the Default tenant (403), invisible elsewhere (404).
+      const verdict = deviceAccessVerdict(group.tenantId ?? MASTER_TENANT_ID, req.tenantId, 'write');
+      if (verdict === 'forbidden') throw new AppError(403, 'This group belongs to another tenant: read-only from the Default tenant');
+      if (verdict !== 'ok') throw new AppError(404, 'Group not found');
       if (group.kind !== 'agent') throw new AppError(400, 'Not an agent group');
 
       const { agentGroupConfig, agentThresholds } = req.body as {
-        agentGroupConfig?: { pushIntervalSeconds?: number | null; heartbeatMonitoring?: boolean | null; maxMissedPushes?: number | null };
+        agentGroupConfig?: unknown;
         agentThresholds?: unknown;
       };
+      if (agentGroupConfig !== undefined
+        && (agentGroupConfig === null || typeof agentGroupConfig !== 'object' || Array.isArray(agentGroupConfig))) {
+        throw new AppError(400, 'agentGroupConfig must be an object');
+      }
+
+      // Known keys only: unknown keys are dropped, never merged blindly.
+      let clean: Partial<AgentGroupConfig> | undefined;
+      if (agentGroupConfig !== undefined) {
+        const src = agentGroupConfig as Record<string, unknown>;
+        const out: Record<string, unknown> = {};
+        for (const k of AGENT_GROUP_CONFIG_KEYS) {
+          if (k in src) out[k] = src[k];
+        }
+        if ('updatePolicy' in out && out.updatePolicy !== null && !isAgentUpdatePolicy(out.updatePolicy)) {
+          throw new AppError(400, 'Invalid updatePolicy');
+        }
+        clean = out as Partial<AgentGroupConfig>;
+      }
 
       let updated = group;
-      if (agentGroupConfig !== undefined) {
-        updated = (await groupService.updateAgentGroupConfig(groupId, agentGroupConfig)) ?? updated;
+      if (clean !== undefined) {
+        updated = (await groupService.updateAgentGroupConfig(groupId, clean)) ?? updated;
+        invalidateAgentUpdatePolicyCache();
+        if ('updatePolicy' in clean) {
+          logger.info({
+            event: 'agent_update_group_policy', userId: req.session.userId, tenantId: req.tenantId, groupId, to: clean.updatePolicy ?? null,
+          }, 'Group agent update policy changed');
+        }
       }
       if (agentThresholds !== undefined) {
         updated = (await groupService.updateAgentThresholds(groupId, agentThresholds as any)) ?? updated;

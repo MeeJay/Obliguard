@@ -14,7 +14,9 @@
     "docker:up": "docker compose up -d",
     "docker:down": "docker compose down",
     "docker:logs": "docker compose logs -f",
-    "docker:build": "docker compose -f docker-compose.build.yml up -d --build"
+    "docker:build": "docker compose -f docker-compose.build.yml up -d --build",
+    "verify": "npm run verify -w server",
+    "typecheck": "tsc -p shared && tsc -p server --noEmit && tsc -p client --noEmit && tsc -p server/test/tsconfig.json"
   },
   "workspaces": [
     "shared",

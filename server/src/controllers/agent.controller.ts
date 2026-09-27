@@ -1,10 +1,19 @@
-import type { Request, Response } from 'express';
+import type { Request, Response, NextFunction } from 'express';
 import path from 'path';
 import fs from 'fs';
 import { agentService } from '../services/agent.service';
 import { serviceTemplateService } from '../services/serviceTemplate.service';
 import { configuredPublicOrigins, requestAuthority, requestProto } from '../utils/publicOrigin';
-import type { AgentThresholds, AgentDevice } from '@obliview/shared';
+import { obliguardHub } from '../services/obliguardHub.service';
+import { checkDeviceAccess } from '../services/deviceAccess.service';
+import { warnBindingRefused, getServedAgentVersion, resolveAgentRoot } from '../services/agent.service';
+import { deviceAccessVerdict } from '../utils/tenantWriteRules';
+import { isAgentUpdatePolicy } from '../utils/agentUpdate';
+import { AppError } from '../middleware/errorHandler';
+import { db } from '../db';
+import { isDeviceUuidFormat } from '../utils/agentIdentity';
+import { logger } from '../utils/logger';
+import type { AgentThresholds, AgentDevice, AgentUpdatePolicy } from '@obliview/shared';
 import { isMasterTenant } from '@obliview/shared';
 
 /**
@@ -30,6 +39,58 @@ async function requireDeviceInTenant(
   return device;
 }
 
+/**
+ * Resolve a device by :id for a WRITE: it must belong to the operating tenant.
+ * No platform-admin bypass (A5): from the Default tenant a foreign device is
+ * read-only (403), from any other tenant it does not exist (404).
+ */
+async function requireDeviceWritable(
+  req: Request,
+  res: Response,
+  id: unknown,
+): Promise<AgentDevice | null> {
+  const r = await checkDeviceAccess(id, req.tenantId, 'write');
+  if (!r.ok) {
+    res.status(r.status).json({ success: false, error: r.error });
+    return null;
+  }
+  const device = await agentService.getDeviceById(r.row.id);
+  if (!device) {
+    res.status(404).json({ success: false, error: 'Device not found' });
+    return null;
+  }
+  return device;
+}
+
+/** 1..5000 unique positive integer ids, or null. */
+function sanitizeDeviceIds(raw: unknown): number[] | null {
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > 5000) return null;
+  const ids = [...new Set(raw.map((v) => Number(v)).filter((n) => Number.isInteger(n) && n > 0))];
+  return ids.length > 0 ? ids : null;
+}
+
+function isValidCommand(command: unknown): command is string {
+  return typeof command === 'string' && command.length > 0 && command.length <= 50;
+}
+
+/**
+ * Device commands accepted from the UI (C17-1). 'update' is not queued: it
+ * becomes an explicit update request, delivered as latestVersion in the next
+ * config frame when the update policy allows it.
+ */
+const ALLOWED_DEVICE_COMMANDS = new Set(['uninstall', 'update']);
+
+/** updatePolicy body value: a policy, or null (inherit). */
+function isUpdatePolicyInput(v: unknown): v is AgentUpdatePolicy | null {
+  return v === null || isAgentUpdatePolicy(v);
+}
+
+function requireServedVersion(): void {
+  if (getServedAgentVersion() === null) {
+    throw new AppError(503, 'No agent version available on this server', 'versionUnavailable');
+  }
+}
+
 // ── Push endpoint (called by agent) ──────────────────────────────────────────
 
 export async function agentPush(req: Request, res: Response): Promise<void> {
@@ -39,8 +100,8 @@ export async function agentPush(req: Request, res: Response): Promise<void> {
     const agentTenantId = (req as unknown as { agentApiKeyId: number; agentTenantId: number }).agentTenantId;
     const deviceUuid = req.headers['x-device-uuid'] as string | undefined;
 
-    if (!deviceUuid) {
-      res.status(400).json({ error: 'X-Device-UUID header required' });
+    if (!isDeviceUuidFormat(deviceUuid)) {
+      res.status(400).json({ error: 'Valid X-Device-UUID header required' });
       return;
     }
 
@@ -57,8 +118,10 @@ export async function agentPush(req: Request, res: Response): Promise<void> {
       req.body,
     );
 
-    const statusCode = result.status === 'ok' ? 200 : result.status === 'pending' ? 202 : 401;
-    res.status(statusCode).json(result);
+    // The internal enrolment flag never reaches HTTP clients.
+    const { enrolmentDeferred: _d, ...payload } = result;
+    const statusCode = payload.status === 'ok' ? 200 : payload.status === 'pending' ? 202 : 401;
+    res.status(statusCode).json(payload);
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Internal server error' });
@@ -72,17 +135,23 @@ export async function notifyingUpdate(req: Request, res: Response): Promise<void
     const agentApiKeyId = (req as unknown as { agentApiKeyId: number; agentTenantId: number }).agentApiKeyId;
     const agentTenantId = (req as unknown as { agentApiKeyId: number; agentTenantId: number }).agentTenantId;
     const deviceUuid = req.headers['x-device-uuid'] as string | undefined;
-    if (!deviceUuid) {
-      res.status(400).json({ error: 'X-Device-UUID header required' });
+    if (!isDeviceUuidFormat(deviceUuid)) {
+      res.status(400).json({ error: 'Valid X-Device-UUID header required' });
       return;
     }
-    // Identify device — must belong to the authenticated API key
-    const device = await agentService.getDeviceByUuid(deviceUuid);
-    if (!device || device.apiKeyId !== agentApiKeyId) {
+    // Identify device — must be approved and bound to the authenticated API key
+    const v = await agentService.checkAgentBinding({ id: agentApiKeyId, tenant_id: agentTenantId }, deviceUuid);
+    if (!v.ok || !v.device || v.device.status !== 'approved') {
+      if (!v.ok) {
+        warnBindingRefused({
+          deviceUuid, deviceId: v.device.id, apiKeyId: agentApiKeyId, keyTenantId: agentTenantId,
+          deviceTenantId: v.device.tenant_id, boundKeyId: v.device.api_key_id, deviceType: v.device.device_type, via: 'notify',
+        });
+      }
       res.status(404).json({ error: 'Device not found' });
       return;
     }
-    await agentService.setDeviceUpdating(device.id, agentTenantId);
+    await agentService.setDeviceUpdating(v.device.id, v.device.tenant_id);
     res.json({ ok: true });
   } catch (error) {
     console.error(error);
@@ -92,7 +161,22 @@ export async function notifyingUpdate(req: Request, res: Response): Promise<void
 
 // ── Public: version + download ──────────────────────────────────────────────
 
-export function agentVersion(_req: Request, res: Response): void {
+/**
+ * GET /api/agent/version (public route).
+ *
+ * Deployed agents call it WITHOUT a session at startup (agent/main.go
+ * checkForUpdate, legacy agent/src/index.js) and self-update to whatever it
+ * returns; every build returns early on an empty version (main.go, index.js).
+ * The update target is now delivered only in the config frame, gated by the
+ * update policy (C17-1), so session-less callers get ''. The logged-in UI
+ * (GlobalAddAgentModal) still gets the served version.
+ */
+export function agentVersion(req: Request, res: Response): void {
+  res.setHeader('Cache-Control', 'no-store');
+  if (!req.session?.userId) {
+    res.json({ version: '' });
+    return;
+  }
   try {
     const info = agentService.getAgentVersion();
     res.json(info);
@@ -131,7 +215,8 @@ export function agentDownload(req: Request, res: Response): void {
     return;
   }
 
-  const filePath = path.resolve(__dirname, '../../../../agent/dist', binaryName);
+  // Same agent root as the served version (dist layout in prod, src layout under tsx).
+  const filePath = path.join(resolveAgentRoot() ?? path.resolve(__dirname, '../../../../agent'), 'dist', binaryName);
 
   if (!fs.existsSync(filePath)) {
     res.status(404).json({ error: 'Agent binary not available' });
@@ -371,12 +456,19 @@ export async function createKey(req: Request, res: Response): Promise<void> {
 
 export async function deleteKey(req: Request, res: Response): Promise<void> {
   const id = Number(req.params.id);
-  const ok = await agentService.deleteKey(id);
+  if (!Number.isInteger(id) || id <= 0) {
+    res.status(400).json({ success: false, error: 'Invalid API key ID' });
+    return;
+  }
+  // Tenant-scoped, no master bypass: credentials are never god-viewed.
+  const ok = await agentService.deleteKey(id, req.tenantId);
   if (!ok) {
     res.status(404).json({ success: false, error: 'API key not found' });
     return;
   }
-  res.json({ success: true });
+  const closed = obliguardHub.disconnectByApiKey(id);
+  logger.info({ apiKeyId: id, tenantId: req.tenantId, closed }, 'Agent API key deleted — live sessions closed');
+  res.json({ success: true, data: { closedSessions: closed } });
 }
 
 // ── Admin: Devices ──────────────────────────────────────────────────────────
@@ -399,12 +491,13 @@ export async function listDevices(req: Request, res: Response): Promise<void> {
 }
 
 export async function updateDevice(req: Request, res: Response): Promise<void> {
-  const id = Number(req.params.id);
-  if (!(await requireDeviceInTenant(req, res, id))) return;
+  const loaded = await requireDeviceWritable(req, res, req.params.id);
+  if (!loaded) return;
+  const id = loaded.id;
   const {
     status, groupId, checkIntervalSeconds, maxMissedPushes, agentThresholds, name,
     heartbeatMonitoring, sensorDisplayNames, overrideGroupSettings, displayConfig,
-    notificationTypes, wanMatchingEnabled, evaluateOnly,
+    notificationTypes, wanMatchingEnabled, evaluateOnly, updatePolicy,
   } = req.body as {
     status?: 'approved' | 'refused' | 'pending' | 'suspended';
     groupId?: number | null;
@@ -419,20 +512,66 @@ export async function updateDevice(req: Request, res: Response): Promise<void> {
     notificationTypes?: import('@obliview/shared').NotificationTypeConfig | null;
     wanMatchingEnabled?: boolean;
     evaluateOnly?: boolean;
+    updatePolicy?: AgentUpdatePolicy | null;
+  };
+
+  if (status !== undefined && !['approved', 'refused', 'pending', 'suspended'].includes(status)) {
+    res.status(400).json({ success: false, error: 'Invalid status' });
+    return;
+  }
+
+  // Update policy (C17-1): the device is already in the operating tenant
+  // (requireDeviceWritable, no platform-admin bypass).
+  const hasPolicy = 'updatePolicy' in req.body;
+  if (hasPolicy && !isUpdatePolicyInput(updatePolicy)) {
+    res.status(400).json({ success: false, error: 'Invalid updatePolicy' });
+    return;
+  }
+  // The approval branch below does not apply updatePolicy: refuse instead of dropping it silently.
+  if (hasPolicy && status === 'approved') {
+    res.status(400).json({ success: false, error: 'updatePolicy cannot be combined with approval' });
+    return;
+  }
+
+  // A device's group must belong to the device's tenant (also covers approval).
+  if (groupId !== undefined && groupId !== null
+    && !(Number.isInteger(groupId) && await agentService.isGroupInTenant(groupId, loaded.tenantId))) {
+    res.status(400).json({ success: false, error: 'Invalid group' });
+    return;
+  }
+
+  // Binding release (after a re-key): only `apiKeyId: null` is accepted.
+  // Validated here, applied only once the rest of the update succeeded.
+  const releaseBinding = 'apiKeyId' in req.body;
+  if (releaseBinding) {
+    if (req.body.apiKeyId !== null) {
+      res.status(400).json({ success: false, error: 'apiKeyId can only be null (release the binding)' });
+      return;
+    }
+    if (loaded.deviceType === 'mikrotik') {
+      res.status(400).json({ success: false, error: 'A MikroTik device has no API-key binding' });
+      return;
+    }
+  }
+  // Release, then close the live channel: otherwise the old key's next
+  // heartbeat re-claims the NULL binding. The first key that reconnects claims it.
+  const applyRelease = async (d: AgentDevice | null): Promise<void> => {
+    if (!releaseBinding) return;
+    if (await agentService.releaseKeyBinding(loaded.id, loaded.tenantId, req.session?.userId ?? null)) {
+      obliguardHub.disconnectDevice(loaded.uuid, 'Key binding released');
+      if (d) d.apiKeyId = null;
+    }
   };
 
   // Special handling for approval
   if (status === 'approved') {
-    const currentDevice = await agentService.getDeviceById(id);
-    if (!currentDevice) {
-      res.status(404).json({ success: false, error: 'Device not found' });
-      return;
-    }
+    const currentDevice = loaded;
 
     if (currentDevice.status === 'suspended') {
       // Reinstate a suspended device: re-activate its monitor, no new monitor created
       await agentService.reinstateDevice(id);
       const device = await agentService.updateDevice(id, { status: 'approved', name, heartbeatMonitoring });
+      await applyRelease(device);
       res.json({ success: true, data: device });
       return;
     }
@@ -448,6 +587,7 @@ export async function updateDevice(req: Request, res: Response): Promise<void> {
     if (name !== undefined || heartbeatMonitoring !== undefined) {
       await agentService.updateDevice(id, { name, heartbeatMonitoring });
     }
+    await applyRelease(device);
     res.json({ success: true, data: device });
     return;
   }
@@ -475,13 +615,21 @@ export async function updateDevice(req: Request, res: Response): Promise<void> {
     ...('notificationTypes' in req.body ? { notificationTypes } : {}),
     ...('wanMatchingEnabled' in req.body ? { wanMatchingEnabled } : {}),
     ...('evaluateOnly' in req.body ? { evaluateOnly } : {}),
+    ...(hasPolicy ? { updatePolicy } : {}),
   });
+
+  if (device && hasPolicy) {
+    logger.info({
+      event: 'agent_update_device_policy', userId: req.session?.userId ?? null, tenantId: req.tenantId, deviceId: id, from: loaded.updatePolicy ?? null, to: updatePolicy ?? null,
+    }, 'Agent update policy changed');
+  }
 
   if (!device) {
     res.status(404).json({ success: false, error: 'Device not found' });
     return;
   }
 
+  await applyRelease(device);
   res.json({ success: true, data: device });
 }
 
@@ -493,9 +641,9 @@ export async function getDeviceMetrics(_req: Request, res: Response): Promise<vo
 }
 
 export async function deleteDevice(req: Request, res: Response): Promise<void> {
-  const id = Number(req.params.id);
-  if (!(await requireDeviceInTenant(req, res, id))) return;
-  const ok = await agentService.deleteDevice(id);
+  const device = await requireDeviceWritable(req, res, req.params.id);
+  if (!device) return;
+  const ok = await agentService.deleteDevice(device.id, req.tenantId);
   if (!ok) {
     res.status(404).json({ success: false, error: 'Device not found' });
     return;
@@ -504,70 +652,195 @@ export async function deleteDevice(req: Request, res: Response): Promise<void> {
 }
 
 // ── Admin: Bulk Device Operations ────────────────────────────────────────────
+// Bulk writes follow the operating tenant, with no master bypass (A5): foreign
+// ids are silently dropped. Responses carry { affected, skipped }.
 
 export async function bulkDeleteDevices(req: Request, res: Response): Promise<void> {
-  const { deviceIds } = req.body as { deviceIds: number[] };
-  if (!Array.isArray(deviceIds) || deviceIds.length === 0) {
+  const requested = sanitizeDeviceIds((req.body as { deviceIds?: unknown })?.deviceIds);
+  if (!requested) {
     res.status(400).json({ success: false, error: 'deviceIds array required' });
     return;
   }
-  const ids = isMasterTenant(req.tenantId)
-    ? deviceIds
-    : await agentService.filterDeviceIdsByTenant(deviceIds, req.tenantId);
-  await agentService.bulkDeleteDevices(ids);
-  res.json({ success: true });
+  const ids = await agentService.filterDeviceIdsByTenant(requested, req.tenantId);
+  const affected = await agentService.bulkDeleteDevices(ids, req.tenantId);
+  res.json({ success: true, data: { affected, skipped: requested.length - affected } });
 }
 
 export async function bulkUpdateDevices(req: Request, res: Response): Promise<void> {
-  const { deviceIds, groupId, heartbeatMonitoring, overrideGroupSettings, status } = req.body as {
-    deviceIds: number[];
+  const { deviceIds, groupId, heartbeatMonitoring, overrideGroupSettings, status, updatePolicy } = req.body as {
+    deviceIds: unknown;
     groupId?: number | null;
     heartbeatMonitoring?: boolean;
     overrideGroupSettings?: boolean;
     status?: 'approved' | 'suspended';
+    updatePolicy?: AgentUpdatePolicy | null;
   };
-  if (!Array.isArray(deviceIds) || deviceIds.length === 0) {
+  const hasPolicy = 'updatePolicy' in (req.body as object);
+  if (hasPolicy && !isUpdatePolicyInput(updatePolicy)) {
+    res.status(400).json({ success: false, error: 'Invalid updatePolicy' });
+    return;
+  }
+  const requested = sanitizeDeviceIds(deviceIds);
+  if (!requested) {
     res.status(400).json({ success: false, error: 'deviceIds array required' });
     return;
   }
-  const ids = isMasterTenant(req.tenantId)
-    ? deviceIds
-    : await agentService.filterDeviceIdsByTenant(deviceIds, req.tenantId);
-  await agentService.bulkUpdateDevices(ids, { groupId, heartbeatMonitoring, overrideGroupSettings, status });
-  res.json({ success: true });
+  if (status !== undefined && status !== 'approved' && status !== 'suspended') {
+    res.status(400).json({ success: false, error: 'Invalid status' });
+    return;
+  }
+  if (groupId !== undefined && groupId !== null
+    && !(Number.isInteger(groupId) && await agentService.isGroupInTenant(groupId, req.tenantId))) {
+    res.status(400).json({ success: false, error: 'Invalid group' });
+    return;
+  }
+  const ids = await agentService.filterDeviceIdsByTenant(requested, req.tenantId);
+  const affected = await agentService.bulkUpdateDevices(
+    ids, { groupId, heartbeatMonitoring, overrideGroupSettings, status, ...(hasPolicy ? { updatePolicy } : {}) }, req.tenantId,
+  );
+  if (hasPolicy && affected > 0) {
+    logger.info({
+      event: 'agent_update_device_policy', userId: req.session?.userId ?? null, tenantId: req.tenantId, deviceIds: ids.slice(0, 50), count: affected, to: updatePolicy ?? null,
+    }, 'Agent update policy changed (bulk)');
+  }
+  res.json({ success: true, data: { affected, skipped: requested.length - affected } });
 }
 
-export async function bulkDeviceCommand(req: Request, res: Response): Promise<void> {
-  const { deviceIds, command } = req.body as { deviceIds: number[]; command: string };
-  if (!Array.isArray(deviceIds) || deviceIds.length === 0) {
-    res.status(400).json({ success: false, error: 'deviceIds array required' });
-    return;
+export async function bulkDeviceCommand(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { deviceIds, command } = req.body as { deviceIds: unknown; command: unknown };
+    const requested = sanitizeDeviceIds(deviceIds);
+    if (!requested) {
+      res.status(400).json({ success: false, error: 'deviceIds array required' });
+      return;
+    }
+    if (!isValidCommand(command)) {
+      res.status(400).json({ success: false, error: 'command required' });
+      return;
+    }
+    if (!ALLOWED_DEVICE_COMMANDS.has(command)) {
+      res.status(400).json({ success: false, error: 'Unknown command' });
+      return;
+    }
+    if (command === 'update') {
+      requireServedVersion();
+      // Strict tenant scope inside the service: foreign ids count as notFound.
+      const data = await agentService.requestUpdate(requested, req.tenantId, req.session?.userId ?? null);
+      res.json({ success: true, data });
+      return;
+    }
+    const ids = await agentService.filterDeviceIdsByTenant(requested, req.tenantId);
+    const affected = await agentService.bulkSendCommand(ids, command, req.tenantId);
+    res.json({ success: true, data: { affected, skipped: requested.length - affected } });
+  } catch (err) {
+    next(err);
   }
-  if (!command) {
-    res.status(400).json({ success: false, error: 'command required' });
-    return;
-  }
-  const ids = isMasterTenant(req.tenantId)
-    ? deviceIds
-    : await agentService.filterDeviceIdsByTenant(deviceIds, req.tenantId);
-  await agentService.bulkSendCommand(ids, command);
-  res.json({ success: true });
 }
 
-export async function sendDeviceCommand(req: Request, res: Response): Promise<void> {
-  const id = Number(req.params.id);
-  if (!(await requireDeviceInTenant(req, res, id))) return;
-  const { command } = req.body as { command: string };
-  if (!command) {
-    res.status(400).json({ success: false, error: 'command required' });
-    return;
+export async function sendDeviceCommand(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { command } = req.body as { command: unknown };
+    if (!isValidCommand(command)) {
+      res.status(400).json({ success: false, error: 'command required' });
+      return;
+    }
+    if (!ALLOWED_DEVICE_COMMANDS.has(command)) {
+      res.status(400).json({ success: false, error: 'Unknown command' });
+      return;
+    }
+    if (command === 'update') {
+      await requestDeviceUpdate(req, res, next);
+      return;
+    }
+    const device = await requireDeviceWritable(req, res, req.params.id);
+    if (!device) return;
+    const ok = await agentService.sendCommand(device.id, command, req.tenantId);
+    if (!ok) {
+      res.status(404).json({ success: false, error: 'Device not found' });
+      return;
+    }
+    res.json({ success: true });
+  } catch (err) {
+    next(err);
   }
-  const ok = await agentService.sendCommand(id, command);
-  if (!ok) {
-    res.status(404).json({ success: false, error: 'Device not found' });
-    return;
+}
+
+// ── Agent update requests (C17-1) ────────────────────────────────────────────
+// Open to members of the operating tenant holding monitor_rw (route guard).
+// Writes follow the operating tenant, with no platform-admin bypass.
+
+/** POST /agent/devices/:id/agent-update — "Update now" on one agent. */
+export async function requestDeviceUpdate(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const device = await requireDeviceWritable(req, res, req.params.id);
+    if (!device) return;
+    requireServedVersion();
+    const r = await agentService.requestUpdate([device.id], req.tenantId, req.session?.userId ?? null);
+    if (r.requested === 1) {
+      res.json({ success: true, data: await agentService.getDeviceById(device.id) });
+      return;
+    }
+    if (r.skipped.off) throw new AppError(409, 'Updates are disabled for this agent (policy: off)', 'updatePolicyOff');
+    if (r.skipped.current) throw new AppError(409, 'Agent is already up to date', 'alreadyCurrent');
+    throw new AppError(409, 'Only approved agents that reported a version can be updated', 'notUpdatable');
+  } catch (err) {
+    next(err);
   }
-  res.json({ success: true });
+}
+
+/** DELETE /agent/devices/:id/agent-update — cancel a pending request. */
+export async function cancelDeviceUpdate(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const device = await requireDeviceWritable(req, res, req.params.id);
+    if (!device) return;
+    await agentService.cancelUpdateRequest(device.id, req.tenantId, req.session?.userId ?? null);
+    res.json({ success: true, data: await agentService.getDeviceById(device.id) });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/** POST /agent/devices/bulk-request-update — foreign ids are counted in skipped.notFound. */
+export async function bulkRequestUpdate(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const ids = sanitizeDeviceIds((req.body as { deviceIds?: unknown })?.deviceIds);
+    if (!ids) {
+      res.status(400).json({ success: false, error: 'deviceIds array required' });
+      return;
+    }
+    requireServedVersion();
+    const data = await agentService.requestUpdate(ids, req.tenantId, req.session?.userId ?? null);
+    res.json({ success: true, data });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/** POST /agent/groups/:groupId/agent-update — outdated approved agents of the group and its sub-groups. */
+export async function requestGroupUpdateHandler(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const groupId = Number(req.params.groupId);
+    if (!Number.isInteger(groupId) || groupId <= 0) throw new AppError(400, 'Invalid group ID');
+    const g = await db('monitor_groups').where({ id: groupId }).first('tenant_id') as { tenant_id: number } | undefined;
+    const verdict = g ? deviceAccessVerdict(g.tenant_id, req.tenantId, 'write') : 'not-found';
+    if (verdict === 'forbidden') throw new AppError(403, 'This group belongs to another tenant: read-only from the Default tenant');
+    if (verdict !== 'ok') throw new AppError(404, 'Group not found');
+    requireServedVersion();
+    const r = await agentService.requestGroupUpdate(groupId, req.tenantId, req.session?.userId ?? null);
+    if (!r) throw new AppError(404, 'Group not found');
+    res.json({ success: true, data: r });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/** GET /agent/devices/versions — version distribution (Default keeps the read god view). */
+export async function getDeviceVersionDistribution(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    res.json({ success: true, data: await agentService.getVersionDistribution(req.tenantId) });
+  } catch (err) {
+    next(err);
+  }
 }
 
 /**

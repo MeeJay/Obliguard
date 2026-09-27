@@ -47,6 +47,8 @@ interface ServiceTemplatesPanelProps {
   className?: string;
   /** Allow creating local templates (device scope only). */
   onCreateLocal?: () => void;
+  /** Another tenant's agent (Default god view): list only — no create, edit, reset, bind or unbind. */
+  readOnly?: boolean;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -205,6 +207,7 @@ export function ServiceTemplatesPanel({
   scopeId,
   className,
   onCreateLocal,
+  readOnly = false,
 }: ServiceTemplatesPanelProps) {
   const [configs, setConfigs]   = useState<ResolvedServiceConfig[]>([]);
   const [loading, setLoading]   = useState(true);
@@ -311,7 +314,7 @@ export function ServiceTemplatesPanel({
         </div>
 
         <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
-          {scope === 'device' && onCreateLocal && (
+          {scope === 'device' && onCreateLocal && !readOnly && (
             <button
               onClick={onCreateLocal}
               className="inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] text-accent hover:bg-accent/10 transition-colors"
@@ -437,7 +440,7 @@ export function ServiceTemplatesPanel({
                       <div className="flex items-center gap-1 flex-shrink-0">
 
                         {/* Threshold editor toggle — only when active at this scope */}
-                        {cfg.enabled && (
+                        {cfg.enabled && !readOnly && (
                           <button
                             onClick={() => setEditingThreshold(isEditingThis ? null : cfg.templateId)}
                             title="Edit threshold override"
@@ -453,7 +456,7 @@ export function ServiceTemplatesPanel({
                         )}
 
                         {/* Reset: only shown when this scope has an explicit override */}
-                        {hasScopeOverride && (
+                        {hasScopeOverride && !readOnly && (
                           <button
                             onClick={() => void reset(cfg)}
                             disabled={isBusy}
@@ -470,7 +473,7 @@ export function ServiceTemplatesPanel({
                         )}
 
                         {/* Bind / Unbind — always shown based on current effective state */}
-                        {cfg.enabled ? (
+                        {readOnly ? null : cfg.enabled ? (
                           <button
                             onClick={() => void unbind(cfg)}
                             disabled={isBusy}
@@ -499,7 +502,7 @@ export function ServiceTemplatesPanel({
                     </div>
 
                     {/* Threshold editor (expanded row) */}
-                    {isEditingThis && (
+                    {isEditingThis && !readOnly && (
                       <OverridesEditor
                         cfg={cfg}
                         apiScope={apiScope}

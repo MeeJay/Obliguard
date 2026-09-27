@@ -1,12 +1,13 @@
 import { create } from 'zustand';
 import type { User, UserPermissions, PermissionLevel, Capability } from '@obliview/shared';
 import { authApi, type LoginResult } from '../api/auth.api';
-import { connectSocket, disconnectSocket } from '../socket/socketClient';
+import { connectSocket, disconnectSocket, getSocket } from '../socket/socketClient';
 import { useLiveAlertsStore } from './liveAlertsStore';
 import { setLanguage } from '../i18n';
-import { useTenantStore } from './tenantStore';
+import { useTenantStore, isTenantSwitchPending } from './tenantStore';
 import { useGroupStore } from './groupStore';
 import { applyTheme } from '../utils/theme';
+import apiClient, { SESSION_RESYNC_EVENT } from '../api/client';
 
 function syncPreferencesToStore(user: User) {
   const prefs = user.preferences;
@@ -26,6 +27,10 @@ interface AuthState {
   user: User | null;
   permissions: UserPermissions | null;
   requires2faSetup: boolean;
+  /** Non-admin with no usable tenant: the app shows NoTenantPage. */
+  noTenantAccess: boolean;
+  /** Favourite workspace opened at sign-in (null = first membership). */
+  preferredTenantId: number | null;
   isLoading: boolean;
   isInitialized: boolean;
 
@@ -33,6 +38,8 @@ interface AuthState {
   logout: () => Promise<void>;
   checkSession: () => Promise<void>;
   refreshPermissions: () => Promise<void>;
+  /** Set (or clear with null) the favourite workspace. */
+  setDefaultTenant: (tenantId: number | null) => Promise<void>;
 
   // Convenience permission checkers
   isAdmin: () => boolean;
@@ -49,6 +56,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   user: null,
   permissions: null,
   requires2faSetup: false,
+  noTenantAccess: false,
+  preferredTenantId: null,
   isLoading: false,
   isInitialized: false,
 
@@ -63,22 +72,12 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         return result;
       }
 
-      const user = result.user;
-      set({ user, isLoading: false });
-      syncPreferencesToStore(user);
-      connectSocket();
-      useTenantStore.getState().fetchTenants();
-      useLiveAlertsStore.getState().fetchAlerts();
-      // Fetch permissions in the background; failure is non-fatal here.
-      authApi.me()
-        .then(({ permissions, user: fullUser, requires2faSetup, currentTenantId }) => {
-          set({ permissions, requires2faSetup: requires2faSetup ?? false });
-          syncPreferencesToStore(fullUser);
-          if (currentTenantId != null) {
-            useTenantStore.setState({ currentTenantId });
-          }
-        })
-        .catch(() => { /* non-critical — permissions will load on next checkSession */ });
+      // Load the full session (user, permissions, tenant, noTenantAccess) before
+      // the caller navigates, so the dashboard never flashes for a user who
+      // ends up on NoTenantPage.
+      await get().checkSession();
+      set({ isLoading: false });
+      if (!get().user) throw new Error('Unable to load session');
       return result;
     } catch (err) {
       set({ isLoading: false });
@@ -110,7 +109,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       await authApi.logout();
     } finally {
       disconnectSocket();
-      set({ user: null, permissions: null, requires2faSetup: false });
+      set({ user: null, permissions: null, requires2faSetup: false, noTenantAccess: false, preferredTenantId: null });
     }
 
     if (obligateLogoutUrl) {
@@ -120,18 +119,29 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   checkSession: async () => {
     try {
-      const { user, permissions, requires2faSetup, currentTenantId } = await authApi.me();
-      set({ user, permissions, requires2faSetup: requires2faSetup ?? false, isInitialized: true });
+      const { user, permissions, requires2faSetup, currentTenantId, noTenantAccess, preferredTenantId } = await authApi.me();
+      const blocked = !!noTenantAccess && user.role !== 'admin';
+      set({
+        user,
+        permissions,
+        requires2faSetup: requires2faSetup ?? false,
+        noTenantAccess: blocked,
+        preferredTenantId: preferredTenantId ?? user.preferredTenantId ?? null,
+        isInitialized: true,
+      });
       syncPreferencesToStore(user);
-      connectSocket();
+      useTenantStore.setState({ currentTenantId: currentTenantId ?? null });
       useTenantStore.getState().fetchTenants();
-      useLiveAlertsStore.getState().fetchAlerts();
-      useGroupStore.getState().fetchTree();
-      if (currentTenantId != null) {
-        useTenantStore.setState({ currentTenantId });
+      if (blocked) {
+        // No tenant: no socket (refused server-side anyway), no tenant-scoped fetches.
+        disconnectSocket();
+      } else {
+        connectSocket();
+        useLiveAlertsStore.getState().fetchAlerts();
+        useGroupStore.getState().fetchTree();
       }
     } catch {
-      set({ user: null, permissions: null, requires2faSetup: false, isInitialized: true });
+      set({ user: null, permissions: null, requires2faSetup: false, noTenantAccess: false, isInitialized: true });
     }
   },
 
@@ -142,6 +152,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     } catch {
       // Ignore errors
     }
+  },
+
+  setDefaultTenant: async (tenantId: number | null) => {
+    const res = await apiClient.post<{ success: boolean; data?: { preferredTenantId: number | null } }>('/tenant/default', { tenantId });
+    set({ preferredTenantId: res.data.data?.preferredTenantId ?? tenantId });
   },
 
   isAdmin: () => get().user?.role === 'admin',
@@ -209,3 +224,57 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     return permissions.permissions[`group:${groupId}`] ?? null;
   },
 }));
+
+// ── Session re-sync (single-flight) ──────────────────────────────────────────
+// Fired by api/client (403 noTenantAccess, 409 tenantChanged, response-tenant
+// mismatch) and socketClient (server-initiated disconnect). Reloads to '/' when
+// the tenant changed or access was regained, so stores of the old tenant are
+// never shown under the new one. Loop guards: in-flight flag, skip when already
+// blocked, 2 s cooldown, no socket/fetches while blocked.
+let resyncInFlight: Promise<void> | null = null;
+let lastResyncAt = 0;
+
+export function resyncSession(): Promise<void> {
+  if (resyncInFlight) return resyncInFlight;
+  const prevTenant = useTenantStore.getState().currentTenantId;
+  const prevBlocked = useAuthStore.getState().noTenantAccess;
+  resyncInFlight = useAuthStore.getState().checkSession()
+    .then(() => {
+      const s = useAuthStore.getState();
+      if (!s.user) return; // 401 path: handled by the interceptor / ProtectedRoute
+      const next = useTenantStore.getState().currentTenantId;
+      if ((prevBlocked && !s.noTenantAccess) || (prevTenant != null && next != null && next !== prevTenant)) {
+        window.location.assign('/');
+      }
+    })
+    .finally(() => {
+      resyncInFlight = null;
+      lastResyncAt = Date.now();
+    });
+  return resyncInFlight;
+}
+
+function onSessionResync(e: Event): void {
+  const reason = (e as CustomEvent<{ reason?: string }>).detail?.reason;
+  const s = useAuthStore.getState();
+  if (!s.user || !s.isInitialized) return;
+  if (reason === 'noTenantAccess' && s.noTenantAccess) return;
+  // Mismatch / 409 caused by our own in-flight tenant switch in this tab: expected.
+  if (reason === 'tenantChanged' && isTenantSwitchPending()) return;
+  if (reason === 'socket') {
+    // A server disconnect is never auto-reconnected: the socket must be rebuilt
+    // by a checkSession. No cooldown here; if a resync is already running (it
+    // may have called connectSocket() before the socket was dropped), re-check
+    // once it settles.
+    const pending = resyncInFlight ?? Promise.resolve();
+    void pending.finally(() => {
+      const cur = useAuthStore.getState();
+      if (cur.user && !cur.noTenantAccess && !getSocket()) void resyncSession();
+    });
+    return;
+  }
+  if (Date.now() - lastResyncAt < 2000) return; // belt-and-braces against 403 → resync → 403 bursts
+  void resyncSession();
+}
+
+if (typeof window !== 'undefined') window.addEventListener(SESSION_RESYNC_EVENT, onSessionResync);

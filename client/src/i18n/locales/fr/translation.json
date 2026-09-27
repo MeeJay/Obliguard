@@ -697,6 +697,12 @@
     }
   },
   "agents": {
+    "foreignReadOnly": "Cet agent appartient à un autre tenant. Il est en lecture seule ici : basculez sur son tenant pour le modifier.",
+    "foreignReadOnlyShort": "Lecture seule (autre tenant)",
+    "boundKey": "Clé API liée : {{name}}",
+    "noBoundKey": "Liée à aucune clé API : la prochaine clé de ce tenant qui se connecte la récupère",
+    "releaseKeyBinding": "Libérer la liaison à la clé API",
+    "releaseKeyBindingDesc": "À utiliser après une réinstallation de l'agent avec une autre clé de ce tenant : l'agent est déconnecté et la première clé qui se reconnecte est liée (arrêtez d'abord l'ancienne installation si elle tourne encore). Le groupe et les réglages sont conservés.",
     "tabKeys": "Clés API",
     "tabDevices": "Appareils",
     "approve": "Approuver",
@@ -932,7 +938,26 @@
     "message": "Page introuvable",
     "goToDashboard": "Aller au tableau de bord"
   },
-  "header": {
+  "bans": {
+    "scopeGlobalHint": "Ban global : appliqué sur tous les agents de tous les tenants.",
+    "scopeTenantHint": "Ban local : appliqué uniquement sur les agents de ce tenant.",
+    "whitelistGlobalHint": "Entrée de whitelist globale : s'applique à tous les tenants, non supprimable par les autres tenants.",
+    "whitelistTenantHint": "Entrée de whitelist locale : s'applique uniquement à ce tenant.",
+    "bannedGlobal": "{{ip}} banni globalement",
+    "bannedLocal": "{{ip}} banni sur ce tenant",
+    "quickBanPromptGlobal": "Raison du ban de {{ip}} (ban global : tous les tenants) :",
+    "quickBanPromptLocal": "Raison du ban de {{ip}} (ce tenant uniquement) :",
+    "bulkConfirmGlobal": "Bannir {{count}} IP globalement (tous les agents de tous les tenants) ?",
+    "bulkConfirmLocal": "Bannir {{count}} IP sur ce tenant ?",
+    "bulkResult": "{{created}} bannies, {{skipped}} ignorées (déjà bannies ou whitelistées), {{invalid}} invalides",
+    "bulkInvalid": "Ignorées : {{list}}",
+    "confirmBanGlobal": "Bannir l'IP {{ip}} ?\n\nElle sera bloquée sur tous les agents de tous les tenants.",
+    "confirmBanLocal": "Bannir l'IP {{ip}} ?\n\nElle sera bloquée sur les agents de ce tenant.",
+    "promoteButton": "Promouvoir en global",
+    "promoteConfirm": "Promouvoir le ban de {{ip}} en ban global ? Il sera appliqué sur tous les agents de tous les tenants et sa raison deviendra visible de tous les tenants.",
+    "promoted": "{{ip}} est maintenant banni globalement",
+    "dangerZoneDefaultOnly": "Passez sur le tenant Default pour utiliser la zone de danger : les effacements s'appliquent à tous les tenants."
+  },  "header": {
     "signedInAs": "Connecté en tant que",
     "disableAlerts": "Désactiver les alertes en direct",
     "enableAlerts": "Activer les alertes en direct",
@@ -959,7 +984,19 @@
     "removeMember": "Retirer de l'espace de travail",
     "toggleRole": "Cliquer pour basculer entre admin et membre",
     "roleAdmin": "admin",
-    "switchWorkspace": "Changer d'espace de travail"
+    "switchWorkspace": "Changer d'espace de travail",
+    "noAccess": {
+      "title": "Aucun espace de travail assigné",
+      "body": "Votre compte n'est membre d'aucun espace de travail. Demandez à un administrateur de vous y ajouter, puis vérifiez à nouveau.",
+      "retry": "Vérifier à nouveau",
+      "ssoBody": "Vos espaces de travail sont attribués dans Obligate, et un espace local portant le même identifiant doit exister ici. Contactez un administrateur, puis reconnectez-vous.",
+      "ssoRetry": "Se reconnecter"
+    },
+    "setFavourite": "Définir comme espace favori",
+    "clearFavourite": "Espace favori (cliquer pour retirer)",
+    "favouriteHint": "L'espace favori s'ouvre à la connexion",
+    "favouriteLabel": "Espace de travail favori",
+    "noFavourite": "Aucun (premier espace)"
   },
   "evaluateOnly": {
     "badge": "Évaluation",
@@ -968,5 +1005,60 @@
     "groupDesc": "Une fois activé, ce groupe et tous ses agents observent les événements sans jamais créer ni appliquer de ban automatique. Idéal pour régler la whitelist avant d'activer l'enforcement.",
     "enabled": "Mode évaluation activé",
     "disabled": "Mode évaluation désactivé"
+  },
+  "agentUpdate": {
+    "policyLabel": "Mises à jour des agents",
+    "groupPolicyDesc": "Politique de mise à jour des agents de ce groupe et de ses sous-groupes. « Désactivées » les gèle quel que soit le réglage en dessous.",
+    "globalLabel": "Mises à jour des agents (politique par défaut)",
+    "globalDesc": "Automatique : chaque nouvelle version est installée en ~30 s. Manuelle : uniquement sur « Mettre à jour ». Désactivées : jamais (gel de toute la flotte, prioritaire sur tous les groupes et agents).",
+    "globalDefaultOnly": "Passe sur le tenant Default pour changer la politique globale",
+    "builtInDefault": "(défaut intégré)",
+    "changeDefault": "Changer le défaut",
+    "confirmGlobalAuto": "Tous les agents sans réglage de groupe ou d'agent passeront à la dernière version en ~30 s, puis à chaque nouvelle version dès que le serveur la sert. Continuer ?",
+    "policy": {
+      "auto": "Automatique",
+      "manual": "Manuelle",
+      "off": "Désactivées (gel)",
+      "inherit": "Hériter"
+    },
+    "source": {
+      "agent": "agent",
+      "group": "groupe",
+      "global": "global",
+      "default": "défaut",
+      "unresolved": "indisponible"
+    },
+    "frozenBy": "Gelé par : {{source}}",
+    "frozenBadge": "Mises à jour gelées",
+    "updateAvailable": "Mise à jour disponible : v{{version}}",
+    "updateAvailableShort": "Mise à jour disponible",
+    "updateNow": "Mettre à jour",
+    "updateRequested": "Mise à jour vers v{{version}} demandée",
+    "cancelRequest": "Annuler",
+    "requestedToast": "Mise à jour demandée : l'agent se met à jour à son prochain heartbeat",
+    "saveFailed": "Échec de l'enregistrement",
+    "readOnlyOtherTenant": "Lecture seule : ce groupe appartient à un autre tenant",
+    "confirmUpdate": "Mettre à jour {{name}} vers v{{version}} ?",
+    "bulkUpdate": "Mettre à jour",
+    "confirmBulk": "Demander la mise à jour vers v{{version}} de {{count}} agent(s) ?",
+    "bulkResult": "{{requested}} mise(s) à jour demandée(s), {{skipped}} ignorée(s)",
+    "bulkSkippedOtherTenant": "{{count}} agent(s) d'autres tenants non modifié(s)",
+    "groupUpdate": "Mettre à jour les agents en retard",
+    "groupConfirm": "Demander la mise à jour de tous les agents en retard de ce groupe et de ses sous-groupes ?",
+    "errors": {
+      "off": "Les mises à jour sont désactivées pour cet agent (politique : désactivées)",
+      "current": "Cet agent est déjà à jour",
+      "notUpdatable": "Seuls les agents approuvés ayant remonté une version peuvent être mis à jour",
+      "unavailable": "Aucune version d'agent n'est disponible sur ce serveur"
+    },
+    "distribution": {
+      "title": "Versions des agents",
+      "latest": "Dernière : v{{version}}",
+      "upToDate": "{{count}} à jour",
+      "outdated": "{{count}} en retard",
+      "pending": "{{count}} mise(s) à jour demandée(s)",
+      "unknown": "{{count}} inconnue(s)"
+    },
+    "dashboardOutdated": "{{count}} agent(s) en retard sur v{{version}}"
   }
 }

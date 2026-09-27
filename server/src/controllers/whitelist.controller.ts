@@ -25,6 +25,9 @@ export async function listWhitelist(req: Request, res: Response, next: NextFunct
       entries = await whitelistService.listByScope(scopeParam as WhitelistScope, scopeId, req.tenantId, isAdmin);
     }
 
+    // Per-entry delete right for the operating tenant (A5). A4 must keep this call.
+    entries = await whitelistService.annotateDeletable(entries, req.tenantId);
+
     res.json({ success: true, data: entries });
   } catch (err) {
     next(err);
@@ -54,8 +57,8 @@ export async function deleteWhitelistEntry(req: Request, res: Response, next: Ne
       throw new AppError(400, 'Invalid whitelist entry ID');
     }
 
-    const isAdmin = req.session?.role === 'admin';
-    await whitelistService.delete(id, req.tenantId, isAdmin);
+    // Follows the operating tenant; the platform role grants nothing extra (A5).
+    await whitelistService.delete(id, req.tenantId);
 
     res.json({ success: true });
   } catch (err) {

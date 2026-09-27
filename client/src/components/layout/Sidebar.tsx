@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import {
   DndContext,
@@ -38,6 +38,7 @@ import { cn } from '@/utils/cn';
 import { useAuthStore } from '@/store/authStore';
 import { useGroupStore } from '@/store/groupStore';
 import { useUiStore } from '@/store/uiStore';
+import { useTenantStore } from '@/store/tenantStore';
 import { agentApi } from '@/api/agent.api';
 import { getSocket } from '@/socket/socketClient';
 import type { AgentDevice, MonitorStatus, GroupTreeNode, Capability } from '@obliview/shared';
@@ -312,6 +313,19 @@ export function Sidebar() {
     toggleSidebarCollapsed,
   } = useUiStore();
   const { tree, fetchTree } = useGroupStore();
+  const currentTenantId = useTenantStore(s => s.currentTenantId);
+
+  // Default-tenant god view: other tenants' agents and groups are read-only.
+  const isForeign = useCallback(
+    (tid: number | null | undefined) => currentTenantId != null && tid != null && tid !== currentTenantId,
+    [currentTenantId],
+  );
+  const groupTenant = useMemo(() => {
+    const m = new Map<number, number | undefined>();
+    const walk = (ns: GroupTreeNode[]) => ns.forEach(n => { m.set(n.id, n.tenantId); walk(n.children); });
+    walk(tree);
+    return m;
+  }, [tree]);
 
   const [approvedDevices, setApprovedDevices] = useState<AgentDevice[]>([]);
   const [deviceStatuses, setDeviceStatuses] = useState<Map<number, string>>(new Map());
@@ -423,6 +437,10 @@ export function Sidebar() {
         const device       = dragData.device as AgentDevice;
         const targetGroupId = dropData.groupId as number | null;
         if (device.groupId === targetGroupId) return;
+        if (isForeign(device.tenantId) || (targetGroupId != null && isForeign(groupTenant.get(targetGroupId)))) {
+          toast.error(t('agents.foreignReadOnlyShort', 'Read-only (other tenant)'));
+          return;
+        }
         try {
           await agentApi.updateDevice(device.id, { groupId: targetGroupId });
           loadDevices();
@@ -437,6 +455,12 @@ export function Sidebar() {
         const group        = dragData.group as GroupTreeNode;
         const targetGroupId = dropData.groupId as number | null;
         if (group.id === targetGroupId) return;
+        // Client-side guard only: the server-side group god-view writes
+        // (groupsApi.move, group CRUD) stay open until A12.
+        if (isForeign(groupTenant.get(group.id)) || (targetGroupId != null && isForeign(groupTenant.get(targetGroupId)))) {
+          toast.error(t('agents.foreignReadOnlyShort', 'Read-only (other tenant)'));
+          return;
+        }
         try {
           await groupsApi.move(group.id, targetGroupId);
           void fetchTree();
@@ -447,7 +471,7 @@ export function Sidebar() {
         }
       }
     },
-    [loadDevices, fetchTree, canManageAgents],
+    [loadDevices, fetchTree, canManageAgents, isForeign, groupTenant, t],
   );
 
   const filteredNavItems = navItems.filter(item => {

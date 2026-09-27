@@ -7,7 +7,9 @@ declare module 'express-session' {
     userId: number;
     username: string;
     role: string;
-    currentTenantId: number;
+    // unset = no tenant access (non-admin without membership); only login,
+    // /tenant/switch, /auth/me and the SSO callback write it
+    currentTenantId?: number;
     oauthState: string;
     // redirect_uri sent to Obligate by /auth/sso-redirect, replayed verbatim by
     // /auth/callback for the code exchange (never rebuilt from request headers).

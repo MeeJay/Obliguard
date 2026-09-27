@@ -1,6 +1,7 @@
 import { db } from '../db';
 import { appConfigService } from './appConfig.service';
 import { logger } from '../utils/logger';
+import { checkBanTarget } from '../utils/protectedIps';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -268,6 +269,7 @@ export const remoteBlocklistService = {
 
     let countBanned = 0;
     let countSuspicious = 0;
+    let countRefused = 0;
 
     for (const [ip, data] of Object.entries(body.ips ?? {})) {
       const status = data.status ?? 'banned';
@@ -292,11 +294,18 @@ export const remoteBlocklistService = {
         });
 
       if (status === 'banned') {
+        // Same contract as every ban path (B2-3 must keep it): refuse invalid,
+        // reserved and protected entries. The remote_blocked_ips row stays.
+        const chk = await checkBanTarget(ip, { allowCidr: false });
+        if (!chk.ok) {
+          countRefused++;
+          continue;
+        }
         // Create a global auto-ban if not already banned
-        const existingBan = await db('ip_bans').where({ ip, is_active: true }).first();
+        const existingBan = await db('ip_bans').whereRaw('ip = ?::inet', [chk.target.address]).where('is_active', true).first();
         if (!existingBan) {
           await db('ip_bans').insert({
-            ip,
+            ip: chk.target.address,
             scope: 'global',
             ban_type: 'auto',
             reason: `obli.tools: ${data.reason ?? 'shared ban'} (${data.reports ?? 1} reports)`,
@@ -327,6 +336,10 @@ export const remoteBlocklistService = {
         await ipReputationService.ensureExists(ip).catch(() => {});
         countSuspicious++;
       }
+    }
+
+    if (countRefused > 0) {
+      logger.warn({ listId: list.id, refused: countRefused }, 'obli.tools sync: refused reserved/protected/invalid entries');
     }
 
     await db('remote_blocklists').where({ id: list.id }).update({

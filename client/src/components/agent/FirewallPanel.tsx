@@ -7,9 +7,11 @@ import type { FirewallRule, FirewallAddRequest } from '@obliview/shared';
 interface Props {
   deviceId: number;
   wsConnected: boolean;
+  /** Another tenant's agent (Default god view): list only, no add/toggle/delete. */
+  readOnly?: boolean;
 }
 
-export function FirewallPanel({ deviceId, wsConnected }: Props) {
+export function FirewallPanel({ deviceId, wsConnected, readOnly = false }: Props) {
   const [rules, setRules] = useState<FirewallRule[]>([]);
   const [platform, setPlatform] = useState<string>('');
   const [loading, setLoading] = useState(false);
@@ -101,10 +103,12 @@ export function FirewallPanel({ deviceId, wsConnected }: Props) {
             className="p-1.5 rounded text-text-muted hover:text-accent hover:bg-bg-hover transition-colors disabled:opacity-40">
             <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
           </button>
-          <button onClick={() => setShowAdd(true)}
-            className="flex items-center gap-1 px-2.5 py-1 rounded text-xs font-medium bg-accent text-white hover:bg-accent-hover transition-colors">
-            <Plus size={12} /> Add Rule
-          </button>
+          {!readOnly && (
+            <button onClick={() => setShowAdd(true)}
+              className="flex items-center gap-1 px-2.5 py-1 rounded text-xs font-medium bg-accent text-white hover:bg-accent-hover transition-colors">
+              <Plus size={12} /> Add Rule
+            </button>
+          )}
         </div>
       </div>
 
@@ -181,7 +185,7 @@ export function FirewallPanel({ deviceId, wsConnected }: Props) {
                     <td className="text-center px-2 py-2">
                       <button
                         onClick={() => void handleToggle(rule.id, !rule.enabled)}
-                        disabled={pending.has(rule.id) || rule.source === 'obliguard'}
+                        disabled={readOnly || pending.has(rule.id) || rule.source === 'obliguard'}
                         className={`w-7 h-3.5 rounded-full transition-colors ${rule.enabled ? 'bg-accent' : 'bg-bg-tertiary'} disabled:opacity-40`}
                         role="switch" aria-checked={rule.enabled}
                       >
@@ -190,7 +194,7 @@ export function FirewallPanel({ deviceId, wsConnected }: Props) {
                     </td>
                   )}
                   <td className="text-right px-2 py-2">
-                    {rule.source !== 'obliguard' && (
+                    {!readOnly && rule.source !== 'obliguard' && (
                       <button onClick={() => void handleDelete(rule.id)} disabled={pending.has(rule.id)}
                         className="p-1 rounded text-text-muted hover:text-status-down hover:bg-status-down/10 transition-colors disabled:opacity-40">
                         <Trash2 size={12} />
@@ -205,7 +209,7 @@ export function FirewallPanel({ deviceId, wsConnected }: Props) {
       )}
 
       {/* Add Rule Modal */}
-      {showAdd && <AddRuleModal platform={platform} onAdd={handleAdd} onClose={() => setShowAdd(false)} />}
+      {showAdd && !readOnly && <AddRuleModal platform={platform} onAdd={handleAdd} onClose={() => setShowAdd(false)} />}
     </div>
   );
 }

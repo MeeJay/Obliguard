@@ -22,6 +22,7 @@ interface UserRow {
   foreign_id?: number | null;
   foreign_source_url?: string | null;
   avatar?: string | null;
+  preferred_tenant_id?: number | null;
 }
 
 function rowToUser(row: UserRow): User {
@@ -41,6 +42,7 @@ function rowToUser(row: UserRow): User {
     emailOtpEnabled: row.email_otp_enabled ?? false,
     foreignSource: row.foreign_source ?? null,
     avatar: row.avatar ?? null,
+    preferredTenantId: row.preferred_tenant_id ?? null,
   };
 }
 

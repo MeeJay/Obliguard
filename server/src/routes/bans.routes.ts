@@ -21,15 +21,17 @@ const router = Router();
 
 // ⚠️ /stats and /wipe-* must be before /:id
 router.get('/stats', requireAuth, getBanStats);
-// wipe-* are destructive tenant-wide resets → keep admin-only.
+// wipe-* are PLATFORM-WIDE resets: platform admin AND Default tenant (enforced in the controller).
 router.post('/wipe-bans', requireAuth, requireRole('admin'), wipeAllBans);
 router.post('/wipe-reputation', requireAuth, requireRole('admin'), wipeAllReputation);
+// Bulk ban: scope follows the operating tenant (Default = global, others = tenant); goes through banService.create.
 router.post('/bulk-ban', requireAuth, requireCapability(CAPABILITIES.BANS), bulkBan);
 router.post('/bulk-whitelist', requireAuth, requireCapability(CAPABILITIES.WHITELIST), bulkWhitelist);
 router.get('/', requireAuth, listBans);
 router.get('/:id', requireAuth, getBanById);
 router.post('/', requireAuth, requireCapability(CAPABILITIES.BANS), createBan);
 router.delete('/:id', requireAuth, requireCapability(CAPABILITIES.BANS), liftBan);
+// Promote to global: Default tenant only (enforced in banService.promoteToGlobal).
 router.post('/:id/promote-global', requireAuth, requireCapability(CAPABILITIES.BANS), promoteBan);
 
 // Per-tenant exclusions (a ban-management action)

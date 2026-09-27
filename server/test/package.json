@@ -1,0 +1,10 @@
+{
+  "name": "@obliguard/server-verify",
+  "private": true,
+  "description": "Obliguard verification harness - never part of a Docker image",
+  "devDependencies": {
+    "embedded-postgres": "16.14.0-beta.17",
+    "socket.io-client": "^4.8.1",
+    "ws": "^8.18.3"
+  }
+}

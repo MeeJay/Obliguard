@@ -45,6 +45,7 @@ router.use('/agent', agentRoutes);           // agent push (authenticated via AP
 router.use('/admin/config', appConfigRoutes);
 router.use('/system', systemRoutes);         // system info / about (admin only, no tenant required)
 router.use('/profile/2fa', twoFactorRoutes); // must be before /profile
+router.use('/profile', profileRoutes);         // global: enrollment / profile / 2FA work without a tenant
 router.use('/live-alerts', liveAlertRouter);
 router.use('/oblitools', oblitoolsRoutes);   // ObliTools desktop manifest (auth required)
 router.use('/permission-sets', permissionSetsRoutes);
@@ -63,7 +64,6 @@ tenantRouter.use('/groups', groupsRoutes);
 tenantRouter.use('/settings', settingsRoutes);
 tenantRouter.use('/notifications', notificationsRoutes);
 tenantRouter.use('/users', usersRoutes);
-tenantRouter.use('/profile', profileRoutes);
 tenantRouter.use('/teams', teamsRoutes);
 tenantRouter.use('/admin/smtp-servers', smtpServerRoutes);
 

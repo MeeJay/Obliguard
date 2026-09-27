@@ -4,10 +4,10 @@ import { AppError } from './errorHandler';
 import { permissionService } from '../services/permission.service';
 
 /**
- * Require a feature capability (e.g. 'monitor_rw', 'bans'). Admins always pass;
- * non-admins must hold the capability via one of their teams
- * (team_permissions.capabilities). Use this on WRITE routes so the Admin/User/
- * Viewer permission grid is actually enforced, instead of a blanket admin gate.
+ * Require a feature capability (e.g. 'monitor_rw', 'bans') on WRITE routes.
+ * Admins always pass; non-admins hold every capability only as members of the
+ * current tenant; the legacy per-team capability column is ignored. Mount it
+ * after requireTenant (it reads the validated req.tenantId).
  */
 export function requireCapability(capability: Capability) {
   return async (req: Request, _res: Response, next: NextFunction): Promise<void> => {
@@ -21,7 +21,7 @@ export function requireCapability(capability: Capability) {
       const caps = await permissionService.getUserCapabilities(
         req.session.userId,
         false,
-        req.session.currentTenantId,
+        req.tenantId ?? req.session.currentTenantId,
       );
       if (!caps.includes(capability)) {
         next(new AppError(403, 'Insufficient permissions'));

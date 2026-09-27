@@ -10,6 +10,9 @@ import { userSessionsService } from '../services/userSessions.service';
 import { logger } from '../utils/logger';
 import { regenerateSession } from '../utils/regenerateSession';
 import { invalidateUserState } from '../middleware/sessionUserGuard';
+import { requireTenant, invalidateTenantAccess } from '../middleware/tenant';
+import { isDeviceUuidFormat } from '../utils/agentIdentity';
+import { deviceAccessVerdict } from '../utils/tenantWriteRules';
 import { configuredPublicOrigins, requestAuthority, requestProto } from '../utils/publicOrigin';
 
 const router = Router();
@@ -201,6 +204,7 @@ router.get('/callback', async (req, res) => {
       // successful exchange therefore re-enables the local account — a disable
       // pushed through sso-user-sync (legitimate, missed 'reactivate', or forged
       // with the browser-exposed key) can't lock the user out for good.
+      const prevRole = (await db('users').where({ id: localUserId }).first('role') as { role: string } | undefined)?.role;
       await db('users').where({ id: localUserId }).update({
         is_active: true,
         role: assertion.role === 'admin' ? 'admin' : 'user',
@@ -208,6 +212,12 @@ router.get('/callback', async (req, res) => {
         display_name: assertion.displayName,
         updated_at: new Date(),
       });
+      // Socket rooms (role:admin, tenant:X:admin) are fixed at connect time:
+      // a platform-role change closes the live sockets so they reconnect with
+      // the new role (HTTP is already covered by sessionUserGuard).
+      if (prevRole && prevRole !== (assertion.role === 'admin' ? 'admin' : 'user')) {
+        userSessionsService.disconnectSockets(localUserId);
+      }
       // Make sure the link row exists and points to this account (idempotent;
       // repairs accounts that were resolved through users.foreign_id).
       await db('sso_foreign_users')
@@ -262,8 +272,10 @@ router.get('/callback', async (req, res) => {
       obligateService.reportProvision(assertion.obligateUserId, localUserId).catch(() => {});
     }
 
-    // Sync tenants + capabilities from Obligate (every SSO login)
-    for (const t of assertion.tenants) {
+    // Sync tenant + team memberships from Obligate (every SSO login).
+    // Capabilities are NOT synced: they derive from tenant membership
+    // (permission.service.getUserCapabilities).
+    for (const t of Array.isArray(assertion.tenants) ? assertion.tenants : []) {
       const tenant = await db('tenants').where({ slug: t.slug }).first() as { id: number } | undefined;
       if (tenant) {
         await db('user_tenants')
@@ -304,18 +316,8 @@ router.get('/callback', async (req, res) => {
             );
           }
         }
-
-        if (t.capabilities?.length) {
-          const userTeamIds = await db('team_memberships')
-            .join('user_teams', 'user_teams.id', 'team_memberships.team_id')
-            .where({ 'team_memberships.user_id': localUserId, 'user_teams.tenant_id': tenant.id })
-            .pluck('team_memberships.team_id') as number[];
-          for (const teamId of userTeamIds) {
-            await db('team_permissions')
-              .where({ team_id: teamId })
-              .update({ capabilities: JSON.stringify(t.capabilities) });
-          }
-        }
+      } else {
+        logger.warn({ userId: localUserId, slug: t.slug }, 'Obligate SSO: asserted tenant has no local tenant with this slug — skipped');
       }
     }
 
@@ -347,6 +349,7 @@ router.get('/callback', async (req, res) => {
     const requestedSlug = req.session.requestedTenantSlug;
     await regenerateSession(req);
     invalidateUserState(localUserId); // is_active / role were just (re)written
+    invalidateTenantAccess(localUserId); // memberships may have just been added
     req.session.userId = localUserId;
     const user = await db('users').where({ id: localUserId }).first() as { username: string; role: string } | undefined;
     if (user) {
@@ -395,10 +398,15 @@ router.get('/callback', async (req, res) => {
     }
 
     if (resolvedTenantId === null) {
-      const tenant = await tenantService.getFirstTenantForUser(localUserId);
-      resolvedTenantId = tenant?.id ?? 1;
+      resolvedTenantId = await tenantService.resolveLoginTenant(localUserId, assertion.role === 'admin' ? 'admin' : 'user');
     }
-    req.session.currentTenantId = resolvedTenantId;
+    if (resolvedTenantId !== null) req.session.currentTenantId = resolvedTenantId;
+    else {
+      logger.warn(
+        { userId: localUserId, asserted: (Array.isArray(assertion.tenants) ? assertion.tenants : []).map((t) => t.slug) },
+        'Obligate SSO: user has no local tenant membership — no tenant access until one is assigned',
+      );
+    }
 
     logger.info(`Obligate SSO: user ${assertion.username} (obligate #${assertion.obligateUserId}) → local #${localUserId}`);
 
@@ -546,10 +554,8 @@ router.get('/app-info', async (req, res) => {
       .select('id', 'name', 'slug')
       .orderBy('name') as Array<{ id: number; name: string; slug: string }>;
 
-    // Capabilities are applied to team_permissions in /auth/callback only when
-    // the user is in a team on the tenant — without a team they are a no-op.
-    // We therefore no longer advertise permissionSets to Obligate, so its UI
-    // stops offering orphan capability checkboxes alongside the team picker.
+    // Capabilities derive from local tenant membership; per-tenant capabilities
+    // in the SSO assertion are ignored, so permissionSets are not advertised.
     res.json({
       success: true,
       data: {
@@ -646,12 +652,15 @@ router.get('/connected-apps', requireAuth, async (req, res) => {
 
 /**
  * GET /api/auth/device-links?uuid=xxx
- * Returns cross-app links for a device UUID via Obligate.
+ * Returns cross-app links for a device UUID via Obligate. Tenant-scoped: only
+ * for a device of the operating tenant (Default keeps its god-view read).
  */
-router.get('/device-links', requireAuth, async (req, res) => {
+router.get('/device-links', requireAuth, requireTenant, async (req, res) => {
   try {
-    const uuid = req.query.uuid as string;
-    if (!uuid) { res.json({ success: true, data: [] }); return; }
+    const uuid = typeof req.query.uuid === 'string' ? req.query.uuid : '';
+    if (!isDeviceUuidFormat(uuid)) { res.json({ success: true, data: [] }); return; }
+    const row = await db('agent_devices').where({ uuid }).first('tenant_id') as { tenant_id: number } | undefined;
+    if (!row || deviceAccessVerdict(row.tenant_id, req.tenantId, 'read') !== 'ok') { res.json({ success: true, data: [] }); return; }
     const links = await obligateService.getDeviceLinks(uuid);
     res.json({ success: true, data: links });
   } catch {

@@ -12,18 +12,20 @@ import { db } from '../../db';
 import { logger } from '../../utils/logger';
 import { createRouterOSClient } from './routerosClient';
 import { mikrotikDeviceService } from './mikrotikDevice.service';
+import { isUnsafeBanId } from '../banSafetyAudit';
 
 interface MikroTikDeviceInfo {
   deviceId: number;
   tenantId: number;
 }
 
-async function getApprovedMikroTikDevices(): Promise<MikroTikDeviceInfo[]> {
-  const rows = await db('agent_devices')
+async function getApprovedMikroTikDevices(tenantId?: number | null): Promise<MikroTikDeviceInfo[]> {
+  const q = db('agent_devices')
     .where('device_type', 'mikrotik')
     .where('status', 'approved')
     .select('id as deviceId', 'tenant_id as tenantId');
-  return rows;
+  if (tenantId != null) q.where('tenant_id', tenantId);
+  return q;
 }
 
 async function pushToDevice(
@@ -69,9 +71,12 @@ export const mikrotikBanSync = {
    * Push a ban or unban to ALL approved MikroTik devices.
    * Called after auto-ban, manual ban, or ban lift.
    * Fire-and-forget — errors are logged but don't block the caller.
+   *
+   * opts.tenantId restricts the push to that tenant's routers (tenant-local
+   * bans). Stop-gap until A3 replaces this with pushBan(ban, action).
    */
-  async pushBanToAll(ip: string, action: 'ban' | 'unban'): Promise<void> {
-    const devices = await getApprovedMikroTikDevices();
+  async pushBanToAll(ip: string, action: 'ban' | 'unban', opts?: { tenantId?: number | null }): Promise<void> {
+    const devices = await getApprovedMikroTikDevices(opts?.tenantId);
     if (devices.length === 0) return;
 
     // Run in parallel, don't await individual failures
@@ -93,8 +98,11 @@ export const mikrotikBanSync = {
       // Get all active global bans
       const bans = await db('ip_bans')
         .where('is_active', true)
-        .select('ip');
-      const wantedIPs = new Set(bans.map((b) => b.ip as string));
+        .select('id', 'ip') as Array<{ id: number; ip: string }>;
+      // Unsafe legacy rows (banSafetyAudit) are never delivered: an existing
+      // entry is removed by the toRemove loop below. A3 replaces this with a
+      // fullSync based on computeBanDelta and must keep the unsafe filter.
+      const wantedIPs = new Set(bans.filter((b) => !isUnsafeBanId(b.id)).map((b) => String(b.ip)));
 
       // Get current address-list from MikroTik
       const client = await createRouterOSClient({

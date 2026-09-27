@@ -5,6 +5,8 @@ export class AppError extends Error {
   constructor(
     public statusCode: number,
     message: string,
+    /** Machine-readable error code (lowerCamel), echoed as `code` in the body when set. */
+    public code?: string,
   ) {
     super(message);
     this.name = 'AppError';
@@ -21,6 +23,7 @@ export function errorHandler(
     res.status(err.statusCode).json({
       success: false,
       error: err.message,
+      ...(err.code ? { code: err.code } : {}),
     });
     return;
   }

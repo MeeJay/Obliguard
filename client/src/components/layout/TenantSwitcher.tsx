@@ -1,5 +1,5 @@
-import { useRef, useState, useEffect } from 'react';
-import { ChevronDown, Building2, Check } from 'lucide-react';
+import { useRef, useState, useEffect, type MouseEvent as ReactMouseEvent } from 'react';
+import { ChevronDown, Building2, Check, Star } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useTenantStore } from '@/store/tenantStore';
 import { useGroupStore } from '@/store/groupStore';
@@ -7,11 +7,12 @@ import { useMonitorStore } from '@/store/monitorStore';
 import { disconnectSocket, connectSocket } from '@/socket/socketClient';
 import { useAuthStore } from '@/store/authStore';
 import { cn } from '@/utils/cn';
+import toast from 'react-hot-toast';
 
 export function TenantSwitcher() {
   const { t } = useTranslation();
   const { currentTenantId, tenants, setCurrentTenant } = useTenantStore();
-  const { user } = useAuthStore();
+  const { user, preferredTenantId, setDefaultTenant } = useAuthStore();
   const [open, setOpen] = useState(false);
   const [switching, setSwitching] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -65,6 +66,16 @@ export function TenantSwitcher() {
     }
   };
 
+  const handleSetDefault = async (e: ReactMouseEvent, tenantId: number) => {
+    e.stopPropagation();
+    // Toggle: clicking the current favourite clears it (back to the first workspace).
+    try {
+      await setDefaultTenant(preferredTenantId === tenantId ? null : tenantId);
+    } catch {
+      toast.error(t('common.error', 'Error'));
+    }
+  };
+
   return (
     <div className="relative">
       <button
@@ -94,31 +105,57 @@ export function TenantSwitcher() {
             </p>
           </div>
           <div className="py-1 max-h-64 overflow-y-auto">
-            {tenants.map((tenant) => (
-              <button
-                key={tenant.id}
-                onClick={() => handleSwitch(tenant.id)}
-                className={cn(
-                  'w-full flex items-center justify-between px-3 py-2 text-sm text-left transition-colors hover:bg-bg-hover',
-                  tenant.id === currentTenantId
-                    ? 'text-accent font-semibold'
-                    : 'text-text-primary',
-                )}
-              >
-                <div className="flex items-center gap-2 min-w-0">
-                  <Building2 size={13} className="shrink-0 text-text-muted" />
-                  <span className="truncate">{tenant.name}</span>
-                  {tenant.role === 'admin' && (
-                    <span className="shrink-0 text-[10px] text-text-muted bg-bg-tertiary rounded px-1 py-0.5">
-                      {t('tenant.roleAdmin')}
-                    </span>
+            {tenants.map((tenant) => {
+              const isFavourite = tenant.id === preferredTenantId;
+              return (
+                <div
+                  key={tenant.id}
+                  className={cn(
+                    'group flex items-center gap-1 pr-2 transition-colors hover:bg-bg-hover',
+                    tenant.id === currentTenantId
+                      ? 'text-accent font-semibold'
+                      : 'text-text-primary',
                   )}
+                >
+                  <button
+                    onClick={() => handleSwitch(tenant.id)}
+                    className="flex min-w-0 flex-1 items-center justify-between px-3 py-2 text-sm text-left"
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Building2 size={13} className="shrink-0 text-text-muted" />
+                      <span className="truncate">{tenant.name}</span>
+                      {tenant.role === 'admin' && (
+                        <span className="shrink-0 text-[10px] text-text-muted bg-bg-tertiary rounded px-1 py-0.5">
+                          {t('tenant.roleAdmin')}
+                        </span>
+                      )}
+                    </div>
+                    {tenant.id === currentTenantId && (
+                      <Check size={13} className="shrink-0 text-accent" />
+                    )}
+                  </button>
+                  <button
+                    onClick={(e) => { void handleSetDefault(e, tenant.id); }}
+                    title={isFavourite
+                      ? t('tenant.clearFavourite', 'Favourite workspace (click to clear)')
+                      : t('tenant.setFavourite', 'Set as favourite workspace')}
+                    aria-pressed={isFavourite}
+                    className={cn(
+                      'shrink-0 rounded p-1 transition-colors hover:bg-bg-tertiary',
+                      isFavourite ? 'text-accent' : 'text-text-muted opacity-0 group-hover:opacity-100 focus-visible:opacity-100',
+                    )}
+                  >
+                    <Star size={13} className={cn(isFavourite && 'fill-current')} />
+                  </button>
                 </div>
-                {tenant.id === currentTenantId && (
-                  <Check size={13} className="shrink-0 text-accent" />
-                )}
-              </button>
-            ))}
+              );
+            })}
+          </div>
+          <div className="px-3 py-2 border-t border-border">
+            <p className="text-[11px] text-text-muted">
+              <Star size={10} className="mr-1 inline align-[-1px]" />
+              {t('tenant.favouriteHint', 'The favourite workspace opens at sign-in')}
+            </p>
           </div>
         </div>
       )}

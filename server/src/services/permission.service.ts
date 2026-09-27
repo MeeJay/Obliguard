@@ -288,8 +288,12 @@ export const permissionService = {
    * platform-admin-only actions stay behind `requireRole('admin')`).
    *
    * Viewing is NOT a capability — any authenticated tenant member may view;
-   * these gate mutations only. A tenantId is required to grant tenant-derived
-   * capabilities; without it we fall back to the legacy team_permissions store.
+   * these gate mutations only.
+   *
+   * Platform admin → all; member of `tenantId` → all; no tenant or not a
+   * member → none. The legacy per-team capability column is ignored (kept; a
+   * role→capability matrix may come later): it was not tenant-scoped, so a
+   * pinned-capability team in tenant A granted bans/whitelist on Default.
    */
   async getUserCapabilities(
     userId: number,
@@ -297,45 +301,11 @@ export const permissionService = {
     tenantId?: number,
   ): Promise<Capability[]> {
     if (isAdmin) return [...ALL_CAPABILITIES];
-
-    const held = new Set<string>();
-
-    // Primary source: tenant membership. Membership in the current tenant grants
-    // the full operational capability set (see doc comment above).
-    if (tenantId != null) {
-      const membership = await db('user_tenants')
-        .where({ user_id: userId, tenant_id: tenantId })
-        .first();
-      if (membership) {
-        for (const c of ALL_CAPABILITIES) held.add(c);
-      }
-    }
-
-    // Legacy/explicit source: capabilities pinned onto team_permissions rows.
-    // Obligate no longer populates these, but keep honouring any that exist so
-    // manual grants (or a future Obligate that ships capabilities) still work.
-    const teamIds = await this.getUserTeamIds(userId);
-    if (teamIds.length > 0) {
-      const rows = await db('team_permissions')
-        .whereIn('team_id', teamIds)
-        .whereNotNull('capabilities')
-        .select('capabilities');
-      for (const r of rows) {
-        const raw = (r as { capabilities: unknown }).capabilities;
-        let arr: unknown;
-        try {
-          arr = typeof raw === 'string' ? JSON.parse(raw) : raw;
-        } catch {
-          arr = null;
-        }
-        if (Array.isArray(arr)) {
-          for (const c of arr) if (typeof c === 'string') held.add(c);
-        }
-      }
-    }
-
-    // Only surface capabilities we actually recognise/enforce.
-    return ALL_CAPABILITIES.filter((c) => held.has(c));
+    if (tenantId == null) return [];
+    const membership = await db('user_tenants')
+      .where({ user_id: userId, tenant_id: tenantId })
+      .first('user_id');
+    return membership ? [...ALL_CAPABILITIES] : [];
   },
 
   /**

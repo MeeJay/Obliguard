@@ -50,7 +50,9 @@ Appelé par l'agent juste avant de s'auto-mettre à jour, pour que le serveur sa
 
 ### `GET /agent/version` et `/agent/desktop-version`
 
-Renvoient les métadonnées de version courante (`agentService.getAgentVersion()` / `getDesktopVersion()`), utilisées par l'agent Go pour décider s'il doit s'auto-mettre à jour, et par le client React pour afficher une bannière de mise à jour du tray app.
+Renvoient les métadonnées de version courante (`agentService.getAgentVersion()` / `getDesktopVersion()`), utilisées par le client React (ajout d'agent, bannière de mise à jour du tray app).
+
+`GET /agent/version` renvoie `{ "version": "" }` (avec `Cache-Control: no-store`) à tout appelant **sans session** : les agents l'appellent au démarrage et se mettaient à jour vers la version renvoyée ; une version vide est ignorée par toutes les versions de l'agent. La cible de mise à jour n'est plus livrée que dans la trame de config, selon la politique de mise à jour (C17-1). Une session connectée reçoit toujours la version servie.
 
 ### `GET /agent/download/:filename`
 
@@ -106,21 +108,28 @@ Point d'ingestion syslog HTTP pour les devices MikroTik, monté avec `express.te
 
 ### CRUD des devices agent
 
-> Note d'ordre de déclaration dans `agent.routes.ts` : les routes statiques (`/devices/stats`, `/devices/bulk`, `/devices/bulk-command`) sont déclarées **avant** `/devices/:id`, sinon Express interpréterait le segment littéral `stats` ou `bulk` comme un `:id`.
+> Note d'ordre de déclaration dans `agent.routes.ts` : les routes statiques (`/devices/stats`, `/devices/versions`, `/devices/bulk`, `/devices/bulk-command`, `/devices/bulk-request-update`) sont déclarées **avant** `/devices/:id`, sinon Express interpréterait le segment littéral `stats` ou `bulk` comme un `:id`.
 
 | Route | Handler | Notes |
 |---|---|---|
 | GET `/devices/stats` | `getDeviceStats` | `{ online: agentService.countOnlineDevices(tenantId) }` |
+| GET `/devices/versions` | `getDeviceVersionDistribution` | répartition des versions des agents approuvés (`AgentVersionDistribution`) ; le tenant Default voit tous les tenants (lecture) |
+| POST `/devices/bulk-request-update` | `bulkRequestUpdate` | body `{ deviceIds }` → `AgentUpdateRequestResult` ; les agents d'autres tenants sont comptés dans `skipped.notFound` |
 | DELETE `/devices/bulk` | `bulkDeleteDevices` | body `{ deviceIds: number[] }` |
 | PATCH `/devices/bulk` | `bulkUpdateDevices` | body `{ deviceIds, groupId?, heartbeatMonitoring?, overrideGroupSettings?, status? }` |
-| POST `/devices/bulk-command` | `bulkDeviceCommand` | body `{ deviceIds, command }` |
+| POST `/devices/bulk-command` | `bulkDeviceCommand` | body `{ deviceIds, command }` ; commandes autorisées : `uninstall`, `update` (400 sinon). `update` crée une demande de mise à jour (réponse `AgentUpdateRequestResult`), jamais un `pending_command` |
 | GET `/devices` | `listDevices` | filtre `?status=pending\|approved\|refused\|suspended` |
 | GET `/devices/:id` | `getDevice` | |
 | GET `/devices/:id/metrics` | `getDeviceMetrics` | renvoie toujours 404 — les agents Obliguard poussent des événements IP, pas des métriques matérielles (hérité d'Obliview) |
 | GET `/devices/:id/templates` | `getDeviceTemplates` | résout les templates de service après avoir remonté la chaîne d'héritage de groupe, via `serviceTemplateService.getResolvedForDevice(id)` |
 | PATCH `/devices/:id` | `updateDevice` | voir logique d'approbation ci-dessous |
 | DELETE `/devices/:id` | `deleteDevice` | |
-| POST `/devices/:id/command` | `sendDeviceCommand` | body `{ command }` |
+| POST `/devices/:id/command` | `sendDeviceCommand` | body `{ command }` ; `uninstall` ou `update` uniquement |
+| POST `/devices/:id/agent-update` | `requestDeviceUpdate` | « Mettre à jour » : 200 (device), 409 `updatePolicyOff` / `alreadyCurrent` / `notUpdatable`, 503 `versionUnavailable` |
+| DELETE `/devices/:id/agent-update` | `cancelDeviceUpdate` | annule la demande en cours |
+| POST `/groups/:groupId/agent-update` | `requestGroupUpdateHandler` | agents en retard du groupe et de ses sous-groupes (tenant courant uniquement) |
+
+Mises à jour d'agent (C17-1) : ces écritures, comme `updatePolicy` dans `PATCH /devices/:id` et `PATCH /devices/bulk`, suivent le tenant courant sans exception pour l'admin plateforme (403 depuis Default sur un agent ou groupe d'un autre tenant, 404 ailleurs) ; elles demandent `monitor_rw`. La politique de groupe (`PATCH /groups/:id/agent-config`) reste réservée à l'admin plateforme, sur un groupe du tenant courant ; la politique globale (`PATCH /admin/config/agent-global` `{ updatePolicy }`) à l'admin plateforme depuis le tenant Default.
 
 `updateDevice` (`agent.controller.ts:346`) contient une logique conditionnelle non triviale sur le champ `status` :
 

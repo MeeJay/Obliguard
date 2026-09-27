@@ -1,30 +1,28 @@
 import type { Request, Response, NextFunction } from 'express';
-import { isMasterTenant } from '@obliview/shared';
-import { db } from '../db';
 import { obliguardHub } from '../services/obliguardHub.service';
+import { checkDeviceAccess } from '../services/deviceAccess.service';
 import { AppError } from '../middleware/errorHandler';
 import { randomUUID } from 'crypto';
 import { logger } from '../utils/logger';
 
 /**
- * Resolve the device UUID and enforce tenant ownership (master sees all).
- * A 404 (not 403) is used for a wrong-tenant device so we never reveal that it
- * exists — these routes are reachable by non-admin members with 'monitor_rw'.
+ * Resolve the device UUID and enforce the operating-tenant rule (A5):
+ * - 'read' (rule list): own tenant, or the Default tenant god view;
+ * - 'write' (add/delete/toggle): own tenant only — 403 from Default
+ *   (read-only god view, no platform-admin bypass), 404 elsewhere.
+ * Only approved devices receive firewall commands (409 otherwise).
  */
-async function getDeviceUuid(deviceId: number, req: Request): Promise<string> {
-  const row = await db('agent_devices').where({ id: deviceId }).select('uuid', 'tenant_id').first() as
-    { uuid: string; tenant_id: number } | undefined;
-  if (!row) throw new AppError(404, 'Device not found');
-  if (!isMasterTenant(req.tenantId) && row.tenant_id !== req.tenantId) {
-    throw new AppError(404, 'Device not found');
-  }
-  return row.uuid;
+async function getDeviceUuid(deviceId: number, req: Request, mode: 'read' | 'write'): Promise<string> {
+  const r = await checkDeviceAccess(deviceId, req.tenantId, mode);
+  if (!r.ok) throw new AppError(r.status, r.error);
+  if (r.row.status !== 'approved') throw new AppError(409, 'Agent is not approved');
+  return r.row.uuid;
 }
 
 export async function getFirewallRules(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const deviceId = parseInt(req.params.id, 10);
-    const uuid = await getDeviceUuid(deviceId, req);
+    const uuid = await getDeviceUuid(deviceId, req, 'read');
     logger.info({ deviceId, uuid }, 'Firewall: sending firewall_list command');
     const cmdId = randomUUID();
     const result = await obliguardHub.pushAndWait(uuid, {
@@ -46,7 +44,7 @@ export async function getFirewallRules(req: Request, res: Response, next: NextFu
 export async function addFirewallRule(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const deviceId = parseInt(req.params.id, 10);
-    const uuid = await getDeviceUuid(deviceId, req);
+    const uuid = await getDeviceUuid(deviceId, req, 'write');
     const result = await obliguardHub.pushAndWait(uuid, {
       type: 'firewall_add',
       id: randomUUID(),
@@ -66,7 +64,7 @@ export async function deleteFirewallRule(req: Request, res: Response, next: Next
   try {
     const deviceId = parseInt(req.params.id, 10);
     const ruleId = req.params.ruleId;
-    const uuid = await getDeviceUuid(deviceId, req);
+    const uuid = await getDeviceUuid(deviceId, req, 'write');
     const result = await obliguardHub.pushAndWait(uuid, {
       type: 'firewall_delete',
       id: randomUUID(),
@@ -87,7 +85,7 @@ export async function toggleFirewallRule(req: Request, res: Response, next: Next
     const deviceId = parseInt(req.params.id, 10);
     const ruleId = req.params.ruleId;
     const { enabled } = req.body as { enabled: boolean };
-    const uuid = await getDeviceUuid(deviceId, req);
+    const uuid = await getDeviceUuid(deviceId, req, 'write');
     const result = await obliguardHub.pushAndWait(uuid, {
       type: 'firewall_toggle',
       id: randomUUID(),

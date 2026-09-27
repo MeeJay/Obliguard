@@ -697,6 +697,12 @@
     }
   },
   "agents": {
+    "foreignReadOnly": "This agent belongs to another tenant. It is read-only here: switch to its tenant to change it.",
+    "foreignReadOnlyShort": "Read-only (other tenant)",
+    "boundKey": "Bound API key: {{name}}",
+    "noBoundKey": "Not bound to an API key: the next key of this tenant claims it",
+    "releaseKeyBinding": "Release API key binding",
+    "releaseKeyBindingDesc": "Use this after reinstalling the agent with another key of this tenant: the agent is disconnected and the first key that reconnects is bound (stop the old install first if it still runs). Group and settings are kept.",
     "tabKeys": "API Keys",
     "tabDevices": "Devices",
     "approve": "Approve",
@@ -932,7 +938,26 @@
     "message": "Page not found",
     "goToDashboard": "Go to Dashboard"
   },
-  "header": {
+  "bans": {
+    "scopeGlobalHint": "Global ban: enforced on every agent of every tenant.",
+    "scopeTenantHint": "Local ban: enforced only on the agents of this tenant.",
+    "whitelistGlobalHint": "Global whitelist entry: applies to every tenant and cannot be removed by other tenants.",
+    "whitelistTenantHint": "Local whitelist entry: applies only to this tenant.",
+    "bannedGlobal": "{{ip}} banned globally",
+    "bannedLocal": "{{ip}} banned on this tenant",
+    "quickBanPromptGlobal": "Ban reason for {{ip}} (global ban: every tenant):",
+    "quickBanPromptLocal": "Ban reason for {{ip}} (this tenant only):",
+    "bulkConfirmGlobal": "Ban {{count}} IPs globally (every agent of every tenant)?",
+    "bulkConfirmLocal": "Ban {{count}} IPs on this tenant?",
+    "bulkResult": "{{created}} banned, {{skipped}} skipped (already banned or whitelisted), {{invalid}} invalid",
+    "bulkInvalid": "Ignored: {{list}}",
+    "confirmBanGlobal": "Ban IP {{ip}}?\n\nIt will be blocked on every agent of every tenant.",
+    "confirmBanLocal": "Ban IP {{ip}}?\n\nIt will be blocked on the agents of this tenant.",
+    "promoteButton": "Promote to global",
+    "promoteConfirm": "Promote the ban on {{ip}} to a global ban? It will be enforced on every agent of every tenant, and its reason becomes visible to every tenant.",
+    "promoted": "{{ip}} is now banned globally",
+    "dangerZoneDefaultOnly": "Switch to the Default tenant to use the danger zone: wipes apply to every tenant."
+  },  "header": {
     "signedInAs": "Signed in as",
     "disableAlerts": "Disable live alerts",
     "enableAlerts": "Enable live alerts",
@@ -959,7 +984,19 @@
     "removeMember": "Remove from workspace",
     "toggleRole": "Click to toggle admin / member role",
     "roleAdmin": "admin",
-    "switchWorkspace": "Switch workspace"
+    "switchWorkspace": "Switch workspace",
+    "noAccess": {
+      "title": "No workspace assigned",
+      "body": "Your account is not a member of any workspace yet. Ask an administrator to add you to a workspace, then check again.",
+      "retry": "Check again",
+      "ssoBody": "Your workspaces are assigned in Obligate, and a local workspace with the same identifier must exist here. Ask an administrator, then sign in again.",
+      "ssoRetry": "Sign in again"
+    },
+    "setFavourite": "Set as favourite workspace",
+    "clearFavourite": "Favourite workspace (click to clear)",
+    "favouriteHint": "The favourite workspace opens at sign-in",
+    "favouriteLabel": "Favourite workspace",
+    "noFavourite": "None (first workspace)"
   },
   "evaluateOnly": {
     "badge": "Evaluate-only",
@@ -968,5 +1005,60 @@
     "groupDesc": "When enabled, this group and all its agents observe events but never create or enforce auto-bans. Ideal for tuning whitelist rules before enforcing.",
     "enabled": "Evaluate-only mode enabled",
     "disabled": "Evaluate-only mode disabled"
+  },
+  "agentUpdate": {
+    "policyLabel": "Agent updates",
+    "groupPolicyDesc": "Update policy of this group's agents and sub-groups. 'Off' freezes them whatever is set below.",
+    "globalLabel": "Agent updates (default policy)",
+    "globalDesc": "Automatic: every new release is installed within ~30 s. Manual: only on \"Update now\". Off: never (fleet-wide freeze, overrides every group and agent).",
+    "globalDefaultOnly": "Switch to the Default tenant to change the global update policy",
+    "builtInDefault": "(built-in default)",
+    "changeDefault": "Change default",
+    "confirmGlobalAuto": "Every agent without a group/agent override will update to the latest version within ~30 s, and to every future release as soon as the server serves it. Continue?",
+    "policy": {
+      "auto": "Automatic",
+      "manual": "Manual",
+      "off": "Off (frozen)",
+      "inherit": "Inherit"
+    },
+    "source": {
+      "agent": "agent",
+      "group": "group",
+      "global": "global",
+      "default": "default",
+      "unresolved": "unavailable"
+    },
+    "frozenBy": "Frozen by {{source}}",
+    "frozenBadge": "Updates frozen",
+    "updateAvailable": "Update available: v{{version}}",
+    "updateAvailableShort": "Update available",
+    "updateNow": "Update now",
+    "updateRequested": "Update to v{{version}} requested",
+    "cancelRequest": "Cancel",
+    "requestedToast": "Update requested: the agent updates at its next heartbeat",
+    "saveFailed": "Failed to save",
+    "readOnlyOtherTenant": "Read-only: this group belongs to another tenant",
+    "confirmUpdate": "Update {{name}} to v{{version}}?",
+    "bulkUpdate": "Update",
+    "confirmBulk": "Request an update to v{{version}} for {{count}} agent(s)?",
+    "bulkResult": "{{requested}} update(s) requested, {{skipped}} skipped",
+    "bulkSkippedOtherTenant": "{{count}} agent(s) of other tenants were not changed",
+    "groupUpdate": "Update outdated agents",
+    "groupConfirm": "Request an update for every outdated agent of this group and its sub-groups?",
+    "errors": {
+      "off": "Updates are disabled for this agent (policy: off)",
+      "current": "This agent is already up to date",
+      "notUpdatable": "Only approved agents that reported a version can be updated",
+      "unavailable": "No agent version is available on this server"
+    },
+    "distribution": {
+      "title": "Agent versions",
+      "latest": "Latest: v{{version}}",
+      "upToDate": "{{count}} up to date",
+      "outdated": "{{count}} outdated",
+      "pending": "{{count}} update(s) requested",
+      "unknown": "{{count}} unknown"
+    },
+    "dashboardOutdated": "{{count}} agent(s) behind v{{version}}"
   }
 }

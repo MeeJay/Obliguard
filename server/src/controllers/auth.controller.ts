@@ -5,16 +5,23 @@ import { twoFactorService } from '../services/twoFactor.service';
 import { permissionService } from '../services/permission.service';
 import { tenantService } from '../services/tenant.service';
 import { AppError } from '../middleware/errorHandler';
+import { canUseTenant } from '../middleware/tenant';
+import { invalidateUserState } from '../middleware/sessionUserGuard';
 import { obligateService } from '../services/obligate.service';
 import { db } from '../db';
 import { config } from '../config';
 import { regenerateSession } from '../utils/regenerateSession';
 import type { LoginInput } from '../validators/auth.schema';
 
-/** Helper: resolve & store the first accessible tenant in the session. */
-async function setSessionTenant(req: Request, userId: number): Promise<void> {
-  const tenant = await tenantService.getFirstTenantForUser(userId);
-  req.session.currentTenantId = tenant?.id ?? 1;
+/**
+ * Helper: resolve & store the landing tenant in the session (favourite, else
+ * first membership, else Default for platform admins only). A non-admin
+ * without membership gets no tenant at all (no god-view fallback).
+ */
+async function setSessionTenant(req: Request, userId: number, role: string): Promise<void> {
+  const tenantId = await tenantService.resolveLoginTenant(userId, role);
+  if (tenantId !== null) req.session.currentTenantId = tenantId;
+  else delete req.session.currentTenantId;
 }
 
 export const authController = {
@@ -75,7 +82,7 @@ export const authController = {
       req.session.userId = user.id;
       req.session.username = user.username;
       req.session.role = user.role;
-      await setSessionTenant(req, user.id);
+      await setSessionTenant(req, user.id, user.role);
 
       res.json({ success: true, data: { user } });
     } catch (err) {
@@ -114,13 +121,20 @@ export const authController = {
         throw new AppError(401, 'User not found');
       }
 
-      // Repair missing currentTenantId (e.g. sessions from before Phase 13)
-      if (!req.session.currentTenantId) {
-        await setSessionTenant(req, user.id);
-      }
+      // Align the session role with the DB so requireTenant (session role) and this
+      // check (DB role) agree; otherwise a promotion could make /me say 'ok' while
+      // requireTenant still 403s for up to the guard's 5 s cache.
+      if (req.session.role !== user.role) { req.session.role = user.role; invalidateUserState(user.id); }
+      // The only tenant repair point: re-validate the session tenant, re-resolve
+      // it when unusable (no Default fallback for non-admins).
+      const current = req.session.currentTenantId;
+      if (current != null && !(await canUseTenant(user.id, user.role, current))) delete req.session.currentTenantId;
+      if (req.session.currentTenantId == null) await setSessionTenant(req, user.id, user.role);
+      const tenantId = req.session.currentTenantId ?? null;
+      const preferredTenantId = await tenantService.getPreferredTenant(user.id);
 
       const isAdmin = user.role === 'admin';
-      const permissions = await permissionService.getUserPermissions(user.id, isAdmin, req.session.currentTenantId);
+      const permissions = await permissionService.getUserPermissions(user.id, isAdmin, tenantId ?? undefined);
 
       // Check if force 2FA applies to this user
       let requires2faSetup = false;
@@ -133,7 +147,14 @@ export const authController = {
 
       res.json({
         success: true,
-        data: { user, permissions, requires2faSetup, currentTenantId: req.session.currentTenantId },
+        data: {
+          user,
+          permissions,
+          requires2faSetup,
+          currentTenantId: tenantId,
+          noTenantAccess: tenantId === null,
+          preferredTenantId,
+        },
       });
     } catch (err) {
       next(err);

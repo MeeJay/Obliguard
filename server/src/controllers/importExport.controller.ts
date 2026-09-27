@@ -3,6 +3,8 @@ import type { Knex } from 'knex';
 import { randomUUID } from 'crypto';
 import { db } from '../db';
 import { AppError } from '../middleware/errorHandler';
+import { sanitizeImportedAgentGroupConfig } from '../utils/agentUpdate';
+import { invalidateAgentUpdatePolicyCache } from '../services/agent.service';
 
 type ExportSection =
   | 'monitorGroups'
@@ -23,6 +25,15 @@ type ExportSection =
 type ConflictStrategy = 'update' | 'generateNew' | 'ignore';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/**
+ * agent_group_config as stored on import (C17): known keys only, and never an
+ * imported updatePolicy 'auto' (an import must not silently turn auto-update on).
+ */
+function importedAgentGroupConfigJson(cfg: unknown): string | null {
+  const clean = sanitizeImportedAgentGroupConfig(cfg);
+  return clean ? JSON.stringify(clean) : null;
+}
 
 function slugify(name: string): string {
   return name
@@ -770,7 +781,7 @@ export const importExportController = {
                 description:      (g.description as string | null) ?? null,
                 sort_order:       (g.sortOrder as number) ?? 0,
                 agent_thresholds: g.agentThresholds  ? JSON.stringify(g.agentThresholds)  : null,
-                agent_group_config: g.agentGroupConfig ? JSON.stringify(g.agentGroupConfig) : null,
+                agent_group_config: importedAgentGroupConfigJson(g.agentGroupConfig),
                 updated_at:       new Date(),
               });
               batchGroupByOrigUuid.set(decision.uuid, decision.existingId);
@@ -789,7 +800,7 @@ export const importExportController = {
                 group_notifications: false,
                 kind:               'agent',
                 agent_thresholds:   g.agentThresholds  ? JSON.stringify(g.agentThresholds)  : null,
-                agent_group_config: g.agentGroupConfig ? JSON.stringify(g.agentGroupConfig) : null,
+                agent_group_config: importedAgentGroupConfigJson(g.agentGroupConfig),
                 tenant_id:          tenantId,
               }).returning('*');
 
@@ -984,6 +995,8 @@ export const importExportController = {
 
       }); // end transaction
 
+      // Imported groups may carry an update policy: drop the cached chains.
+      invalidateAgentUpdatePolicyCache();
       res.json({ success: true, data: results });
     } catch (err) {
       next(err);

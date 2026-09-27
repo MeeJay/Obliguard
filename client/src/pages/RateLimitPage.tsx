@@ -345,11 +345,13 @@ function AddPolicyModal({ onSave, onClose, lockedTarget, lockedLabel }: AddPolic
 
 // ── NetworkLimitsPanel (embeddable, locked to one target) ───────────────────────
 
-export function NetworkLimitsPanel({ scope, scopeId, label, title }: {
+export function NetworkLimitsPanel({ scope, scopeId, label, title, readOnly = false }: {
   scope: 'group' | 'agent';
   scopeId: number;
   label: string;
   title?: string;
+  /** Another tenant's agent (Default god view): list only, no add/delete. */
+  readOnly?: boolean;
 }) {
   const [policies, setPolicies] = useState<RateLimitPolicy[]>([]);
   const [loading, setLoading] = useState(true);
@@ -404,7 +406,7 @@ export function NetworkLimitsPanel({ scope, scopeId, label, title }: {
         <h3 className="text-sm font-semibold text-text-primary flex items-center gap-1.5">
           <Network size={14} className="text-text-muted" />{title ?? 'Network limits'}
         </h3>
-        <Button size="sm" onClick={() => setShowAdd(true)}><Plus size={12} className="mr-1" />Add</Button>
+        {!readOnly && <Button size="sm" onClick={() => setShowAdd(true)}><Plus size={12} className="mr-1" />Add</Button>}
       </div>
 
       {loading ? (
@@ -422,22 +424,24 @@ export function NetworkLimitsPanel({ scope, scopeId, label, title }: {
                   <div className="text-[10px] text-text-muted mt-0.5">ban at ×{p.banMultiplier}</div>
                 )}
               </div>
-              <button
-                onClick={() => setDeleting(p)}
-                className="p-1.5 rounded-md text-text-muted hover:text-status-down hover:bg-status-down/10 transition-colors shrink-0"
-                title="Delete limit"
-              >
-                <Trash2 size={13} />
-              </button>
+              {!readOnly && (
+                <button
+                  onClick={() => setDeleting(p)}
+                  className="p-1.5 rounded-md text-text-muted hover:text-status-down hover:bg-status-down/10 transition-colors shrink-0"
+                  title="Delete limit"
+                >
+                  <Trash2 size={13} />
+                </button>
+              )}
             </div>
           ))}
         </div>
       )}
 
-      {showAdd && (
+      {showAdd && !readOnly && (
         <AddPolicyModal onSave={handleSave} onClose={() => setShowAdd(false)} lockedTarget={{ scope, scopeId }} lockedLabel={label} />
       )}
-      {deleting && (
+      {deleting && !readOnly && (
         <ConfirmDialog
           title="Delete network limit"
           message="The agent will stop enforcing this limit on its next sync."

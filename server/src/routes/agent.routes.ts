@@ -31,6 +31,11 @@ import {
   bulkUpdateDevices,
   bulkDeviceCommand,
   getDeviceTemplates,
+  requestDeviceUpdate,
+  cancelDeviceUpdate,
+  bulkRequestUpdate,
+  requestGroupUpdateHandler,
+  getDeviceVersionDistribution,
 } from '../controllers/agent.controller';
 
 const router = Router();
@@ -99,30 +104,37 @@ router.get('/installer/wizard-linux-amd64', requireAuth, requireRole('admin'), r
 // (which are requireAuth only). Previously these were requireRole('admin'),
 // so every non-admin got a 403 → empty Dashboard/NetMap (agents, online count).
 //
-// WRITE endpoints (bulk, patch, delete, command, firewall, keys, wizard) stay
-// admin-only: non-admin SSO users all collapse to local role 'user' (an Obligate
-// "Viewer" included), so we must not grant mutation rights on role alone here.
-// Device management (edit/delete/command/bulk/firewall) → 'monitor_rw' capability.
+// WRITE endpoints require the monitor_rw capability: platform admins, and members
+// of the current tenant (permission.service.getUserCapabilities); keys/wizard stay
+// admin-only. requireTenant runs before the capability check, so a missing tenant
+// answers 403 noTenantAccess and capabilities are computed on the validated tenant.
 const canManageAgents = requireCapability(CAPABILITIES.MONITOR_RW);
 
 router.get('/devices/stats',          requireAuth, requireTenant, getDeviceStats);
-router.delete('/devices/bulk',        requireAuth, canManageAgents, requireTenant, bulkDeleteDevices);
-router.patch('/devices/bulk',         requireAuth, canManageAgents, requireTenant, bulkUpdateDevices);
-router.post('/devices/bulk-command',  requireAuth, canManageAgents, requireTenant, bulkDeviceCommand);
+// Agent update control (C17-1): version distribution (read) and bulk "Update now".
+router.get('/devices/versions',       requireAuth, requireTenant, getDeviceVersionDistribution);
+router.post('/devices/bulk-request-update', requireAuth, requireTenant, canManageAgents, bulkRequestUpdate);
+router.delete('/devices/bulk',        requireAuth, requireTenant, canManageAgents, bulkDeleteDevices);
+router.patch('/devices/bulk',         requireAuth, requireTenant, canManageAgents, bulkUpdateDevices);
+router.post('/devices/bulk-command',  requireAuth, requireTenant, canManageAgents, bulkDeviceCommand);
 
 router.get('/devices', requireAuth, requireTenant, listDevices);
 router.get('/devices/:id', requireAuth, requireTenant, getDevice);
 router.get('/devices/:id/metrics', requireAuth, requireTenant, getDeviceMetrics);
 router.get('/devices/:id/templates', requireAuth, requireTenant, getDeviceTemplates);
-router.patch('/devices/:id', requireAuth, canManageAgents, requireTenant, updateDevice);
-router.delete('/devices/:id', requireAuth, canManageAgents, requireTenant, deleteDevice);
-router.post('/devices/:id/command', requireAuth, canManageAgents, requireTenant, sendDeviceCommand);
+router.patch('/devices/:id', requireAuth, requireTenant, canManageAgents, updateDevice);
+router.delete('/devices/:id', requireAuth, requireTenant, canManageAgents, deleteDevice);
+router.post('/devices/:id/command', requireAuth, requireTenant, canManageAgents, sendDeviceCommand);
+// Explicit agent update request (C17-1) — 'agent-update' avoids any confusion with PATCH device updates.
+router.post('/devices/:id/agent-update', requireAuth, requireTenant, canManageAgents, requestDeviceUpdate);
+router.delete('/devices/:id/agent-update', requireAuth, requireTenant, canManageAgents, cancelDeviceUpdate);
+router.post('/groups/:groupId/agent-update', requireAuth, requireTenant, canManageAgents, requestGroupUpdateHandler);
 
 // Firewall rule management (real-time via agent WS) — device management → monitor_rw.
 import { getFirewallRules, addFirewallRule, deleteFirewallRule, toggleFirewallRule } from '../controllers/firewall.controller';
-router.get('/devices/:id/firewall/rules', requireAuth, canManageAgents, requireTenant, getFirewallRules);
-router.post('/devices/:id/firewall/rules', requireAuth, canManageAgents, requireTenant, addFirewallRule);
-router.delete('/devices/:id/firewall/rules/:ruleId', requireAuth, canManageAgents, requireTenant, deleteFirewallRule);
-router.patch('/devices/:id/firewall/rules/:ruleId', requireAuth, canManageAgents, requireTenant, toggleFirewallRule);
+router.get('/devices/:id/firewall/rules', requireAuth, requireTenant, canManageAgents, getFirewallRules);
+router.post('/devices/:id/firewall/rules', requireAuth, requireTenant, canManageAgents, addFirewallRule);
+router.delete('/devices/:id/firewall/rules/:ruleId', requireAuth, requireTenant, canManageAgents, deleteFirewallRule);
+router.patch('/devices/:id/firewall/rules/:ruleId', requireAuth, requireTenant, canManageAgents, toggleFirewallRule);
 
 export default router;

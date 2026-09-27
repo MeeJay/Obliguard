@@ -20,6 +20,11 @@ const clientIdProbeInFlight = new Map<string, Promise<boolean | null>>();
 const HASHED_OK_TTL_MS = 60 * 60_000;      // re-check hourly once supported
 const HASHED_UNSUPPORTED_TTL_MS = 5 * 60_000; // pick up an Obligate upgrade within 5 min
 const CLIENT_ID_SUPPORT_KEY = 'obligate_public_client_id_support';
+
+// registerDeviceLink throttle (A5)
+const LINK_THROTTLE_MAX = 10_000;
+const LINK_OK_TTL = 10 * 60_000;
+const LINK_RETRY_MS = 60_000;
 let legacyClientIdWarned = false;
 
 /** Non-reversible fingerprint of a key (binds an "unsupported" answer to it). */
@@ -118,8 +123,14 @@ export interface ObligateUserAssertion {
   email: string | null;
   displayName: string | null;
   role: string;
-  tenants: Array<{ slug: string; role: string; capabilities?: string[] }>;
+  tenants: Array<{
+    slug: string;
+    role: string;
+    /** @deprecated ignored — capabilities derive from local tenant membership (permission.service.getUserCapabilities) */
+    capabilities?: string[];
+  }>;
   teams: string[];
+  /** @deprecated ignored — capabilities derive from local tenant membership (permission.service.getUserCapabilities) */
   capabilities?: string[];
   authSource: 'local' | 'ldap';
   linkedLocalUserId: number | null;
@@ -364,16 +375,30 @@ export const obligateService = {
 
   /**
    * Register a device UUID + path with Obligate for cross-app linking.
-   * Throttled: only calls Obligate once every 10 minutes per UUID.
-   * Failed attempts don't update the throttle so the next push retries.
+   * Called for approved, bound devices only (A5). Throttled per UUID: once
+   * every 10 minutes after a success; an in-flight / failed attempt is retried
+   * at most every 60 s (the marker is set BEFORE the fetch, which times out
+   * after 10 s). The throttle map is bounded to 10 000 entries.
    */
   _linkThrottle: new Map<string, number>(),
+  _recordLink(uuid: string, ts: number): void {
+    this._linkThrottle.delete(uuid);
+    this._linkThrottle.set(uuid, ts);
+    while (this._linkThrottle.size > LINK_THROTTLE_MAX) {
+      const k = this._linkThrottle.keys().next().value;
+      if (k === undefined) break;
+      this._linkThrottle.delete(k);
+    }
+  },
   async registerDeviceLink(uuid: string, appPath: string): Promise<void> {
     const now = Date.now();
-    if (now - (this._linkThrottle.get(uuid) ?? 0) < 10 * 60 * 1000) return;
+    if (now - (this._linkThrottle.get(uuid) ?? 0) < LINK_OK_TTL) return;
 
     const raw = await appConfigService.getObligateRaw();
     if (!raw.url || !raw.apiKey) return;
+
+    // In-flight / retry marker: a hanging or failing Obligate is retried at most every 60 s.
+    this._recordLink(uuid, now - LINK_OK_TTL + LINK_RETRY_MS);
 
     try {
       const res = await fetch(`${raw.url}/api/devices/register`, {
@@ -383,9 +408,10 @@ export const obligateService = {
           'Authorization': `Bearer ${raw.apiKey}`,
         },
         body: JSON.stringify({ uuid, path: appPath }),
+        signal: AbortSignal.timeout(10_000),
       });
-      if (res.ok) this._linkThrottle.set(uuid, now);
-    } catch { /* non-critical — will retry on next push */ }
+      if (res.ok) this._recordLink(uuid, Date.now());
+    } catch { /* non-critical — retried after LINK_RETRY_MS */ }
   },
 
   /**

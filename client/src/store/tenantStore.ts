@@ -9,6 +9,15 @@ interface TenantState {
   setCurrentTenant: (tenantId: number) => Promise<void>;
 }
 
+// Same-tab switch guard: responses to requests sent with the old tenant header
+// that land after the server committed the switch echo the new tenant; they are
+// expected and must not trigger a mismatch re-sync (full reload). Covers the
+// switch itself plus a short tail for requests still in flight.
+let switchGuardUntil = 0;
+export function isTenantSwitchPending(): boolean {
+  return Date.now() < switchGuardUntil;
+}
+
 export const useTenantStore = create<TenantState>((set) => ({
   currentTenantId: null,
   tenants: [],
@@ -27,6 +36,7 @@ export const useTenantStore = create<TenantState>((set) => ({
   },
 
   setCurrentTenant: async (tenantId: number) => {
+    switchGuardUntil = Number.POSITIVE_INFINITY;
     try {
       const res = await fetch('/api/tenant/switch', {
         method: 'POST',
@@ -38,6 +48,8 @@ export const useTenantStore = create<TenantState>((set) => ({
       set({ currentTenantId: tenantId });
     } catch {
       // ignore
+    } finally {
+      switchGuardUntil = Date.now() + 3000;
     }
   },
 }));

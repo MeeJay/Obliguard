@@ -1,6 +1,6 @@
 {
   "name": "@obliview/server",
-  "version": "2.3.93",
+  "version": "2.3.94",
   "private": true,
   "main": "dist/src/index.js",
   "scripts": {
@@ -10,7 +10,10 @@
     "migrate": "knex migrate:latest --knexfile knexfile.ts",
     "migrate:make": "knex migrate:make --knexfile knexfile.ts",
     "seed": "knex seed:run --knexfile knexfile.ts",
-    "migrate:rollback": "knex migrate:rollback --knexfile knexfile.ts"
+    "migrate:rollback": "knex migrate:rollback --knexfile knexfile.ts",
+    "verify": "tsx test/run.ts",
+    "verify:setup": "npm --prefix test ci --no-audit --no-fund",
+    "verify:typecheck": "tsc -p test/tsconfig.json"
   },
   "dependencies": {
     "@obliview/shared": "*",
@@ -36,6 +39,7 @@
     "socket.io": "^4.7.4",
     "ssh2": "^1.17.0",
     "undici": "^7.21.0",
+    "ws": "^8.18.3",
     "zod": "^3.22.4"
   },
   "devDependencies": {

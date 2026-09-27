@@ -7,7 +7,27 @@ import { mikrotikBanSync } from '../services/mikrotik/mikrotikBanSync.service';
 import { mikrotikImport } from '../services/mikrotik/mikrotikImport.service';
 import { parseMikroTikSyslog } from '../services/mikrotik/syslogParser';
 import { agentService, markMikrotikSeen } from '../services/agent.service';
+import { checkDeviceAccess } from '../services/deviceAccess.service';
 import type { AgentIpEvent } from '@obliview/shared';
+
+/**
+ * Every MikroTik :id route (A5): the device must belong to the operating
+ * tenant — credentials (incl. the ingest token) are never god-viewed, so even
+ * reads use the same-tenant 'write' rule. 403 from Default, 404 elsewhere,
+ * 404 for a non-MikroTik device. Returns the device id, or null (answered).
+ */
+async function requireOwnMikrotik(req: Request, res: Response): Promise<number | null> {
+  const r = await checkDeviceAccess(req.params.id, req.tenantId, 'write');
+  if (!r.ok) {
+    res.status(r.status).json({ error: r.error });
+    return null;
+  }
+  if (r.row.device_type !== 'mikrotik') {
+    res.status(404).json({ error: 'MikroTik device not found' });
+    return null;
+  }
+  return r.row.id;
+}
 
 export async function createMikroTikDevice(req: Request, res: Response): Promise<void> {
   try {
@@ -18,6 +38,12 @@ export async function createMikroTikDevice(req: Request, res: Response): Promise
 
     if (!name || !hostname || !apiHost || !apiUsername || !apiPassword || !syslogIdentifier) {
       res.status(400).json({ error: 'Missing required fields: name, hostname, apiHost, apiUsername, apiPassword, syslogIdentifier' });
+      return;
+    }
+
+    // The router's group must belong to the operating tenant.
+    if (groupId != null && !(Number.isInteger(Number(groupId)) && await agentService.isGroupInTenant(Number(groupId), tenantId))) {
+      res.status(400).json({ error: 'Invalid group' });
       return;
     }
 
@@ -36,7 +62,8 @@ export async function createMikroTikDevice(req: Request, res: Response): Promise
 
 export async function getMikroTikCredentials(req: Request, res: Response): Promise<void> {
   try {
-    const deviceId = parseInt(req.params.id, 10);
+    const deviceId = await requireOwnMikrotik(req, res);
+    if (deviceId === null) return;
     const creds = await mikrotikDeviceService.getCredentials(deviceId);
     if (!creds) {
       res.status(404).json({ error: 'MikroTik credentials not found' });
@@ -50,7 +77,8 @@ export async function getMikroTikCredentials(req: Request, res: Response): Promi
 
 export async function updateMikroTikCredentials(req: Request, res: Response): Promise<void> {
   try {
-    const deviceId = parseInt(req.params.id, 10);
+    const deviceId = await requireOwnMikrotik(req, res);
+    if (deviceId === null) return;
     await mikrotikDeviceService.updateCredentials(deviceId, req.body);
     res.json({ ok: true });
   } catch (err) {
@@ -61,7 +89,8 @@ export async function updateMikroTikCredentials(req: Request, res: Response): Pr
 
 export async function testMikroTikConnection(req: Request, res: Response): Promise<void> {
   try {
-    const deviceId = parseInt(req.params.id, 10);
+    const deviceId = await requireOwnMikrotik(req, res);
+    if (deviceId === null) return;
     const result = await mikrotikDeviceService.testConnection(deviceId);
     res.json(result);
   } catch (err) {
@@ -71,7 +100,8 @@ export async function testMikroTikConnection(req: Request, res: Response): Promi
 
 export async function syncMikroTikBans(req: Request, res: Response): Promise<void> {
   try {
-    const deviceId = parseInt(req.params.id, 10);
+    const deviceId = await requireOwnMikrotik(req, res);
+    if (deviceId === null) return;
     const result = await mikrotikBanSync.fullSync(deviceId);
     res.json(result);
   } catch (err) {
@@ -81,7 +111,8 @@ export async function syncMikroTikBans(req: Request, res: Response): Promise<voi
 
 export async function clearMikroTikLogCache(req: Request, res: Response): Promise<void> {
   try {
-    const deviceId = req.params.id ? parseInt(req.params.id, 10) : undefined;
+    const deviceId = await requireOwnMikrotik(req, res);
+    if (deviceId === null) return;
     const { mikrotikLogPoller } = await import('../services/mikrotik/mikrotikLogPoller.service');
     mikrotikLogPoller.clearCache(deviceId);
     res.json({ ok: true, message: `Cache cleared${deviceId ? ` for device ${deviceId}` : ' (all)'}. Next poll will re-seed.` });
@@ -92,7 +123,8 @@ export async function clearMikroTikLogCache(req: Request, res: Response): Promis
 
 export async function debugMikroTikLogs(req: Request, res: Response): Promise<void> {
   try {
-    const deviceId = parseInt(req.params.id, 10);
+    const deviceId = await requireOwnMikrotik(req, res);
+    if (deviceId === null) return;
     const { createRouterOSClient } = await import('../services/mikrotik/routerosClient');
     const { mikrotikDeviceService } = await import('../services/mikrotik/mikrotikDevice.service');
     const cfg = await mikrotikDeviceService.getRouterOSConfig(deviceId);

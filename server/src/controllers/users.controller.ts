@@ -4,6 +4,7 @@ import { teamService } from '../services/team.service';
 import { userSessionsService } from '../services/userSessions.service';
 import { invalidateUserState } from '../middleware/sessionUserGuard';
 import { AppError } from '../middleware/errorHandler';
+import { db } from '../db';
 import type {
   CreateUserInput,
   UpdateUserInput,
@@ -182,17 +183,30 @@ export const usersController = {
   async setTenants(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const id = parseInt(req.params.id, 10);
-      const targetUser = await userService.getById(id);
-      if (targetUser?.foreignSource === 'obligate') {
+      const targetUser = Number.isSafeInteger(id) && id > 0 ? await userService.getById(id) : null;
+      if (!targetUser) throw new AppError(404, 'User not found');
+      if (targetUser.foreignSource === 'obligate') {
         throw new AppError(400, 'Cannot modify SSO user tenant access — manage from Obligate');
       }
-      const { assignments } = req.body as {
+      const { assignments } = (req.body ?? {}) as {
         assignments: { tenantId: number; role: 'admin' | 'member' }[];
       };
-      if (!Array.isArray(assignments)) {
-        throw new AppError(400, 'assignments must be an array');
+      if (
+        !Array.isArray(assignments) ||
+        !assignments.every((a) =>
+          a && typeof a.tenantId === 'number' && Number.isSafeInteger(a.tenantId) && a.tenantId > 0 &&
+          (a.role === 'admin' || a.role === 'member'))
+      ) {
+        throw new AppError(400, 'assignments must be an array of { tenantId, role }');
+      }
+      const ids = assignments.map((a) => a.tenantId);
+      if (new Set(ids).size !== ids.length) throw new AppError(400, 'Duplicate tenantId in assignments');
+      if (ids.length && (await db('tenants').whereIn('id', ids).pluck('id')).length !== ids.length) {
+        throw new AppError(404, 'Tenant not found');
       }
       await userService.setUserTenantAssignments(id, assignments);
+      // Dropped memberships answer 403 at once; live sockets rejoin their rooms.
+      userSessionsService.onMembershipChanged(id);
       res.json({ success: true, message: 'Tenant assignments updated' });
     } catch (err) {
       next(err);

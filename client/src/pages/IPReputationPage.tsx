@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
 import {
   Search,
   Shield,
@@ -22,6 +23,7 @@ import {
   AlertTriangle,
   EyeOff,
   Eye,
+  Lock,
 } from 'lucide-react';
 import type {
   IpReputation,
@@ -41,7 +43,7 @@ import { cn } from '@/utils/cn';
 import { useAuthStore } from '@/store/authStore';
 import { useTenantStore } from '@/store/tenantStore';
 import toast from 'react-hot-toast';
-import apiClient from '../api/client';
+import apiClient, { tenantFetch } from '../api/client';
 import { ipLabelsApi } from '../api/ipLabels.api';
 import { anonIp, anonHostname, anonUsername, anonLog } from '@/utils/anonymize';
 
@@ -219,9 +221,11 @@ function ConfirmDialog({ title, message, confirmLabel = 'Confirm', variant = 'da
 interface IPDetailDrawerProps {
   ip: IpReputation;
   onClose: () => void;
-  onBan: (ip: string, scope: BanScope, reason: string) => Promise<void>;
+  onBan: (ip: string, reason: string) => Promise<void>;
   onWhitelist: (ip: string, label: string) => Promise<void>;
   onLiftBan: () => Promise<void>;
+  /** Default tenant only: promote the active (local) ban to a global ban. */
+  onPromote?: () => Promise<void>;
   /** Local override: stop enforcing a global ban on this tenant only. */
   /** Re-enable enforcement of a previously excluded global ban. */
   onRemoveExclusion: () => Promise<void>;
@@ -231,10 +235,10 @@ interface IPDetailDrawerProps {
   isAdmin: boolean;
 }
 
-function IPDetailDrawer({ ip, onClose, onBan, onWhitelist, onLiftBan, onRemoveExclusion, onClear, onRename, currentLabel, isAdmin }: IPDetailDrawerProps) {
+function IPDetailDrawer({ ip, onClose, onBan, onWhitelist, onLiftBan, onPromote, onRemoveExclusion, onClear, onRename, currentLabel, isAdmin }: IPDetailDrawerProps) {
+  const { t } = useTranslation();
   const [events, setEvents] = useState<IpEvent[]>([]);
   const [loadingEvents, setLoadingEvents] = useState(true);
-  const [banScope, setBanScope] = useState<BanScope>('global');
   const [banReason, setBanReason] = useState('');
   const [whitelistLabel, setWhitelistLabel] = useState('');
   const [actionLoading, setActionLoading] = useState(false);
@@ -308,7 +312,7 @@ function IPDetailDrawer({ ip, onClose, onBan, onWhitelist, onLiftBan, onRemoveEx
     }
     setActionLoading(true);
     try {
-      await onBan(ip.ip, banScope, banReason.trim());
+      await onBan(ip.ip, banReason.trim());
       setShowBanForm(false);
       setBanReason('');
     } finally {
@@ -520,19 +524,12 @@ function IPDetailDrawer({ ip, onClose, onBan, onWhitelist, onLiftBan, onRemoveEx
                 ) : (
                   <div className="rounded-lg border border-border bg-bg-secondary p-4 space-y-3">
                     <p className="text-sm font-medium text-text-primary">Ban {anonIp(ip.ip)}</p>
-                    <div className="space-y-1">
-                      <label className="block text-sm font-medium text-text-secondary">Scope</label>
-                      <select
-                        value={banScope}
-                        onChange={e => setBanScope(e.target.value as BanScope)}
-                        className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
-                      >
-                        <option value="global">Global</option>
-                        <option value="tenant">Tenant</option>
-                        <option value="group">Group</option>
-                        <option value="agent">Agent</option>
-                      </select>
-                    </div>
+                    {/* The scope follows the operating tenant (server-side). */}
+                    <p className="text-xs text-text-muted">
+                      {isGodView
+                        ? t('bans.scopeGlobalHint', 'Global ban: enforced on every agent of every tenant.')
+                        : t('bans.scopeTenantHint', 'Local ban: enforced only on the agents of this tenant.')}
+                    </p>
                     <Input
                       label="Reason"
                       placeholder="Why is this IP being banned?"
@@ -632,6 +629,25 @@ function IPDetailDrawer({ ip, onClose, onBan, onWhitelist, onLiftBan, onRemoveEx
                   <Shield size={13} className="mr-1.5" />Lift ban
                 </Button>
               )
+            )}
+
+            {/* Promote a local ban to global — Default tenant only (server-enforced). */}
+            {isGodView && onPromote && ip.status === 'banned' && ip.activeBanId && ip.activeBanScope && ip.activeBanScope !== 'global' && (
+              <Button
+                variant="secondary"
+                size="sm"
+                loading={actionLoading}
+                onClick={async () => {
+                  setActionLoading(true);
+                  try {
+                    await onPromote();
+                  } finally {
+                    setActionLoading(false);
+                  }
+                }}
+              >
+                <Globe size={13} className="mr-1.5" />{t('bans.promoteButton', 'Promote to global')}
+              </Button>
             )}
 
             {/* Clear suspicious — shown for suspicious IPs */}
@@ -747,7 +763,18 @@ interface ActivityTabProps {
   isAdmin: boolean;
 }
 
+/** POST /bans/bulk-ban response. */
+interface BulkBanResult {
+  created: number;
+  skipped: number;
+  invalid: number;
+  scope: 'global' | 'tenant';
+  skippedEntries: { ip: string; reason: string }[];
+  invalidEntries: { ip: string; reason: string }[];
+}
+
 function ActivityTab({ isAdmin }: ActivityTabProps) {
+  const { t } = useTranslation();
   const [rows, setRows] = useState<IpReputation[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -846,23 +873,48 @@ function ActivityTab({ isAdmin }: ActivityTabProps) {
     }
   };
 
-  const handleBan = async (ipAddr: string, scope: BanScope, reason: string) => {
+  /** Pull the server's explanation out of an axios error (e.g. the 403 telling
+   *  a non-origin tenant to use Exclude) instead of swallowing it. */
+  const serverError = (err: unknown, fallback: string): string =>
+    (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? fallback;
+
+  /** Manual ban: NO scope is sent — the server derives it from the operating
+   *  tenant (Default = global, any other tenant = local). */
+  const handleBan = async (ipAddr: string, reason: string) => {
     try {
-      const res = await apiClient.post<{ id?: number; data?: { id: number } }>(
-        '/bans',
-        { ip: ipAddr, reason, scope },
-      );
-      const created = res.data;
-      const banId = created?.id ?? (created as any)?.data?.id ?? null;
-      toast.success(`${ipAddr} banned`);
-      setRows(prev => prev.map(r => r.ip === ipAddr ? { ...r, status: 'banned' } : r));
+      const res = await apiClient.post<{ data: IpBan }>('/bans', { ip: ipAddr, reason });
+      const ban = res.data?.data;
+      toast.success(ban?.scope === 'global'
+        ? t('bans.bannedGlobal', { defaultValue: '{{ip}} banned globally', ip: ipAddr })
+        : t('bans.bannedLocal', { defaultValue: '{{ip}} banned on this tenant', ip: ipAddr }));
+      setRows(prev => prev.map(r => r.ip === ipAddr
+        ? { ...r, status: 'banned', activeBanId: ban?.id ?? r.activeBanId, activeBanScope: ban?.scope ?? r.activeBanScope }
+        : r));
       if (selectedIp?.ip === ipAddr) {
-        setSelectedIp(prev => prev ? { ...prev, status: 'banned' } : prev);
-        if (banId != null) setSelectedBanId(banId);
+        setSelectedIp(prev => prev ? { ...prev, status: 'banned', activeBanId: ban?.id ?? prev.activeBanId, activeBanScope: ban?.scope ?? prev.activeBanScope } : prev);
+        if (ban?.id != null) setSelectedBanId(ban.id);
       }
-    } catch {
-      toast.error('Failed to ban IP');
-      throw new Error('Failed to ban IP');
+    } catch (err) {
+      const msg = serverError(err, 'Failed to ban IP');
+      toast.error(msg);
+      throw new Error(msg);
+    }
+  };
+
+  /** Default tenant only: promote a local ban to a global one. */
+  const handlePromoteById = async (banId: number, ipAddr: string) => {
+    if (!window.confirm(t('bans.promoteConfirm', {
+      defaultValue: 'Promote the ban on {{ip}} to a global ban? It will be enforced on every agent of every tenant, and its reason becomes visible to every tenant.',
+      ip: ipAddr,
+    }))) return;
+    try {
+      await apiClient.post(`/bans/${banId}/promote-global`);
+      toast.success(t('bans.promoted', { defaultValue: '{{ip}} is now banned globally', ip: ipAddr }));
+      setRows(prev => prev.map(r => r.ip === ipAddr && r.activeBanId === banId ? { ...r, activeBanScope: 'global' } : r));
+      setSelectedIp(prev => prev && prev.ip === ipAddr ? { ...prev, activeBanScope: 'global' } : prev);
+      load();
+    } catch (err) {
+      toast.error(serverError(err, 'Failed to promote ban'));
     }
   };
 
@@ -883,8 +935,9 @@ function ActivityTab({ isAdmin }: ActivityTabProps) {
   const handleUnwhitelist = async (ipAddr: string) => {
     try {
       // Find the whitelist entry by IP to get its ID
-      const wlRes = await apiClient.get<{ data: { id: number; ip: string }[] }>('/whitelist');
-      const entry = (wlRes.data?.data ?? []).find(w => w.ip === ipAddr || w.ip === ipAddr + '/32');
+      // (skip entries the operating tenant may not delete — server-computed canDelete)
+      const wlRes = await apiClient.get<{ data: { id: number; ip: string; canDelete?: boolean }[] }>('/whitelist');
+      const entry = (wlRes.data?.data ?? []).find(w => (w.ip === ipAddr || w.ip === ipAddr + '/32') && w.canDelete !== false);
       if (!entry) { toast.error('Whitelist entry not found'); return; }
       await apiClient.delete(`/whitelist/${entry.id}`);
       toast.success(`${ipAddr} removed from whitelist`);
@@ -912,13 +965,26 @@ function ActivityTab({ isAdmin }: ActivityTabProps) {
   };
   const handleBulkBan = async () => {
     if (selectedIps.size === 0) return;
-    if (!confirm(`Ban ${selectedIps.size} IPs?`)) return;
+    const count = selectedIps.size;
+    if (!confirm(isGodView
+      ? t('bans.bulkConfirmGlobal', { defaultValue: 'Ban {{count}} IPs globally (every agent of every tenant)?', count })
+      : t('bans.bulkConfirmLocal', { defaultValue: 'Ban {{count}} IPs on this tenant?', count }))) return;
     try {
-      await apiClient.post('/bans/bulk-ban', { ips: [...selectedIps] });
-      toast.success(`${selectedIps.size} IPs banned`);
+      const res = await apiClient.post<BulkBanResult>('/bans/bulk-ban', { ips: [...selectedIps] });
+      const r = res.data;
+      toast.success(t('bans.bulkResult', {
+        defaultValue: '{{created}} banned, {{skipped}} skipped (already banned or whitelisted), {{invalid}} invalid',
+        created: r.created, skipped: r.skipped, invalid: r.invalid,
+      }));
+      if (r.invalid > 0) {
+        toast.error(t('bans.bulkInvalid', {
+          defaultValue: 'Ignored: {{list}}',
+          list: r.invalidEntries.slice(0, 5).map(e => `${e.ip} (${e.reason})`).join(', '),
+        }));
+      }
       setSelectedIps(new Set());
       load();
-    } catch { toast.error('Bulk ban failed'); }
+    } catch (err) { toast.error(serverError(err, 'Bulk ban failed')); }
   };
   const handleBulkWhitelist = async () => {
     if (selectedIps.size === 0) return;
@@ -930,11 +996,6 @@ function ActivityTab({ isAdmin }: ActivityTabProps) {
       load();
     } catch { toast.error('Bulk whitelist failed'); }
   };
-
-  /** Pull the server's explanation out of an axios error (e.g. the 403 telling
-   *  a non-origin tenant to use Exclude) instead of swallowing it. */
-  const serverError = (err: unknown, fallback: string): string =>
-    (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? fallback;
 
   const handleLiftBanById = async (banId: number, ipAddr?: string) => {
     try {
@@ -974,9 +1035,11 @@ function ActivityTab({ isAdmin }: ActivityTabProps) {
   };
 
   const handleQuickBan = async (row: IpReputation) => {
-    const reason = window.prompt(`Ban reason for ${row.ip}:`);
+    const reason = window.prompt(isGodView
+      ? t('bans.quickBanPromptGlobal', { defaultValue: 'Ban reason for {{ip}} (global ban: every tenant):', ip: row.ip })
+      : t('bans.quickBanPromptLocal', { defaultValue: 'Ban reason for {{ip}} (this tenant only):', ip: row.ip }));
     if (!reason) return;
-    await handleBan(row.ip, 'global', reason);
+    await handleBan(row.ip, reason).catch(() => { /* toasted */ });
   };
 
   const handleClear = async (ipAddr: string) => {
@@ -1016,7 +1079,7 @@ function ActivityTab({ isAdmin }: ActivityTabProps) {
       setShowAddModal(false);
       load();
     } catch (err: any) {
-      const msg = err?.response?.data?.message || err?.message || 'Failed to add IP';
+      const msg = err?.response?.data?.error || err?.message || 'Failed to add IP';
       toast.error(msg);
       throw err;
     }
@@ -1133,7 +1196,7 @@ function ActivityTab({ isAdmin }: ActivityTabProps) {
                   const displayLabel = ipLabels.get(row.ip);
                   return (
                     <tr
-                      key={row.ip}
+                      key={`${row.ip}:${row.activeBanId ?? ''}`}
                       onClick={() => handleRowClick(row)}
                       className="hover:bg-bg-hover transition-colors cursor-pointer"
                     >
@@ -1300,26 +1363,15 @@ function ActivityTab({ isAdmin }: ActivityTabProps) {
           onRename={handleRename}
           currentLabel={ipLabels.get(selectedIp.ip)}
           onLiftBan={async () => {
-            if (selectedBanId != null) {
-              await handleLiftBanById(selectedBanId, selectedIp.ip);
-            } else {
-              try {
-                const res = await apiClient.get<{ data: Array<{ id: number }> }>(
-                  '/bans',
-                  { params: { search: selectedIp.ip, active: 'true', pageSize: 1 } },
-                );
-                if (res.data) {
-                  const json = res.data;
-                  if (json.data.length > 0) {
-                    await handleLiftBanById(json.data[0].id, selectedIp.ip);
-                    return;
-                  }
-                }
-              } catch {
-                // fall through
-              }
-              toast.error('Could not find active ban for this IP');
-            }
+            // Exact ban id only (never a text search: '1.2.3.4' would match '11.2.3.45').
+            const banId = selectedBanId ?? selectedIp.activeBanId;
+            if (banId == null) { toast.error('Could not find active ban for this IP'); return; }
+            await handleLiftBanById(banId, selectedIp.ip);
+          }}
+          onPromote={async () => {
+            const banId = selectedBanId ?? selectedIp.activeBanId;
+            if (banId == null) { toast.error('Could not find active ban for this IP'); return; }
+            await handlePromoteById(banId, selectedIp.ip);
           }}
           onRemoveExclusion={async () => {
             const banId = selectedBanId ?? selectedIp.activeBanId;
@@ -1472,6 +1524,9 @@ function AddWhitelistModal({ onSave, onClose }: AddWhitelistModalProps) {
 
 /** @deprecated Kept for potential future use. Access whitelist via IP drawer instead. */
 export function WhitelistTab() {
+  const { t } = useTranslation();
+  const currentTenantId = useTenantStore(s => s.currentTenantId);
+  const isMaster = currentTenantId != null && isMasterTenant(currentTenantId);
   const [entries, setEntries] = useState<IpWhitelist[]>([]);
   const [loading, setLoading] = useState(true);
   const [scopeFilter, setScopeFilter] = useState<WhitelistScope | 'all'>('all');
@@ -1485,7 +1540,7 @@ export function WhitelistTab() {
       const params = new URLSearchParams();
       if (scopeFilter !== 'all') params.set('scope', scopeFilter);
 
-      const res = await fetch(`/api/whitelist?${params.toString()}`);
+      const res = await tenantFetch(`/api/whitelist?${params.toString()}`);
       if (!res.ok) throw new Error('Failed to load whitelist');
       const json = await res.json();
       const data: IpWhitelist[] = Array.isArray(json) ? json : (json.data ?? []);
@@ -1503,7 +1558,7 @@ export function WhitelistTab() {
 
   const handleAdd = async (req: CreateWhitelistRequest) => {
     try {
-      const res = await fetch('/api/whitelist', {
+      const res = await tenantFetch('/api/whitelist', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(req),
@@ -1522,7 +1577,7 @@ export function WhitelistTab() {
     if (!deletingEntry) return;
     setConfirmDeleteLoading(true);
     try {
-      const res = await fetch(`/api/whitelist/${deletingEntry.id}`, { method: 'DELETE' });
+      const res = await tenantFetch(`/api/whitelist/${deletingEntry.id}`, { method: 'DELETE' });
       if (!res.ok) throw new Error('Failed to remove whitelist entry');
       toast.success(`${deletingEntry.ip} removed from whitelist`);
       setDeletingEntry(null);
@@ -1628,13 +1683,24 @@ export function WhitelistTab() {
                       {formatDate(entry.createdAt)}
                     </td>
                     <td className="px-4 py-3 text-right">
-                      <button
-                        onClick={() => setDeletingEntry(entry)}
-                        className="p-1.5 rounded-md text-text-muted hover:text-status-down hover:bg-status-down/10 transition-colors"
-                        title="Remove from whitelist"
-                      >
-                        <Trash2 size={14} />
-                      </button>
+                      {(entry.canDelete ?? (isMaster || entry.scope !== 'global')) ? (
+                        <button
+                          onClick={() => setDeletingEntry(entry)}
+                          className="p-1.5 rounded-md text-text-muted hover:text-status-down hover:bg-status-down/10 transition-colors"
+                          title="Remove from whitelist"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      ) : (
+                        <span
+                          className="inline-flex p-1.5 text-text-muted"
+                          title={entry.scope === 'global'
+                            ? 'Global entry — only the Default tenant can remove it'
+                            : t('agents.foreignReadOnlyShort', 'Read-only (other tenant)')}
+                        >
+                          <Lock size={14} />
+                        </span>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -1717,10 +1783,12 @@ interface AddBanModalProps {
 }
 
 function AddBanModal({ onSave, onClose }: AddBanModalProps) {
+  const { t } = useTranslation();
+  const currentTenantId = useTenantStore(s => s.currentTenantId);
+  const isGodView = currentTenantId != null && isMasterTenant(currentTenantId);
   const [ip, setIp] = useState('');
   const [cidrPrefix, setCidrPrefix] = useState('');
   const [reason, setReason] = useState('');
-  const [scope, setScope] = useState<BanScope>('global');
   const [expiresAt, setExpiresAt] = useState('');
   const [saving, setSaving] = useState(false);
 
@@ -1734,7 +1802,6 @@ function AddBanModal({ onSave, onClose }: AddBanModalProps) {
       const req: CreateBanRequest = {
         ip: ip.trim(),
         reason: reason.trim() || null,
-        scope,
         cidrPrefix: cidrPrefix ? Number(cidrPrefix) : null,
         expiresAt: expiresAt || null,
       };
@@ -1781,19 +1848,11 @@ function AddBanModal({ onSave, onClose }: AddBanModalProps) {
             </div>
           </div>
 
-          <div className="space-y-1">
-            <label className="block text-sm font-medium text-text-secondary">Scope</label>
-            <select
-              value={scope}
-              onChange={e => setScope(e.target.value as BanScope)}
-              className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
-            >
-              <option value="global">Global</option>
-              <option value="tenant">Tenant</option>
-              <option value="group">Group</option>
-              <option value="agent">Agent</option>
-            </select>
-          </div>
+          <p className="text-xs text-text-muted">
+            {isGodView
+              ? t('bans.scopeGlobalHint', 'Global ban: enforced on every agent of every tenant.')
+              : t('bans.scopeTenantHint', 'Local ban: enforced only on the agents of this tenant.')}
+          </p>
 
           <Input
             label="Reason (optional)"
@@ -1836,11 +1895,13 @@ interface AddIpReputationModalProps {
 }
 
 function AddIpReputationModal({ onSave, onClose }: AddIpReputationModalProps) {
+  const { t } = useTranslation();
+  const currentTenantId = useTenantStore(s => s.currentTenantId);
+  const isGodView = currentTenantId != null && isMasterTenant(currentTenantId);
   const [ip, setIp] = useState('');
   const [status, setStatus] = useState<IpStatus>('banned');
   const [label, setLabel] = useState('');
   const [reason, setReason] = useState('');
-  const [scope, setScope] = useState<BanScope>('global');
   const [expiresAt, setExpiresAt] = useState('');
   const [saving, setSaving] = useState(false);
 
@@ -1851,12 +1912,11 @@ function AddIpReputationModal({ onSave, onClose }: AddIpReputationModalProps) {
       const req: import('@obliview/shared').AddIpReputationRequest = { ip: ip.trim(), status };
       if (status === 'banned') {
         req.reason = reason.trim() || null;
-        req.scope = scope;
         req.expiresAt = expiresAt || null;
       } else if (status === 'whitelisted') {
         req.label = label.trim() || null;
-        req.scope = scope as WhitelistScope;
       }
+      // No scope: the server derives it from the operating tenant.
       await onSave(req);
     } finally {
       setSaving(false);
@@ -1913,18 +1973,19 @@ function AddIpReputationModal({ onSave, onClose }: AddIpReputationModalProps) {
             </div>
           </div>
 
-          {(status === 'banned' || status === 'whitelisted') && (
-            <div className="space-y-1">
-              <label className="block text-sm font-medium text-text-secondary">Scope</label>
-              <select
-                value={scope}
-                onChange={e => setScope(e.target.value as BanScope)}
-                className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
-              >
-                <option value="global">Global</option>
-                <option value="tenant">Tenant</option>
-              </select>
-            </div>
+          {status === 'banned' && (
+            <p className="text-xs text-text-muted">
+              {isGodView
+                ? t('bans.scopeGlobalHint', 'Global ban: enforced on every agent of every tenant.')
+                : t('bans.scopeTenantHint', 'Local ban: enforced only on the agents of this tenant.')}
+            </p>
+          )}
+          {status === 'whitelisted' && (
+            <p className="text-xs text-text-muted">
+              {isGodView
+                ? t('bans.whitelistGlobalHint', 'Global whitelist entry: applies to every tenant and cannot be removed by other tenants.')
+                : t('bans.whitelistTenantHint', 'Local whitelist entry: applies only to this tenant.')}
+            </p>
           )}
 
           {status === 'banned' && (
@@ -1982,6 +2043,9 @@ interface BansTabProps {
 
 /** @deprecated Kept for potential future use. Access bans via IP drawer instead. */
 export function BansTab({ isAdmin }: BansTabProps) {
+  // Promote to global is a Default-tenant action (server-enforced).
+  const currentTenantId = useTenantStore(s => s.currentTenantId);
+  const isGodView = currentTenantId != null && isMasterTenant(currentTenantId);
   const [bans, setBans] = useState<IpBan[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -2014,7 +2078,7 @@ export function BansTab({ isAdmin }: BansTabProps) {
       });
       if (debouncedSearch.trim()) params.set('search', debouncedSearch.trim());
 
-      const res = await fetch(`/api/bans?${params.toString()}`);
+      const res = await tenantFetch(`/api/bans?${params.toString()}`);
       if (!res.ok) throw new Error('Failed to load bans');
       const json: BanListResponse = await res.json();
       setBans(json.data);
@@ -2032,18 +2096,22 @@ export function BansTab({ isAdmin }: BansTabProps) {
 
   const handleAddBan = async (req: CreateBanRequest) => {
     try {
-      const res = await fetch('/api/bans', {
+      const res = await tenantFetch('/api/bans', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(req),
       });
-      if (!res.ok) throw new Error('Failed to create ban');
+      if (!res.ok) {
+        const body = await res.json().catch(() => null) as { error?: string } | null;
+        throw new Error(body?.error ?? 'Failed to create ban');
+      }
       toast.success(`${req.ip} banned`);
       setShowAddModal(false);
       load();
-    } catch {
-      toast.error('Failed to create ban');
-      throw new Error('Failed to create ban');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to create ban';
+      toast.error(msg);
+      throw new Error(msg);
     }
   };
 
@@ -2051,7 +2119,7 @@ export function BansTab({ isAdmin }: BansTabProps) {
     if (!liftingBan) return;
     setConfirmLiftLoading(true);
     try {
-      const res = await fetch(`/api/bans/${liftingBan.id}`, { method: 'DELETE' });
+      const res = await tenantFetch(`/api/bans/${liftingBan.id}`, { method: 'DELETE' });
       if (!res.ok) throw new Error('Failed to lift ban');
       toast.success(`Ban on ${liftingBan.ip} lifted`);
       setLiftingBan(null);
@@ -2066,7 +2134,7 @@ export function BansTab({ isAdmin }: BansTabProps) {
   const handleExclude = async (ban: IpBan) => {
     setExcludingBanId(ban.id);
     try {
-      const res = await fetch(`/api/bans/${ban.id}/exclude`, { method: 'POST' });
+      const res = await tenantFetch(`/api/bans/${ban.id}/exclude`, { method: 'POST' });
       if (!res.ok) throw new Error('Failed to exclude ban');
       toast.success(`${ban.ip} excluded from your network`);
       load();
@@ -2080,7 +2148,7 @@ export function BansTab({ isAdmin }: BansTabProps) {
   const handleRemoveExclusion = async (ban: IpBan) => {
     setExcludingBanId(ban.id);
     try {
-      const res = await fetch(`/api/bans/${ban.id}/exclude`, { method: 'DELETE' });
+      const res = await tenantFetch(`/api/bans/${ban.id}/exclude`, { method: 'DELETE' });
       if (!res.ok) throw new Error('Failed to remove exclusion');
       toast.success(`Exclusion on ${ban.ip} removed`);
       load();
@@ -2094,12 +2162,15 @@ export function BansTab({ isAdmin }: BansTabProps) {
   const handlePromoteGlobal = async (ban: IpBan) => {
     setPromotingBanId(ban.id);
     try {
-      const res = await fetch(`/api/bans/${ban.id}/promote-global`, { method: 'POST' });
-      if (!res.ok) throw new Error('Failed to promote ban');
+      const res = await tenantFetch(`/api/bans/${ban.id}/promote-global`, { method: 'POST' });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null) as { error?: string } | null;
+        throw new Error(body?.error ?? 'Failed to promote ban');
+      }
       toast.success(`Ban on ${ban.ip} promoted to global`);
       load();
-    } catch {
-      toast.error('Failed to promote ban');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to promote ban');
     } finally {
       setPromotingBanId(null);
     }
@@ -2244,7 +2315,7 @@ export function BansTab({ isAdmin }: BansTabProps) {
                             <Shield size={11} className="mr-1" />Lift ban
                           </Button>
                         )}
-                        {isAdmin && ban.scope !== 'global' && ban.isActive && !isExpired(ban.expiresAt) && (
+                        {isGodView && ban.scope !== 'global' && ban.isActive && !isExpired(ban.expiresAt) && (
                           <Button
                             size="sm"
                             variant="secondary"

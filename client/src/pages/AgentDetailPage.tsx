@@ -5,6 +5,7 @@ import {
   ChevronLeft, ChevronRight, Wifi, Cpu, Server, X, Eye,
   Trash2, AlertTriangle,
   ChevronDown, ChevronUp, LayoutGrid, Network, Pencil, ArrowLeftRight, Shield, Gauge, Settings,
+  ArrowUpCircle,
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import apiClient from '@/api/client';
@@ -26,6 +27,12 @@ import { NotificationTypesPanel } from '@/components/agent/NotificationTypesPane
 import { ServiceTemplatesPanel } from '@/components/agent/ServiceTemplatesPanel';
 import { MikroTikPanel } from '@/components/mikrotik/MikroTikPanel';
 import { anonIp, anonHostname, anonUsername } from '@/utils/anonymize';
+import { useTranslation } from 'react-i18next';
+import { isMasterTenant, CAPABILITIES } from '@obliview/shared';
+import type { AgentUpdatePolicy } from '@obliview/shared';
+import { useTenantStore } from '@/store/tenantStore';
+import { useAuthStore } from '@/store/authStore';
+import { agentUpdateErrorMessage } from '@/utils/agentUpdate';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -529,10 +536,17 @@ function IpDrawer({
 function AgentSettingsPanel({
   device,
   onUpdate,
+  readOnly = false,
+  canEditUpdatePolicy = false,
 }: {
   device: AgentDevice;
   onUpdate: (d: AgentDevice) => void;
+  /** Another tenant's agent (Default god view): every control is a write, so all are disabled. */
+  readOnly?: boolean;
+  /** monitor_rw in the operating tenant, on an own-tenant Go agent (C17-1). */
+  canEditUpdatePolicy?: boolean;
 }) {
+  const { t } = useTranslation();
   // Per-param override detection
   const cisOverridden  = device.overrideGroupSettings ?? false;
   const mmpOverridden  = device.maxMissedPushes !== null;
@@ -562,10 +576,18 @@ function AgentSettingsPanel({
     try {
       const updated = await agentApi.updateDevice(device.id, updates);
       onUpdate(updated);
-    } catch { /* ignore */ } finally {
+    } catch (err) {
+      toast.error((err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? t('agentUpdate.saveFailed', 'Failed to save'));
+    } finally {
       setSaving(false);
     }
   }
+
+  // Update policy (C17-1): frozen from above ('off' at group / global level) cannot be lifted here.
+  const resolvedPolicy = device.resolvedUpdatePolicy ?? 'manual';
+  const policySource = device.updatePolicySource ?? 'default';
+  const frozenFromAbove = resolvedPolicy === 'off' && policySource !== 'agent';
+  const policySelectDisabled = saving || !canEditUpdatePolicy || frozenFromAbove;
 
   function Toggle({ value, onChange }: { value: boolean; onChange: () => void }) {
     return (
@@ -585,6 +607,7 @@ function AgentSettingsPanel({
   }
 
   return (
+    <fieldset disabled={readOnly} className="min-w-0 border-0 p-0 m-0">
     <div className="px-5 py-3 flex flex-wrap items-center gap-5">
       <span className="text-[10px] font-semibold uppercase tracking-wider text-text-muted flex-shrink-0">
         Agent Settings
@@ -714,8 +737,37 @@ function AgentSettingsPanel({
         </span>
       </label>
 
+      {/* ── Agent updates (C17-1) ────────────────────────────────────────── */}
+      {device.deviceType === 'agent' && (
+        <div className="flex items-center gap-2 text-xs text-text-secondary">
+          <span>{t('agentUpdate.policyLabel', 'Agent updates')}</span>
+          <select
+            value={device.updatePolicy ?? 'inherit'}
+            onChange={e => {
+              const v = e.target.value as 'inherit' | AgentUpdatePolicy;
+              void save({ updatePolicy: v === 'inherit' ? null : v });
+            }}
+            disabled={policySelectDisabled}
+            className="rounded border border-border bg-bg-tertiary px-2 py-1 text-xs text-text-primary focus:outline-none focus:border-accent disabled:opacity-60"
+          >
+            <option value="inherit">
+              {`${t('agentUpdate.policy.inherit', 'Inherit')} (${t(`agentUpdate.policy.${resolvedPolicy}`, resolvedPolicy)} — ${t(`agentUpdate.source.${policySource}`, policySource)})`}
+            </option>
+            <option value="auto">{t('agentUpdate.policy.auto', 'Automatic')}</option>
+            <option value="manual">{t('agentUpdate.policy.manual', 'Manual')}</option>
+            <option value="off">{t('agentUpdate.policy.off', 'Off (frozen)')}</option>
+          </select>
+          {frozenFromAbove && (
+            <span className="text-[10px] text-amber-400">
+              {t('agentUpdate.frozenBy', { defaultValue: 'Frozen by {{source}}', source: t(`agentUpdate.source.${policySource}`, policySource) })}
+            </span>
+          )}
+        </div>
+      )}
+
       {saving && <span className="text-[11px] text-text-muted animate-pulse">Saving…</span>}
     </div>
+    </fieldset>
   );
 }
 
@@ -852,7 +904,8 @@ function LocalTemplateModal({
 
 // ── TemplatesSection ──────────────────────────────────────────────────────────
 
-function TemplatesSection({ deviceId, deviceType, mikrotikStatus }: { deviceId: number; deviceType?: 'agent' | 'mikrotik'; mikrotikStatus?: 'online' | 'offline' | 'misconfigured' }) {
+function TemplatesSection({ deviceId, deviceType, mikrotikStatus, readOnly = false }: { deviceId: number; deviceType?: 'agent' | 'mikrotik'; mikrotikStatus?: 'online' | 'offline' | 'misconfigured'; readOnly?: boolean }) {
+  const { t } = useTranslation();
   const [localTemplates, setLocalTemplates] = useState<ServiceTemplate[]>([]);
   const [localLoading,   setLocalLoading]   = useState(true);
   const [localExpanded,  setLocalExpanded]  = useState(true);
@@ -889,9 +942,16 @@ function TemplatesSection({ deviceId, deviceType, mikrotikStatus }: { deviceId: 
   return (
     <>
       {/* MikroTik configuration panel (only for MikroTik devices) */}
+      {/* (credentials are never god-viewed: not rendered for another tenant's router) */}
       {deviceType === 'mikrotik' && (
         <div className="mb-4">
-          <MikroTikPanel deviceId={deviceId} mikrotikStatus={mikrotikStatus} />
+          {readOnly ? (
+            <p className="text-xs text-text-muted">
+              {t('agents.foreignReadOnly', 'This agent belongs to another tenant. It is read-only here: switch to its tenant to change it.')}
+            </p>
+          ) : (
+            <MikroTikPanel deviceId={deviceId} mikrotikStatus={mikrotikStatus} />
+          )}
         </div>
       )}
 
@@ -899,7 +959,8 @@ function TemplatesSection({ deviceId, deviceType, mikrotikStatus }: { deviceId: 
       <ServiceTemplatesPanel
         scope="device"
         scopeId={deviceId}
-        onCreateLocal={() => setShowCreate(true)}
+        readOnly={readOnly}
+        onCreateLocal={readOnly ? undefined : () => setShowCreate(true)}
       />
 
       {/* Local templates owned by this agent */}
@@ -956,13 +1017,15 @@ function TemplatesSection({ deviceId, deviceType, mikrotikStatus }: { deviceId: 
                         )}
                       </div>
                     </div>
-                    <button
-                      onClick={() => setDeletingLocal(tpl)}
-                      title="Delete this local template"
-                      className="p-1.5 rounded text-text-muted hover:text-red-400 hover:bg-red-500/10 transition-colors flex-shrink-0"
-                    >
-                      <Trash2 size={13} />
-                    </button>
+                    {!readOnly && (
+                      <button
+                        onClick={() => setDeletingLocal(tpl)}
+                        title="Delete this local template"
+                        className="p-1.5 rounded text-text-muted hover:text-red-400 hover:bg-red-500/10 transition-colors flex-shrink-0"
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    )}
                   </div>
                 ))
               )}
@@ -972,7 +1035,7 @@ function TemplatesSection({ deviceId, deviceType, mikrotikStatus }: { deviceId: 
       )}
 
       {/* Modals */}
-      {showCreate && (
+      {showCreate && !readOnly && (
         <LocalTemplateModal
           deviceId={deviceId}
           onSave={() => { setShowCreate(false); void loadLocal(); }}
@@ -980,7 +1043,7 @@ function TemplatesSection({ deviceId, deviceType, mikrotikStatus }: { deviceId: 
         />
       )}
 
-      {deletingLocal && (
+      {deletingLocal && !readOnly && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
           <div className="w-full max-w-sm rounded-xl border border-border bg-bg-primary shadow-2xl p-6">
             <div className="flex items-start gap-3 mb-4">
@@ -1018,6 +1081,10 @@ const PAGE_SIZE = 50;
 type TabId = 'overview' | 'starmap' | 'firewall' | 'netlimits' | 'settings';
 
 export function AgentDetailPage() {
+  const { t } = useTranslation();
+  // Manual bans follow the operating tenant (Default = global, else local).
+  const currentTenantId = useTenantStore(s => s.currentTenantId);
+  const isGodView = currentTenantId != null && isMasterTenant(currentTenantId);
   const { deviceId } = useParams<{ deviceId: string }>();
   const navigate = useNavigate();
   const devId = deviceId ? parseInt(deviceId, 10) : null;
@@ -1025,6 +1092,12 @@ export function AgentDetailPage() {
   // Device info
   const [device,        setDevice]        = useState<AgentDevice | null>(null);
   const [deviceLoading, setDeviceLoading] = useState(true);
+  // Another tenant's agent (Default god view): read-only here — the server
+  // refuses writes with 403; switch to its tenant to change it.
+  const foreign = !!device && currentTenantId != null && device.tenantId != null && device.tenantId !== currentTenantId;
+  // Agent update actions (C17-1): monitor_rw in the operating tenant (admins hold every capability).
+  const canManage = useAuthStore(s => s.user?.role === 'admin' || (s.permissions?.capabilities?.includes(CAPABILITIES.MONITOR_RW) ?? false));
+  const [updateBusy, setUpdateBusy] = useState(false);
 
   // Cross-app links
   const [crossAppLinks, setCrossAppLinks] = useState<Array<{ appType: string; name: string; url: string; color: string | null }>>([]);
@@ -1172,7 +1245,9 @@ export function AgentDetailPage() {
 
   // ── Quick ban ───────────────────────────────────────────────────────────────
   const handleBan = useCallback(async (ip: string) => {
-    if (!confirm(`Ban IP ${ip}?\n\nThis IP will be blocked across all agents.`)) return;
+    if (!confirm(isGodView
+      ? t('bans.confirmBanGlobal', { ip, defaultValue: 'Ban IP {{ip}}?\n\nIt will be blocked on every agent of every tenant.' })
+      : t('bans.confirmBanLocal', { ip, defaultValue: 'Ban IP {{ip}}?\n\nIt will be blocked on the agents of this tenant.' }))) return;
     setBanningIps(prev => new Set(prev).add(ip));
     try {
       await bansApi.create({ ip, reason: 'Manual ban from agent detail' });
@@ -1183,7 +1258,7 @@ export function AgentDetailPage() {
     } finally {
       setBanningIps(prev => { const s = new Set(prev); s.delete(ip); return s; });
     }
-  }, []);
+  }, [isGodView, t]);
 
   // ── Quick whitelist ─────────────────────────────────────────────────────────
   const handleWhitelist = useCallback(async (ip: string) => {
@@ -1256,6 +1331,8 @@ export function AgentDetailPage() {
                   className="text-xl font-semibold bg-bg-secondary border border-accent/60 rounded px-2 py-0.5 text-text-primary focus:outline-none focus:border-accent min-w-[8rem]"
                 />
               </form>
+            ) : foreign ? (
+              <h1 className="text-xl font-semibold text-text-primary">{anonHostname(displayName)}</h1>
             ) : (
               <button
                 type="button"
@@ -1273,6 +1350,63 @@ export function AgentDetailPage() {
             </span>
             {device.agentVersion && (
               <span className="text-xs text-text-muted font-mono">v{device.agentVersion}</span>
+            )}
+            {/* ── Agent update (C17-1) ── */}
+            {device.updateAvailable && device.latestAgentVersion && !device.updatePending && (
+              <span className="rounded-full px-2 py-0.5 text-[11px] font-medium bg-amber-500/10 text-amber-400">
+                {t('agentUpdate.updateAvailable', { defaultValue: 'Update available: v{{version}}', version: device.latestAgentVersion })}
+              </span>
+            )}
+            {device.updatePending && (
+              <span className="rounded-full px-2 py-0.5 text-[11px] font-medium bg-blue-500/10 text-blue-400">
+                {t('agentUpdate.updateRequested', { defaultValue: 'Update to v{{version}} requested', version: device.updateRequestedVersion })}
+              </span>
+            )}
+            {canManage && !foreign && device.deviceType === 'agent' && device.updateAvailable
+              && !device.updatePending && device.resolvedUpdatePolicy !== 'off' && (
+              <button
+                type="button"
+                disabled={updateBusy}
+                onClick={async () => {
+                  if (!confirm(t('agentUpdate.confirmUpdate', {
+                    defaultValue: 'Update {{name}} to v{{version}}?',
+                    name: displayName,
+                    version: device.latestAgentVersion,
+                  }))) return;
+                  setUpdateBusy(true);
+                  try {
+                    setDevice(await agentApi.requestUpdate(device.id));
+                    toast.success(t('agentUpdate.requestedToast', 'Update requested: the agent updates at its next heartbeat'));
+                  } catch (err) {
+                    toast.error(agentUpdateErrorMessage(err, t, 'Failed to request the update'));
+                  } finally {
+                    setUpdateBusy(false);
+                  }
+                }}
+                className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[11px] font-medium border border-amber-500/40 text-amber-400 hover:bg-amber-500/10 transition-colors disabled:opacity-50"
+              >
+                <ArrowUpCircle size={12} />
+                {t('agentUpdate.updateNow', 'Update now')}
+              </button>
+            )}
+            {canManage && !foreign && device.deviceType === 'agent' && device.updatePending && (
+              <button
+                type="button"
+                disabled={updateBusy}
+                onClick={async () => {
+                  setUpdateBusy(true);
+                  try {
+                    setDevice(await agentApi.cancelUpdate(device.id));
+                  } catch (err) {
+                    toast.error(agentUpdateErrorMessage(err, t, 'Failed to cancel the update'));
+                  } finally {
+                    setUpdateBusy(false);
+                  }
+                }}
+                className="rounded px-2 py-0.5 text-[11px] font-medium border border-border text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors disabled:opacity-50"
+              >
+                {t('agentUpdate.cancelRequest', 'Cancel')}
+              </button>
             )}
           </div>
           <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-text-secondary">
@@ -1318,6 +1452,15 @@ export function AgentDetailPage() {
           </button>
         </div>
       </div>
+
+      {/* ── Foreign-tenant (read-only) banner ─────────────────────────────── */}
+      {foreign && (
+        <div className="px-6 pt-4 flex-shrink-0">
+          <div className="rounded-lg border border-border bg-bg-secondary px-4 py-2.5 text-sm text-text-secondary">
+            {t('agents.foreignReadOnly', 'This agent belongs to another tenant. It is read-only here: switch to its tenant to change it.')}
+          </div>
+        </div>
+      )}
 
       {/* ── Evaluate-only banner ─────────────────────────────────────────── */}
       {device.evaluateOnly && (
@@ -1539,24 +1682,30 @@ export function AgentDetailPage() {
             </div>
           ) : activeTab === 'firewall' && device ? (
             <div className="p-6">
-              <FirewallPanel deviceId={device.id} wsConnected={device.wsConnected ?? false} />
+              <FirewallPanel deviceId={device.id} wsConnected={device.wsConnected ?? false} readOnly={foreign} />
             </div>
           ) : activeTab === 'netlimits' && device ? (
             <div className="p-6">
-              <NetworkLimitsPanel scope="agent" scopeId={device.id} label={device.name || device.hostname} title="Network limits (rate &amp; traffic shaping)" />
+              <NetworkLimitsPanel scope="agent" scopeId={device.id} label={device.name || device.hostname} title="Network limits (rate &amp; traffic shaping)" readOnly={foreign} />
             </div>
           ) : activeTab === 'settings' && device ? (
             <div className="p-6 space-y-6">
               {/* Agent settings (push interval, missed pushes) */}
-              <AgentSettingsPanel device={device} onUpdate={d => setDevice(d)} />
+              <AgentSettingsPanel
+                device={device}
+                onUpdate={d => setDevice(d)}
+                readOnly={foreign}
+                canEditUpdatePolicy={canManage && !foreign && device.deviceType === 'agent'}
+              />
 
               {/* Service templates */}
-              <TemplatesSection deviceId={devId!} deviceType={device.deviceType} mikrotikStatus={device.mikrotikStatus} />
+              <TemplatesSection deviceId={devId!} deviceType={device.deviceType} mikrotikStatus={device.mikrotikStatus} readOnly={foreign} />
 
               {/* Notification types — per-agent overrides */}
               <NotificationTypesPanel
                 config={device.notificationTypes ?? null}
                 scope="device"
+                readOnly={foreign}
                 onSave={async (notifTypes: NotificationTypeConfig | null) => {
                   const updated = await agentApi.updateDevice(device.id, { notificationTypes: notifTypes });
                   setDevice(updated);

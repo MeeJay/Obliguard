@@ -2,6 +2,7 @@ import { db } from '../db';
 import type { IpWhitelist, CreateWhitelistRequest, WhitelistScope } from '@obliview/shared';
 import { isMasterTenant } from '@obliview/shared';
 import { AppError } from '../middleware/errorHandler';
+import { whitelistDeleteVerdict } from '../utils/tenantWriteRules';
 
 // ── Row interface ────────────────────────────────────────────────────────────
 
@@ -140,28 +141,73 @@ class WhitelistService {
     return rowToWhitelist(row);
   }
 
+  /** Tenant owning the agent/group an entry targets (null for global/tenant scopes or a missing target). */
+  private async targetTenantOf(scope: string, scopeId: number | null): Promise<number | null> {
+    if (scopeId == null) return null;
+    if (scope === 'agent') {
+      const r = await db('agent_devices').where({ id: scopeId }).first('tenant_id') as { tenant_id: number } | undefined;
+      return r?.tenant_id ?? null;
+    }
+    if (scope === 'group') {
+      const r = await db('monitor_groups').where({ id: scopeId }).first('tenant_id') as { tenant_id: number } | undefined;
+      return r?.tenant_id ?? null;
+    }
+    return null;
+  }
+
   /**
-   * Deletes a whitelist entry by ID.
+   * Deletes a whitelist entry by ID, following the operating tenant
+   * (whitelistDeleteVerdict). The platform role grants nothing extra.
    *
-   * A GLOBAL entry is authoritative and NOT locally overridable: only a platform
-   * admin or the Default/master tenant may remove it. A non-Default tenant may
-   * only remove its own local (tenant/group/agent) entries.
+   * - A GLOBAL entry is authoritative: only the Default tenant may remove it.
+   * - A local entry may be removed by its owner tenant, or by the tenant that
+   *   owns the targeted agent/group (a victim removes an entry planted on its
+   *   own agent or group; customers remove rows created from Default on them).
+   * - Otherwise: 403 from Default (read-only god view), 404 elsewhere.
    */
-  async delete(id: number, tenantId: number, isAdmin: boolean): Promise<void> {
+  async delete(id: number, tenantId: number): Promise<void> {
     const row = await db<IpWhitelistRow>('ip_whitelist').where({ id }).first();
     if (!row) throw new AppError(404, 'Whitelist entry not found');
 
-    if (!isAdmin && !isMasterTenant(tenantId)) {
-      if (row.scope === 'global') {
+    const target = await this.targetTenantOf(row.scope, row.scope_id);
+    switch (whitelistDeleteVerdict(row, target, tenantId)) {
+      case 'forbidden-global':
         throw new AppError(403, 'A global whitelist entry can only be removed from the Default tenant');
-      }
-      if (row.tenant_id !== tenantId) {
-        throw new AppError(403, 'Whitelist entry does not belong to your tenant');
-      }
+      case 'forbidden-foreign':
+        throw new AppError(403, 'This whitelist entry belongs to another tenant: read-only from the Default tenant');
+      case 'not-found':
+        throw new AppError(404, 'Whitelist entry not found');
+      default:
+        break;
     }
 
     const deleted = await db('ip_whitelist').where({ id }).del();
     if (!deleted) throw new AppError(404, 'Whitelist entry not found');
+  }
+
+  /** Sets `canDelete` on each entry for the operating tenant (same rule as delete). */
+  async annotateDeletable(entries: IpWhitelist[], tenantId: number): Promise<IpWhitelist[]> {
+    const agentIds = [...new Set(entries.filter((e) => e.scope === 'agent' && e.scopeId != null).map((e) => e.scopeId as number))];
+    const groupIds = [...new Set(entries.filter((e) => e.scope === 'group' && e.scopeId != null).map((e) => e.scopeId as number))];
+    const agentTenant = new Map<number, number>();
+    const groupTenant = new Map<number, number>();
+    if (agentIds.length > 0) {
+      const rows = await db('agent_devices').whereIn('id', agentIds).select('id', 'tenant_id') as Array<{ id: number; tenant_id: number }>;
+      for (const r of rows) agentTenant.set(r.id, r.tenant_id);
+    }
+    if (groupIds.length > 0) {
+      const rows = await db('monitor_groups').whereIn('id', groupIds).select('id', 'tenant_id') as Array<{ id: number; tenant_id: number }>;
+      for (const r of rows) groupTenant.set(r.id, r.tenant_id);
+    }
+    for (const entry of entries) {
+      let target: number | null = null;
+      if (entry.scopeId != null) {
+        if (entry.scope === 'agent') target = agentTenant.get(entry.scopeId) ?? null;
+        else if (entry.scope === 'group') target = groupTenant.get(entry.scopeId) ?? null;
+      }
+      entry.canDelete = whitelistDeleteVerdict({ scope: entry.scope, tenant_id: entry.tenantId }, target, tenantId) === 'ok';
+    }
+    return entries;
   }
 
   /**

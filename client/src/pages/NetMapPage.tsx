@@ -15,6 +15,9 @@ import { useEffect, useRef, useState, useCallback, lazy, Suspense } from 'react'
 import { Shield, Ban, Activity, RefreshCw, Zap, X, ExternalLink, Box, Grid2x2 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { Link } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
+import { isMasterTenant } from '@obliview/shared';
+import { useTenantStore } from '@/store/tenantStore';
 
 const NetMap3D = lazy(() => import('../netmap3d/NetMap3D'));
 import { getSocket } from '../socket/socketClient';
@@ -108,6 +111,10 @@ function hexRgb(h: string): [number, number, number] {
 // ── Component ──────────────────────────────────────────────────────────────────
 
 export function NetMapPage() {
+  const { t } = useTranslation();
+  // Manual bans follow the operating tenant (Default = global, else local).
+  const currentTenantId = useTenantStore(s => s.currentTenantId);
+  const isGodView = currentTenantId != null && isMasterTenant(currentTenantId);
   const canvasRef    = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const bgRef        = useRef<HTMLCanvasElement | null>(null);
@@ -369,9 +376,13 @@ export function NetMapPage() {
   // ── Quick ban ─────────────────────────────────────────────────────────────
 
   const quickBan = useCallback(async (ip: string) => {
+    if (!window.confirm(isGodView
+      ? t('bans.confirmBanGlobal', { ip, defaultValue: 'Ban IP {{ip}}?\n\nIt will be blocked on every agent of every tenant.' })
+      : t('bans.confirmBanLocal', { ip, defaultValue: 'Ban IP {{ip}}?\n\nIt will be blocked on the agents of this tenant.' }))) return;
     setBanningIp(ip);
     try {
-      await apiClient.post('/bans', { ip, reason: 'Manual ban from NetMap', scope: 'global' });
+      // No scope: the server derives it from the operating tenant.
+      const res = await apiClient.post<{ data: { scope?: string } }>('/bans', { ip, reason: 'Manual ban from NetMap' });
       const node = ipsRef.current.get(ip);
       if (node) {
         node.status    = 'banned';
@@ -380,13 +391,15 @@ export function NetMapPage() {
         ripplesRef.current.push({ id: Math.random().toString(36).slice(2), x: node.x, y: node.y, t: 0 });
       }
       setStats(s => ({ ...s, banned: s.banned + 1 }));
-      toast.success(`${ip} banned`);
+      toast.success(res.data?.data?.scope === 'global'
+        ? t('bans.bannedGlobal', { defaultValue: '{{ip}} banned globally', ip })
+        : t('bans.bannedLocal', { defaultValue: '{{ip}} banned on this tenant', ip }));
     } catch (err) {
       const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error;
       toast.error(msg || `Failed to ban ${ip}`);
     }
     finally { setBanningIp(null); }
-  }, []);
+  }, [isGodView, t]);
 
   // ── Relayout IPs (debounced) ──────────────────────────────────────────────
 

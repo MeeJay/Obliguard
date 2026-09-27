@@ -70,6 +70,8 @@ interface NotificationTypesPanelProps {
   scope: 'global' | 'group' | 'device';
   title?: string;
   className?: string;
+  /** Another tenant's agent (Default god view): switches disabled, no Override/Reset. */
+  readOnly?: boolean;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -82,6 +84,7 @@ export function NotificationTypesPanel({
   scope,
   title,
   className,
+  readOnly = false,
 }: NotificationTypesPanelProps) {
   const { t } = useTranslation();
   const [draft, setDraft] = useState<NotificationTypeConfig | null>(config);
@@ -199,11 +202,11 @@ export function NotificationTypesPanel({
               <Switch
                 on={val}
                 onChange={v => handleToggle(key, v)}
-                disabled={!isGlobal && !overriding}
+                disabled={readOnly || (!isGlobal && !overriding)}
               />
 
               {/* Override / Reset button (not shown for global scope) */}
-              {!isGlobal && (
+              {!isGlobal && !readOnly && (
                 <button
                   onClick={overriding ? () => handleReset(key) : () => handleOverride(key)}
                   disabled={isSaving}

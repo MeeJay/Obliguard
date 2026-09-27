@@ -3,13 +3,15 @@ import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
   Pencil, Trash2, ArrowLeft, FolderOpen,
   Server, Bell, Globe, RotateCcw,
-  Plus, X, ChevronDown, ChevronUp, Shield, EyeOff,
+  Plus, X, ChevronDown, ChevronUp, Shield, EyeOff, ArrowUpCircle,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { cn } from '@/utils/cn';
 import { anonHostname } from '@/utils/anonymize';
 import { useGroupStore } from '@/store/groupStore';
 import { useAuthStore } from '@/store/authStore';
+import { useTenantStore } from '@/store/tenantStore';
+import { agentUpdateErrorMessage } from '@/utils/agentUpdate';
 import { groupsApi } from '@/api/groups.api';
 import { agentApi } from '@/api/agent.api';
 import { serviceTemplatesApi } from '@/api/serviceTemplates.api';
@@ -17,6 +19,7 @@ import type {
   MonitorGroup, AgentDevice, AgentGroupConfig,
   NotificationTypeConfig, ServiceTemplate, ServiceType, ServiceTemplateMode,
 } from '@obliview/shared';
+import { CAPABILITIES } from '@obliview/shared';
 import { Button } from '@/components/common/Button';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { NotificationBindingsPanel } from '@/components/notifications/NotificationBindingsPanel';
@@ -29,7 +32,12 @@ import toast from 'react-hot-toast';
 // Agent Group Settings Panel
 // ─────────────────────────────────────────────────────────────────────────────
 
-function AgentGroupSettingsPanel({ group, onUpdate }: { group: MonitorGroup; onUpdate: (g: MonitorGroup) => void }) {
+function AgentGroupSettingsPanel({ group, onUpdate, readOnly = false }: {
+  group: MonitorGroup;
+  onUpdate: (g: MonitorGroup) => void;
+  /** Another tenant's group (Default god view): the server refuses every write. */
+  readOnly?: boolean;
+}) {
   const { t } = useTranslation();
 
   const cfg: AgentGroupConfig = group.agentGroupConfig ?? {
@@ -47,6 +55,7 @@ function AgentGroupSettingsPanel({ group, onUpdate }: { group: MonitorGroup; onU
   const [savingInterval, setSavingInterval] = useState(false);
   const [savingMaxMissed, setSavingMaxMissed] = useState(false);
   const [savingEval, setSavingEval] = useState(false);
+  const [savingPolicy, setSavingPolicy] = useState(false);
 
   const isOverridingInterval = cfg.pushIntervalSeconds !== null;
   const isOverridingMaxMissed = cfg.maxMissedPushes !== null;
@@ -76,8 +85,8 @@ function AgentGroupSettingsPanel({ group, onUpdate }: { group: MonitorGroup; onU
         },
       });
       onUpdate(updated);
-    } catch {
-      toast.error(t('groups.failedUpdate'));
+    } catch (err) {
+      toast.error((err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? t('groups.failedUpdate'));
     } finally {
       setSaving(false);
     }
@@ -121,7 +130,13 @@ function AgentGroupSettingsPanel({ group, onUpdate }: { group: MonitorGroup; onU
         {t('groups.detail.agentSettings')}
       </h2>
       <p className="text-xs text-text-muted mb-4">{t('groups.detail.agentSettingsDesc')}</p>
+      {readOnly && (
+        <p className="text-xs text-amber-400 mb-3">
+          {t('agentUpdate.readOnlyOtherTenant', 'Read-only: this group belongs to another tenant')}
+        </p>
+      )}
 
+      <fieldset disabled={readOnly} className="min-w-0 border-0 p-0 m-0">
       <div className="divide-y divide-border">
 
         {/* ── Push Interval ── */}
@@ -231,6 +246,39 @@ function AgentGroupSettingsPanel({ group, onUpdate }: { group: MonitorGroup; onU
           )}
         </div>
 
+        {/* ── Agent updates (C17-1) ── */}
+        <div className="flex items-center gap-4 py-3">
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-text-primary">{t('agentUpdate.policyLabel', 'Agent updates')}</span>
+              {cfg.updatePolicy ? (
+                <span className="inline-flex items-center rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-500">
+                  Override
+                </span>
+              ) : (
+                <span className="text-xs text-text-muted">Default</span>
+              )}
+            </div>
+            <p className="text-xs text-text-muted mt-0.5">
+              {t('agentUpdate.groupPolicyDesc', "Update policy of this group's agents and sub-groups. 'Off' freezes them whatever is set below.")}
+            </p>
+          </div>
+          <select
+            value={cfg.updatePolicy ?? 'inherit'}
+            onChange={e => {
+              const v = e.target.value;
+              void saveConfig({ updatePolicy: v === 'inherit' ? null : v as 'auto' | 'manual' | 'off' }, setSavingPolicy);
+            }}
+            disabled={savingPolicy}
+            className="shrink-0 rounded-md border border-border bg-bg-tertiary px-2 py-1 text-sm text-text-primary focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50"
+          >
+            <option value="inherit">{t('agentUpdate.policy.inherit', 'Inherit')}</option>
+            <option value="auto">{t('agentUpdate.policy.auto', 'Automatic')}</option>
+            <option value="manual">{t('agentUpdate.policy.manual', 'Manual')}</option>
+            <option value="off">{t('agentUpdate.policy.off', 'Off (frozen)')}</option>
+          </select>
+        </div>
+
         {/* ── Evaluate-only (dry-run) mode ── */}
         <div className="flex items-center gap-4 py-3">
           <div className="flex-1 min-w-0">
@@ -261,6 +309,7 @@ function AgentGroupSettingsPanel({ group, onUpdate }: { group: MonitorGroup; onU
         </div>
 
       </div>
+      </fieldset>
     </div>
   );
 }
@@ -554,6 +603,31 @@ export function GroupDetailPage() {
   const [loading, setLoading] = useState(true);
 
   const isAgentGroup = group?.kind === 'agent';
+  // Agent updates (C17-1): writes follow the operating tenant; "Update outdated
+  // agents" is open to monitor_rw members (admins hold every capability).
+  const currentTenantId = useTenantStore(s => s.currentTenantId);
+  const isOwnTenantGroup = group?.tenantId === undefined || group.tenantId === currentTenantId;
+  const canManage = useAuthStore(s => s.user?.role === 'admin' || (s.permissions?.capabilities?.includes(CAPABILITIES.MONITOR_RW) ?? false));
+  const [requestingUpdate, setRequestingUpdate] = useState(false);
+
+  const handleGroupUpdate = async () => {
+    if (!group) return;
+    if (!confirm(t('agentUpdate.groupConfirm', 'Request an update for every outdated agent of this group and its sub-groups?'))) return;
+    setRequestingUpdate(true);
+    try {
+      const r = await agentApi.requestGroupUpdate(group.id);
+      const skipped = r.skipped.off + r.skipped.current + r.skipped.notUpdatable + r.skipped.notFound;
+      toast.success(t('agentUpdate.bulkResult', {
+        defaultValue: '{{requested}} update(s) requested, {{skipped}} skipped',
+        requested: r.requested,
+        skipped,
+      }));
+    } catch (err) {
+      toast.error(agentUpdateErrorMessage(err, t, t('groups.failedUpdate')));
+    } finally {
+      setRequestingUpdate(false);
+    }
+  };
 
   // Fetch group + agent devices on mount
   useEffect(() => {
@@ -655,6 +729,14 @@ export function GroupDetailPage() {
           </div>
         </div>
 
+        {isAgentGroup && canManage && isOwnTenantGroup && (
+          <div className="flex items-center gap-2 ml-auto mr-2">
+            <Button variant="secondary" size="sm" onClick={handleGroupUpdate} loading={requestingUpdate}>
+              <ArrowUpCircle size={14} className="mr-1.5" />
+              {t('agentUpdate.groupUpdate', 'Update outdated agents')}
+            </Button>
+          </div>
+        )}
         {canWrite && (
           <div className="flex items-center gap-2">
             <Link to={`/group/${groupId}/edit`}>
@@ -772,7 +854,7 @@ export function GroupDetailPage() {
       {/* ── Agent group settings (push interval, max missed pushes) ── */}
       {isAdmin() && isAgentGroup && (
         <div className="mt-6">
-          <AgentGroupSettingsPanel group={group} onUpdate={setGroup} />
+          <AgentGroupSettingsPanel group={group} onUpdate={setGroup} readOnly={!isOwnTenantGroup} />
         </div>
       )}
     </div>

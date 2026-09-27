@@ -5,7 +5,7 @@ import type { SessionData } from 'express-session';
 import { config } from './config';
 import { logger } from './utils/logger';
 import { authService } from './services/auth.service';
-import { tenantService } from './services/tenant.service';
+import { canUseTenant } from './middleware/tenant';
 import { sessionMiddleware } from './session';
 import { db } from './db';
 
@@ -125,16 +125,16 @@ export function createSocketServer(httpServer: HttpServer): SocketIOServer {
       }
 
       // Tenant rooms follow the session's current tenant (set by login /
-      // tenant switch). Same access rule as the switch route: platform admins
-      // may be on any tenant, others only on tenants they belong to.
+      // tenant switch). Same access rule as requireTenant (canUseTenant, DB
+      // role): platform admins need the tenant to exist, others a membership.
       let tenantId = toPositiveInt(sess.currentTenantId);
-      if (tenantId !== null && user.role !== 'admin') {
-        const hasAccess = await tenantService.userHasAccess(user.id, tenantId);
-        if (!hasAccess) {
-          logger.warn(`Socket: user ${user.id} has no access to session tenant ${tenantId} — tenant rooms not joined`);
-          tenantId = null;
-        }
+      if (tenantId !== null && !(await canUseTenant(user.id, user.role, tenantId))) {
+        logger.warn(`Socket: user ${user.id} cannot use session tenant ${tenantId} — tenant rooms not joined`);
+        tenantId = null;
       }
+      // Until realtime emits are tenant-scoped, broadcasts (ip:flow, heartbeats,
+      // status) reach every socket: a non-admin with no tenant holds none.
+      if (tenantId === null && user.role !== 'admin') return next(new Error('No tenant access'));
 
       socket.data.user = user;
       socket.data.tenantId = tenantId;

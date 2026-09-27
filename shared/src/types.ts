@@ -45,6 +45,11 @@ export interface User {
   foreignSource?: string | null;
   /** Profile picture as base64 data URI or remote URL — synced from Obligate when SSO is used. */
   avatar?: string | null;
+  /**
+   * Favourite workspace (opened at sign-in when still usable), or null. Set by
+   * the session payloads (/auth/me, login); absent on admin user listings.
+   */
+  preferredTenantId?: number | null;
 }
 
 export interface UserWithPassword extends User {
@@ -69,6 +74,8 @@ export interface MonitorGroup {
    */
   evaluateOnly?: boolean;
   kind: 'agent';
+  /** Owning tenant (Default god view keeps write pickers and drag-and-drop tenant-local). */
+  tenantId?: number;
   agentThresholds?: AgentThresholds | null;
   agentGroupConfig?: AgentGroupConfig | null;
   createdAt: string;
@@ -298,10 +305,45 @@ export interface ObligateConfig {
 /**
  * Global agent defaults stored in app_config as JSON under key "agent_global_config".
  */
+// ── Agent update policy (C17-1) ──────────────────────────────────────────────
+/**
+ * Who decides when an agent self-updates. 'auto': every served release is
+ * advertised; 'manual': only after an explicit "Update now"; 'off': never.
+ * 'off' at any level (global / group / agent) is absolute; otherwise the
+ * nearest explicit value wins.
+ */
+export type AgentUpdatePolicy = 'auto' | 'manual' | 'off';
+export const AGENT_UPDATE_POLICIES: readonly AgentUpdatePolicy[] = ['auto', 'manual', 'off'];
+/** Built-in default when no level sets a policy. */
+export const DEFAULT_AGENT_UPDATE_POLICY: AgentUpdatePolicy = 'manual';
+/** Where the resolved policy comes from ('unresolved' = group lookup failed, fails closed to 'off'). */
+export type AgentUpdatePolicySource = 'agent' | 'group' | 'global' | 'default' | 'unresolved';
+
+export interface AgentUpdateRequestResult {
+  requested: number;
+  targetVersion: string | null;
+  skipped: { off: number; current: number; notUpdatable: number; notFound: number };
+}
+
+export interface AgentVersionDistribution {
+  latestVersion: string | null;
+  total: number;
+  upToDate: number;
+  outdated: number;
+  unknown: number;
+  updatePending: number;
+  policies: Record<AgentUpdatePolicy, number>;
+  globalPolicy: AgentUpdatePolicy;
+  globalPolicyIsDefault: boolean;
+  versions: Array<{ version: string; count: number; isLatest: boolean; outdated: boolean }>;
+}
+
 export interface AgentGlobalConfig {
   checkIntervalSeconds: number | null;
   maxMissedPushes: number | null;
   notificationTypes: NotificationTypeConfig | null;
+  /** Global agent update policy. null / absent = DEFAULT_AGENT_UPDATE_POLICY ('manual'). */
+  updatePolicy?: AgentUpdatePolicy | null;
 }
 
 export const DEFAULT_AGENT_GLOBAL_CONFIG: Required<{
@@ -487,6 +529,8 @@ export interface AgentGroupConfig {
   pushIntervalSeconds: number | null;
   maxMissedPushes: number | null;
   notificationTypes: NotificationTypeConfig | null;
+  /** Group agent update policy (applies to sub-groups). null / absent = inherit. */
+  updatePolicy?: AgentUpdatePolicy | null;
 }
 
 // ============================================
@@ -610,6 +654,25 @@ export interface AgentDevice {
    *   - 'misconfigured': never received any syslog AND never had a successful API connection
    */
   mikrotikStatus?: 'online' | 'offline' | 'misconfigured';
+  // ── Update policy (C17-1) ──
+  /** Raw device-level update policy. null = inherit from group / global. */
+  updatePolicy?: AgentUpdatePolicy | null;
+  /** Effective update policy ('off' at any level above wins). */
+  resolvedUpdatePolicy?: AgentUpdatePolicy;
+  /** Level the effective policy comes from. */
+  updatePolicySource?: AgentUpdatePolicySource;
+  /** Group that sets the effective policy, when updatePolicySource = 'group'. */
+  updatePolicySourceGroupId?: number | null;
+  /** Agent version served by this server (agent/VERSION); null when unavailable. */
+  latestAgentVersion?: string | null;
+  /** True when the served version is strictly newer than the reported one (approved agents only). */
+  updateAvailable?: boolean;
+  /** Timestamp of a pending explicit "Update now" request. */
+  updateRequestedAt?: string | null;
+  /** Version served when the request was made (void once another version is served). */
+  updateRequestedVersion?: string | null;
+  /** True while a live request will be offered at the next heartbeat. */
+  updatePending?: boolean;
 }
 
 // ============================================
@@ -1062,6 +1125,8 @@ export interface IpWhitelist {
   tenantId: number | null;
   createdBy: number | null;
   createdAt: string;
+  /** Computed per operating tenant by the server (whitelist delete rule). */
+  canDelete?: boolean;
 }
 
 export interface CreateWhitelistRequest {

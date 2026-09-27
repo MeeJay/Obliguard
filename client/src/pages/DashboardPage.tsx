@@ -1,11 +1,11 @@
 import { useEffect, useState, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router-dom';
 import { ShieldOff, Cpu, Activity, Calendar, Server, Wifi, ChevronRight } from 'lucide-react';
 import apiClient from '@/api/client';
 import { getSocket } from '@/socket/socketClient';
 import { SOCKET_EVENTS } from '@obliview/shared';
-import type { AgentDevice, ApiResponse } from '@obliview/shared';
+import type { AgentDevice, AgentVersionDistribution, ApiResponse } from '@obliview/shared';
 import { anonHostname, anonIp } from '@/utils/anonymize';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -197,6 +197,8 @@ export function DashboardPage() {
   const [agentDevices, setAgentDevices] = useState<AgentDevice[]>([]);
   const [agentEventCounts, setAgentEventCounts] = useState<Map<number, AgentEventCount>>(new Map());
   const [agentsLoading, setAgentsLoading] = useState(true);
+  // Agent version distribution (C17-1): outdated / update-requested chip.
+  const [versionDist, setVersionDist] = useState<AgentVersionDistribution | null>(null);
 
   // Fetch stats
   useEffect(() => {
@@ -252,12 +254,14 @@ export function DashboardPage() {
         const todayStart = new Date();
         todayStart.setHours(0, 0, 0, 0);
 
-        const [devicesRes, eventsRes] = await Promise.allSettled([
+        const [devicesRes, eventsRes, versionsRes] = await Promise.allSettled([
           apiClient.get<ApiResponse<AgentDevice[]>>('/agent/devices'),
           apiClient.get('/ip-events', {
             params: { from: todayStart.toISOString(), pageSize: 1000 },
           }),
+          apiClient.get<ApiResponse<AgentVersionDistribution>>('/agent/devices/versions'),
         ]);
+        setVersionDist(versionsRes.status === 'fulfilled' ? (versionsRes.value.data.data ?? null) : null);
 
         const devices =
           devicesRes.status === 'fulfilled' ? (devicesRes.value.data.data ?? []) : [];
@@ -364,6 +368,26 @@ export function DashboardPage() {
           status="events"
         />
       </div>
+
+      {/* Agent updates (C17-1) */}
+      {versionDist && (versionDist.outdated > 0 || versionDist.updatePending > 0) && (
+        <Link to="/admin/agents" className="mb-6 flex flex-wrap items-center gap-2 text-xs w-fit">
+          {versionDist.outdated > 0 && (
+            <span className="rounded-full px-2.5 py-1 font-medium bg-amber-500/10 text-amber-400 border border-amber-500/20">
+              {t('agentUpdate.dashboardOutdated', {
+                defaultValue: '{{count}} agent(s) behind v{{version}}',
+                count: versionDist.outdated,
+                version: versionDist.latestVersion ?? '?',
+              })}
+            </span>
+          )}
+          {versionDist.updatePending > 0 && (
+            <span className="rounded-full px-2.5 py-1 font-medium bg-blue-500/10 text-blue-400 border border-blue-500/20">
+              {t('agentUpdate.distribution.pending', { defaultValue: '{{count}} update(s) requested', count: versionDist.updatePending })}
+            </span>
+          )}
+        </Link>
+      )}
 
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
         {/* Recent Bans */}

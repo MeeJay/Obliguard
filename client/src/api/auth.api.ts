@@ -5,6 +5,17 @@ export type LoginResult =
   | { user: User; requires2fa?: never }
   | { requires2fa: true; methods: { totp: boolean; email: boolean }; user?: never };
 
+export interface MeResponse {
+  user: User;
+  permissions: UserPermissions;
+  requires2faSetup: boolean;
+  /** null = no usable tenant (non-admin without membership). */
+  currentTenantId: number | null;
+  noTenantAccess?: boolean;
+  /** Favourite workspace opened at sign-in, or null. */
+  preferredTenantId?: number | null;
+}
+
 export const authApi = {
   async login(data: LoginRequest): Promise<LoginResult> {
     const res = await apiClient.post<ApiResponse<LoginResult>>('/auth/login', data);
@@ -15,8 +26,8 @@ export const authApi = {
     await apiClient.post('/auth/logout');
   },
 
-  async me(): Promise<{ user: User; permissions: UserPermissions; requires2faSetup: boolean; currentTenantId?: number }> {
-    const res = await apiClient.get<ApiResponse<{ user: User; permissions: UserPermissions; requires2faSetup: boolean; currentTenantId?: number }>>('/auth/me');
+  async me(): Promise<MeResponse> {
+    const res = await apiClient.get<ApiResponse<MeResponse>>('/auth/me');
     return res.data.data!;
   },
 

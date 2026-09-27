@@ -1,12 +1,13 @@
 import { useState, useEffect, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import { User, Save, KeyRound, Bell, CheckCircle2, AlertTriangle, QrCode, Mail, ArrowLeftRight, Palette } from 'lucide-react';
+import { User, Save, KeyRound, Bell, CheckCircle2, AlertTriangle, QrCode, Mail, ArrowLeftRight, Palette, Star } from 'lucide-react';
 import { ThemePicker } from '@/components/common/ThemePicker';
 import { loadSavedTheme, type AppTheme } from '@/utils/theme';
 import { profileApi } from '@/api/profile.api';
 import { appConfigApi } from '@/api/appConfig.api';
 import { twoFactorApi, type TwoFactorStatus } from '@/api/twoFactor.api';
 import { useAuthStore } from '@/store/authStore';
+import { useTenantStore } from '@/store/tenantStore';
 import { useLiveAlertsStore } from '@/store/liveAlertsStore';
 import { Button } from '@/components/common/Button';
 import { Input } from '@/components/common/Input';
@@ -15,7 +16,23 @@ import toast from 'react-hot-toast';
 
 export function ProfilePage() {
   const { t } = useTranslation();
-  const { user: sessionUser, requires2faSetup } = useAuthStore();
+  const { user: sessionUser, requires2faSetup, preferredTenantId, setDefaultTenant } = useAuthStore();
+  const tenants = useTenantStore((st) => st.tenants);
+  const [savingFavourite, setSavingFavourite] = useState(false);
+
+  // Favourite workspace: also reachable here because the TenantSwitcher (and its
+  // star) is replaced by the tab bar in the native desktop app.
+  const handleFavouriteChange = async (value: string) => {
+    setSavingFavourite(true);
+    try {
+      await setDefaultTenant(value === '' ? null : Number(value));
+      toast.success(t('common.saved', 'Saved'));
+    } catch {
+      toast.error(t('common.error', 'Error'));
+    } finally {
+      setSavingFavourite(false);
+    }
+  };
   const [obligateUrl, setObligateUrl] = useState<string | null>(null);
 
   useEffect(() => {
@@ -269,6 +286,32 @@ export function ProfilePage() {
             </Button>
           </div>
         </form>
+      )}
+
+      {/* Favourite workspace section */}
+      {tenants.length > 1 && (
+        <div className="mb-8">
+          <div className="rounded-lg border border-border bg-bg-secondary p-5 space-y-4">
+            <div className="flex items-center gap-2 mb-2">
+              <Star size={18} className="text-accent" />
+              <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide">
+                {t('tenant.favouriteLabel', 'Favourite workspace')}
+              </h2>
+            </div>
+            <select
+              value={preferredTenantId != null ? String(preferredTenantId) : ''}
+              onChange={(e) => handleFavouriteChange(e.target.value)}
+              disabled={savingFavourite}
+              className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-1 focus:ring-accent"
+            >
+              <option value="">{t('tenant.noFavourite', 'None (first workspace)')}</option>
+              {tenants.map((tn) => (
+                <option key={tn.id} value={String(tn.id)}>{tn.name}</option>
+              ))}
+            </select>
+            <p className="text-xs text-text-muted">{t('tenant.favouriteHint', 'The favourite workspace opens at sign-in')}</p>
+          </div>
+        </div>
       )}
 
       {/* Live Alert Notifications section */}

@@ -1,5 +1,6 @@
 import { io, Socket } from 'socket.io-client';
 import { useSocketStore } from '../store/socketStore';
+import { dispatchSessionResync } from '../api/client';
 
 let socket: Socket | null = null;
 
@@ -30,8 +31,15 @@ export function getSocket(): Socket | null {
  * reconnect after a tenant switch picks up the new session tenant.
  */
 export function connectSocket(): Socket {
-  if (socket?.connected) {
-    return socket;
+  // Reuse the live instance while it is connected, handshaking or auto-
+  // reconnecting (active); only a dead one is torn down before rebuilding, so
+  // repeated checkSession() calls never leave an orphaned second socket.
+  if (socket) {
+    if (socket.connected || socket.active) return socket;
+    socket.removeAllListeners();
+    socket.io.removeAllListeners();
+    socket.disconnect();
+    socket = null;
   }
 
   socket = io(window.location.origin, {
@@ -42,6 +50,7 @@ export function connectSocket(): Socket {
     withCredentials: true,
   });
 
+  const s = socket;
   const { setStatus } = useSocketStore.getState();
 
   socket.on('connect', () => {
@@ -49,8 +58,15 @@ export function connectSocket(): Socket {
     setStatus('connected');
   });
 
-  socket.on('disconnect', () => {
+  socket.on('disconnect', (reason) => {
     setStatus('disconnected');
+    // Only the server's disconnectSockets(true) produces this reason: membership
+    // change, tenant deleted, role change or revocation. No auto-reconnect after
+    // it — drop the instance so connectSocket() builds a fresh one, and re-sync.
+    if (reason === 'io server disconnect') {
+      if (socket === s) socket = null;
+      dispatchSessionResync('socket');
+    }
   });
 
   socket.on('connect_error', () => {

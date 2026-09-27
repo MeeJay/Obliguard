@@ -7,15 +7,23 @@ import type { AgentIpEvent, ObliguardPushBody } from '@obliview/shared';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-interface ObliguardConn {
+export interface ObliguardConn {
   ws: WebSocket;
   deviceUuid: string;
-  /** DB row ID — null until first heartbeat resolves the device */
+  /** DB row ID — null until the device is known AND approved */
   deviceId: number | null;
   tenantId: number;
   apiKeyId: number;
   /** Cached client IP (from WS upgrade headers) */
   clientIp: string;
+  /** Set by disconnectWhere: the conn is being torn down, ignore its frames. */
+  closing: boolean;
+  /** True once the first heartbeat frame arrived. */
+  seenHeartbeat: boolean;
+  /** First-heartbeat deadline timer. */
+  deadline: ReturnType<typeof setTimeout> | null;
+  /** Registered with no agent_devices row yet (counted against the per-key pending cap). */
+  rowless: boolean;
 }
 
 /** Command pushed from server → agent on the WS channel */
@@ -25,29 +33,52 @@ export interface OrCommand {
   payload: Record<string, unknown>;
 }
 
+interface FirewallWaiter {
+  resolve: (val: unknown) => void;
+  reject: (err: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+  deviceUuid: string;
+}
+
 // ── Service ───────────────────────────────────────────────────────────────────
 
-class ObliguardHubService {
+export class ObliguardHubService {
   /** deviceUuid → active connection */
   private byDevice = new Map<string, ObliguardConn>();
   /** deviceUuid → pending offline timer (cleared if agent reconnects before expiry) */
   private offlineTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
+  /** A socket that sends no heartbeat within this delay is closed (4008). Tests may lower it. */
+  firstHeartbeatDeadlineMs = 60_000;
+
   constructor() {
     // Ping every 15 s to keep the connection alive through reverse proxies.
-    setInterval(() => {
+    const pinger = setInterval(() => {
       for (const [uuid, conn] of this.byDevice) {
         if (conn.ws.readyState === 1 /* OPEN */) {
           try { (conn.ws as any).ping(); } catch { this._unregister(uuid, conn.ws); }
         }
       }
     }, 15_000);
+    pinger.unref?.();
+  }
+
+  /**
+   * True when a live, non-closing connection holds `uuid` for another tenant or
+   * another API key. Such a connection is never displaced.
+   */
+  hasLiveConflict(uuid: string, tenantId: number, apiKeyId: number): boolean {
+    const e = this.byDevice.get(uuid);
+    return !!e && !e.closing && e.ws.readyState === 1 && (e.tenantId !== tenantId || e.apiKeyId !== apiKeyId);
   }
 
   /**
    * Register an Obliguard agent command-channel WebSocket.
-   * Replaces any existing connection for the same device UUID.
-   * Drains any pending_command queued in the DB immediately on connect.
+   * Replaces an existing connection of the SAME key for the device UUID; a live
+   * connection held by another key is never displaced (the new one is closed
+   * 4003 — the pre-upgrade gate normally rejects it with HTTP 403 first).
+   * Drains a queued 'uninstall' on connect (approved devices only).
+   * Returns false when the socket was refused.
    */
   async register(
     deviceUuid: string,
@@ -55,7 +86,20 @@ class ObliguardHubService {
     apiKeyId: number,
     clientIp: string,
     ws: WebSocket,
-  ): Promise<void> {
+    opts: { rowless?: boolean } = {},
+  ): Promise<boolean> {
+    if (ws.readyState !== 1) return false;
+
+    if (this.hasLiveConflict(deviceUuid, tenantId, apiKeyId)) {
+      const live = this.byDevice.get(deviceUuid)!;
+      logger.warn(
+        { deviceUuid, tenantId, apiKeyId, liveTenantId: live.tenantId, liveApiKeyId: live.apiKeyId },
+        'Obliguard agent WS refused: device already connected with another API key',
+      );
+      try { ws.close(4003, 'Device/API-key mismatch'); } catch { /* ignore */ }
+      return false;
+    }
+
     // Cancel any pending offline timer — agent reconnected in time
     const pendingTimer = this.offlineTimers.get(deviceUuid);
     if (pendingTimer) {
@@ -71,35 +115,55 @@ class ObliguardHubService {
 
     const conn: ObliguardConn = {
       ws, deviceUuid, deviceId: null, tenantId, apiKeyId, clientIp,
+      closing: false, seenHeartbeat: false, deadline: null, rowless: opts.rowless === true,
     };
     this.byDevice.set(deviceUuid, conn);
 
     ws.on('close', () => this._unregister(deviceUuid, ws));
     ws.on('error', () => this._unregister(deviceUuid, ws));
     ws.on('message', async (data: Buffer) => {
+      if (conn.closing || ws.readyState !== 1) return;
       try {
         const msg = JSON.parse(data.toString());
         switch (msg.type) {
           case 'heartbeat': await this._handleHeartbeat(conn, msg); break;
           case 'events':    await this._handleEventsFlush(conn, msg); break;
-          case 'firewall_response': this._resolveFirewallResponse(msg); break;
+          case 'firewall_response': this._resolveFirewallResponse(conn, msg); break;
           default:          break; // unknown message type — ignore
         }
       } catch { /* malformed JSON */ }
     });
 
-    // Drain pending DB command on connect (delivers commands queued while offline)
+    // Row-less / silent sockets are bounded: no heartbeat within the deadline → closed.
+    conn.deadline = setTimeout(() => {
+      if (!conn.seenHeartbeat) this.disconnectWhere((c) => c === conn, 4008, 'No heartbeat');
+    }, this.firstHeartbeatDeadlineMs);
+    conn.deadline.unref?.();
+    ws.once('close', () => { if (conn.deadline) clearTimeout(conn.deadline); });
+
+    // Drain a queued 'uninstall' on connect (other commands wait for the heartbeat)
     await this._drainPendingCommand(conn);
 
     logger.info({ deviceUuid, tenantId }, 'Obliguard agent command channel connected');
+    return true;
   }
 
   private _unregister(deviceUuid: string, ws: WebSocket): void {
     const existing = this.byDevice.get(deviceUuid);
     if (existing?.ws === ws) {
       const deviceId = existing.deviceId;
+      if (existing.deadline) { clearTimeout(existing.deadline); existing.deadline = null; }
       this.byDevice.delete(deviceUuid);
       logger.info({ deviceUuid }, 'Obliguard agent command channel disconnected');
+
+      // Pending firewall commands of this device can no longer be answered.
+      for (const [id, w] of this.firewallWaiters) {
+        if (w.deviceUuid === deviceUuid) {
+          clearTimeout(w.timer);
+          this.firewallWaiters.delete(id);
+          w.reject(new Error('Agent is not connected'));
+        }
+      }
 
       // Start an offline grace timer based on the device's resolved settings.
       // If the agent reconnects before the timer fires, register() cancels it.
@@ -107,6 +171,57 @@ class ObliguardHubService {
         this._startOfflineTimer(deviceUuid, deviceId);
       }
     }
+  }
+
+  // ── Teardown API ─────────────────────────────────────────────────────────────
+
+  /**
+   * Close every connection matching `pred`. Entries stay in byDevice until
+   * their 'close' event (_unregister keeps the offline-timer semantics); a
+   * socket that does not close within 5 s is terminated.
+   * Also the hook for tenant deletion (C13).
+   */
+  disconnectWhere(pred: (c: ObliguardConn) => boolean, code: number, reason: string): number {
+    let count = 0;
+    for (const conn of [...this.byDevice.values()]) {
+      if (!pred(conn)) continue;
+      conn.closing = true;
+      try {
+        conn.ws.close(code, reason);
+      } catch {
+        try { conn.ws.terminate(); } catch { /* ignore */ }
+      }
+      const t = setTimeout(() => {
+        try { if (conn.ws.readyState !== 3) conn.ws.terminate(); } catch { /* ignore */ }
+      }, 5000);
+      t.unref?.();
+      count++;
+    }
+    return count;
+  }
+
+  /**
+   * Live sockets of `apiKeyId` registered before their device row exists (the
+   * first heartbeat inserts it). The gate adds them to countPendingForKey so a
+   * key holder cannot open unbounded fresh-uuid sockets inside the
+   * first-heartbeat window.
+   */
+  countRowlessForKey(apiKeyId: number): number {
+    let n = 0;
+    for (const c of this.byDevice.values()) {
+      if (c.rowless && !c.closing && c.apiKeyId === apiKeyId) n++;
+    }
+    return n;
+  }
+
+  /** Close every live channel authenticated with `apiKeyId` (key deletion). */
+  disconnectByApiKey(apiKeyId: number): number {
+    return this.disconnectWhere((c) => c.apiKeyId === apiKeyId, 4003, 'API key revoked');
+  }
+
+  /** Close the live channel of a device (suspend / refuse / delete). */
+  disconnectDevice(uuid: string, reason: string): number {
+    return this.disconnectWhere((c) => c.deviceUuid === uuid, 4003, reason);
   }
 
   /**
@@ -146,28 +261,32 @@ class ObliguardHubService {
   }
 
   /**
-   * Drain any command queued in agent_devices.pending_command while the agent
-   * was offline. Clears the DB record before sending to prevent re-delivery.
+   * On connect: cache the device id of an APPROVED device and deliver a queued
+   * 'uninstall'. Other commands (e.g. 'update') are delivered by the next
+   * heartbeat's handlePush, with latestVersion. The conditional UPDATE prevents
+   * a double delivery racing handlePush; uninstall_commanded_at lets
+   * cleanupUninstalledDevices remove the device.
    */
   private async _drainPendingCommand(conn: ObliguardConn): Promise<void> {
     try {
       const row = await db('agent_devices')
         .where({ uuid: conn.deviceUuid, tenant_id: conn.tenantId })
-        .select('id', 'pending_command')
-        .first() as { id: number; pending_command: string | null } | undefined;
+        .first('id', 'status', 'pending_command') as
+        { id: number; status: string; pending_command: string | null } | undefined;
 
-      if (!row) return;
+      if (!row || row.status !== 'approved') return;
 
       // Cache the device ID for later use
       conn.deviceId = row.id;
 
-      if (!row.pending_command) return;
+      if (row.pending_command !== 'uninstall') return;
 
-      // Clear before delivering
-      await db('agent_devices').where({ id: row.id }).update({ pending_command: null });
+      const n = await db('agent_devices')
+        .where({ id: row.id, pending_command: 'uninstall' })
+        .update({ pending_command: null, uninstall_commanded_at: new Date(), updated_at: new Date() });
 
-      if (conn.ws.readyState === 1) {
-        conn.ws.send(JSON.stringify({ type: 'config', command: row.pending_command }));
+      if (n === 1 && conn.ws.readyState === 1 && !conn.closing) {
+        conn.ws.send(JSON.stringify({ type: 'config', command: 'uninstall' }));
       }
     } catch (e) {
       logger.error(e, 'obliguardHub: failed to drain pending command');
@@ -176,10 +295,11 @@ class ObliguardHubService {
 
   /**
    * Handle a heartbeat message from an Obliguard agent.
-   * Calls the full handlePush pipeline (updates metadata, resolves ban delta,
-   * service configs, etc.) and sends a `{ type: "config", ... }` response.
+   * Calls the full handlePush pipeline (binding, metadata, ban delta, service
+   * configs, etc.) and sends a `{ type: "config", ... }` response.
    */
   private async _handleHeartbeat(conn: ObliguardConn, msg: any): Promise<void> {
+    conn.seenHeartbeat = true;
     try {
       const body: ObliguardPushBody = {
         hostname:       msg.hostname       ?? '',
@@ -200,19 +320,31 @@ class ObliguardHubService {
         conn.clientIp,
         body,
       );
+      // The row exists now (or enrolment was deferred and the socket closes below).
+      conn.rowless = false;
+
+      if (response.status === 'refused') {
+        // Also covers suspended and binding mismatch. deviceId is KEPT so
+        // _unregister starts the offline grace timer (UI gets 'down').
+        this.disconnectWhere((c) => c === conn, 4003, 'Device refused');
+        return;
+      }
+
+      if (response.status === 'pending') {
+        // Don't send config to non-approved agents
+        conn.deviceId = null;
+        if (response.enrolmentDeferred) this.disconnectWhere((c) => c === conn, 1013, 'Enrolment deferred');
+        return;
+      }
+
+      agentService.touchApiKeyUsage(conn.apiKeyId);
 
       // Cache resolved device ID so events-flush path can use it without a DB lookup
       if (!conn.deviceId) {
         const row = await db('agent_devices')
-          .where({ uuid: conn.deviceUuid, tenant_id: conn.tenantId })
-          .select('id')
-          .first() as { id: number } | undefined;
+          .where({ uuid: conn.deviceUuid, tenant_id: conn.tenantId, status: 'approved' })
+          .first('id') as { id: number } | undefined;
         if (row) conn.deviceId = row.id;
-      }
-
-      if (response.status === 'pending' || response.status === 'refused') {
-        // Don't send config to non-approved agents
-        return;
       }
 
       // Build and send config reply
@@ -236,7 +368,7 @@ class ObliguardHubService {
         configMsg.command = response.command;
       }
 
-      if (conn.ws.readyState === 1) {
+      if (conn.ws.readyState === 1 && !conn.closing) {
         conn.ws.send(JSON.stringify(configMsg));
       }
     } catch (e) {
@@ -248,10 +380,10 @@ class ObliguardHubService {
    * Handle an events-flush frame: `{ type: "events", events: [...] }`.
    * Processes only the events pipeline (enrichment, insert, reputation,
    * threat detection, Starmap emit) — no ban/config overhead.
-   * Latency: typically <500 ms from event occurrence to Starmap update.
+   * processEventsFlush re-validates approval + tenant on every flush.
    */
   private async _handleEventsFlush(conn: ObliguardConn, msg: any): Promise<void> {
-    const events: AgentIpEvent[] = msg.events ?? [];
+    const events: AgentIpEvent[] = Array.isArray(msg.events) ? msg.events : [];
     if (events.length === 0) return;
 
     // Resolve device ID if not yet cached (first flush before any heartbeat)
@@ -261,7 +393,7 @@ class ObliguardHubService {
           .where({ uuid: conn.deviceUuid, tenant_id: conn.tenantId })
           .select('id', 'status')
           .first() as { id: number; status: string } | undefined;
-        if (!row || row.status === 'pending' || row.status === 'refused') return;
+        if (!(row && row.status === 'approved')) return;
         conn.deviceId = row.id;
       } catch {
         return;
@@ -278,7 +410,7 @@ class ObliguardHubService {
    */
   push(deviceUuid: string, cmd: OrCommand): boolean {
     const conn = this.byDevice.get(deviceUuid);
-    if (!conn || conn.ws.readyState !== 1) return false;
+    if (!conn || conn.closing || conn.ws.readyState !== 1) return false;
     try {
       conn.ws.send(JSON.stringify(cmd));
       return true;
@@ -290,31 +422,44 @@ class ObliguardHubService {
 
   // ── Firewall command: push and wait for response ─────────────────────────
 
-  private firewallWaiters = new Map<string, { resolve: (val: unknown) => void; timer: ReturnType<typeof setTimeout> }>();
+  private firewallWaiters = new Map<string, FirewallWaiter>();
 
   async pushAndWait(deviceUuid: string, cmd: OrCommand, timeoutMs = 30000): Promise<unknown> {
-    const delivered = this.push(deviceUuid, cmd);
-    if (!delivered) throw new Error('Agent is not connected');
-    logger.info({ deviceUuid, cmdType: cmd.type, cmdId: cmd.id }, 'pushAndWait: command sent, awaiting response');
-
+    // The waiter (bound to the target device) is registered BEFORE the push, so
+    // an immediate answer is never lost and only that device can resolve it.
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.firewallWaiters.delete(cmd.id);
         logger.warn({ deviceUuid, cmdId: cmd.id }, 'pushAndWait: TIMEOUT after ' + (timeoutMs / 1000) + 's');
         reject(new Error('Agent did not respond within ' + (timeoutMs / 1000) + 's'));
       }, timeoutMs);
-      this.firewallWaiters.set(cmd.id, { resolve, timer });
+      this.firewallWaiters.set(cmd.id, { resolve, reject, timer, deviceUuid });
+
+      if (!this.push(deviceUuid, cmd)) {
+        clearTimeout(timer);
+        this.firewallWaiters.delete(cmd.id);
+        reject(new Error('Agent is not connected'));
+        return;
+      }
+      logger.info({ deviceUuid, cmdType: cmd.type, cmdId: cmd.id }, 'pushAndWait: command sent, awaiting response');
     });
   }
 
-  private _resolveFirewallResponse(msg: { id?: string; [k: string]: unknown }): void {
-    if (!msg.id) {
-      logger.warn('Firewall response without id — ignoring');
+  private _resolveFirewallResponse(conn: ObliguardConn, msg: { id?: unknown; [k: string]: unknown }): void {
+    if (typeof msg.id !== 'string' || msg.id.length > 64) {
+      logger.warn('Firewall response without a valid id — ignoring');
       return;
     }
     const waiter = this.firewallWaiters.get(msg.id);
     if (!waiter) {
       logger.warn({ msgId: msg.id }, 'Firewall response for unknown/expired waiter');
+      return;
+    }
+    if (waiter.deviceUuid !== conn.deviceUuid) {
+      logger.warn(
+        { msgId: msg.id, expectedUuid: waiter.deviceUuid, fromUuid: conn.deviceUuid },
+        'Firewall response from another device — ignored',
+      );
       return;
     }
     logger.info({ msgId: msg.id, success: msg.success }, 'pushAndWait: response received');

@@ -6,10 +6,33 @@ L'agent Go d'Obliguard est capable de se mettre à jour lui-même et de se dési
 
 La version distante attendue arrive de deux façons :
 
-- **Au démarrage** : `checkForUpdate()` (`agent/main.go`) appelle `GET /api/agent/version` une seule fois et délègue à `applyUpdateIfNewer()`.
-- **En fonctionnement normal** : la version cible est piggybackée sur chaque réponse serveur, aussi bien sur l'ancien canal HTTP push (`push.go:70`, champ `LatestVersion`) que sur le canal WebSocket persistant (`cmd_ws.go:58`, champ `LatestVersion` du message de config). Dans `applyOGConfig()` (`agent/cmd_ws.go:288`), dès que `msg.LatestVersion != ""`, `applyUpdateIfNewer(cfg, msg.LatestVersion)` est appelé.
+- **Au démarrage** : `checkForUpdate()` (`agent/main.go`) appelle `GET /api/agent/version` une seule fois et délègue à `applyUpdateIfNewer()`. Depuis C17-1, cet appel (sans session) reçoit `{ "version": "" }` : toutes les versions de l'agent sortent immédiatement sur une version vide (`main.go`, et `agent/src/index.js` pour l'ancien agent Node). Le démarrage ne déclenche donc plus aucune mise à jour.
+- **En fonctionnement normal** : la version cible peut être jointe à la réponse serveur, aussi bien sur l'ancien canal HTTP push (`push.go`, champ `LatestVersion`) que sur le canal WebSocket persistant (`cmd_ws.go`, champ `LatestVersion` du message de config). Dans `applyOGConfig()` (`agent/cmd_ws.go`), dès que `msg.LatestVersion != ""`, `applyUpdateIfNewer(cfg, msg.LatestVersion)` est appelé. Le serveur n'envoie `latestVersion` **que si la politique de mise à jour le permet** (voir ci-dessous).
 
-Le serveur expose la version courante via `agentVersion()` dans `server/src/controllers/agent.controller.ts:70`, qui lit `agentService.getAgentVersion()` — la version des binaires disponibles dans `agent/dist/`.
+Le serveur lit la version servie dans `agent/VERSION` (repli : littéral `agentVersion` de `agent/main.go`, sauf `dev`), en cherchant le dossier `agent/` dans la disposition dist (`server/dist/src/services` → `/app/agent` en Docker) puis dans la disposition src (serveur lancé avec `tsx` en dev). Une valeur invalide (plus de 64 caractères, pas au format `X.Y.Z`) n'est jamais annoncée. La route de téléchargement utilise le même dossier.
+
+### Politique de mise à jour (C17-1)
+
+Le serveur décide quand un agent se met à jour. Trois niveaux, chacun `auto` | `manual` | `off` (absent = hériter) :
+
+- **global** : `app_config.agent_global_config.updatePolicy` (Paramètres → Réglages agents par défaut). Modifiable uniquement par un admin plateforme **depuis le tenant Default**. Non défini = défaut intégré **`manual`** (valeur de toutes les installations existantes au déploiement).
+- **groupe** : `monitor_groups.agent_group_config.updatePolicy`, hérité par les sous-groupes (`group_closure`). Admin plateforme, uniquement sur un groupe du tenant courant. Seuls les groupes **du tenant de l'agent** comptent dans la chaîne (un ancêtre d'un autre tenant est ignoré).
+- **agent** : colonne `agent_devices.update_policy` (migration 027). Membres du tenant courant ayant `monitor_rw`.
+
+Résolution : `off` à n'importe quel niveau est **absolu** (gèle tout le sous-arbre ; `off` global = arrêt d'urgence de toute la flotte). Sinon la valeur explicite la plus proche l'emporte (agent → groupe le plus proche → global → `manual`). Si la lecture de la chaîne de groupes échoue, l'agent est résolu `off` avec la source `unresolved` : pas de mise à jour, mais les bans et la whitelist continuent d'être livrés.
+
+`latestVersion` est envoyé (HTTP push et hub WS, via `handlePush`) seulement si :
+
+1. la version servie est strictement plus récente que celle remontée par l'agent (même comparaison que `isStrictlyNewer` en Go) ;
+2. la politique est `auto`, **ou** une demande explicite « Mettre à jour » est active.
+
+`auto` suit chaque nouvelle version dès que le serveur la sert (pas de plafond) : pour étager un déploiement, laisser le global en `manual`, passer un groupe pilote en `auto` (ou cliquer « Mettre à jour les agents en retard » sur ce groupe), vérifier, puis élargir.
+
+**Demande explicite** (`POST /api/agent/devices/:id/agent-update`, `/devices/bulk-request-update`, `/groups/:groupId/agent-update`, ou la commande `update`) : colonnes `update_requested_at` / `update_requested_version` / `update_requested_by`. Elle vise la version servie au moment du clic et devient caduque si le serveur en sert une autre, après **24 h**, ou si l'agent est suspendu, refusé ou passé en `off`. Elle est close dès que l'agent remonte la version visée.
+
+**Limitation** : au plus une offre par agent toutes les **10 minutes** (en `auto` comme sur demande) ; une demande est abandonnée après **3 offres** sans que l'agent remonte la nouvelle version. Recliquer redonne 3 offres mais ne raccourcit pas l'intervalle de 10 minutes (pas de boucle téléchargement/redémarrage). Cet état est en mémoire : un redémarrage du serveur peut permettre une offre de plus.
+
+Un import (Import/Export) ne réactive jamais la mise à jour automatique : le contrôleur d'import passe `agent_group_config` par `sanitizeImportedAgentGroupConfig`, qui ignore une politique `auto` et ne garde que `manual` / `off` (et les clés connues). Les routes d'import ne sont pas montées actuellement ; la protection est déjà câblée pour leur remise en service.
 
 ### Comparaison de version
 
@@ -40,7 +63,7 @@ const ALLOWED_AGENT_BINARIES: Record<string, string> = {
 };
 ```
 
-Tout nom hors de cette liste renvoie 404. Le fichier est résolu depuis `agent/dist/` sur le disque du serveur (`path.resolve(__dirname, '../../../../agent/dist', binaryName)`) et servi via `res.sendFile()`.
+Tout nom hors de cette liste renvoie 404. Le fichier est résolu depuis `agent/dist/` sur le disque du serveur (dossier `agent/` résolu par `resolveAgentRoot()`, dispositions dist puis src) et servi via `res.sendFile()`.
 
 ### Application de la mise à jour
 
