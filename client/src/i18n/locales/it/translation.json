@@ -579,6 +579,13 @@
     "failedUpdate": "Impossibile aggiornare l'impostazione"
   },
   "profile": {
+    "themePicker": {
+      "obliOperator": "Tema scuro blu notte, accento ambra",
+      "obliDaylight": "Tema chiaro Nordic Mist, grigio-azzurro tenue",
+      "obliDim": "Tema scuro ardesia Nord, accento ambra",
+      "modern": "Interfaccia scura con accento arancione",
+      "neon": "Interfaccia molto scura con effetti luminosi arancioni"
+    },
     "title": "Il mio profilo",
     "sectionProfile": "Nome visualizzato",
     "usernameLabel": "Nome utente",

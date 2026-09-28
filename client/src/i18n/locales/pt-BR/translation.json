@@ -579,6 +579,13 @@
     "failedUpdate": "Falha ao atualizar configuração"
   },
   "profile": {
+    "themePicker": {
+      "obliOperator": "Tema escuro azul-noite, destaque âmbar",
+      "obliDaylight": "Tema claro Nordic Mist, cinza-azulado suave",
+      "obliDim": "Tema escuro ardósia Nord, destaque âmbar",
+      "modern": "Interface escura com destaque laranja",
+      "neon": "Interface bem escura com efeitos luminosos laranja"
+    },
     "title": "Meu Perfil",
     "sectionProfile": "Nome de Exibição",
     "usernameLabel": "Nome de usuário",

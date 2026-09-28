@@ -579,6 +579,13 @@
     "failedUpdate": "Nie udało się zaktualizować ustawienia"
   },
   "profile": {
+    "themePicker": {
+      "obliOperator": "Ciemny motyw w kolorze nocnego błękitu, bursztynowy akcent",
+      "obliDaylight": "Jasny motyw Nordic Mist, delikatny niebieskoszary",
+      "obliDim": "Ciemny motyw w kolorze łupka Nord, bursztynowy akcent",
+      "modern": "Ciemny interfejs z pomarańczowym akcentem",
+      "neon": "Bardzo ciemny interfejs z pomarańczowymi efektami świetlnymi"
+    },
     "title": "Mój profil",
     "sectionProfile": "Nazwa wyświetlana",
     "usernameLabel": "Nazwa użytkownika",

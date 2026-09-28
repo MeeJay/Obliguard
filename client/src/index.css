@@ -175,6 +175,83 @@
   background: #e5e9f0;
 }
 
+/* ── Obli Dim ─────────────────────────────────────────────────────────────────
+   Dark companion of Obli Daylight: Nord "Polar Night" neutrals (mid-dark slate,
+   softer than Operator's near-black) so a second server can be told apart at a
+   glance without switching to a light theme. It is a DARK theme for every
+   light/dark decision (logo, native controls via color-scheme).
+   Dim changes NEUTRALS ONLY: the accent block below (Obliguard amber) is copied
+   verbatim from Obli Operator and must never diverge from it.
+   Same rule as Daylight: every token is a plain RGB triplet (no alpha).
+   Status tokens mapped by USAGE in Obliguard: status-down keeps the SEMANTICS
+   of Operator / Daylight, where it is the neutral slate (offline agent dots,
+   MikroTik 'Offline', and also errors / bans / failures / the danger button),
+   so it stays neutral grey here — a red down would turn offline agents red on
+   Dim only; status-pending = warnings (SSO unavailable banner, uptime
+   95-99 %) so amber; maintenance = blue (kept distinct from paused);
+   ssl-expired = lavender (kept distinct from down).
+   ───────────────────────────────────────────────────────────────────────────── */
+[data-theme="obli-dim"] {
+  color-scheme: dark;
+
+  --c-bg-primary:            46 52 64;      /* #2e3440  page */
+  --c-bg-secondary:          59 66 82;      /* #3b4252  cards / surfaces */
+  --c-bg-tertiary:           67 76 94;      /* #434c5e  inputs / pill containers */
+  --c-bg-hover:              70 80 99;      /* #465063  hover, one step above tertiary */
+  --c-bg-active:             74 84 104;     /* #4a5468  active / selected */
+
+  --c-border:                76 86 106;     /* #4c566a */
+  --c-border-light:          94 106 130;    /* #5e6a82 */
+
+  --c-text-primary:          236 239 244;   /* #eceff4 */
+  --c-text-secondary:        216 222 233;   /* #d8dee9 */
+  --c-text-muted:            163 171 188;   /* #a3abbc */
+
+  --c-status-up:             108 203 143;   /* #6ccb8f */
+  --c-status-up-bg:          47 74 61;      /* #2f4a3d */
+  --c-status-down:           138 147 166;   /* #8a93a6  offline / neutral, as in Operator */
+  --c-status-down-bg:        54 60 74;      /* #363c4a */
+  --c-status-pending:        235 203 139;   /* #ebcb8b  used as warning */
+  --c-status-pending-bg:     75 69 53;      /* #4b4535 */
+  --c-status-maintenance:    136 166 224;   /* #88a6e0 */
+  --c-status-maintenance-bg: 53 66 94;      /* #35425e */
+  --c-status-paused:         138 147 166;   /* #8a93a6 */
+  --c-status-paused-bg:      54 60 74;      /* #363c4a */
+  --c-status-ssl-warning:    235 203 139;   /* #ebcb8b */
+  --c-status-ssl-warning-bg: 75 69 53;      /* #4b4535 */
+  --c-status-ssl-expired:    197 163 224;   /* #c5a3e0 */
+  --c-status-ssl-expired-bg: 69 59 90;      /* #453b5a */
+
+  /* Obliguard accent — verbatim from Obli Operator (orange #f5a623, highlight #ffb84a) */
+  --c-accent:                245 166 35;
+  --c-accent-hover:          255 184 74;
+  --c-accent-dark:           184 124 24;
+  --c-primary:               245 166 35;
+
+  --shadow-card: 0 1px 0 0 rgba(255,255,255,0.03), 0 6px 20px -8px rgba(20,23,30,0.40);
+  --shadow-glow: 0 0 0 1px rgb(var(--c-accent) / 0.20) inset, 0 6px 26px -10px rgb(var(--c-accent) / 0.28);
+}
+
+/* Obli Dim chrome: topbar (Header <header>) + sidebar (Sidebar <aside>, both
+   collapsed and expanded) one step DARKER than the page (#282d37). They use
+   bg-bg-secondary, the card token, and are the only <header>/<aside> elements
+   of the app. */
+[data-theme="obli-dim"] header.bg-bg-secondary,
+[data-theme="obli-dim"] aside.bg-bg-secondary {
+  background-color: rgb(40 45 55);          /* #282d37 */
+}
+/* Obli Dim white-on-status-down fills (Button danger, SettingsPage action
+   button): white on the #8a93a6 slate is only 3.1:1, so the fill takes
+   Operator's own danger slate #6b7399 (white 4.6:1, same button as Operator),
+   and #5e6a82 (white 5.4:1) while hovering a hover:bg-status-down/80 button.
+   Text and tint uses of status-down are unchanged. */
+[data-theme="obli-dim"] .bg-status-down.text-white:not(:hover) {
+  background-color: rgb(107 115 153);
+}
+[data-theme="obli-dim"] .bg-status-down.text-white.hover\:bg-status-down\/80:hover {
+  background-color: rgb(94 106 130);
+}
+
 /* ─────────────────────────────────────────────────────────────────────────────
    Utility — hide scrollbar
    ───────────────────────────────────────────────────────────────────────────── */

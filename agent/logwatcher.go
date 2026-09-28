@@ -363,6 +363,7 @@ func (lw *LogWatcher) tailJournald(watchKey, unit, svcKey string, cfg AgentServi
 		return
 	}
 
+	var delay time.Duration
 	for {
 		select {
 		case <-lw.stopCh:
@@ -384,7 +385,9 @@ func (lw *LogWatcher) tailJournald(watchKey, unit, svcKey string, cfg AgentServi
 			continue
 		}
 
+		startedAt := time.Now()
 		scanner := bufio.NewScanner(stdout)
+		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 		for scanner.Scan() {
 			// Check for shutdown between lines.
 			select {
@@ -421,6 +424,9 @@ func (lw *LogWatcher) tailJournald(watchKey, unit, svcKey string, cfg AgentServi
 			}
 		}
 
+		// Scan may stop on a read error / oversized line while the child is still
+		// running: kill it so Wait always returns and the process is reaped.
+		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 
 		select {
@@ -432,12 +438,18 @@ func (lw *LogWatcher) tailJournald(watchKey, unit, svcKey string, cfg AgentServi
 		default:
 		}
 
-		log.Printf("LogWatcher: journalctl (%s) exited — restarting in 5s", unit)
-		// Remove from watchedFiles so startWatchers() can restart the goroutine cleanly.
-		lw.mu.Lock()
-		delete(lw.watchedFiles, watchKey)
-		lw.mu.Unlock()
-		time.Sleep(5 * time.Second)
+		// This goroutine keeps ownership of watchKey while it restarts the child
+		// itself: releasing the key here let startWatchers() (every 10s) spawn a
+		// second tailer for the same unit on every exit, multiplying journalctl
+		// processes (thousands after a few hours when journalctl exits quickly).
+		delay = nextRestartDelay(delay, time.Since(startedAt))
+		log.Printf("LogWatcher: journalctl (%s) exited — restarting in %s", unit, delay)
+		if !lw.sleepOrStop(delay) {
+			lw.mu.Lock()
+			delete(lw.watchedFiles, watchKey)
+			lw.mu.Unlock()
+			return
+		}
 	}
 }
 
@@ -477,6 +489,7 @@ func (lw *LogWatcher) tailClog(watchKey, clogFile, svcKey string, cfg AgentServi
 		return
 	}
 
+	var delay time.Duration
 	for {
 		select {
 		case <-lw.stopCh:
@@ -497,7 +510,9 @@ func (lw *LogWatcher) tailClog(watchKey, clogFile, svcKey string, cfg AgentServi
 			continue
 		}
 
+		startedAt := time.Now()
 		scanner := bufio.NewScanner(stdout)
+		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 		for scanner.Scan() {
 			select {
 			case <-lw.stopCh:
@@ -533,6 +548,9 @@ func (lw *LogWatcher) tailClog(watchKey, clogFile, svcKey string, cfg AgentServi
 			}
 		}
 
+		// Scan may stop on a read error / oversized line while the child is still
+		// running: kill it so Wait always returns and the process is reaped.
+		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 
 		select {
@@ -544,11 +562,15 @@ func (lw *LogWatcher) tailClog(watchKey, clogFile, svcKey string, cfg AgentServi
 		default:
 		}
 
-		log.Printf("LogWatcher: clog (%s) exited — restarting in 5s", clogFile)
-		lw.mu.Lock()
-		delete(lw.watchedFiles, watchKey)
-		lw.mu.Unlock()
-		time.Sleep(5 * time.Second)
+		// Keep ownership of watchKey while restarting (see tailJournald).
+		delay = nextRestartDelay(delay, time.Since(startedAt))
+		log.Printf("LogWatcher: clog (%s) exited — restarting in %s", clogFile, delay)
+		if !lw.sleepOrStop(delay) {
+			lw.mu.Lock()
+			delete(lw.watchedFiles, watchKey)
+			lw.mu.Unlock()
+			return
+		}
 	}
 }
 
@@ -933,5 +955,28 @@ func makeEvent(ip, username, service, eventType, rawLog string) AgentIpEvent {
 		EventType: eventType,
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		RawLog:    rawLog,
+	}
+}
+
+// nextRestartDelay backs off when a followed child (journalctl / clog) dies
+// quickly: 5s, doubling up to 5 min; a run that lasted over a minute resets it.
+func nextRestartDelay(prev, ran time.Duration) time.Duration {
+	if ran > time.Minute || prev <= 0 {
+		return 5 * time.Second
+	}
+	next := prev * 2
+	if next > 5*time.Minute {
+		next = 5 * time.Minute
+	}
+	return next
+}
+
+// sleepOrStop waits d, returning false if the watcher is stopped meanwhile.
+func (lw *LogWatcher) sleepOrStop(d time.Duration) bool {
+	select {
+	case <-lw.stopCh:
+		return false
+	case <-time.After(d):
+		return true
 	}
 }

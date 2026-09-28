@@ -579,6 +579,13 @@
     "failedUpdate": "Failed to update setting"
   },
   "profile": {
+    "themePicker": {
+      "obliOperator": "미드나이트 블루 다크 테마, 앰버 강조색",
+      "obliDaylight": "Nordic Mist 라이트 테마, 부드러운 블루 그레이",
+      "obliDim": "Nord 슬레이트 다크 테마, 앰버 강조색",
+      "modern": "주황색 강조색의 다크 인터페이스",
+      "neon": "주황색 발광 효과가 있는 매우 어두운 인터페이스"
+    },
     "title": "My Profile",
     "sectionProfile": "Display Name",
     "usernameLabel": "사용자명",

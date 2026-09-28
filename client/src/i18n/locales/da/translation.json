@@ -579,6 +579,13 @@
     "failedUpdate": "Kunne ikke opdatere indstilling"
   },
   "profile": {
+    "themePicker": {
+      "obliOperator": "Mørkt midnatsblåt tema, ravfarvet accent",
+      "obliDaylight": "Lyst Nordic Mist-tema, blød blågrå",
+      "obliDim": "Mørkt Nord-skifertema, ravfarvet accent",
+      "modern": "Mørk brugerflade med orange accent",
+      "neon": "Dybt mørk brugerflade med orange glødeeffekter"
+    },
     "title": "Min Profil",
     "sectionProfile": "Visningsnavn",
     "usernameLabel": "Brugernavn",

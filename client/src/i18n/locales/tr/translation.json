@@ -579,6 +579,13 @@
     "failedUpdate": "Ayar güncellenemedi"
   },
   "profile": {
+    "themePicker": {
+      "obliOperator": "Gece mavisi koyu tema, kehribar vurgu",
+      "obliDaylight": "Nordic Mist açık tema, yumuşak mavi-gri",
+      "obliDim": "Nord arduvaz koyu tema, kehribar vurgu",
+      "modern": "Turuncu vurgulu koyu arayüz",
+      "neon": "Turuncu parlama efektli çok koyu arayüz"
+    },
     "title": "Profilim",
     "sectionProfile": "Görünen Ad",
     "usernameLabel": "Kullanıcı adı",

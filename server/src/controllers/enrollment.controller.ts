@@ -2,6 +2,7 @@ import type { Request, Response, NextFunction } from 'express';
 import { db } from '../db';
 import { AppError } from '../middleware/errorHandler';
 import { z } from 'zod';
+import { APP_THEME_IDS } from '../validators/profile.schema';
 
 export const REQUIRED_ENROLLMENT_VERSION = 2;
 
@@ -11,7 +12,7 @@ const enrollmentSchema = z.object({
   preferredLanguage: z.string().max(10).default('en'),
   toastEnabled: z.boolean().default(true),
   toastPosition: z.enum(['top-center', 'bottom-right']).default('bottom-right'),
-  preferredTheme: z.enum(['obli-operator', 'obli-daylight', 'modern', 'neon']).default('obli-operator'),
+  preferredTheme: z.enum(APP_THEME_IDS).default('obli-operator'),
 });
 
 export const enrollmentController = {

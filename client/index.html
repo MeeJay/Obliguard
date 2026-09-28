@@ -13,7 +13,7 @@
     <script>
       try {
         var t = localStorage.getItem('og-theme');
-        if (t === 'obli-operator' || t === 'obli-daylight' || t === 'modern' || t === 'neon') {
+        if (t === 'obli-operator' || t === 'obli-daylight' || t === 'obli-dim' || t === 'modern' || t === 'neon') {
           document.documentElement.dataset.theme = t;
         } else {
           document.documentElement.dataset.theme = 'obli-operator';
@@ -24,6 +24,7 @@
     </script>
     <style>
       [data-theme="obli-daylight"] body { background: #e5e9f0; }
+      [data-theme="obli-dim"] body { background: #2e3440; }
     </style>
   </head>
   <body class="bg-bg-primary text-text-primary">

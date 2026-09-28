@@ -580,6 +580,13 @@
     "failedUpdate": "Échec de la mise à jour du paramètre"
   },
   "profile": {
+    "themePicker": {
+      "obliOperator": "Thème sombre bleu nuit, accent ambre",
+      "obliDaylight": "Thème clair Nordic Mist, gris-bleu doux",
+      "obliDim": "Thème sombre ardoise Nord, accent ambre",
+      "modern": "Interface sombre avec accent orange",
+      "neon": "Interface sombre profonde avec effets lumineux orange"
+    },
     "title": "Mon profil",
     "sectionProfile": "Nom d'affichage",
     "usernameLabel": "Identifiant",

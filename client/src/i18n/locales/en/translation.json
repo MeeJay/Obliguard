@@ -580,6 +580,13 @@
     "failedUpdate": "Failed to update setting"
   },
   "profile": {
+    "themePicker": {
+      "obliOperator": "Midnight-blue dark theme, amber accent",
+      "obliDaylight": "Nordic Mist light theme, soft blue-grey",
+      "obliDim": "Nord slate mid-dark theme, amber accent",
+      "modern": "Dark interface with orange accent",
+      "neon": "Deep dark interface with orange glow effects"
+    },
     "title": "My Profile",
     "sectionProfile": "Display Name",
     "usernameLabel": "Username",

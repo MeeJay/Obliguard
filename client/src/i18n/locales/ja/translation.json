@@ -579,6 +579,13 @@
     "failedUpdate": "設定の更新に失敗しました"
   },
   "profile": {
+    "themePicker": {
+      "obliOperator": "ミッドナイトブルーのダークテーマ、アンバーのアクセント",
+      "obliDaylight": "Nordic Mist ライトテーマ、やわらかなブルーグレー",
+      "obliDim": "Nord スレートのダークテーマ、アンバーのアクセント",
+      "modern": "オレンジのアクセントを備えたダークインターフェース",
+      "neon": "オレンジの発光効果を備えた漆黒のインターフェース"
+    },
     "title": "マイプロフィール",
     "sectionProfile": "表示名",
     "usernameLabel": "ユーザー名",

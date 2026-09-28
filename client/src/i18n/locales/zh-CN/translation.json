@@ -579,6 +579,13 @@
     "failedUpdate": "更新设置失败"
   },
   "profile": {
+    "themePicker": {
+      "obliOperator": "午夜蓝深色主题，琥珀色强调色",
+      "obliDaylight": "Nordic Mist 浅色主题，柔和蓝灰色",
+      "obliDim": "Nord 石板灰深色主题，琥珀色强调色",
+      "modern": "深色界面，橙色强调色",
+      "neon": "极深色界面，橙色发光效果"
+    },
     "title": "我的个人资料",
     "sectionProfile": "显示名称",
     "usernameLabel": "用户名",

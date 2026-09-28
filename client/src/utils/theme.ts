@@ -5,7 +5,8 @@ export { type AppTheme };
 const STORAGE_KEY = 'og-theme';
 
 const DEFAULT_THEME: AppTheme = 'obli-operator';
-const KNOWN = new Set<AppTheme>(['obli-operator', 'obli-daylight', 'modern', 'neon']);
+// Keep in sync with the inline FOUC script in client/index.html (its own list).
+const KNOWN = new Set<AppTheme>(['obli-operator', 'obli-daylight', 'obli-dim', 'modern', 'neon']);
 
 /**
  * Apply a theme by setting data-theme on <html> and persisting it.

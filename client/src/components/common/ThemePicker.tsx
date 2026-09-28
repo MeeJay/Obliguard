@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import type { AppTheme } from '@obliview/shared';
 import { applyTheme } from '@/utils/theme';
 import { cn } from '@/utils/cn';
@@ -9,7 +10,11 @@ interface ThemePickerProps {
 
 interface ThemeOption {
   id: AppTheme;
+  /** Brand name — identical in every locale, not translated. */
   label: string;
+  /** i18n key under `profile.themePicker.*`. */
+  descriptionKey: string;
+  /** English fallback shown if the key is missing. */
   description: string;
   preview: {
     bg: string;
@@ -19,6 +24,8 @@ interface ThemeOption {
     textPrimary: string;
     textMuted: string;
     dot: string;
+    /** Sidebar colour when it differs from the cards (Obli Dim: darker chrome). */
+    chrome?: string;
   };
 }
 
@@ -26,7 +33,8 @@ const THEMES: ThemeOption[] = [
   {
     id: 'obli-operator',
     label: 'Obli Operator',
-    description: 'Thème sombre bleu nuit, accent ambre',
+    descriptionKey: 'obliOperator',
+    description: 'Midnight-blue dark theme, amber accent',
     preview: {
       bg:          '#0b0d1a',
       card:        '#131728',
@@ -40,7 +48,8 @@ const THEMES: ThemeOption[] = [
   {
     id: 'obli-daylight',
     label: 'Obli Daylight',
-    description: 'Thème clair Nordic Mist, gris-bleu doux',
+    descriptionKey: 'obliDaylight',
+    description: 'Nordic Mist light theme, soft blue-grey',
     preview: {
       bg:          '#e5e9f0',
       card:        '#eceff4',
@@ -52,9 +61,28 @@ const THEMES: ThemeOption[] = [
     },
   },
   {
+    // Dark companion of Daylight (Nord Polar Night neutrals). The accent is
+    // Obliguard's Operator amber, unchanged: Dim changes neutrals only.
+    id: 'obli-dim',
+    label: 'Obli Dim',
+    descriptionKey: 'obliDim',
+    description: 'Nord slate mid-dark theme, amber accent',
+    preview: {
+      bg:          '#2e3440',
+      card:        '#3b4252',
+      border:      '#4c566a',
+      accent:      '#f5a623',
+      textPrimary: '#eceff4',
+      textMuted:   '#a3abbc',
+      dot:         '#6ccb8f',
+      chrome:      '#282d37',
+    },
+  },
+  {
     id: 'modern',
     label: 'Modern UI',
-    description: 'Interface sombre avec accent orange',
+    descriptionKey: 'modern',
+    description: 'Dark interface with orange accent',
     preview: {
       bg:          '#0d0d0c',
       card:        '#151513',
@@ -68,7 +96,8 @@ const THEMES: ThemeOption[] = [
   {
     id: 'neon',
     label: 'Neon UI',
-    description: 'Interface sombre profonde avec effets lumineux orange',
+    descriptionKey: 'neon',
+    description: 'Deep dark interface with orange glow effects',
     preview: {
       bg:          '#07080a',
       card:        '#0d0e11',
@@ -89,7 +118,7 @@ function MiniPreview({ theme }: { theme: ThemeOption }) {
       <rect width="120" height="80" fill={p.bg} />
 
       {/* Sidebar */}
-      <rect x="0" y="0" width="28" height="80" fill={p.card} />
+      <rect x="0" y="0" width="28" height="80" fill={p.chrome ?? p.card} />
       {/* Sidebar items */}
       <rect x="4" y="10" width="20" height="4" rx="2" fill={p.border} />
       <rect x="4" y="18" width="16" height="4" rx="2" fill={p.border} />
@@ -127,6 +156,7 @@ function MiniPreview({ theme }: { theme: ThemeOption }) {
 }
 
 export function ThemePicker({ value, onChange }: ThemePickerProps) {
+  const { t } = useTranslation();
   const handleSelect = (theme: AppTheme) => {
     applyTheme(theme);
     onChange(theme);
@@ -172,7 +202,7 @@ export function ThemePicker({ value, onChange }: ThemePickerProps) {
                   {theme.label}
                 </div>
                 <div className="text-[11px] text-text-muted leading-tight mt-0.5 truncate">
-                  {theme.description}
+                  {t(`profile.themePicker.${theme.descriptionKey}`, theme.description)}
                 </div>
               </div>
             </div>

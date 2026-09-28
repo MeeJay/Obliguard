@@ -30,7 +30,8 @@ interface LogoProps {
 /**
  * Obliguard wordmark. Uses the black-text variant on the light Obli Daylight
  * theme (readable on a white surface) and the default white-text variant on the
- * dark themes.
+ * dark themes, Obli Dim included (the check is a whitelist of the light theme,
+ * so a new dark theme needs no change here).
  */
 export function Logo({ className, alt = 'Obliguard' }: LogoProps) {
   const src = useIsDaylight() ? '/logo-daylight.svg' : '/logo.svg';

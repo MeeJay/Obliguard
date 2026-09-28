@@ -579,6 +579,13 @@
     "failedUpdate": "Aktualizace nastavení se nezdařila"
   },
   "profile": {
+    "themePicker": {
+      "obliOperator": "Tmavý motiv v barvě půlnoční modři, jantarový akcent",
+      "obliDaylight": "Světlý motiv Nordic Mist, jemná modrošedá",
+      "obliDim": "Tmavý motiv v barvě břidlice Nord, jantarový akcent",
+      "modern": "Tmavé rozhraní s oranžovým akcentem",
+      "neon": "Velmi tmavé rozhraní s oranžovými světelnými efekty"
+    },
     "title": "Můj profil",
     "sectionProfile": "Zobrazované jméno",
     "usernameLabel": "Uživatelské jméno",
