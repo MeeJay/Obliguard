@@ -52,6 +52,12 @@ export async function up(knex: Knex): Promise<void> {
       // response playbooks stay read-only.
       t.boolean('has_write_consent').notNullable().defaultTo(false);
       t.boolean('exo_worker_enabled').notNullable().defaultTo(true);
+      // Whether the service principal actually holds the Exchange role. The
+      // enrolment script reports it after verifying membership. Exchange.ManageAsApp
+      // alone grants nothing: without the role every Exchange command, reads
+      // included, is denied. When false, the P-EXO controls are reported as
+      // uncovered through F-DATA-01 rather than silently passing.
+      t.boolean('exo_role_assigned').notNullable().defaultTo(false);
 
       // ── Per-source progress. A source that stops advancing is what F-DATA-01
       //    reports on: no conclusion may cover a period that was never fetched. ──

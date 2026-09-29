@@ -195,45 +195,82 @@ function Register-ObliguardM365 {
     # ── 7. Rôle Exchange ─────────────────────────────────────────────────────
     # Exchange.ManageAsApp ouvre la porte, ce rôle décide de ce qu'on peut lire.
     # Sans lui, toutes les commandes Exchange échouent en accès refusé, y compris
-    # les lectures : c'est ce qui rend les contrôles P-EXO inopérants.
+    # les lectures : les contrôles P-EXO seraient tous inopérants, et ce sont eux
+    # qui voient les règles de boîte masquées, les transferts et la trace des
+    # messages, c'est-à-dire l'essentiel de ce qu'un compte compromis laisse
+    # derrière lui. C'est donc une étape obligatoire, pas une option.
+    $exchangeRoleAssigned = $false
+
     if ($SkipExchange) {
-        Write-Host '[7/7] Rôle Exchange ignoré (-SkipExchange).' -ForegroundColor Yellow
+        # Sortie de secours explicite, pour un client qui refuse ce rôle. Le
+        # serveur en est informé et signalera les contrôles P-EXO comme non
+        # couverts, plutôt que de les déclarer conformes.
+        Write-Host '[7/7] Rôle Exchange volontairement ignoré (-SkipExchange).' -ForegroundColor Yellow
+        Write-Host '      Les contrôles P-EXO seront signalés comme non couverts.' -ForegroundColor Yellow
         Show-ObliguardExchangeInstructions -Plan $plan -AppId $app.AppId -SpObjectId $appSp.Id
-    } elseif (Get-Module -ListAvailable -Name ExchangeOnlineManagement) {
+    } else {
         Write-Host '[7/7] Attribution du rôle Exchange...'
+        if (-not (Get-Module -ListAvailable -Name ExchangeOnlineManagement)) {
+            Write-Host '      Installation du module ExchangeOnlineManagement pour l''utilisateur courant...'
+            Install-Module ExchangeOnlineManagement -Scope CurrentUser -Force -AllowClobber
+        }
+        Import-Module ExchangeOnlineManagement -ErrorAction Stop
+
         try {
-            Import-Module ExchangeOnlineManagement -ErrorAction Stop
+            Write-Host '      Connexion à Exchange Online (seconde authentification)...'
             Connect-ExchangeOnline -ShowBanner:$false -ErrorAction Stop
+
             $existing = Get-ServicePrincipal -ErrorAction SilentlyContinue |
                 Where-Object { $_.AppId -eq $app.AppId } | Select-Object -First 1
             if (-not $existing) {
                 New-ServicePrincipal -AppId $app.AppId -ObjectId $appSp.Id `
                     -DisplayName $plan.appDisplayName -ErrorAction Stop | Out-Null
+                Write-Host '      Principal de service Exchange créé'
             }
-            Add-RoleGroupMember -Identity $plan.exchangeRole -Member $appSp.Id -ErrorAction Stop
-            Write-Host "      Rôle « $($plan.exchangeRole) » attribué"
+
+            try {
+                Add-RoleGroupMember -Identity $plan.exchangeRole -Member $appSp.Id -ErrorAction Stop
+                Write-Host "      Rôle « $($plan.exchangeRole) » attribué"
+            } catch {
+                if ($_.Exception.Message -match 'already a member') {
+                    Write-Host "      Rôle « $($plan.exchangeRole) » déjà attribué"
+                } else {
+                    throw
+                }
+            }
+
+            # Contrôle par l'usage : l'appartenance au groupe ne prouve pas que
+            # les commandes passent. Une lecture triviale le prouve.
+            $members = Get-RoleGroupMember -Identity $plan.exchangeRole -ErrorAction Stop
+            if (@($members | Where-Object { $_.Guid -eq $appSp.Id -or $_.Name -eq $appSp.Id }).Count -eq 0) {
+                throw "Le principal de service n'apparaît pas dans « $($plan.exchangeRole) » après attribution."
+            }
+            $exchangeRoleAssigned = $true
+            Write-Host '      Appartenance au rôle vérifiée'
         } catch {
-            if ($_.Exception.Message -match 'already a member') {
-                Write-Host "      Rôle « $($plan.exchangeRole) » déjà attribué"
-            } else {
-                Write-Warning "      Attribution du rôle Exchange impossible : $($_.Exception.Message)"
-                Show-ObliguardExchangeInstructions -Plan $plan -AppId $app.AppId -SpObjectId $appSp.Id
-            }
+            Write-Host ''
+            Write-Warning "Attribution du rôle Exchange impossible : $($_.Exception.Message)"
+            Show-ObliguardExchangeInstructions -Plan $plan -AppId $app.AppId -SpObjectId $appSp.Id
+            Disconnect-MgGraph | Out-Null
+            # On interrompt : la moitié des contrôles reposent sur Exchange, et un
+            # enrôlement à moitié fait qui se présente comme réussi produirait des
+            # rapports rassurants sur un périmètre qui n'a jamais été regardé.
+            # Relancer ce script une fois le problème corrigé, ou avec
+            # -SkipExchange pour assumer un périmètre réduit.
+            throw 'Enrôlement interrompu : le rôle Exchange est requis. Corriger, puis relancer ce script (ou utiliser -SkipExchange pour accepter un périmètre réduit).'
         } finally {
             Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue
         }
-    } else {
-        Write-Host '[7/7] Module ExchangeOnlineManagement absent.' -ForegroundColor Yellow
-        Show-ObliguardExchangeInstructions -Plan $plan -AppId $app.AppId -SpObjectId $appSp.Id
     }
 
     # ── Retour à Obliguard ───────────────────────────────────────────────────
     Write-Host ''
     Write-Host 'Retour des identifiants à Obliguard...'
     $callback = @{
-        token         = $Token
-        entraTenantId = $ctx.TenantId
-        clientId      = $app.AppId
+        token                = $Token
+        entraTenantId        = $ctx.TenantId
+        clientId             = $app.AppId
+        exchangeRoleAssigned = $exchangeRoleAssigned
     } | ConvertTo-Json
 
     # Les permissions fraîchement accordées mettent quelques secondes à se
@@ -260,6 +297,11 @@ function Register-ObliguardM365 {
     Write-Host "  Application    : $($app.AppId)"
     Write-Host "  Licence        : $(if ($result.licenceProfile) { $result.licenceProfile } else { 'non déterminée' })"
     Write-Host "  Permissions OK : $($result.grantedScopes.Count)"
+    if ($exchangeRoleAssigned) {
+        Write-Host "  Exchange       : rôle « $($plan.exchangeRole) » actif, contrôles P-EXO couverts"
+    } else {
+        Write-Host '  Exchange       : rôle absent, contrôles P-EXO non couverts' -ForegroundColor Yellow
+    }
     if ($result.missingScopes -and $result.missingScopes.Count -gt 0) {
         Write-Host "  Manquantes     : $($result.missingScopes -join ', ')" -ForegroundColor Yellow
         Write-Host ''

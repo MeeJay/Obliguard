@@ -209,10 +209,11 @@ export async function getM365EnrolPlan(req: Request, res: Response): Promise<voi
  * du sondage des permissions, que le script affiche à l'opérateur.
  */
 export async function completeM365Enrolment(req: Request, res: Response): Promise<void> {
-  const { token, entraTenantId, clientId } = (req.body ?? {}) as {
+  const { token, entraTenantId, clientId, exchangeRoleAssigned } = (req.body ?? {}) as {
     token?: string;
     entraTenantId?: string;
     clientId?: string;
+    exchangeRoleAssigned?: boolean;
   };
   if (!token || !entraTenantId || !clientId) {
     res.status(400).json({ error: 'token, entraTenantId et clientId sont obligatoires' });
@@ -220,7 +221,9 @@ export async function completeM365Enrolment(req: Request, res: Response): Promis
   }
 
   try {
-    res.json(await m365TenantService.completeEnrolment(token, entraTenantId, clientId));
+    res.json(
+      await m365TenantService.completeEnrolment(token, entraTenantId, clientId, Boolean(exchangeRoleAssigned)),
+    );
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Erreur inattendue';
     logger.warn({ err }, 'Enrôlement M365 refusé');

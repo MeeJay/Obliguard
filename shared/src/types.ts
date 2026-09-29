@@ -768,6 +768,13 @@ export interface M365Tenant {
   /** True once the optional second consent, covering the response actions, is granted. */
   hasWriteConsent: boolean;
   exoWorkerEnabled: boolean;
+  /**
+   * True when the service principal actually holds the Exchange role.
+   * Exchange.ManageAsApp alone grants nothing: without the role every Exchange
+   * command is denied, reads included. When false, the P-EXO controls are
+   * reported as uncovered instead of silently passing.
+   */
+  exoRoleAssigned: boolean;
   freshness: M365SourceFreshness;
   lastError: string | null;
   lastErrorAt: string | null;
@@ -840,12 +847,16 @@ export interface M365EnrolmentCallbackRequest {
   token: string;
   entraTenantId: string;
   clientId: string;
+  /** Reported by the enrolment script once it has verified role-group membership. */
+  exchangeRoleAssigned: boolean;
 }
 
 /** Outcome of probing the tenant: which permissions landed, and what licence. */
 export interface M365EnrolmentVerification {
   ok: boolean;
   licenceProfile: M365LicenceProfile | null;
+  /** False means the P-EXO controls cannot run on this tenant. */
+  exoRoleAssigned: boolean;
   /** Application permissions that answered, by Graph path. */
   grantedScopes: string[];
   /** Permissions the module needs and that are still missing. */

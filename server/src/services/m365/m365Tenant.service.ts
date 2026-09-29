@@ -48,6 +48,7 @@ interface M365TenantRow {
   licence_profile: M365LicenceProfile | null;
   has_write_consent: boolean;
   exo_worker_enabled: boolean;
+  exo_role_assigned: boolean;
   last_posture_at: Date | null;
   last_signin_at: Date | null;
   last_ual_cursor: unknown | null;
@@ -229,6 +230,7 @@ export const m365TenantService = {
     token: string,
     entraTenantId: string,
     clientId: string,
+    exchangeRoleAssigned: boolean,
   ): Promise<M365EnrolmentVerification & { deviceId: number }> {
     const tokenRow = await db('m365_enrolment_tokens')
       .where('token_hash', hashToken(token))
@@ -243,12 +245,16 @@ export const m365TenantService = {
     await db('m365_tenants').where('device_id', deviceId).update({
       entra_tenant_id: entraTenantId,
       client_id: clientId,
+      exo_role_assigned: exchangeRoleAssigned,
       last_error: null,
       last_error_at: null,
       updated_at: new Date(),
     });
 
-    logger.info({ deviceId, entraTenantId, clientId }, 'Enrôlement M365 terminé, vérification en cours');
+    logger.info(
+      { deviceId, entraTenantId, clientId, exchangeRoleAssigned },
+      'Enrôlement M365 terminé, vérification en cours',
+    );
 
     const verification = await this.verifyPermissions(deviceId);
     return { ...verification, deviceId };
@@ -286,9 +292,11 @@ export const m365TenantService = {
    * rôle Exchange n'a pas été attribué au principal de service.
    */
   async verifyPermissions(deviceId: number): Promise<M365EnrolmentVerification> {
+    const row = await db<M365TenantRow>('m365_tenants').where('device_id', deviceId).first();
+    const exoRoleAssigned = Boolean(row?.exo_role_assigned);
     const creds = await this.getCredentials(deviceId);
     if (!creds) {
-      return { ok: false, licenceProfile: null, grantedScopes: [], missingScopes: readPermissionNames(), error: 'Tenant non enrôlé' };
+      return { ok: false, licenceProfile: null, exoRoleAssigned, grantedScopes: [], missingScopes: readPermissionNames(), error: 'Tenant non enrôlé' };
     }
 
     // Un échec d'acquisition de jeton est sans ambiguïté : certificat non
@@ -298,7 +306,7 @@ export const m365TenantService = {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       await this.recordError(deviceId, `Acquisition de jeton impossible : ${message}`);
-      return { ok: false, licenceProfile: null, grantedScopes: [], missingScopes: readPermissionNames(), error: message };
+      return { ok: false, licenceProfile: null, exoRoleAssigned, grantedScopes: [], missingScopes: readPermissionNames(), error: message };
     }
 
     const granted: string[] = [];
@@ -337,7 +345,9 @@ export const m365TenantService = {
     });
 
     logger.info({ deviceId, licence, granted: granted.length, missing }, 'Permissions M365 vérifiées');
-    return { ok: missing.length === 0, licenceProfile: licence, grantedScopes: granted, missingScopes: missing };
+    // Un rôle Exchange absent ne rend pas l'enrôlement invalide, mais il retire
+    // du périmètre tous les contrôles P-EXO : l'appelant doit pouvoir le dire.
+    return { ok: missing.length === 0, licenceProfile: licence, exoRoleAssigned, grantedScopes: granted, missingScopes: missing };
   },
 
   /** Consigne une erreur d'accès, pour que l'interface et F-DATA-01 la montrent. */
@@ -423,6 +433,7 @@ function toApi(row: M365TenantRow): M365Tenant {
     licenceProfile: row.licence_profile,
     hasWriteConsent: row.has_write_consent,
     exoWorkerEnabled: row.exo_worker_enabled,
+    exoRoleAssigned: row.exo_role_assigned,
     freshness: freshnessOf(row),
     lastError: row.last_error,
     lastErrorAt: row.last_error_at?.toISOString() ?? null,
