@@ -11,6 +11,9 @@ RUN cd server && npm install
 
 COPY server/tsconfig.json server/knexfile.ts ./server/
 COPY server/src/ ./server/src/
+# scripts/ holds the build helpers invoked by `npm run build` (copy-assets.mjs
+# carries the non-TS files tsc ignores into dist/). Without it the build fails.
+COPY server/scripts/ ./server/scripts/
 RUN cd server && npm run build
 
 # ---- Offline install wizard builder ----
