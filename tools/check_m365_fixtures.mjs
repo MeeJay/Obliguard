@@ -91,16 +91,20 @@ function checkScenario(name, doc) {
 
 // Extrait de la colonne « réel » les jetons qui identifient quelque chose :
 // IP, domaines, parties locales d'adresse, fragments de GUID, longs nombres,
-// noms d'hôte. La prose de la table ne produit pas de jeton.
+// noms d'hôte, noms d'éditeurs. La prose de la table ne produit pas de jeton.
+//
+// Tout jeton est cherché, y compris les courts. Un jeton court produit beaucoup
+// de correspondances fortuites ("lou" dans "louer") : il est donc cherché en
+// limite de mot, et sur les fragments numériques en limite d'octet, pour qu'un
+// fragment réel ne puisse pas passer au travers.
 function realTokens(markdown) {
   const tokens = new Set();
-  const short = new Set();
   for (const line of markdown.split('\n')) {
     const cells = line.split('|').map((c) => c.trim());
     if (cells.length < 4) continue;                       // pas une ligne de tableau
     const real = cells[2];
     if (!real || /^-+$/.test(real) || /^réel$/i.test(real)) continue;
-    const add = (t) => (t.length >= 6 ? tokens.add(t) : short.add(t));
+    const add = (t) => t && tokens.add(t);
 
     for (const m of real.matchAll(/\b\d{1,3}(?:\.\d{1,3}){2,3}\b/g)) add(m[0]);
     for (const m of real.matchAll(/\b[0-9a-f]{1,4}(?::[0-9a-f]{0,4}){3,}/gi)) add(m[0].replace(/:+$/, ''));
@@ -109,26 +113,59 @@ function realTokens(markdown) {
     for (const m of real.matchAll(/\b[0-9a-f]{8}(?:-[0-9a-f]{4})?\b/gi)) add(m[0]);
     for (const m of real.matchAll(/\b\d{12,}\b/g)) add(m[0]);
     for (const m of real.matchAll(/\b[A-Z][A-Z0-9]{2,}-[A-Z0-9]{4,}\b/g)) add(m[0]);
+
+    // Cellule sans prose (ni parenthèse, ni virgule, ni point-virgule) : c'est une
+    // valeur littérale, par exemple un nom d'éditeur. Elle est prise telle quelle,
+    // ce qu'aucun motif ne saurait deviner. Les cellules avec prose restent
+    // couvertes par les extracteurs ci-dessus.
+    if (real.length <= 40 && !/[(),;]/.test(real)) add(real);
   }
-  return { tokens: [...tokens], short: [...short] };
+  return [...tokens];
 }
 
+// Un jeton purement numéro-pointé ("0.87") ne doit matcher qu'en frontière
+// d'octet, sinon "20.87" ou "10.870" déclencheraient à tort. Les autres jetons
+// courts sont cherchés en limite de mot. Les jetons longs restent en sous-chaîne :
+// un fragment réel noyé dans une chaîne plus grande doit être vu.
+function occurrence(text, token) {
+  if (token.length >= 8) {
+    const i = text.toLowerCase().indexOf(token.toLowerCase());
+    return i === -1 ? null : i;
+  }
+  const esc = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pattern = /^[\d.]+$/.test(token)
+    ? `(?<![\\d.])${esc}(?![\\d.])`
+    : `(?<![a-z0-9])${esc}(?![a-z0-9])`;
+  const m = text.match(new RegExp(pattern, 'i'));
+  return m ? m.index : null;
+}
+
+// Aucun jeton n'est exempté de la recherche, et aucune correspondance n'est
+// masquée. Un pseudonyme qui entre en collision avec un jeton réel se renomme
+// plutôt que se whiteliste : une liste d'exceptions finit par cacher une vraie fuite.
+//
+// Restent les jetons qui sont des mots courants, comme « admin » : ils
+// apparaissent dans des constantes Microsoft (« Reset password (by admin) »)
+// qu'on ne peut pas réécrire sans fausser les données. Ces correspondances sont
+// affichées une par une avec leur contexte, pour être relues, et ne bloquent pas.
+// Toute autre correspondance est une fuite et fait échouer le contrôle.
+const COMMON_WORDS = new Set(['admin', 'test', 'support', 'contact', 'info', 'service']);
+
 function checkLeaks(mapPath, files) {
-  const md = fs.readFileSync(mapPath, 'utf8');
-  const { tokens, short } = realTokens(md);
+  const tokens = realTokens(fs.readFileSync(mapPath, 'utf8'));
   if (!tokens.length) fail('map', `aucun jeton extrait de ${mapPath} : format de table inattendu`);
 
+  const collisions = [];
   for (const [rel, txt] of files) {
-    const low = txt.toLowerCase();
     for (const t of tokens) {
-      const i = low.indexOf(t.toLowerCase());
-      if (i !== -1) {
-        const ctx = txt.slice(Math.max(0, i - 60), i + 80).replace(/\s+/g, ' ');
-        fail(rel, `valeur réelle "${t}" présente : …${ctx}…`);
-      }
+      const i = occurrence(txt, t);
+      if (i === null) continue;
+      const ctx = txt.slice(Math.max(0, i - 60), i + 80).replace(/\s+/g, ' ');
+      if (COMMON_WORDS.has(t.toLowerCase())) collisions.push(`${rel} : "${t}" dans …${ctx}…`);
+      else fail(rel, `valeur réelle "${t}" présente : …${ctx}…`);
     }
   }
-  return { count: tokens.length, short };
+  return { count: tokens.length, collisions };
 }
 
 // ── Exécution ───────────────────────────────────────────────────────────────
@@ -163,11 +200,11 @@ for (const name of scenarios) {
 }
 
 if (mapPath) {
-  const { count, short } = checkLeaks(mapPath, sources);
-  console.log(`\nTable de correspondance : ${count} valeurs réelles recherchées dans les scénarios.`);
-  if (short.length) {
-    console.log(`  ${short.length} jeton(s) trop court(s) pour une recherche automatique fiable, ` +
-      `à relire à la main : ${short.join(', ')}`);
+  const { count, collisions } = checkLeaks(mapPath, sources);
+  console.log(`\nTable de correspondance : ${count} valeurs réelles recherchées, aucune exemption.`);
+  if (collisions.length) {
+    console.log(`\n${collisions.length} collision(s) sur un mot courant, à relire (non bloquant) :`);
+    for (const c of collisions) console.log(`  ${c}`);
   }
 } else {
   console.log('\nContrôle de fuite non exécuté : relancer avec --map <table de correspondance hors dépôt>.');

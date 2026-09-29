@@ -29,6 +29,11 @@
             "vpnAsns": { "type": "array", "items": { "type": "string" } }
           }
         },
+        "becApps": {
+          "type": "array",
+          "description": "Applications que ce scénario déclare appartenir à la liste d'exfiltration BEC. Le catalogue réel est une donnée produit ; le scénario nomme les siennes pour que P-APP-05 et D-ID-03 restent testables sans citer d'éditeur.",
+          "items": { "type": "string" }
+        },
         "victims": { "type": "array", "items": { "type": "string" } },
         "users": { "type": "array", "items": { "type": "string" } }
       }

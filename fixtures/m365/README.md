@@ -47,7 +47,7 @@ Le dépôt est public, donc aucune donnée client réelle ne doit y figurer :
 - fournisseurs d'accès et hébergeurs dans `geo.org` : conservés quand ils désignent une infrastructure publique, génériques quand ils localiseraient une personne.
 - objets de message : tous remplacés, y compris les leurres. Les objets de substitution gardent la famille du leurre d'origine (document partagé, demande de signature, relance de contrat), ce que testent D-MAIL-02 et D-EXO-06.
 - empreintes logicielles et matérielles : numéros de build, versions détaillées et modèles d'appareil retirés des user agents. Les user agents d'automate (`python-requests`, `Python-urllib`) sont conservés : ce sont les indicateurs de D-SI-01.
-- noms d'applications tierces (`eM Client`, `RocketReach`, `Apollo`, `AdminDroid`…) : conservés. Ils désignent des éditeurs, pas le client, et P-APP-05 comme D-ID-03 reposent dessus.
+- noms d'applications tierces : remplacés par des identifiants de catégorie (`app-bec-01`, `app-prospection-01`, `app-crm-01`, `app-systeme-01`, `app-gestion-01`, `app-webmail-01`). Le jeu d'apps consenties sur une boîte est en soi une empreinte du client. Le catalogue réel des outils d'exfiltration BEC est une donnée produit ; chaque scénario déclare les siennes dans `tenant.becApps`, ce qui garde P-APP-05 et D-ID-03 testables sans nommer d'éditeur.
 
 La correspondance avec les valeurs réelles reste hors dépôt.
 
@@ -58,6 +58,8 @@ node tools/check_m365_fixtures.mjs --map ~/obliguard-private/mapping_fixtures_M3
 ```
 
 Le contrôle vérifie la conformité au schéma, les invariants de rejeu (tri par `ts`, identifiants uniques, chaque IP d'événement présente dans `geo`, plages de documentation) et, avec `--map`, qu'aucune valeur de la table de correspondance n'apparaît dans les scénarios. Sans `--map`, le contrôle de fuite n'est pas exécuté et le script le signale.
+
+Aucun jeton n'est exempté de la recherche, quelle que soit sa longueur, et aucune correspondance n'est masquée. Un pseudonyme qui entre en collision avec une valeur réelle se renomme plutôt que s'inscrire dans une liste d'exceptions. Restent les jetons qui sont des mots courants et apparaissent dans des constantes Microsoft, comme `admin` dans `Reset password (by admin)` : ils sont affichés un par un avec leur contexte, pour relecture, et ne bloquent pas.
 
 ## Régénérer
 

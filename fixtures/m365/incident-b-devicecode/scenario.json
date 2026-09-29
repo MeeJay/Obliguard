@@ -28,22 +28,25 @@
   "partnerTenants": [],
   "allowlists": {
    "oauthApps": [
-    "Apple Internet Accounts",
-    "Sellsy CRM",
-    "Sellsy Email",
-    "Apollo",
-    "Modash.io",
-    "ContactOut",
-    "RocketReach"
+    "app-systeme-01",
+    "app-crm-01",
+    "app-crm-02",
+    "app-prospection-02",
+    "app-prospection-03",
+    "app-prospection-04",
+    "app-prospection-01"
    ],
    "forwarding": [
     {
      "mailbox": "influencer01@tenant-b.example",
-     "to": "influencer01@gmail.example"
+     "to": "influencer01@webmail-perso.example"
     }
    ],
    "vpnAsns": []
   },
+  "becApps": [
+   "app-bec-01"
+  ],
   "victims": [
    "victim@tenant-b.example"
   ],
@@ -51,7 +54,7 @@
    "victim@tenant-b.example",
    "victim-alias@tenant-b.example",
    "ceo@tenant-b.example",
-   "globaladmin@tenant-b.onmicrosoft.example",
+   "ga01@tenant-b.onmicrosoft.example",
    "influencer01@tenant-b.example"
   ]
  },
@@ -240,30 +243,30 @@
   "roleAssignments": [
    {
     "role": "Global Administrator",
-    "principal": "globaladmin@tenant-b.onmicrosoft.example",
+    "principal": "ga01@tenant-b.onmicrosoft.example",
     "principalType": "user"
    },
    {
     "role": "Exchange Administrator",
-    "principal": "AdminDroid Service Application",
+    "principal": "app-gestion-01",
     "principalType": "servicePrincipal"
    }
   ],
   "appPermissions": [
    {
-    "client": "AdminDroid Service Application",
+    "client": "app-gestion-01",
     "microsoft": false,
     "resource": "Microsoft Graph",
     "permission": "User.ReadWrite.All"
    },
    {
-    "client": "AdminDroid Service Application",
+    "client": "app-gestion-01",
     "microsoft": false,
     "resource": "Microsoft Graph",
     "permission": "Directory.ReadWrite.All"
    },
    {
-    "client": "AdminDroid Service Application",
+    "client": "app-gestion-01",
     "microsoft": false,
     "resource": "Office 365 Exchange Online",
     "permission": "Exchange.ManageAsApp"
@@ -333,7 +336,7 @@
   "oauthGrants": [
    {
     "user": "victim@tenant-b.example",
-    "app": "eM Client",
+    "app": "app-bec-01",
     "publisherVerified": true,
     "scope": "IMAP.AccessAsUser.All",
     "label": "legit",
@@ -341,7 +344,7 @@
    },
    {
     "user": "victim@tenant-b.example",
-    "app": "RocketReach",
+    "app": "app-prospection-01",
     "publisherVerified": true,
     "scope": "openid offline_access profile email User.Read People.Read Calendars.ReadWrite Mail.ReadWrite Mail.Send MailboxSettings.Read Contacts.ReadWrite",
     "label": "legit",
@@ -349,7 +352,7 @@
    },
    {
     "user": "victim@tenant-b.example",
-    "app": "Apple Internet Accounts",
+    "app": "app-systeme-01",
     "publisherVerified": true,
     "scope": "offline_access openid EWS.AccessAsUser.All",
     "label": "legit"
@@ -364,98 +367,98 @@
    },
    {
     "user": "staff01@tenant-b.example",
-    "app": "Apple Internet Accounts",
+    "app": "app-systeme-01",
     "publisherVerified": true,
     "scope": "offline_access openid EWS.AccessAsUser.All",
     "label": "legit"
    },
    {
     "user": "staff02@tenant-b.example",
-    "app": "Apple Internet Accounts",
+    "app": "app-systeme-01",
     "publisherVerified": true,
     "scope": "offline_access openid EWS.AccessAsUser.All",
     "label": "legit"
    },
    {
     "user": "staff03@tenant-b.example",
-    "app": "Apple Internet Accounts",
+    "app": "app-systeme-01",
     "publisherVerified": true,
     "scope": "offline_access openid EWS.AccessAsUser.All",
     "label": "legit"
    },
    {
     "user": "staff04@tenant-b.example",
-    "app": "Apple Internet Accounts",
+    "app": "app-systeme-01",
     "publisherVerified": true,
     "scope": "offline_access openid EWS.AccessAsUser.All",
     "label": "legit"
    },
    {
     "user": "staff05@tenant-b.example",
-    "app": "Apple Internet Accounts",
+    "app": "app-systeme-01",
     "publisherVerified": true,
     "scope": "offline_access openid EWS.AccessAsUser.All",
     "label": "legit"
    },
    {
     "user": "staff06@tenant-b.example",
-    "app": "Apple Internet Accounts",
+    "app": "app-systeme-01",
     "publisherVerified": true,
     "scope": "offline_access openid EWS.AccessAsUser.All",
     "label": "legit"
    },
    {
     "user": "staff07@tenant-b.example",
-    "app": "Apple Internet Accounts",
+    "app": "app-systeme-01",
     "publisherVerified": true,
     "scope": "offline_access openid EWS.AccessAsUser.All",
     "label": "legit"
    },
    {
     "user": "staff08@tenant-b.example",
-    "app": "Apple Internet Accounts",
+    "app": "app-systeme-01",
     "publisherVerified": true,
     "scope": "offline_access openid EWS.AccessAsUser.All",
     "label": "legit"
    },
    {
     "user": "staff09@tenant-b.example",
-    "app": "Apple Internet Accounts",
+    "app": "app-systeme-01",
     "publisherVerified": true,
     "scope": "offline_access openid EWS.AccessAsUser.All",
     "label": "legit"
    },
    {
     "user": "staff10@tenant-b.example",
-    "app": "Apple Internet Accounts",
+    "app": "app-systeme-01",
     "publisherVerified": true,
     "scope": "offline_access openid EWS.AccessAsUser.All",
     "label": "legit"
    },
    {
     "user": "staff11@tenant-b.example",
-    "app": "Apple Internet Accounts",
+    "app": "app-systeme-01",
     "publisherVerified": true,
     "scope": "offline_access openid EWS.AccessAsUser.All",
     "label": "legit"
    },
    {
     "user": "staff12@tenant-b.example",
-    "app": "Apple Internet Accounts",
+    "app": "app-systeme-01",
     "publisherVerified": true,
     "scope": "offline_access openid EWS.AccessAsUser.All",
     "label": "legit"
    },
    {
     "user": "staff13@tenant-b.example",
-    "app": "Apple Internet Accounts",
+    "app": "app-systeme-01",
     "publisherVerified": true,
     "scope": "offline_access openid EWS.AccessAsUser.All",
     "label": "legit"
    },
    {
     "user": "sales02@tenant-b.example",
-    "app": "Apollo",
+    "app": "app-prospection-02",
     "publisherVerified": true,
     "scope": "Mail.ReadWrite Mail.Send Contacts.ReadWrite",
     "label": "legit"
@@ -474,7 +477,7 @@
    "mailboxForwarding": [
     {
      "mailbox": "influencer01@tenant-b.example",
-     "forwardingSmtpAddress": "influencer01@gmail.example",
+     "forwardingSmtpAddress": "influencer01@webmail-perso.example",
      "deliverToMailboxAndForward": true,
      "label": "legit",
      "note": "influenceur géré : transfert vers sa boîte perso, allowlisté"
@@ -42790,7 +42793,7 @@
    "activity": "Reset user password",
    "category": "UserManagement",
    "result": "success",
-   "initiatedBy": "globaladmin@tenant-b.onmicrosoft.example",
+   "initiatedBy": "ga01@tenant-b.onmicrosoft.example",
    "ip": "2603:1026:2400::9",
    "target": "victim@tenant-b.example",
    "targetType": "User"
@@ -42804,7 +42807,7 @@
    "activity": "Disable account",
    "category": "UserManagement",
    "result": "success",
-   "initiatedBy": "globaladmin@tenant-b.onmicrosoft.example",
+   "initiatedBy": "ga01@tenant-b.onmicrosoft.example",
    "ip": "2603:1026:2400::9",
    "target": "victim@tenant-b.example",
    "targetType": "User"
@@ -42818,7 +42821,7 @@
    "activity": "Revoke user sessions",
    "category": "UserManagement",
    "result": "success",
-   "initiatedBy": "globaladmin@tenant-b.onmicrosoft.example",
+   "initiatedBy": "ga01@tenant-b.onmicrosoft.example",
    "ip": "2603:1026:2400::9",
    "target": "victim@tenant-b.example",
    "targetType": "User"
@@ -42832,9 +42835,9 @@
    "activity": "Remove delegated permission grant",
    "category": "ApplicationManagement",
    "result": "success",
-   "initiatedBy": "globaladmin@tenant-b.onmicrosoft.example",
+   "initiatedBy": "ga01@tenant-b.onmicrosoft.example",
    "ip": "2603:1026:2400::9",
-   "target": "eM Client",
+   "target": "app-bec-01",
    "targetType": "ServicePrincipal"
   }
  ],
@@ -42858,19 +42861,19 @@
    },
    {
     "ruleId": "P-ID-05",
-    "target": "AdminDroid Service Application",
+    "target": "app-gestion-01",
     "minSeverity": "HIGH"
    },
    {
     "ruleId": "P-APP-03",
-    "target": "AdminDroid Service Application",
+    "target": "app-gestion-01",
     "minSeverity": "HIGH"
    },
    {
     "ruleId": "P-APP-05",
     "target": "victim@tenant-b.example",
     "minSeverity": "HIGH",
-    "evidenceContains": "eM Client"
+    "evidenceContains": "app-bec-01"
    },
    {
     "ruleId": "P-EXO-12",
@@ -42983,7 +42986,7 @@
     "why": "IP du bureau déclarée de confiance"
    },
    {
-    "target": "RocketReach",
+    "target": "app-prospection-01",
     "maxSeverity": "INFO",
     "ruleIds": [
      "*"
@@ -42991,7 +42994,7 @@
     "why": "app allowlistée, hors de cause"
    },
    {
-    "target": "Apple Internet Accounts",
+    "target": "app-systeme-01",
     "maxSeverity": "INFO",
     "ruleIds": [
      "*"

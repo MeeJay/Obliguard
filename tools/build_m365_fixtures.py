@@ -142,7 +142,7 @@ def scenario_a(seed: int) -> dict:
     V = f"compta1@{D}"          # victime
     CEO = f"ceo@{D}"
     FWD = f"employee-fwd@{D}"   # collaborateur qui transfère le leurre à la direction
-    ADM = f"globaladmin@tenant-a.onmicrosoft.example"
+    ADM = f"ga01@tenant-a.onmicrosoft.example"
     COPIER = f"copier@{D}"
     DELEG = f"assistant@{D}"
     PARTNER = "user_0001@partner-csp.example"
@@ -348,8 +348,8 @@ def scenario_a(seed: int) -> dict:
                "label": "attacker"} for k, v in dev.items()],
         ],
         "oauthGrants": [
-            {"user": CEO, "app": "Gmail", "publisherVerified": False, "scope": "EAS.AccessAsUser.All", "label": "legit",
-             "note": "compte Gmail de la direction branché sur la boîte, conservé"},
+            {"user": CEO, "app": "app-webmail-01", "publisherVerified": False, "scope": "EAS.AccessAsUser.All", "label": "legit",
+             "note": "webmail personnel de la direction branché sur la boîte, conservé"},
         ],
         "exchange": {
             "smtpClientAuthDisabledOrg": False,
@@ -434,7 +434,7 @@ def scenario_b(seed: int) -> dict:
     V = f"victim@{D}"
     V_ALIAS = f"victim-alias@{D}"
     CEO = f"ceo@{D}"
-    ADM = "globaladmin@tenant-b.onmicrosoft.example"
+    ADM = "ga01@tenant-b.onmicrosoft.example"
     INFL = f"influencer01@{D}"
 
     OFFICE = "2001:db8:200::245"
@@ -566,7 +566,7 @@ def scenario_b(seed: int) -> dict:
     s.audit(paris("2026-09-29 10:44:00"), "legit", "observed", "Disable account", category="UserManagement", initiated_by=ADM, ip=MSP, target=V)
     s.audit(paris("2026-09-29 10:44:05"), "legit", "observed", "Revoke user sessions", category="UserManagement", initiated_by=ADM, ip=MSP, target=V)
     s.audit(paris("2026-09-29 10:45:00"), "legit", "observed", "Remove delegated permission grant", category="ApplicationManagement",
-            initiated_by=ADM, ip=MSP, target="eM Client", target_type="ServicePrincipal")
+            initiated_by=ADM, ip=MSP, target="app-bec-01", target_type="ServicePrincipal")
 
     # ── Direction : VPN mobile (légitime)
     s.ual(paris("2026-09-25 11:14:47"), "legit", "observed", CEO, CEO_ORANGE, "MailItemsAccessed", client_info="Client=OutlookService;" + UA_IOS_OUTLOOK,
@@ -587,7 +587,10 @@ def scenario_b(seed: int) -> dict:
     s.ual(paris("2026-09-25 14:15:37"), "legit", "observed", V, OFFICE, "UserLoggedIn", workload="AzureActiveDirectory",
           note="dernier UserLoggedIn ingéré pour la victime ; UAL vide après le 27/09 au soir au moment de l'enquête")
 
-    ok_apps = ["Apple Internet Accounts", "Sellsy CRM", "Sellsy Email", "Apollo", "Modash.io", "ContactOut", "RocketReach"]
+    ok_apps = ["app-systeme-01", "app-crm-01", "app-crm-02", "app-prospection-02", "app-prospection-03",
+               "app-prospection-04", "app-prospection-01"]
+    # Apps que ce scénario déclare appartenir à la liste d'exfiltration BEC du produit.
+    bec_apps = ["app-bec-01"]
     posture = {
         "licence": "free",
         "securityDefaults": False,
@@ -601,12 +604,12 @@ def scenario_b(seed: int) -> dict:
         "technicalNotificationMails": ["support@msp.example"],
         "roleAssignments": [
             {"role": "Global Administrator", "principal": ADM, "principalType": "user"},
-            {"role": "Exchange Administrator", "principal": "AdminDroid Service Application", "principalType": "servicePrincipal"},
+            {"role": "Exchange Administrator", "principal": "app-gestion-01", "principalType": "servicePrincipal"},
         ],
         "appPermissions": [
-            {"client": "AdminDroid Service Application", "microsoft": False, "resource": "Microsoft Graph", "permission": p}
+            {"client": "app-gestion-01", "microsoft": False, "resource": "Microsoft Graph", "permission": p}
             for p in ("User.ReadWrite.All", "Directory.ReadWrite.All")
-        ] + [{"client": "AdminDroid Service Application", "microsoft": False, "resource": "Office 365 Exchange Online",
+        ] + [{"client": "app-gestion-01", "microsoft": False, "resource": "Office 365 Exchange Online",
               "permission": "Exchange.ManageAsApp"}],
         "users": [
             {"upn": V, "enabled": True, "mfaMethods": ["password"], "lastPasswordChange": "2026-09-29T08:14:08Z", "provenance": "observed"},
@@ -616,17 +619,17 @@ def scenario_b(seed: int) -> dict:
         ],
         "entraDevices": [],
         "oauthGrants": [
-            {"user": V, "app": "eM Client", "publisherVerified": True, "scope": "IMAP.AccessAsUser.All", "label": "legit",
+            {"user": V, "app": "app-bec-01", "publisherVerified": True, "scope": "IMAP.AccessAsUser.All", "label": "legit",
              "note": "hors de cause selon le rapport, retiré par précaution ; reste une app de la liste BEC"},
-            {"user": V, "app": "RocketReach", "publisherVerified": True,
+            {"user": V, "app": "app-prospection-01", "publisherVerified": True,
              "scope": "openid offline_access profile email User.Read People.Read Calendars.ReadWrite Mail.ReadWrite Mail.Send MailboxSettings.Read Contacts.ReadWrite",
              "label": "legit", "note": "outil de prospection, hors de cause"},
-            {"user": V, "app": "Apple Internet Accounts", "publisherVerified": True, "scope": "offline_access openid EWS.AccessAsUser.All", "label": "legit"},
+            {"user": V, "app": "app-systeme-01", "publisherVerified": True, "scope": "offline_access openid EWS.AccessAsUser.All", "label": "legit"},
             {"user": f"sales01@{D}", "app": "test", "publisherVerified": False, "scope": "User.Read Mail.Read Mail.ReadWrite Mail.Send People.Read offline_access",
              "label": "unknown", "note": "origine à identifier"},
-            *[{"user": f"staff{i:02d}@{D}", "app": "Apple Internet Accounts", "publisherVerified": True,
+            *[{"user": f"staff{i:02d}@{D}", "app": "app-systeme-01", "publisherVerified": True,
                "scope": "offline_access openid EWS.AccessAsUser.All", "label": "legit"} for i in range(1, 14)],
-            {"user": f"sales02@{D}", "app": "Apollo", "publisherVerified": True, "scope": "Mail.ReadWrite Mail.Send Contacts.ReadWrite", "label": "legit"},
+            {"user": f"sales02@{D}", "app": "app-prospection-02", "publisherVerified": True, "scope": "Mail.ReadWrite Mail.Send Contacts.ReadWrite", "label": "legit"},
         ],
         "exchange": {
             "smtpClientAuthDisabledOrg": True,
@@ -634,7 +637,7 @@ def scenario_b(seed: int) -> dict:
             "unifiedAuditLogHasRecentEvents": True,
             "applicationImpersonationAssignments": [{"assignee": "Organization Management", "delegationType": "DelegatingOrgWide"}],
             "mailboxForwarding": [
-                {"mailbox": INFL, "forwardingSmtpAddress": "influencer01@gmail.example", "deliverToMailboxAndForward": True, "label": "legit",
+                {"mailbox": INFL, "forwardingSmtpAddress": "influencer01@webmail-perso.example", "deliverToMailboxAndForward": True, "label": "legit",
                  "note": "influenceur géré : transfert vers sa boîte perso, allowlisté"},
                 {"mailbox": f"staff05@{D}", "forwardingSmtpAddress": f"staff06@{D}", "deliverToMailboxAndForward": True, "label": "legit"},
             ],
@@ -654,9 +657,9 @@ def scenario_b(seed: int) -> dict:
             {"ruleId": "P-ID-01", "target": "tenant", "minSeverity": "HIGH"},
             {"ruleId": "P-ID-09", "target": "tenant", "minSeverity": "MEDIUM"},
             {"ruleId": "P-ID-17", "target": "tenant", "minSeverity": "HIGH", "why": "flux device code non bloqué"},
-            {"ruleId": "P-ID-05", "target": "AdminDroid Service Application", "minSeverity": "HIGH"},
-            {"ruleId": "P-APP-03", "target": "AdminDroid Service Application", "minSeverity": "HIGH"},
-            {"ruleId": "P-APP-05", "target": V, "minSeverity": "HIGH", "evidenceContains": "eM Client"},
+            {"ruleId": "P-ID-05", "target": "app-gestion-01", "minSeverity": "HIGH"},
+            {"ruleId": "P-APP-03", "target": "app-gestion-01", "minSeverity": "HIGH"},
+            {"ruleId": "P-APP-05", "target": V, "minSeverity": "HIGH", "evidenceContains": "app-bec-01"},
             {"ruleId": "P-EXO-12", "target": V, "minSeverity": "HIGH"},
             {"ruleId": "D-SI-09", "target": V, "minSeverity": "CRITICAL", "evidenceContains": "deviceCodeFlow"},
             {"ruleId": "D-SI-01", "target": V, "minSeverity": "CRITICAL", "evidenceContains": "Python-urllib"},
@@ -677,8 +680,8 @@ def scenario_b(seed: int) -> dict:
             {"target": V, "maxSeverity": "MEDIUM", "ruleIds": ["D-SI-03", "D-SI-04"], "window": [iso(paris("2026-08-12 00:00:00")), iso(paris("2026-08-14 00:00:00"))],
              "why": "vacances dans un pays limitrophe, FAI résidentiel"},
             {"target": OFFICE, "maxSeverity": "INFO", "ruleIds": ["*"], "why": "IP du bureau déclarée de confiance"},
-            {"target": "RocketReach", "maxSeverity": "INFO", "ruleIds": ["*"], "why": "app allowlistée, hors de cause"},
-            {"target": "Apple Internet Accounts", "maxSeverity": "INFO", "ruleIds": ["*"], "why": "app allowlistée"},
+            {"target": "app-prospection-01", "maxSeverity": "INFO", "ruleIds": ["*"], "why": "app allowlistée, hors de cause"},
+            {"target": "app-systeme-01", "maxSeverity": "INFO", "ruleIds": ["*"], "why": "app allowlistée"},
             {"target": INFL, "maxSeverity": "INFO", "ruleIds": ["P-EXO-05"], "why": "transfert allowlisté (métier du client)"},
             {"target": "Organization Management", "ruleIds": ["P-APP-07"], "why": "assignation de délégation"},
             {"target": "tenant", "ruleIds": ["P-EXO-02"], "why": "valeur EXO fausse alors que l'UAL contient des événements"},
@@ -705,7 +708,8 @@ def scenario_b(seed: int) -> dict:
     return build_doc(s, "Device code phishing, script Python sur jeton et campagne sortante", D, posture, expected, timeline, {
         "licence": "free", "timezone": "Europe/Paris", "allowedCountries": ["FR"], "trustedIps": [OFFICE],
         "neighborCountriesTolerance": ["CH", "BE", "ES", "IT", "DE", "LU"], "mspKeywords": ["msp"], "partnerTenants": [],
-        "allowlists": {"oauthApps": ok_apps, "forwarding": [{"mailbox": INFL, "to": "influencer01@gmail.example"}], "vpnAsns": []},
+        "allowlists": {"oauthApps": ok_apps, "forwarding": [{"mailbox": INFL, "to": "influencer01@webmail-perso.example"}], "vpnAsns": []},
+        "becApps": bec_apps,
         "victims": [V], "users": [V, V_ALIAS, CEO, ADM, INFL],
     })
 

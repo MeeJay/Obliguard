@@ -34,7 +34,7 @@
    "compta1@tenant-a.example",
    "ceo@tenant-a.example",
    "employee-fwd@tenant-a.example",
-   "globaladmin@tenant-a.onmicrosoft.example",
+   "ga01@tenant-a.onmicrosoft.example",
    "copier@tenant-a.example",
    "assistant@tenant-a.example",
    "user01@tenant-a.example",
@@ -5182,7 +5182,7 @@
   "roleAssignments": [
    {
     "role": "Global Administrator",
-    "principal": "globaladmin@tenant-a.onmicrosoft.example",
+    "principal": "ga01@tenant-a.onmicrosoft.example",
     "principalType": "user"
    }
   ],
@@ -5211,7 +5211,7 @@
     "provenance": "observed"
    },
    {
-    "upn": "globaladmin@tenant-a.onmicrosoft.example",
+    "upn": "ga01@tenant-a.onmicrosoft.example",
     "enabled": true,
     "mfaMethods": [
      "password",
@@ -5311,11 +5311,11 @@
   "oauthGrants": [
    {
     "user": "ceo@tenant-a.example",
-    "app": "Gmail",
+    "app": "app-webmail-01",
     "publisherVerified": false,
     "scope": "EAS.AccessAsUser.All",
     "label": "legit",
-    "note": "compte Gmail de la direction branché sur la boîte, conservé"
+    "note": "webmail personnel de la direction branché sur la boîte, conservé"
    }
   ],
   "exchange": {
@@ -29759,9 +29759,9 @@
    "activity": "Reset password (by admin)",
    "category": "UserManagement",
    "result": "success",
-   "initiatedBy": "globaladmin@tenant-a.onmicrosoft.example",
+   "initiatedBy": "ga01@tenant-a.onmicrosoft.example",
    "ip": "2001:db8:e::133",
-   "target": "globaladmin@tenant-a.onmicrosoft.example",
+   "target": "ga01@tenant-a.onmicrosoft.example",
    "targetType": "User"
   },
   {
@@ -29773,7 +29773,7 @@
    "activity": "Disable account",
    "category": "UserManagement",
    "result": "success",
-   "initiatedBy": "globaladmin@tenant-a.onmicrosoft.example",
+   "initiatedBy": "ga01@tenant-a.onmicrosoft.example",
    "ip": "2001:db8:e::133",
    "target": "compta1@tenant-a.example",
    "targetType": "User"
@@ -29812,7 +29812,7 @@
    "activity": "Delete device",
    "category": "Device",
    "result": "success",
-   "initiatedBy": "globaladmin@tenant-a.onmicrosoft.example",
+   "initiatedBy": "ga01@tenant-a.onmicrosoft.example",
    "ip": "2001:db8:e::133",
    "target": "WKSTN-01",
    "targetType": "Device"
@@ -29826,7 +29826,7 @@
    "activity": "Update device registration policy",
    "category": "Policy",
    "result": "success",
-   "initiatedBy": "globaladmin@tenant-a.onmicrosoft.example",
+   "initiatedBy": "ga01@tenant-a.onmicrosoft.example",
    "ip": "2001:db8:e::133",
    "target": "deviceRegistrationPolicy",
    "targetType": "Policy",
@@ -29849,7 +29849,7 @@
    "source": "ual",
    "label": "legit",
    "provenance": "observed",
-   "user": "globaladmin@tenant-a.onmicrosoft.example",
+   "user": "ga01@tenant-a.onmicrosoft.example",
    "ip": "2001:db8:e::133",
    "operation": "Remove-InboxRule",
    "workload": "Exchange",
