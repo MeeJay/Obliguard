@@ -30,6 +30,8 @@ import mikrotikRoutes from './mikrotik.routes';
 import remoteBlocklistRoutes from './remoteBlocklist.routes';
 import rateLimitPoliciesRoutes from './rateLimitPolicies.routes';
 import externalBansRoutes from './externalBans.routes';
+import m365Routes from './m365.routes';
+import m365EnrolRoutes from './m365Enrol.routes';
 
 const router = Router();
 
@@ -48,6 +50,7 @@ router.use('/profile/2fa', twoFactorRoutes); // must be before /profile
 router.use('/profile', profileRoutes);         // global: enrollment / profile / 2FA work without a tenant
 router.use('/live-alerts', liveAlertRouter);
 router.use('/oblitools', oblitoolsRoutes);   // ObliTools desktop manifest (auth required)
+router.use('/m365/enrol', m365EnrolRoutes);  // enrôlement M365 (authentifié par jeton à usage unique, sans session)
 router.use('/permission-sets', permissionSetsRoutes);
 
 // ── Tenant management ─────────────────────────────────────────────────────────
@@ -76,6 +79,7 @@ tenantRouter.use('/ip-reputation', ipReputationRoutes);
 tenantRouter.use('/service-templates', serviceTemplatesRoutes);
 tenantRouter.use('/geo', geoRoutes);
 tenantRouter.use('/mikrotik', mikrotikRoutes);
+tenantRouter.use('/m365', m365Routes);
 tenantRouter.use('/remote-blocklists', remoteBlocklistRoutes);
 tenantRouter.use('/rate-limit-policies', rateLimitPoliciesRoutes);
 

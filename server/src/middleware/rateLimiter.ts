@@ -71,3 +71,24 @@ export const authLimiter = rateLimit({
     error: 'Too many login attempts, please try again in 5 minutes',
   },
 });
+
+// M365 enrolment limiter — the two session-less endpoints that validate a
+// single-use enrolment token.
+//
+// These are reached by the PowerShell script on an operator's workstation, so
+// the natural volume is a handful of calls per enrolment. The global apiLimiter
+// already covers them, but a route that checks a secret deserves its own,
+// tighter bucket, the same reasoning as authLimiter for login.
+//
+// The key is the IP alone: the token is the thing being guessed, so bucketing by
+// token would hand an attacker a fresh allowance per attempt.
+export const m365EnrolLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    error: 'Too many enrolment attempts, please try again later',
+  },
+});
