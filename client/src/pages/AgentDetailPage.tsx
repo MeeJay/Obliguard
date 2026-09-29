@@ -904,7 +904,7 @@ function LocalTemplateModal({
 
 // ── TemplatesSection ──────────────────────────────────────────────────────────
 
-function TemplatesSection({ deviceId, deviceType, mikrotikStatus, readOnly = false }: { deviceId: number; deviceType?: 'agent' | 'mikrotik'; mikrotikStatus?: 'online' | 'offline' | 'misconfigured'; readOnly?: boolean }) {
+function TemplatesSection({ deviceId, deviceType, mikrotikStatus, readOnly = false }: { deviceId: number; deviceType?: AgentDevice['deviceType']; mikrotikStatus?: 'online' | 'offline' | 'misconfigured'; readOnly?: boolean }) {
   const { t } = useTranslation();
   const [localTemplates, setLocalTemplates] = useState<ServiceTemplate[]>([]);
   const [localLoading,   setLocalLoading]   = useState(true);

@@ -645,8 +645,13 @@ export interface AgentDevice {
   evaluateOnly?: boolean;
   /** Where the effective evaluate-only state comes from ('agent' = own flag, 'group' = inherited). */
   evaluateOnlySource?: 'agent' | 'group' | null;
-  /** Device type: 'agent' for Go agent binary, 'mikrotik' for remote MikroTik devices. */
-  deviceType: 'agent' | 'mikrotik';
+  /**
+   * Device type:
+   *   - 'agent':    Go agent binary installed on a host
+   *   - 'mikrotik': remote MikroTik device, polled over the RouterOS API
+   *   - 'm365':     Microsoft 365 tenant, polled over Graph and the Management Activity API
+   */
+  deviceType: 'agent' | 'mikrotik' | 'm365';
   /**
    * MikroTik connectivity status (only set when deviceType='mikrotik'):
    *   - 'online':        syslog received recently OR API test succeeded recently
@@ -725,6 +730,127 @@ export interface UpdateMikroTikCredentialsRequest {
   syslogIdentifier?: string;
   addressListName?: string;
   importAddressLists?: string | null;
+}
+
+// ============================================
+// M365 Guard types
+// ============================================
+
+/**
+ * Licence tier detected on the customer tenant. It gates which controls can run:
+ * sign-in logs and userRegistrationDetails need P1, risky users need P2. On the
+ * free tier, connections are only visible through the unified audit log.
+ */
+export type M365LicenceProfile = 'free' | 'p1' | 'p2';
+
+/** Per-source freshness, as shown by the UI banner and asserted by F-DATA-01. */
+export interface M365SourceFreshness {
+  /** Last successful posture scan. */
+  lastPostureAt: string | null;
+  /** Last sign-in read through Graph. Always null on the free tier. */
+  lastSignInAt: string | null;
+  /** Timestamp of the most recent unified audit log event ingested. */
+  lastUalEventAt: string | null;
+  /** Hours since the most recent audit event, or null when nothing was ever ingested. */
+  ualLagHours: number | null;
+}
+
+export interface M365Tenant {
+  id: number;
+  deviceId: number;
+  entraTenantId: string | null;
+  primaryDomain: string | null;
+  clientId: string | null;
+  /** null until the enrolment script has uploaded the certificate. */
+  certThumbprint: string | null;
+  certNotAfter: string | null;
+  licenceProfile: M365LicenceProfile | null;
+  /** True once the optional second consent, covering the response actions, is granted. */
+  hasWriteConsent: boolean;
+  exoWorkerEnabled: boolean;
+  freshness: M365SourceFreshness;
+  lastError: string | null;
+  lastErrorAt: string | null;
+  settings: M365TenantSettings;
+  /** True once the tenant has credentials and a token could be acquired. */
+  enrolled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Per-tenant tuning. Every field has a safe default, so a freshly enrolled
+ * tenant is already usable: the point of these is to remove the false positives
+ * that only the operator knows about, such as the office egress IP.
+ */
+export interface M365TenantSettings {
+  /** ISO 3166-1 alpha-2 codes a sign-in may legitimately come from. */
+  allowedCountries?: string[];
+  /** Neighbouring countries tolerated by the impossible-travel rule. */
+  neighborCountriesTolerance?: string[];
+  /** IPs and CIDRs that are never suspicious, typically the customer's offices. */
+  trustedIps?: string[];
+  /** Words that identify the operator in a mailbox rule name, to cap its severity. */
+  mspKeywords?: string[];
+  /** Applications consented to on purpose, which posture must stop reporting. */
+  allowedOauthApps?: string[];
+  /** Mailbox forwards validated by the business, as "mailbox -> destination". */
+  allowedForwarding?: Array<{ mailbox: string; to: string }>;
+  /** ASNs of VPNs the customer's staff legitimately use. */
+  allowedVpnAsns?: string[];
+  /** External recipients per hour and per sender above which D-MAIL-01 fires. */
+  outboundBurstThreshold?: number;
+}
+
+/**
+ * Creating an m365 device does not contact Microsoft: it registers the tenant,
+ * generates the key pair and hands back the enrolment command to run.
+ */
+export interface CreateM365TenantRequest {
+  name: string;
+  /** Primary domain of the customer tenant, used as the device hostname. */
+  primaryDomain: string;
+  groupId?: number | null;
+}
+
+export interface UpdateM365TenantRequest {
+  primaryDomain?: string;
+  exoWorkerEnabled?: boolean;
+  settings?: M365TenantSettings;
+}
+
+/**
+ * What the UI shows after registering a tenant. The certificate is public
+ * material; the private key stays on the server and is never part of a response.
+ */
+export interface M365EnrolmentInstructions {
+  deviceId: number;
+  /** Single-use token, returned once and only once. */
+  token: string;
+  expiresAt: string;
+  /** Self-signed certificate, PEM, to upload into the customer tenant. */
+  certificatePem: string;
+  certThumbprint: string;
+  /** Ready-to-run command, for the operator to paste into a PowerShell prompt. */
+  command: string;
+}
+
+/** Posted back by the enrolment script, authenticated by the single-use token. */
+export interface M365EnrolmentCallbackRequest {
+  token: string;
+  entraTenantId: string;
+  clientId: string;
+}
+
+/** Outcome of probing the tenant: which permissions landed, and what licence. */
+export interface M365EnrolmentVerification {
+  ok: boolean;
+  licenceProfile: M365LicenceProfile | null;
+  /** Application permissions that answered, by Graph path. */
+  grantedScopes: string[];
+  /** Permissions the module needs and that are still missing. */
+  missingScopes: string[];
+  error?: string;
 }
 
 // ============================================
