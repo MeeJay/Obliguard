@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "obliguard/m365/scenario.schema.json",
+  "title": "Scénario de rejeu M365 Guard",
+  "type": "object",
+  "required": ["id", "version", "title", "tenant", "geo", "posture", "events", "expected"],
+  "properties": {
+    "id": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+    "version": { "type": "integer", "minimum": 1 },
+    "title": { "type": "string" },
+    "generatedBy": { "type": "string" },
+    "tenant": {
+      "type": "object",
+      "required": ["domain", "licence", "timezone", "allowedCountries", "trustedIps", "allowlists"],
+      "properties": {
+        "domain": { "type": "string" },
+        "licence": { "enum": ["free", "p1", "p2"] },
+        "timezone": { "type": "string" },
+        "allowedCountries": { "type": "array", "items": { "type": "string", "pattern": "^[A-Z]{2}$" } },
+        "neighborCountriesTolerance": { "type": "array", "items": { "type": "string", "pattern": "^[A-Z]{2}$" } },
+        "trustedIps": { "type": "array", "items": { "type": "string" } },
+        "mspKeywords": { "type": "array", "items": { "type": "string" } },
+        "partnerTenants": { "type": "array", "items": { "type": "string" } },
+        "allowlists": {
+          "type": "object",
+          "properties": {
+            "oauthApps": { "type": "array", "items": { "type": "string" } },
+            "forwarding": { "type": "array", "items": { "type": "object", "required": ["mailbox", "to"] } },
+            "vpnAsns": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "victims": { "type": "array", "items": { "type": "string" } },
+        "users": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "geo": {
+      "type": "object",
+      "description": "Attributs par IP. Le harnais de test les injecte à la place de la géolocalisation réelle (les IP pseudonymisées sont en plages de documentation).",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["type"],
+        "properties": {
+          "country": { "type": ["string", "null"] },
+          "city": { "type": ["string", "null"] },
+          "asn": { "type": ["string", "null"] },
+          "org": { "type": ["string", "null"] },
+          "type": { "enum": ["office", "residential", "mobile", "hosting", "satellite", "microsoft", "unknown"] },
+          "proxy": { "type": "boolean" },
+          "note": { "type": "string" }
+        }
+      }
+    },
+    "posture": { "type": "object", "description": "Instantané de configuration consommé par le scanner de posture (même structure que les données collectées via Graph et le worker EXO)." },
+    "events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "ts", "source", "label", "provenance"],
+        "properties": {
+          "id": { "type": "string" },
+          "ts": { "type": "string", "format": "date-time", "pattern": "Z$" },
+          "source": { "enum": ["signin", "ual", "entra_audit", "message_trace", "restricted_entity"] },
+          "label": { "enum": ["attacker", "legit", "system", "unknown"] },
+          "provenance": { "enum": ["observed", "reconstructed", "synthetic"] },
+          "user": { "type": "string" },
+          "ip": { "type": ["string", "null"] },
+          "note": { "type": "string" },
+          "interactive": { "type": "boolean" },
+          "appId": { "type": "string" },
+          "appName": { "type": "string" },
+          "resource": { "type": "string" },
+          "clientApp": { "type": "string" },
+          "userAgent": { "type": "string" },
+          "errorCode": { "type": "integer" },
+          "failureReason": { "type": "string" },
+          "authRequirement": { "type": "string" },
+          "mfaMethod": { "type": "string" },
+          "authProtocol": { "enum": ["none", "deviceCode", "ropc", "saml20", "wsFederation"] },
+          "originalTransferMethod": { "type": "string" },
+          "sessionId": { "type": "string" },
+          "deviceId": { "type": "string" },
+          "deviceName": { "type": "string" },
+          "os": { "type": "string" },
+          "browser": { "type": "string" },
+          "caStatus": { "type": "string" },
+          "crossTenantAccessType": { "type": "string" },
+          "homeTenant": { "type": "string" },
+          "operation": { "type": "string" },
+          "workload": { "type": "string" },
+          "resultStatus": { "type": "string" },
+          "clientInfo": { "type": "string" },
+          "mailAccessType": { "enum": ["Bind", "Sync"] },
+          "folder": { "type": "string" },
+          "itemSubject": { "type": "string" },
+          "itemCount": { "type": "integer" },
+          "params": { "type": "string" },
+          "activity": { "type": "string" },
+          "category": { "type": "string" },
+          "result": { "type": "string" },
+          "initiatedBy": { "type": "string" },
+          "target": { "type": "string" },
+          "targetType": { "type": "string" },
+          "modifiedProperties": { "type": "array" },
+          "sender": { "type": "string" },
+          "recipient": { "type": "string" },
+          "subject": { "type": "string" },
+          "status": { "type": "string" },
+          "fromIp": { "type": "string" },
+          "direction": { "enum": ["inbound", "outbound", "internal"] },
+          "messageId": { "type": "string" },
+          "filterVerdict": { "type": "string" },
+          "action": { "type": "string" }
+        }
+      }
+    },
+    "expected": {
+      "type": "object",
+      "required": ["mustRaise", "mustNotRaise"],
+      "properties": {
+        "mustRaise": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["ruleId", "target", "minSeverity"],
+            "properties": {
+              "ruleId": { "type": "string" },
+              "target": { "type": "string" },
+              "minSeverity": { "enum": ["INFO", "MEDIUM", "HIGH", "CRITICAL"] },
+              "window": { "type": "array", "items": { "type": "string" }, "minItems": 2, "maxItems": 2 },
+              "count": { "type": "integer" },
+              "evidenceContains": { "type": "string" },
+              "why": { "type": "string" }
+            }
+          }
+        },
+        "mustNotRaise": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["target", "ruleIds"],
+            "properties": {
+              "target": { "type": "string" },
+              "ruleIds": { "type": "array", "items": { "type": "string" } },
+              "maxSeverity": { "enum": ["INFO", "MEDIUM", "HIGH", "CRITICAL"] },
+              "window": { "type": "array", "items": { "type": "string" }, "minItems": 2, "maxItems": 2 },
+              "why": { "type": "string" }
+            }
+          }
+        },
+        "unlabeled": { "type": "array" }
+      }
+    },
+    "groundTruthTimeline": { "type": "array" },
+    "stats": { "type": "object" }
+  }
+}

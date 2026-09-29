@@ -28,3 +28,6 @@ CLAUDE.md
 PLAN.md
 custom/
 start.ps1
+# Caches Python (outillage fixtures)
+__pycache__/
+*.pyc

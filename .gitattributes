@@ -1,2 +1,7 @@
 *.sh text eol=lf
 agent/installer/* text eol=lf
+
+# Scénarios M365 et leur outillage : le générateur écrit en LF et sa sortie doit
+# rester identique au bit près, sinon chaque clone produit un faux diff.
+fixtures/m365/** text eol=lf
+tools/** text eol=lf
