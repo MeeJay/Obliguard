@@ -53,10 +53,10 @@ RES_EXO = "Office 365 Exchange Online"
 RES_DRS = "Device Registration Service"
 
 UA_WIN_CHROME = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
-UA_MAC_OUTLOOK = "MacOutlook/16.112.26082125 (ARM64 Mac OS X 26.6.2 (Build 25G83))"
+UA_MAC_OUTLOOK = "MacOutlook/16.0.0 (ARM64 Mac OS X 26.0)"
 UA_IOS_OUTLOOK = "Outlook-iOS/2.0"
 UA_WIN_EDGE = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0"
-UA_ANDROID = "Mozilla/5.0 (Linux; Android 16; SM-A546B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36"
+UA_ANDROID = "Mozilla/5.0 (Linux; Android 16; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36"
 UA_PY_REQUESTS = "python-requests/2.34.2"
 UA_PY_URLLIB = "Python-urllib/3.12"
 
@@ -286,10 +286,10 @@ def scenario_a(seed: int) -> dict:
     rcpts_157 = rcpts + s.rnd.sample(rcpts, 16)  # 157 envois pour 141 destinataires uniques
     send_t = paris("2026-09-28 08:49:00")
     for i, r in enumerate(rcpts_157):
-        s.trace(send_t + timedelta(seconds=i // 20), "attacker", "observed" if i < 1 else "synthetic", V, r, "Urgent-Review Shared Document",
+        s.trace(send_t + timedelta(seconds=i // 20), "attacker", "observed" if i < 1 else "synthetic", V, r, "Shared Document - Action Required",
                 "Delivered", ATK_OWA, "internal" if r.endswith(D) else "outbound", f"<phish-a-{i // 20}@{D}>",
                 note="157 envois / 141 uniques / 30 internes / 111 externes (chiffres observés)")
-    s.trace(paris("2026-09-28 08:49:09"), "legit", "observed", FWD, CEO, "TR : Urgent-Review Shared Document", "Delivered", EXO_SRV1,
+    s.trace(paris("2026-09-28 08:49:09"), "legit", "observed", FWD, CEO, "TR : Shared Document - Action Required", "Delivered", EXO_SRV1,
             "internal", f"<fwd-a-1@{D}>", note="collaborateur qui signale le leurre à la direction")
     for i, (subj, hhmm) in enumerate((("RE: virement des sommes dues", "09:12"), ("RE: virement des sommes dues", "09:14"),
                                        ("TR: Devis_0000000001_20260926", "09:31"), ("TR: [Support MSP #0000001] Ticket resolved", "09:40"),
@@ -353,7 +353,7 @@ def scenario_a(seed: int) -> dict:
         ],
         "exchange": {
             "smtpClientAuthDisabledOrg": False,
-            "casMailboxes": [{"mailbox": COPIER, "smtpClientAuthenticationDisabled": False, "label": "legit", "note": "copieur scan-to-mail"}],
+            "casMailboxes": [{"mailbox": COPIER, "smtpClientAuthenticationDisabled": False, "label": "legit", "note": "copieur multifonction, dépôt de documents par courriel"}],
             "unifiedAuditLogIngestionEnabledExoView": None,
             "mailboxForwarding": [],
             "inboxRules": [
@@ -389,7 +389,7 @@ def scenario_a(seed: int) -> dict:
             {"ruleId": "D-SI-01", "target": V, "minSeverity": "CRITICAL", "evidenceContains": "python-requests"},
             {"ruleId": "D-SI-07", "target": V, "minSeverity": "MEDIUM", "why": "602 IP distinctes en 7 jours"},
             {"ruleId": "D-MAIL-01", "target": V, "minSeverity": "CRITICAL", "why": "111 destinataires externes en une minute"},
-            {"ruleId": "D-MAIL-02", "target": V, "minSeverity": "HIGH", "evidenceContains": "Urgent-Review Shared Document"},
+            {"ruleId": "D-MAIL-02", "target": V, "minSeverity": "HIGH", "evidenceContains": "Shared Document - Action Required"},
             {"ruleId": "F-DATA-01", "target": "tenant", "minSeverity": "INFO", "why": "UAL sans UserLoggedIn depuis le 22/09"},
         ],
         "mustNotRaise": [
@@ -487,11 +487,11 @@ def scenario_b(seed: int) -> dict:
              note="succès depuis Hostinger BR entre deux connexions FR de la victime ; non retenu par le rapport final")
 
     # ── 23/09 : leurre reçu, classé indésirable
-    s.trace(paris("2026-09-23 14:19:00"), "attacker", "observed", "sender@lure-sender.example", V, "RE: EPC Contract & Project Management",
+    s.trace(paris("2026-09-23 14:19:00"), "attacker", "observed", "sender@lure-sender.example", V, "RE: Contract Follow-Up",
             "Delivered", LURE_SMTP, "inbound", "<lure-b-1@lure-sender.example>", verdict="Junk",
             note="leurre le plus probable ; supprimé définitivement ensuite de la boîte")
     s.ual(paris("2026-09-23 14:19:30"), "attacker", "reconstructed", V, None, "Create", folder="Courrier indésirable",
-          subject="RE: EPC Contract & Project Management", workload="Exchange")
+          subject="RE: Contract Follow-Up", workload="Exchange")
     # partenaire probablement compromis : phishing haute confiance mis en quarantaine
     for i, day in enumerate(("23", "24", "26", "28")):
         s.trace(paris(f"2026-09-{day} 10:0{i}:00"), "unknown", "observed", f"sender{i + 1}@partner-01.example", f"staff{i + 1}@{D}",
@@ -544,10 +544,10 @@ def scenario_b(seed: int) -> dict:
         t = t0 + timedelta(seconds=int(m * (600 / 8)))
         mid = f"<vsa-b-{m + 1}@{D}>"
         s.ual(t, "attacker", "reconstructed", V, ATK, "Send", client_info="Client=REST;" + UA_PY_URLLIB, app_id=APP["office"][0],
-              session=session, subject="Vendor Service Agreement - Review & Sign", params=f"RecipientCount={size}")
+              session=session, subject="Service Agreement - Signature Requested", params=f"RecipientCount={size}")
         ip = MS_SEND[m % len(MS_SEND)]
         for r in all_rcpts[idx: idx + size]:
-            s.trace(t, "attacker", "synthetic" if m else "observed", V, r, "Vendor Service Agreement - Review & Sign",
+            s.trace(t, "attacker", "synthetic" if m else "observed", V, r, "Service Agreement - Signature Requested",
                     "Delivered" if m < 2 else "Failed", ip, "outbound", mid,
                     note="2 566 destinataires, 473 remis dans 164 sociétés (observé) ; répartition par message reconstituée")
         idx += size
@@ -555,7 +555,7 @@ def scenario_b(seed: int) -> dict:
     for i in range(24):
         s.ual(paris("2026-09-29 03:05:00") + timedelta(minutes=i * 7), "attacker", "reconstructed", V, ATK, "MoveToFolder",
               client_info="Client=REST;" + UA_PY_URLLIB, session=session, folder="Historique des conversations",
-              subject=("Undeliverable: Vendor Service Agreement - Review & Sign" if i % 3 else "RE: Vendor Service Agreement - Review & Sign"),
+              subject=("Undeliverable: Service Agreement - Signature Requested" if i % 3 else "RE: Service Agreement - Signature Requested"),
               items=1, note="masquage sans règle de boîte")
     s.ev("restricted_entity", paris("2026-09-29 03:00:00"), "system", "observed", user=V, action="BlockOutbound",
          note="Microsoft bloque l'envoi à 02:58 puis restreint le compte")

@@ -45,7 +45,9 @@ Le dépôt est public, donc aucune donnée client réelle ne doit y figurer :
 - IP non Microsoft : plages de documentation (`192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`, `2001:db8::/32`). La famille IPv4 / IPv6 n'est pas conservée. Les attributs utiles sont dans `geo`.
 - IP Microsoft (AS8075) : conservées, pour tester leur exclusion.
 - fournisseurs d'accès et hébergeurs dans `geo.org` : conservés quand ils désignent une infrastructure publique, génériques quand ils localiseraient une personne.
-- objets de leurre : conservés (ce sont des indicateurs). Objets métier et personnels : remplacés.
+- objets de message : tous remplacés, y compris les leurres. Les objets de substitution gardent la famille du leurre d'origine (document partagé, demande de signature, relance de contrat), ce que testent D-MAIL-02 et D-EXO-06.
+- empreintes logicielles et matérielles : numéros de build, versions détaillées et modèles d'appareil retirés des user agents. Les user agents d'automate (`python-requests`, `Python-urllib`) sont conservés : ce sont les indicateurs de D-SI-01.
+- noms d'applications tierces (`eM Client`, `RocketReach`, `Apollo`, `AdminDroid`…) : conservés. Ils désignent des éditeurs, pas le client, et P-APP-05 comme D-ID-03 reposent dessus.
 
 La correspondance avec les valeurs réelles reste hors dépôt.
 
