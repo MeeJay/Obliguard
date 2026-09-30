@@ -22,8 +22,8 @@
  *   VERIFY_SUITE_TIMEOUT_MS   per-suite timeout (default 240000)
  *
  * Docker fallback when embedded PG cannot run on the box:
- *   docker -H tcp://10.0.0.152:2375 run -d --rm --name obliguard-verify-pg -p 55432:5432 -e POSTGRES_PASSWORD=verify postgres:16-alpine
- *   VERIFY_DATABASE_URL=postgres://postgres:verify@10.0.0.152:55432/postgres
+ *   docker -H tcp://<hote-docker>:2375 run -d --rm --name obliguard-verify-pg -p 55432:5432 -e POSTGRES_PASSWORD=verify postgres:16-alpine
+ *   VERIFY_DATABASE_URL=postgres://postgres:verify@<hote-docker>:55432/postgres
  *
  * Every artifact (PG data, TAP files, per-suite reports) lives under
  * os.tmpdir(): 000-RegularUpdate.bat commits with `git add -A`, nothing may

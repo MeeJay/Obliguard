@@ -5,7 +5,7 @@ import type { Knex } from 'knex';
  *
  * Per-tenant custom display names for known IP addresses.
  * Lets operators label any IP (whitelisted, suspicious, banned, etc.)
- * with a human-readable name (e.g., "AIRBOX", "Office NAT") that is then
+ * with a human-readable name (e.g., "Office NAT", "Site distant") that is then
  * shown on the network map and reputation tables instead of the raw address.
  *
  * Scope:
