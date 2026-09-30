@@ -18,16 +18,49 @@ coverage/
 .vscode/
 .idea/
 *.tsbuildinfo
-*.bat
 
-# Claude Code internal files (conversation history, memory, etc.)
-.claude/
-CLAUDE.md
-
-# Local dev / planning notes
-PLAN.md
-custom/
-start.ps1
 # Caches Python (outillage fixtures)
 __pycache__/
 *.pyc
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Hors build : JAMAIS sur GitHub (règle propriétaire, 30/09/2026)
+#
+# Par défaut, rien de ce qui n'est pas indispensable au build ne part sur
+# GitHub. La documentation en particulier peut contenir de la donnée client :
+# elle reste sur le poste. Aucune donnée client réelle (nom, domaine, machine,
+# personne, IP) ne doit figurer où que ce soit dans ce dépôt.
+#
+# Toute exception se déclare en négation explicite plus bas, avec sa raison.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Documentation, notes, brouillons
+docs/
+doc/
+docs-*/
+*.md
+*.markdown
+*.txt
+HANDOFF*
+NOTES*
+TODO*
+PLAN.md
+
+# Scripts d'outillage qui nous sont propres (build local, déploiement, bench)
+*.bat
+*.cmd
+*.ps1
+*.psm1
+
+# Données de Claude Code et caches locaux
+.claude/
+.cache/
+CLAUDE.md
+
+# Répertoire de travail local (scripts, clés SSH)
+custom/
+
+# ── Exceptions : indispensables au build ou au runtime ────────────────────────
+# Servi au runtime par le serveur (GET /api/m365/enrol/script) et copié dans
+# dist/ par server/scripts/copy-assets.mjs. Sans lui, l'enrôlement M365 casse.
+!/server/src/services/m365/enrol.ps1
