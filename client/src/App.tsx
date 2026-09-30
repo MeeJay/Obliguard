@@ -72,7 +72,7 @@ export default function App() {
             {/* Agent-device management → 'monitor_rw' (keys tab hidden for
                 non-admins inside the page) */}
             <Route element={<ProtectedRoute requiredCapability="monitor_rw" />}>
-              <Route path="/admin/agents" element={<AdminAgentPage />} />
+              <Route path="/manage/agents" element={<AdminAgentPage />} />
             </Route>
 
             {/* Group management → 'group_rw' capability */}
@@ -85,11 +85,11 @@ export default function App() {
               <Route path="/bans" element={<Navigate to="/ip-reputation" replace />} />
               <Route path="/whitelist" element={<Navigate to="/ip-reputation" replace />} />
               <Route path="/notifications" element={<NotificationsPage />} />
-              <Route path="/admin/users" element={<AdminUsersPage />} />
-              <Route path="/admin/import-export" element={<ImportExportPage />} />
-              <Route path="/admin/tenants" element={<AdminTenantsPage />} />
-              <Route path="/admin/service-templates" element={<ServiceTemplatesPage />} />
-              <Route path="/admin/network-limiting" element={<RateLimitPage />} />
+              <Route path="/manage/users" element={<AdminUsersPage />} />
+              <Route path="/manage/import-export" element={<ImportExportPage />} />
+              <Route path="/manage/tenants" element={<AdminTenantsPage />} />
+              <Route path="/manage/service-templates" element={<ServiceTemplatesPage />} />
+              <Route path="/manage/network-limiting" element={<RateLimitPage />} />
               <Route path="/settings" element={<SettingsPage />} />
             </Route>
           </Route>

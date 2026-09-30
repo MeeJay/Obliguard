@@ -371,7 +371,7 @@ export function DashboardPage() {
 
       {/* Agent updates (C17-1) */}
       {versionDist && (versionDist.outdated > 0 || versionDist.updatePending > 0) && (
-        <Link to="/admin/agents" className="mb-6 flex flex-wrap items-center gap-2 text-xs w-fit">
+        <Link to="/manage/agents" className="mb-6 flex flex-wrap items-center gap-2 text-xs w-fit">
           {versionDist.outdated > 0 && (
             <span className="rounded-full px-2.5 py-1 font-medium bg-amber-500/10 text-amber-400 border border-amber-500/20">
               {t('agentUpdate.dashboardOutdated', {
