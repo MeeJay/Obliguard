@@ -502,6 +502,26 @@ func TestNftablesPerElementFallback(t *testing.T) {
 	mustHaveLine(t, r.lines(), "nft add element inet obliguard obliguard_nets { 5.6.7.8 }")
 }
 
+func TestNftablesWithoutStdinScripts(t *testing.T) {
+	sim := newNftSim()
+	r := &fakeRunner{handle: func(c fakeCall) (string, error) {
+		if len(c.args) == 2 && c.args[0] == "-f" {
+			return "", errors.New("unknown option -f -")
+		}
+		return sim.handle(c)
+	}}
+	useFakeRunner(t, r)
+	fw := &NftablesFirewall{}
+	if err := fw.BanIP("1.2.3.0/24"); err != nil {
+		t.Fatalf("init must fall back to single statements: %v", err)
+	}
+	fw.Flush()
+	if !sim.interval[nftSet4] || !sim.blocks("1.2.3.77") {
+		t.Fatal("interval set not created / element not added")
+	}
+	mustHaveLine(t, r.lines(), "nft add element inet obliguard obliguard_nets { 1.2.3.0/24 }")
+}
+
 func TestNftablesLegacyMigration(t *testing.T) {
 	sim := newNftSim()
 	sim.sets[nftLegacySet] = prefixMap("5.6.7.8", "1.2.3.4")

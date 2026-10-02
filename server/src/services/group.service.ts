@@ -298,6 +298,8 @@ export const groupService = {
         : (existing?.agent_group_config ?? {})),
       ...config,
     };
+    // Obliview leftover stored by older versions: dropped on the next write.
+    delete (merged as unknown as Record<string, unknown>).heartbeatMonitoring;
     const [row] = await (db<GroupRow>('monitor_groups')
       .where({ id })
       .update({ agent_group_config: JSON.stringify(merged), updated_at: new Date() } as Record<string, unknown>)

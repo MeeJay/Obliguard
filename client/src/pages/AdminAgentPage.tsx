@@ -1351,7 +1351,7 @@ export function AdminAgentPage() {
                             <UpdateStatusBadge
                               device={device}
                               size="sm"
-                              canRetry={!isForeign(device.tenantId)}
+                              canRetry={!isForeign(device.tenantId) && device.status === 'approved' && device.resolvedUpdatePolicy !== 'off'}
                               onRetried={handleRetried}
                             />
                           )}

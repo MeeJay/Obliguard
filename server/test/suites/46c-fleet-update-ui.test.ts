@@ -87,6 +87,8 @@ describe('46c fleet update UI (W3-5)', () => {
       const src = read(page);
       assert.match(src, /<UpdateStatusBadge\b/, `${page} renders the update badge`);
       assert.match(src, /canRetry=\{[^}]*\}/, `${page} gates Retry`);
+      // The server refuses a Retry under 'off' (409): no button there.
+      assert.match(src, /canRetry=\{[^}]*resolvedUpdatePolicy !== 'off'[^}]*\}/, `${page} hides Retry when updates are frozen`);
     }
     const admin = read('client/src/pages/AdminAgentPage.tsx');
     assert.match(admin, /missingBuilds/, 'missing builds banner');
@@ -133,6 +135,23 @@ describe('46c fleet update UI (W3-5)', () => {
     assert.equal(client.visibleUpdateAttempt({ agentVersion: '2.0.0', update: { ...at, phase: 'failed' } }), null);
     assert.equal(client.visibleUpdateAttempt({ agentVersion: '1.0.0', update: { ...at, phase: 'succeeded' } }), null);
     assert.equal(client.visibleUpdateAttempt({ agentVersion: '1.0.0', update: null }), null);
+    // Group page chain: ancestors only (the group itself excluded), nearest
+    // first, other tenants' groups ignored, unknown ancestor = unresolved.
+    const node = (id: number, parentId: number | null, tenantId: number, updatePolicy: AgentUpdatePolicy | null, children: any[] = []) =>
+      ({ id, parentId, tenantId, agentGroupConfig: updatePolicy ? { updatePolicy } : null, children });
+    const leaf = node(4, 3, 2, 'auto');
+    const tree = [node(1, null, 2, 'off', [node(2, 1, 9, 'auto', [node(3, 2, 2, 'manual', [leaf])])])];
+    assert.deepEqual(client.ancestorUpdatePolicyChain(tree, leaf), [
+      { groupId: 3, policy: 'manual' },
+      { groupId: 1, policy: 'off' },
+    ]);
+    assert.equal(client.ancestorUpdatePolicyChain(tree, node(5, 42, 2, null)), null);
+    assert.deepEqual(
+      client.resolveUpdatePolicyView(null, client.ancestorUpdatePolicyChain(tree, leaf), null, null),
+      { policy: 'off', source: 'group', sourceGroupId: 1 },
+    );
+    assert.equal(client.updateErrorLabel('timeout', (_k: string, d: string) => d), 'timed out (still on the old version after 10 min)');
+    assert.equal(client.updateErrorLabel('sha256 mismatch', (_k: string, d: string) => d), 'sha256 mismatch', 'agent errors shown as is');
     assert.equal(client.agentBuildLabel('obliguard-agent-linux-arm64'), 'linux-arm64');
     assert.equal(client.agentBuildLabel('obliguard-agent.msi'), 'windows (MSI)');
   });

@@ -113,7 +113,16 @@ func (f *NftablesFirewall) ensureTable() error {
 		fmt.Sprintf("add chain inet %s %s { type filter hook output priority -10; policy accept; }", nftTable, nftChainOut),
 	}, "\n") + "\n" + nftChainsScript(hasLegacy)
 	if err := fwRunStdin(script, "nft", "-f", "-"); err != nil {
-		return fmt.Errorf("nft init: %w", err)
+		// Older nft without stdin scripts, or one statement refused: apply the
+		// statements one by one (as agents up to 1.8.55 did), then check that
+		// the sets exist.
+		log.Printf("Firewall: nft init script refused (%v) — applying statement by statement", err)
+		for _, line := range strings.Split(strings.TrimSpace(script), "\n") {
+			fwRun("nft", strings.Fields(line)...)
+		}
+		if _, lerr := fwOutput("nft", "list", "set", "inet", nftTable, nftSet4); lerr != nil {
+			return fmt.Errorf("nft init: %w", err)
+		}
 	}
 	f.initialized = true
 	f.legacy = hasLegacy

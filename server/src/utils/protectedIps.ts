@@ -14,9 +14,11 @@
  *     creation paths); the check itself never queries.
  *
  * On top of it, NON_PUBLIC_RANGES (RFC 1918, CGNAT, loopback, link-local,
- * ULA, multicast...) are never a ban target, whatever the scope: an internal
- * host brute-forcing an agent must not turn into a fleet-wide (or LAN-wide)
- * block. Documentation and benchmark ranges count as public here.
+ * ULA, multicast...) are never the target of a GLOBAL ban (auto, manual from
+ * Default, promote, external, obli.tools, MikroTik import): an internal host
+ * brute-forcing one agent must not turn into a fleet-wide block of every
+ * tenant's LAN. A tenant/group/agent ban on a LAN address stays the tenant's
+ * explicit local choice. Documentation and benchmark ranges count as public.
  *
  * checkBanTarget() is the mandatory contract for every path that creates a
  * ban (manual, promote, auto-ban, external, obli.tools, MikroTik import).
@@ -266,15 +268,16 @@ export async function findProtectedConflict(
 
 /**
  * Non-public range, then protected set, for an already parsed target.
- * `global` selects the fleet-wide checks (interfaces, every tenant's infra);
- * a scoped ban passes its owning `tenantId`. Every refusal is logged
- * (BanSafety) unless `silent`.
+ * `global` selects the fleet-wide checks (non-public ranges, interfaces,
+ * every tenant's infra); a scoped ban passes its owning `tenantId` (its own
+ * agents and routers; a LAN address stays a tenant's explicit local choice).
+ * Every refusal is logged (BanSafety) unless `silent`.
  */
 export async function findBanSafetyConflict(
   t: ParsedCidr,
   opts: { global: boolean; tenantId?: number | null; silent?: boolean },
 ): Promise<'reserved' | 'protected' | null> {
-  if (isNonPublicTarget(t)) {
+  if (opts.global && isNonPublicTarget(t)) {
     if (!opts.silent) logger.warn({ target: t, global: opts.global }, 'BanSafety: refused ban on a non-public address');
     return 'reserved';
   }

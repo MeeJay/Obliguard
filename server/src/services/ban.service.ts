@@ -377,9 +377,8 @@ class BanService {
       rowTenantId = derived === 'global' ? null : tenantId;
     }
 
-    // 3) Non-public ranges and protected set (interface and every tenant's
-    //    infra addresses matter for global bans; a scoped ban checks its own
-    //    tenant's agents and routers)
+    // 3) Non-public ranges, interfaces and every tenant's infra addresses for
+    //    a global ban; a scoped ban checks its own tenant's agents and routers
     await ensureInfraFresh();
     if (await findBanSafetyConflict(t, { global: scope === 'global', tenantId: rowTenantId })) {
       throw new AppError(400, RESERVED_OR_PROTECTED_MESSAGE);
@@ -1052,7 +1051,7 @@ class BanEngine {
       if (last == null || now - last > 60 * 60 * 1000) {
         if (refusedAutoBanLog.size > 1000) refusedAutoBanLog.clear();
         refusedAutoBanLog.set(rawIp, now);
-        logger.warn({ ip: rawIp, reason: chk.code }, 'BanSafety: BanEngine refused to auto-ban a non-public/reserved/protected address');
+        logger.warn({ ip: rawIp, reason: chk.code }, 'BanEngine: refusing to auto-ban a non-public, reserved or protected address (BanSafety)');
       }
       return;
     }

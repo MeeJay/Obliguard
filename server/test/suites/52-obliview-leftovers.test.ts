@@ -75,11 +75,16 @@ describe('52 Obliview leftovers removed (W3-4)', () => {
     const stored = await h.db('app_config').where({ key: 'agent_global_config' }).first();
     assert.ok(!('heartbeatMonitoring' in JSON.parse(stored.value)));
 
+    // A value stored by an older version is dropped on the next write.
+    await h.db('monitor_groups').where({ id: G.DEFAULT })
+      .update({ agent_group_config: JSON.stringify({ heartbeatMonitoring: false, maxMissedPushes: 3 }) });
     const grp = await admin.patch(`/api/groups/${G.DEFAULT}/agent-config`, { agentGroupConfig: { heartbeatMonitoring: true, pushIntervalSeconds: 45 } });
     assert.equal(grp.status, 200, grp.text);
     const cfgRaw = (await h.db('monitor_groups').where({ id: G.DEFAULT }).first()).agent_group_config;
     const cfg = typeof cfgRaw === 'string' ? JSON.parse(cfgRaw) : cfgRaw;
     assert.equal(cfg.pushIntervalSeconds, 45);
+    assert.equal(cfg.maxMissedPushes, 3, 'existing group config keys are kept');
+    assert.ok(!('heartbeatMonitoring' in (grp.json.data.agentGroupConfig ?? {})), 'group payload still carries heartbeatMonitoring');
     assert.ok(!('heartbeatMonitoring' in cfg), 'group agent config stored heartbeatMonitoring');
   });
 

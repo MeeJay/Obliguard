@@ -1399,7 +1399,7 @@ export function AgentDetailPage() {
             {device.deviceType === 'agent' && (
               <UpdateStatusBadge
                 device={device}
-                canRetry={canManage && !foreign}
+                canRetry={canManage && !foreign && device.status === 'approved' && device.resolvedUpdatePolicy !== 'off'}
                 onRetried={d => setDevice(d)}
               />
             )}

@@ -129,7 +129,7 @@ describe('50 ban engine correctness', () => {
     assert.ok(c3.remove.includes('198.18.52.0/24'));
   });
 
-  lotIt('D4', '50.6 non-public addresses are never banned (engine and manual)', async () => {
+  lotIt('D4', '50.6 non-public addresses are never banned globally (engine, manual, external)', async () => {
     for (const ip of ['192.168.1.50', '100.64.1.50', 'fd00::50']) {
       await insertEvents(h.db, { deviceId: 2, tenantId: 2, ip, count: 8 });
     }
@@ -137,13 +137,21 @@ describe('50 ban engine correctness', () => {
     for (const ip of ['192.168.1.50', '100.64.1.50', 'fd00::50']) {
       assert.equal((await rowsFor(ip)).length, 0, `auto-ban of ${ip}`);
     }
-    const mb = await h.as('member_b');
     const dm = await h.adminIn(1);
     for (const ip of ['192.168.1.50', '100.64.1.50', 'fd00::50', '172.16.0.0/24']) {
-      assert.equal((await mb.post('/api/bans', { ip })).status, 400, `tenant ban of ${ip}`);
       assert.equal((await dm.post('/api/bans', { ip })).status, 400, `global ban of ${ip}`);
     }
+    await assert.rejects(
+      banService.createFromExternal({ ip: '192.168.1.50', reason: null, sourceApp: 'oblihub', expiresAt: null, masterTenantId: 1 }),
+      (err: any) => err?.statusCode === 400,
+    );
     assert.equal((await rowsFor('192.168.1.50')).length, 0);
+    // A tenant-local ban of a LAN address stays the tenant's explicit choice,
+    // and is never promoted to global.
+    const local = await (await h.as('member_b')).post('/api/bans', { ip: '192.168.1.50' });
+    assert.equal(local.status, 201);
+    assert.equal((await dm.post(`/api/bans/${local.json.data.id}/promote-global`)).status, 400);
+    assert.equal((await rowsFor('192.168.1.50')).filter((r) => r.scope === 'global').length, 0);
   });
 
   lotIt('D4', '50.7 approved agents\' public addresses are protected (own tenant for scoped bans)', async () => {
