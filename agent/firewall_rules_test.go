@@ -241,13 +241,26 @@ func TestIptablesArgv(t *testing.T) {
 	if bin != "ip6tables" || !reflect.DeepEqual(got, want) {
 		t.Fatalf("ip6tables: %s %q", bin, got)
 	}
-	if args, err := iptablesDeleteArgs("ipt:INPUT:2"); err != nil || !reflect.DeepEqual(args, []string{"-D", "INPUT", "2"}) {
-		t.Fatalf("iptables delete: %q %v", args, err)
+	if bin, args, err := iptablesDeleteCommand("ipt:INPUT:2"); err != nil || bin != "iptables" || !reflect.DeepEqual(args, []string{"-D", "INPUT", "2"}) {
+		t.Fatalf("iptables delete: %s %q %v", bin, args, err)
 	}
-	for _, id := range []string{"ipt:FORWARD:2", "ipt:INPUT:-F", "ipt:INPUT", "INPUT:2", "ipt:INPUT:2 -j ACCEPT"} {
-		if _, err := iptablesDeleteArgs(id); err == nil {
+	if bin, args, err := iptablesDeleteCommand("ip6t:OUTPUT:7"); err != nil || bin != "ip6tables" || !reflect.DeepEqual(args, []string{"-D", "OUTPUT", "7"}) {
+		t.Fatalf("ip6tables delete: %s %q %v", bin, args, err)
+	}
+	for _, id := range []string{"ipt:FORWARD:2", "ipt:INPUT:-F", "ipt:INPUT", "INPUT:2", "ipt:INPUT:2 -j ACCEPT", "ip6t:FORWARD:1", "ip6tables:INPUT:1"} {
+		if _, _, err := iptablesDeleteCommand(id); err == nil {
 			t.Errorf("iptables delete %q accepted", id)
 		}
+	}
+	// ip6tables -L -n columns: num target prot opt source destination
+	if ip := firstIPv6Field([]string{"--", "2001:db8::/32", "::/0"}); ip != "2001:db8::/32" {
+		t.Errorf("firstIPv6Field: %q", ip)
+	}
+	if ip := firstIPv6Field([]string{"::/0", "2001:db8::1/128"}); ip != "2001:db8::1" {
+		t.Errorf("firstIPv6Field single: %q", ip)
+	}
+	if ip := firstIPv6Field([]string{"::/0", "::/0", "tcp", "dpt:22"}); ip != "" {
+		t.Errorf("firstIPv6Field wildcard: %q", ip)
 	}
 }
 

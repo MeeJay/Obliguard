@@ -570,13 +570,44 @@ func iptablesAddCommand(req FwAddRequest) (string, []string) {
 	return bin, append(args, "-j", target)
 }
 
-// iptablesDeleteArgs parses "ipt:INPUT|OUTPUT:N" (the chains ListRules reports).
-func iptablesDeleteArgs(ruleID string) ([]string, error) {
-	chain, num, ok := strings.Cut(strings.TrimPrefix(ruleID, "ipt:"), ":")
-	if !ok || !strings.HasPrefix(ruleID, "ipt:") || (chain != "INPUT" && chain != "OUTPUT") || !fwDigitsRe.MatchString(num) {
-		return nil, fmt.Errorf("invalid iptables rule ID: %s", ruleID)
+// iptablesDeleteCommand parses "ipt:INPUT|OUTPUT:N" (iptables) or
+// "ip6t:INPUT|OUTPUT:N" (ip6tables), the ids ListRules reports, into the
+// binary and its argv.
+func iptablesDeleteCommand(ruleID string) (string, []string, error) {
+	bin, rest := "iptables", ""
+	switch {
+	case strings.HasPrefix(ruleID, "ipt:"):
+		rest = strings.TrimPrefix(ruleID, "ipt:")
+	case strings.HasPrefix(ruleID, "ip6t:"):
+		bin, rest = "ip6tables", strings.TrimPrefix(ruleID, "ip6t:")
+	default:
+		return "", nil, fmt.Errorf("invalid iptables rule ID: %s", ruleID)
 	}
-	return []string{"-D", chain, num}, nil
+	chain, num, ok := strings.Cut(rest, ":")
+	if !ok || (chain != "INPUT" && chain != "OUTPUT") || !fwDigitsRe.MatchString(num) {
+		return "", nil, fmt.Errorf("invalid iptables rule ID: %s", ruleID)
+	}
+	return bin, []string{"-D", chain, num}, nil
+}
+
+// firstIPv6Field returns the first IPv6 address / network among fields
+// (ip6tables -L -n columns), skipping the ::/0 wildcard; "" when none.
+func firstIPv6Field(fields []string) string {
+	for _, f := range fields {
+		if p, err := netip.ParsePrefix(f); err == nil && p.Addr().Is6() {
+			if p.Bits() == 0 {
+				continue
+			}
+			if p.IsSingleIP() {
+				return p.Addr().String()
+			}
+			return p.Masked().String()
+		}
+		if a, err := netip.ParseAddr(f); err == nil && a.Is6() && !a.IsUnspecified() {
+			return a.String()
+		}
+	}
+	return ""
 }
 
 // netshAddArgs: netsh advfirewall firewall add rule name=... (one argv each).

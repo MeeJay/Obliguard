@@ -345,11 +345,15 @@ func (m *IptablesRuleManager) PlatformName() string { return "iptables" }
 
 func (m *IptablesRuleManager) ListRules() ([]FwRule, error) {
 	var rules []FwRule
+	// ip6tables is listed too: AddRule sends IPv6 remotes there, and those
+	// rules must stay visible (and deletable) from rule management.
 	for _, info := range []struct {
+		bin   string
+		idPfx string
 		chain string
 		dir   string
-	}{{"INPUT", "in"}, {"OUTPUT", "out"}} {
-		out, err := exec.Command("iptables", "-L", info.chain, "-n", "--line-numbers").Output()
+	}{{"iptables", "ipt", "INPUT", "in"}, {"iptables", "ipt", "OUTPUT", "out"}, {"ip6tables", "ip6t", "INPUT", "in"}, {"ip6tables", "ip6t", "OUTPUT", "out"}} {
+		out, err := exec.Command(info.bin, "-L", info.chain, "-n", "--line-numbers").Output()
 		if err != nil {
 			continue
 		}
@@ -367,7 +371,7 @@ func (m *IptablesRuleManager) ListRules() ([]FwRule, error) {
 			proto := strings.ToLower(fields[2])
 
 			rule := FwRule{
-				ID:        fmt.Sprintf("ipt:%s:%d", info.chain, num),
+				ID:        fmt.Sprintf("%s:%s:%d", info.idPfx, info.chain, num),
 				Name:      strings.Join(fields[1:], " "),
 				Direction: info.dir,
 				Protocol:  proto,
@@ -384,7 +388,11 @@ func (m *IptablesRuleManager) ListRules() ([]FwRule, error) {
 			} else {
 				rule.Action = target
 			}
-			if ip := ipRe.FindString(line); ip != "" && ip != "0.0.0.0" {
+			if info.bin == "ip6tables" {
+				if ip := firstIPv6Field(fields[3:]); ip != "" {
+					rule.RemoteIP = ip
+				}
+			} else if ip := ipRe.FindString(line); ip != "" && ip != "0.0.0.0" {
 				rule.RemoteIP = ip
 			}
 			if strings.Contains(line, "dpt:") {
@@ -413,12 +421,15 @@ func (m *IptablesRuleManager) AddRule(req FwAddRequest) error {
 }
 
 func (m *IptablesRuleManager) DeleteRule(ruleID string) error {
-	// Format: "ipt:INPUT|OUTPUT:NUM"
-	args, err := iptablesDeleteArgs(ruleID)
+	// Format: "ipt:INPUT|OUTPUT:NUM" or "ip6t:INPUT|OUTPUT:NUM"
+	bin, args, err := iptablesDeleteCommand(ruleID)
 	if err != nil {
 		return err
 	}
-	return exec.Command("iptables", args...).Run()
+	if out, err := exec.Command(bin, args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("%s -D: %s — %w", bin, strings.TrimSpace(string(out)), err)
+	}
+	return nil
 }
 
 func (m *IptablesRuleManager) ToggleRule(_ string, _ bool) error {
