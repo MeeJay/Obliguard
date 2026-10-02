@@ -5,6 +5,7 @@ import { userSessionsService } from '../services/userSessions.service';
 import { invalidateUserState } from '../middleware/sessionUserGuard';
 import { AppError } from '../middleware/errorHandler';
 import { db } from '../db';
+import { logger } from '../utils/logger';
 import type {
   CreateUserInput,
   UpdateUserInput,
@@ -106,6 +107,13 @@ export const usersController = {
   async changePassword(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const id = parseInt(req.params.id, 10);
+      if (!Number.isSafeInteger(id) || id <= 0) throw new AppError(404, 'User not found');
+
+      // One's own password is changed from the profile, with the current
+      // password: a hijacked admin session must not rotate it without it.
+      if (id === req.session.userId) {
+        throw new AppError(400, 'Use your profile to change your own password');
+      }
 
       // Block password change for SSO users
       const currentUser = await userService.getById(id);
@@ -116,7 +124,39 @@ export const usersController = {
       const data = req.body as ChangePasswordInput;
       const success = await userService.changePassword(id, data.password);
       if (!success) throw new AppError(404, 'User not found');
+      // A reset password signs the account out everywhere.
+      await userSessionsService.destroyForUser(id);
+      logger.info({ targetUserId: id, byUserId: req.session.userId }, 'Admin reset a user password');
       res.json({ success: true, message: 'Password changed' });
+    } catch (err) {
+      next(err);
+    }
+  },
+
+  // DELETE /api/users/:id/2fa — admin resets every second factor of a
+  // locked-out user (lost authenticator) — mirrors Obliance resetMfa.
+  async resetMfa(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const id = parseInt(req.params.id, 10);
+      if (!Number.isSafeInteger(id) || id <= 0) throw new AppError(404, 'User not found');
+      // One's own 2FA is managed from the profile (with a current code): this
+      // route must not be a way around it.
+      if (id === req.session.userId) {
+        throw new AppError(400, 'Use your profile to manage your own two-factor authentication');
+      }
+
+      const updated = await db('users').where({ id }).update({
+        totp_enabled: false,
+        totp_secret: null,
+        email_otp_enabled: false,
+        updated_at: new Date(),
+      });
+      if (!updated) throw new AppError(404, 'User not found');
+
+      // Sessions (and pending 2FA logins) die with the factors.
+      await userSessionsService.destroyForUser(id);
+      logger.warn({ targetUserId: id, byUserId: req.session.userId }, 'Admin reset the two-factor authentication of a user');
+      res.json({ success: true, message: 'Two-factor authentication reset' });
     } catch (err) {
       next(err);
     }

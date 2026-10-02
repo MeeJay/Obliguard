@@ -1,4 +1,6 @@
 import type { Request, Response, NextFunction } from 'express';
+import { isIP } from 'net';
+import { MASTER_TENANT_ID } from '@obliview/shared';
 import { db } from '../db';
 import { banService } from '../services/ban.service';
 import { verifyDelegationToken, verifyFailureToHttp } from '../services/delegationAuth.service';
@@ -17,7 +19,10 @@ export async function requireExternalAppDelegation(req: Request, res: Response, 
   const result = await verifyDelegationToken(req.headers.authorization, 'obliguard');
   if (!result.ok) {
     const { status, code, message } = verifyFailureToHttp(result.failure);
-    logger.warn({ code, headers: { hasAuth: !!req.headers.authorization } }, 'external-bans: token rejected');
+    logger.warn(
+      { reason: code, kid: result.kid, ip: req.ip, method: req.method, path: req.originalUrl, hasAuth: !!req.headers.authorization },
+      'external-bans: delegation token rejected',
+    );
     res.status(status).json({ success: false, code, error: message });
     return;
   }
@@ -37,7 +42,22 @@ export async function requireExternalAppDelegation(req: Request, res: Response, 
  * token (numeric sub) is refused — an end-user should not be able to push cross-suite bans by
  * mistake or intent; global bans through this endpoint are always a system decision.
  */
-const ALLOWED_SOURCE_APPS = ['oblihub']; // extend when more apps push bans (e.g. 'obliview')
+// Owner decision 8: a constant list reviewed in code, never configurable at runtime.
+export const ALLOWED_SOURCE_APPS: readonly string[] = ['oblihub'];
+
+/** Default cap on an external ban's duration (7 days, owner decision 8). */
+const EXTERNAL_BAN_MAX_SECONDS_DEFAULT = 7 * 24 * 3600;
+
+/**
+ * Maximum duration of a ban pushed by a sibling app, from EXTERNAL_BAN_MAX_SECONDS (positive
+ * integer seconds). A missing or invalid value falls back to the 7-day default. Read per call.
+ */
+export function externalBanMaxSeconds(): number {
+  const raw = process.env.EXTERNAL_BAN_MAX_SECONDS?.trim();
+  if (!raw || !/^[0-9]+$/.test(raw)) return EXTERNAL_BAN_MAX_SECONDS_DEFAULT;
+  const n = Number(raw);
+  return Number.isSafeInteger(n) && n > 0 ? n : EXTERNAL_BAN_MAX_SECONDS_DEFAULT;
+}
 
 export async function postExternalBan(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -62,18 +82,23 @@ export async function postExternalBan(req: Request, res: Response, next: NextFun
     }
     const ip = body.ip;
     const reason = typeof body.reason === 'string' ? body.reason.slice(0, 500) : null;
-    let expiresAt: Date | null = null;
-    if (body.banned_until != null && typeof body.banned_until === 'string') {
-      const d = new Date(body.banned_until);
-      if (!isNaN(d.getTime())) expiresAt = d;
-    }
 
-    // Master tenant id — the platform-level tenant that owns bans not tied to a specific
-    // customer tenant. Cross-suite bans always land at this level so they enforce globally.
-    const masterTenant = await db('tenants').where({ is_master: true }).first('id') as { id: number } | undefined;
-    if (!masterTenant) {
-      res.status(500).json({ success: false, error: 'Master tenant not configured' });
-      return;
+    // Duration: never longer than EXTERNAL_BAN_MAX_SECONDS. A request without banned_until
+    // (permanent) gets the maximum too — a sibling app cannot create a permanent global ban.
+    const now = Date.now();
+    const maxExpiresAt = new Date(now + externalBanMaxSeconds() * 1000);
+    let expiresAt = maxExpiresAt;
+    if (body.banned_until != null) {
+      const d = typeof body.banned_until === 'string' ? new Date(body.banned_until) : null;
+      if (!d || isNaN(d.getTime())) {
+        res.status(400).json({ success: false, error: 'banned_until must be an ISO 8601 date' });
+        return;
+      }
+      if (d.getTime() <= now) {
+        res.status(400).json({ success: false, error: 'banned_until must be in the future' });
+        return;
+      }
+      if (d < maxExpiresAt) expiresAt = d;
     }
 
     const { ban, isNew } = await banService.createFromExternal({
@@ -81,10 +106,12 @@ export async function postExternalBan(req: Request, res: Response, next: NextFun
       reason,
       sourceApp: delegated.sourceAppType,
       expiresAt,
-      masterTenantId: masterTenant.id,
+      // Cross-suite bans are owned by the master (Default) tenant — positional id, there is
+      // no is_master column — and always land at global scope so they enforce everywhere.
+      masterTenantId: MASTER_TENANT_ID,
     });
 
-    logger.info({ ip, sourceApp: delegated.sourceAppType, banId: ban.id, isNew }, 'external ban recorded');
+    logger.info({ ip, sourceApp: delegated.sourceAppType, banId: ban.id, isNew, expiresAt }, 'external ban recorded');
     res.status(isNew ? 201 : 200).json({ success: true, data: { banId: ban.id, isNew, ip: ban.ip } });
   } catch (err) { next(err); }
 }
@@ -109,13 +136,16 @@ export async function deleteExternalBan(req: Request, res: Response, next: NextF
       return;
     }
     const ip = req.params.ip;
-    if (!ip || ip.length > 45) {
-      res.status(400).json({ success: false, error: 'ip required (string, ≤ 45 chars)' });
+    // Validated before it reaches the inet comparison: a non-address would raise 22P02 (500).
+    if (!ip || ip.length > 45 || isIP(ip) === 0) {
+      res.status(400).json({ success: false, error: 'ip required (single IPv4/IPv6 address)' });
       return;
     }
+    // Only the active external rows this app pushed. ip_bans has no updated_at column.
     const deleted = await db('ip_bans')
-      .where({ ip, origin_app: delegated.sourceAppType })
-      .update({ is_active: false, updated_at: new Date() });
+      .whereRaw('ip = ?::inet', [ip])
+      .where({ origin_app: delegated.sourceAppType, ban_type: 'external', is_active: true })
+      .update({ is_active: false });
     logger.info({ ip, sourceApp: delegated.sourceAppType, deleted }, 'external ban withdrawn');
     res.json({ success: true, data: { ip, deleted } });
   } catch (err) { next(err); }

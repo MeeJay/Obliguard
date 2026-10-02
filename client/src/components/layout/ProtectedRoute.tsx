@@ -5,7 +5,7 @@ import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { NoTenantPage } from '@/pages/NoTenantPage';
 
 // Must match REQUIRED_ENROLLMENT_VERSION in server/src/controllers/enrollment.controller.ts
-const REQUIRED_ENROLLMENT_VERSION = 1;
+const REQUIRED_ENROLLMENT_VERSION = 2;
 
 interface ProtectedRouteProps {
   requiredRole?: string;
@@ -41,12 +41,11 @@ export function ProtectedRoute({ requiredRole, requiredCapability }: ProtectedRo
   }
 
   // Non-admin without any usable workspace: profile / 2FA / sign-out only.
-  // Both enrollment pages use global endpoints and stay reachable.
+  // The enrollment page uses global endpoints and stays reachable.
   if (
     noTenantAccess &&
     user.role !== 'admin' &&
-    location.pathname !== '/enroll' &&
-    location.pathname !== '/sso-enroll'
+    location.pathname !== '/enroll'
   ) {
     return <NoTenantPage />;
   }

@@ -20,24 +20,38 @@ import { routes } from './routes';
 import { sessionMiddleware } from './session';
 import { sessionUserGuard } from './middleware/sessionUserGuard';
 
+// sha256 of the inline theme bootstrap script of client/index.html (FOUC
+// prevention), in its LF and CRLF checkouts. Keep in sync with the
+// Content-Security-Policy of client/nginx.conf; a stale hash only costs a theme
+// flash on load (React applies the theme again).
+export const SPA_INLINE_SCRIPT_HASHES = [
+  "'sha256-UAt1TA4dj9WHPn3IsId7EFCCnvVMwrMWXeWzs57RsdA='",
+  "'sha256-7qSUcOl1E9dChPq3la8F8WRTFx+ho2HCMmsB8OevM7w='",
+];
+
 export function createApp() {
   const app = express();
 
-  // Trust the first reverse proxy hop so req.ip uses X-Forwarded-For.
-  // Required for accurate rate limiting when behind Nginx / Nginx Proxy Manager.
+  // Trust the first reverse proxy hop (the client container's nginx) so req.ip
+  // is the address that nginx saw — the right-most X-Forwarded-For entry,
+  // which a client cannot forge. It stays the rate-limit key. Every other use
+  // of the client address goes through utils/clientIp (TRUSTED_PROXIES /
+  // TRUSTED_PROXY_HOPS).
   app.set('trust proxy', 1);
 
-  // Security headers
+  // Security headers. The policy matches the one client/nginx.conf sets on the
+  // SPA (Docker), for installs where this process serves client/dist itself.
   app.use(
     helmet({
       contentSecurityPolicy: {
         directives: {
           defaultSrc: ["'self'"],
-          scriptSrc: ["'self'"],
-          styleSrc: ["'self'", "'unsafe-inline'"],
+          scriptSrc: ["'self'", ...SPA_INLINE_SCRIPT_HASHES],
+          styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
           imgSrc: ["'self'", "data:", "blob:"],
           connectSrc: ["'self'", "wss:", "ws:"],
-          fontSrc: ["'self'"],
+          fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
+          workerSrc: ["'self'", 'blob:'],
           objectSrc: ["'none'"],
           baseUri: ["'self'"],
           formAction: ["'self'"],

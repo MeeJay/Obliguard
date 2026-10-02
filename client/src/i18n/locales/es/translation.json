@@ -162,7 +162,6 @@
     "stepLanguage": "Idioma",
     "stepProfile": "Perfil",
     "stepAlerts": "Alertas",
-    "stepPassword": "Contraseña",
     "stepSecurity": "Seguridad",
     "completing": "Finalizando…",
     "complete": "Finalizar configuración",
@@ -193,21 +192,6 @@
       "topCenter": "Arriba al centro",
       "topCenterDesc": "Solo la última alerta, desaparece automáticamente tras 10 segundos.",
       "previewAlt": "Vista previa de posición de alertas"
-    },
-    "password": {
-      "title": "Establecer una contraseña",
-      "subtitleRequired": "Su cuenta fue creada via SSO y no tiene contraseña. Establezca una para poder iniciar sesión directamente.",
-      "subtitleOptional": "Ya tiene una contraseña. Deje los campos vacíos para conservar la actual.",
-      "label": "Contraseña",
-      "newLabel": "Nueva contraseña",
-      "confirmLabel": "Confirmar contraseña",
-      "placeholder": "Al menos 8 caracteres",
-      "optionalPlaceholder": "Dejar vacío para conservar la actual",
-      "confirmPlaceholder": "Repita su contraseña",
-      "tooShort": "La contraseña debe tener al menos 8 caracteres.",
-      "mismatch": "Las contraseñas no coinciden.",
-      "required": "Se requiere una contraseña para su cuenta.",
-      "failed": "Error al establecer la contraseña. Inténtelo de nuevo."
     },
     "security": {
       "title": "Autenticación de dos factores",

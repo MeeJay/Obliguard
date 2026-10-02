@@ -162,7 +162,6 @@
     "stepLanguage": "Taal",
     "stepProfile": "Profiel",
     "stepAlerts": "Waarschuwingen",
-    "stepPassword": "Wachtwoord",
     "stepSecurity": "Beveiliging",
     "completing": "Afronden…",
     "complete": "Instelling afronden",
@@ -193,21 +192,6 @@
       "topCenter": "Boven in het midden",
       "topCenterDesc": "Alleen de nieuwste waarschuwing, automatisch verwijderd na 10 seconden.",
       "previewAlt": "Voorbeeld van waarschuwingspositie"
-    },
-    "password": {
-      "title": "Stel een wachtwoord in",
-      "subtitleRequired": "Uw account is via SSO gemaakt en heeft nog geen wachtwoord. Stel er een in om u direct te kunnen aanmelden.",
-      "subtitleOptional": "U hebt al een wachtwoord. Laat de velden leeg om uw huiding wachtwoord te behouden.",
-      "label": "Wachtwoord",
-      "newLabel": "Nieuw wachtwoord",
-      "confirmLabel": "Bevestig wachtwoord",
-      "placeholder": "Minimaal 8 tekens",
-      "optionalPlaceholder": "Leeg laten om huidig te behouden",
-      "confirmPlaceholder": "Herhaal uw wachtwoord",
-      "tooShort": "Wachtwoord moet minimaal 8 tekens lang zijn.",
-      "mismatch": "Wachtwoorden komen niet overeen.",
-      "required": "Een wachtwoord is vereist voor uw account.",
-      "failed": "Wachtwoord instellen mislukt. Probeer het opnieuw."
     },
     "security": {
       "title": "Twee-factorverificatie",

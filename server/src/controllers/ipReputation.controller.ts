@@ -1,20 +1,50 @@
 import type { Request, Response, NextFunction } from 'express';
-import { ipReputationService } from '../services/ipReputation.service';
+import { ipReputationService, REPUTATION_SORT_KEYS } from '../services/ipReputation.service';
 import { banService } from '../services/ban.service';
 import { whitelistService } from '../services/whitelist.service';
 import { AppError } from '../middleware/errorHandler';
-import type { AddIpReputationRequest, BanScope, WhitelistScope } from '@obliview/shared';
+import { parsePaging, parseLimitOffset, parseSort, queryString } from '../utils/pagination';
+import { parseIpOrCidr } from '../utils/ipValidation';
+import type { AddIpReputationRequest, BanScope, IpStatus, WhitelistScope } from '@obliview/shared';
 
+/** Largest page a single list request may pull. */
+const MAX_REPUTATION_PAGE = 500;
+
+/** Statuses accepted by the list filter (anything else is ignored). */
+const LIST_STATUSES: readonly IpStatus[] = ['clean', 'suspicious', 'banned', 'whitelisted'];
+
+/**
+ * GET /api/ip-reputation
+ *   ?status=&search=  search: an IP (exact), a CIDR (containment) or a substring
+ *   ?limit=&offset=   or ?page=&pageSize=   (max 500 per page)
+ *   ?sortBy=lastSeen|failures|agents|country|firstSeen|bannedAt&sortOrder=asc|desc
+ */
 export async function listReputation(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const status  = req.query.status as import('@obliview/shared').IpStatus | undefined;
-    const search  = req.query.search as string | undefined;
-    const limit   = req.query.limit  !== undefined ? parseInt(req.query.limit  as string, 10) : 50;
-    const offset  = req.query.offset !== undefined ? parseInt(req.query.offset as string, 10) : 0;
+    const q = req.query as Record<string, unknown>;
+    const statusRaw = queryString(q.status, 20);
+    const status = LIST_STATUSES.includes(statusRaw as IpStatus) ? statusRaw as IpStatus : undefined;
+    const search  = queryString(q.search, 64);
+    // Both paging styles are accepted (the UI uses limit/offset, A16 page/pageSize).
+    let limit: number;
+    let offset: number;
+    if (q.page !== undefined || q.pageSize !== undefined) {
+      const p = parsePaging(q, { defaultSize: 50, max: MAX_REPUTATION_PAGE });
+      limit = p.pageSize;
+      offset = p.offset;
+    } else {
+      ({ limit, offset } = parseLimitOffset(q, { defaultLimit: 50, max: MAX_REPUTATION_PAGE }));
+    }
+    const { sortBy, sortOrder, explicit } = parseSort(q, REPUTATION_SORT_KEYS, { sortBy: 'lastSeen', sortOrder: 'desc' });
     const isAdmin = req.session?.role === 'admin';
 
-    const result = await ipReputationService.list({ status, search, limit, offset, tenantId: req.tenantId, isAdmin });
-    res.json({ success: true, data: result.data, total: result.total });
+    const result = await ipReputationService.list({
+      status, search, limit, offset, tenantId: req.tenantId, isAdmin,
+      // No explicit key: the service default (lastSeen, or bannedAt on the banned list).
+      sortBy: explicit ? sortBy : undefined,
+      sortOrder,
+    });
+    res.json({ success: true, data: result.data, total: result.total, limit, offset });
   } catch (err) {
     next(err);
   }
@@ -24,6 +54,9 @@ export async function getIpDetail(req: Request, res: Response, next: NextFunctio
   try {
     const { ip } = req.params;
     if (!ip) throw new AppError(400, 'IP address is required');
+    // ip_reputation.ip is inet: anything that is not one address would be a 500.
+    const parsed = parseIpOrCidr(ip);
+    if (!parsed || parsed.prefix !== (parsed.family === 4 ? 32 : 128)) throw new AppError(400, 'Invalid IP address');
 
     const isAdmin = req.session?.role === 'admin';
     const result  = await ipReputationService.getIpDetail(ip, req.tenantId, isAdmin);

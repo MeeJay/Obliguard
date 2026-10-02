@@ -47,6 +47,10 @@ export function ProfilePage() {
 
   const [displayName, setDisplayName] = useState('');
   const [email, setEmail] = useState('');
+  // The stored address: changing it asks the current password (it receives
+  // password-reset links and e-mail codes).
+  const [originalEmail, setOriginalEmail] = useState('');
+  const [emailPassword, setEmailPassword] = useState('');
   const [preferredLanguage, setPreferredLanguage] = useState('');
   const [savingProfile, setSavingProfile] = useState(false);
 
@@ -77,6 +81,7 @@ export function ProfilePage() {
     profileApi.get().then((profile) => {
       setDisplayName(profile.displayName || '');
       setEmail((profile as any).email || '');
+      setOriginalEmail((profile as any).email || '');
       setPreferredLanguage((profile as any).preferredLanguage || '');
     });
     appConfigApi.getConfig().then((cfg) => {
@@ -85,14 +90,27 @@ export function ProfilePage() {
     twoFactorApi.getStatus().then(setTfaStatus).catch(() => {});
   }, []);
 
+  const emailChanged = email.trim().toLowerCase() !== originalEmail.trim().toLowerCase();
+  const emailNeedsPassword = emailChanged && sessionUser?.foreignSource !== 'obligate';
+
   const handleProfileSubmit = async (e: FormEvent) => {
     e.preventDefault();
     setSavingProfile(true);
     try {
-      await profileApi.update({ displayName: displayName || null, email: email || null, preferredLanguage: preferredLanguage || undefined });
+      await profileApi.update({
+        displayName: displayName || null,
+        email: email || null,
+        preferredLanguage: preferredLanguage || undefined,
+        ...(emailNeedsPassword ? { currentPassword: emailPassword } : {}),
+      });
+      setOriginalEmail(email);
+      setEmailPassword('');
       toast.success(t('profile.profileUpdated'));
-    } catch {
-      toast.error(t('profile.failedProfile'));
+    } catch (err: any) {
+      const status = err?.response?.status;
+      const msg = err?.response?.data?.error;
+      // 400 wrong / missing current password, 409 address in use, 429 throttled.
+      toast.error(status && status !== 500 && msg ? msg : t('profile.failedProfile'));
     } finally {
       setSavingProfile(false);
     }
@@ -219,6 +237,18 @@ export function ProfilePage() {
             />
             <p className="mt-1 text-xs text-text-muted">{t('profile.emailHint')}</p>
           </div>
+
+          {emailNeedsPassword && (
+            <Input
+              label={t('profile.emailCurrentPassword', 'Current password (required to change the email address)')}
+              type="password"
+              value={emailPassword}
+              onChange={(e) => setEmailPassword(e.target.value)}
+              placeholder={t('profile.password.currentPlaceholder')}
+              autoComplete="current-password"
+              required
+            />
+          )}
 
           <div className="space-y-1">
             <label className="block text-sm font-medium text-text-secondary">{t('profile.preferredLanguage')}</label>

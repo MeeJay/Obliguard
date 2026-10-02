@@ -63,6 +63,7 @@ func main() {
 
 	var mw *walk.MainWindow
 	var serverEdit, keyEdit *walk.LineEdit
+	var tlsCheck *walk.CheckBox
 	var logEdit *walk.TextEdit
 	var installBtn *walk.PushButton
 
@@ -113,7 +114,10 @@ func main() {
 					VSpacer{Size: 6},
 					Label{Text: "API Key", TextColor: colorText, Font: Font{Family: "Segoe UI", PointSize: 9, Bold: true}},
 					LineEdit{AssignTo: &keyEdit, Text: cfg.APIKey, CueBanner: "your-api-key"},
-					VSpacer{Size: 12},
+					VSpacer{Size: 6},
+					// Certificates are verified unless the admin opts out (self-signed server).
+					CheckBox{AssignTo: &tlsCheck, Text: "Skip TLS certificate verification (self-signed server)"},
+					VSpacer{Size: 6},
 					Composite{
 						Layout: HBox{MarginsZero: true, Spacing: 8},
 						Children: []Widget{
@@ -129,10 +133,11 @@ func main() {
 										walk.MsgBox(mw, "Missing fields", "Server URL and API Key are required.", walk.MsgBoxIconExclamation)
 										return
 									}
+									tlsInsecure := tlsCheck.Checked()
 									installBtn.SetEnabled(false)
 									_ = logEdit.SetText("")
 									go func() {
-										err := runInstall(serverURL, apiKey, logEdit, mw)
+										err := runInstall(serverURL, apiKey, tlsInsecure, logEdit, mw)
 										mw.Synchronize(func() {
 											installBtn.SetEnabled(true)
 											if err != nil {
@@ -165,7 +170,7 @@ func main() {
 // runInstall extracts the embedded MSI to %TEMP% and launches msiexec.exe with
 // the URL/key on the command line. msiexec triggers the UAC prompt itself, so
 // the wizard only needs asInvoker rights.
-func runInstall(serverURL, apiKey string, logEdit *walk.TextEdit, mw *walk.MainWindow) error {
+func runInstall(serverURL, apiKey string, tlsInsecure bool, logEdit *walk.TextEdit, mw *walk.MainWindow) error {
 	appendLog := func(s string) { mw.Synchronize(func() { logEdit.AppendText(s + "\r\n") }) }
 
 	msiPath := filepath.Join(os.TempDir(), "obliguard-agent.msi")
@@ -175,10 +180,17 @@ func runInstall(serverURL, apiKey string, logEdit *walk.TextEdit, mw *walk.MainW
 	}
 
 	appendLog("Launching msiexec.exe…")
+	// TLS_INSECURE is always passed explicitly (0 = verify certificates).
+	tlsValue := "0"
+	if tlsInsecure {
+		tlsValue = "1"
+		appendLog("TLS certificate verification will be disabled for this agent.")
+	}
 	cmd := exec.Command("msiexec.exe",
 		"/i", msiPath,
 		fmt.Sprintf("SERVERURL=%s", serverURL),
 		fmt.Sprintf("APIKEY=%s", apiKey),
+		"TLS_INSECURE="+tlsValue,
 		"/qb",
 	)
 	out, err := cmd.CombinedOutput()

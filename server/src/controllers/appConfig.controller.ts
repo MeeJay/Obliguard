@@ -3,6 +3,7 @@ import { appConfigService } from '../services/appConfig.service';
 import { AppError } from '../middleware/errorHandler';
 import { TENANT_HEADER, TENANT_CHANGED } from '../middleware/tenant';
 import { isAgentUpdatePolicy } from '../utils/agentUpdate';
+import { agentService } from '../services/agent.service';
 import { logger } from '../utils/logger';
 import type { AgentUpdatePolicy } from '@obliview/shared';
 import { isMasterTenant } from '@obliview/shared';
@@ -43,10 +44,10 @@ export const appConfigController = {
   /** PATCH /admin/config/agent-global */
   async patchAgentGlobal(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const { checkIntervalSeconds, heartbeatMonitoring, maxMissedPushes, notificationTypes } = req.body;
+      // heartbeatMonitoring (Obliview leftover) is ignored if an old client sends it.
+      const { checkIntervalSeconds, maxMissedPushes, notificationTypes } = req.body;
       const patch: Record<string, unknown> = {};
       if ('checkIntervalSeconds' in req.body) patch.checkIntervalSeconds = checkIntervalSeconds;
-      if ('heartbeatMonitoring' in req.body) patch.heartbeatMonitoring = heartbeatMonitoring;
       if ('maxMissedPushes' in req.body) patch.maxMissedPushes = maxMissedPushes;
       if ('notificationTypes' in req.body) patch.notificationTypes = notificationTypes;
 
@@ -72,6 +73,7 @@ export const appConfigController = {
 
       const updated = await appConfigService.setAgentGlobal(patch);
       if (hasPolicy && (before ?? null) !== (updated.updatePolicy ?? null)) {
+        if (updated.updatePolicy === 'off') await agentService.cancelAllOpenAttempts();
         logger.info({
           event: 'agent_update_global_policy', userId: req.session.userId, from: before ?? null, to: updated.updatePolicy ?? null,
         }, 'Global agent update policy changed');

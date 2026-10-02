@@ -16,7 +16,7 @@ import (
 // update — if the notification fails, the worst case is a brief "offline"
 // flash in the dashboard before the agent comes back up.
 func notifyServerUpdating(cfg *Config) {
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := newHTTPClient(10 * time.Second) // agent TLS policy (tlsconfig.go)
 
 	body, _ := json.Marshal(map[string]string{"agentVersion": agentVersion})
 	req, err := http.NewRequest("POST", cfg.ServerURL+"/api/agent/notifying-update", bytes.NewReader(body))
@@ -30,7 +30,7 @@ func notifyServerUpdating(cfg *Config) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("Auto-update: notifying-update request failed: %v", err)
+		log.Printf("Auto-update: notifying-update request failed: %s", tlsHint(err))
 		return
 	}
 	defer resp.Body.Close()

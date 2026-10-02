@@ -32,10 +32,13 @@ import {
   bulkDeviceCommand,
   getDeviceTemplates,
   requestDeviceUpdate,
+  retryDeviceUpdate,
   cancelDeviceUpdate,
   bulkRequestUpdate,
   requestGroupUpdateHandler,
   getDeviceVersionDistribution,
+  getTenantUpdatePolicy,
+  patchTenantUpdatePolicy,
 } from '../controllers/agent.controller';
 
 const router = Router();
@@ -118,6 +121,11 @@ router.delete('/devices/bulk',        requireAuth, requireTenant, canManageAgent
 router.patch('/devices/bulk',         requireAuth, requireTenant, canManageAgents, bulkUpdateDevices);
 router.post('/devices/bulk-command',  requireAuth, requireTenant, canManageAgents, bulkDeviceCommand);
 
+// Tenant level of the update policy (W2-1): read by members, written by platform
+// admins only (same rule as the group and global levels), operating tenant only.
+router.get('/update-policy/tenant',   requireAuth, requireTenant, getTenantUpdatePolicy);
+router.patch('/update-policy/tenant', requireAuth, requireTenant, requireRole('admin'), patchTenantUpdatePolicy);
+
 router.get('/devices', requireAuth, requireTenant, listDevices);
 router.get('/devices/:id', requireAuth, requireTenant, getDevice);
 router.get('/devices/:id/metrics', requireAuth, requireTenant, getDeviceMetrics);
@@ -128,6 +136,8 @@ router.post('/devices/:id/command', requireAuth, requireTenant, canManageAgents,
 // Explicit agent update request (C17-1) — 'agent-update' avoids any confusion with PATCH device updates.
 router.post('/devices/:id/agent-update', requireAuth, requireTenant, canManageAgents, requestDeviceUpdate);
 router.delete('/devices/:id/agent-update', requireAuth, requireTenant, canManageAgents, cancelDeviceUpdate);
+// Retry a failed / abandoned update attempt (W2-1) — same permission as 'Update now'.
+router.post('/devices/:id/update/retry', requireAuth, requireTenant, canManageAgents, retryDeviceUpdate);
 router.post('/groups/:groupId/agent-update', requireAuth, requireTenant, canManageAgents, requestGroupUpdateHandler);
 
 // Firewall rule management (real-time via agent WS) — device management → monitor_rw.

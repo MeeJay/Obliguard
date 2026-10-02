@@ -11,6 +11,8 @@ import {
   ChevronDown,
   ChevronRight,
   X,
+  Eye,
+  Lock,
 } from 'lucide-react';
 import type {
   NotificationChannel,
@@ -18,6 +20,7 @@ import type {
   NotificationBinding,
   SmtpServer,
 } from '@obliview/shared';
+import { NOTIFICATION_REDACTED } from '@obliview/shared';
 import { notificationsApi } from '@/api/notifications.api';
 import { smtpServerApi } from '@/api/smtpServer.api';
 import { Button } from '@/components/common/Button';
@@ -173,6 +176,8 @@ export function NotificationsPage() {
   const [smtpServers, setSmtpServers] = useState<SmtpServer[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
+  // Read-only view of a channel shared to this workspace (secrets masked server-side)
+  const [viewOnly, setViewOnly] = useState(false);
   const [selectedType, setSelectedType] = useState('');
   const [formName, setFormName] = useState('');
   const [formConfig, setFormConfig] = useState<Record<string, unknown>>({});
@@ -206,6 +211,7 @@ export function NotificationsPage() {
 
   const openCreate = () => {
     setEditingId(null);
+    setViewOnly(false);
     setSelectedType(plugins[0]?.type || '');
     setFormName('');
     setFormConfig({});
@@ -214,14 +220,25 @@ export function NotificationsPage() {
 
   const openEdit = (ch: NotificationChannel) => {
     setEditingId(ch.id);
+    setViewOnly(false);
     setSelectedType(ch.type);
     setFormName(ch.name);
     setFormConfig({ ...ch.config });
     setShowForm(true);
   };
 
+  const openView = (ch: NotificationChannel) => {
+    openEdit(ch);
+    setViewOnly(true);
+  };
+
+  /** Masked secrets of a read-only channel render as bullets, never as the placeholder. */
+  const displayValue = (value: unknown): string =>
+    value === NOTIFICATION_REDACTED ? '••••••••' : String(value ?? '');
+
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
+    if (viewOnly) return;
     setSaving(true);
     try {
       if (editingId) {
@@ -318,9 +335,18 @@ export function NotificationsPage() {
       {showForm && (
         <div className="mb-6 rounded-lg border border-border bg-bg-secondary p-5">
           <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide mb-4">
-            {editingId ? t('notifications.editChannel') : t('notifications.newChannel')}
+            {viewOnly
+              ? t('notifications.viewChannel', 'Channel (read-only)')
+              : editingId ? t('notifications.editChannel') : t('notifications.newChannel')}
           </h2>
+          {viewOnly && (
+            <p className="mb-4 flex items-center gap-1.5 text-xs text-text-muted">
+              <Lock size={12} className="shrink-0" />
+              {t('notifications.readOnlyHint', 'This channel is shared with this workspace by its owner. It cannot be edited here and its secrets are hidden.')}
+            </p>
+          )}
           <form onSubmit={handleSubmit} className="space-y-4">
+            <fieldset disabled={viewOnly} className="space-y-4 min-w-0">
             <Input
               label={t('notifications.channelName')}
               value={formName}
@@ -404,8 +430,8 @@ export function NotificationsPage() {
                 <Input
                   key={field.key}
                   label={field.label}
-                  type={field.type === 'password' ? 'password' : field.type === 'number' ? 'number' : 'text'}
-                  value={String(formConfig[field.key] ?? '')}
+                  type={viewOnly ? 'text' : field.type === 'password' ? 'password' : field.type === 'number' ? 'number' : 'text'}
+                  value={viewOnly ? displayValue(formConfig[field.key]) : String(formConfig[field.key] ?? '')}
                   onChange={(e) =>
                     setFormConfig({
                       ...formConfig,
@@ -417,20 +443,24 @@ export function NotificationsPage() {
                 />
               );
             })}
+            </fieldset>
 
             <div className="flex items-center gap-3">
-              <Button type="submit" loading={saving}>
-                {editingId ? t('common.save') : t('common.create')}
-              </Button>
+              {!viewOnly && (
+                <Button type="submit" loading={saving}>
+                  {editingId ? t('common.save') : t('common.create')}
+                </Button>
+              )}
               <Button
                 type="button"
                 variant="secondary"
                 onClick={() => {
                   setShowForm(false);
                   setEditingId(null);
+                  setViewOnly(false);
                 }}
               >
-                {t('common.cancel')}
+                {viewOnly ? t('common.close') : t('common.cancel')}
               </Button>
             </div>
           </form>
@@ -452,6 +482,8 @@ export function NotificationsPage() {
             {channels.map((ch) => {
               const plugin = plugins.find((p) => p.type === ch.type);
               const isShared = ch.isShared === true;
+              // Not owned by this workspace: no edit/delete/sharing/global binding
+              const readOnly = ch.readOnly ?? isShared;
               const isExpanded = expandedTenants.has(ch.id);
 
               return (
@@ -476,10 +508,24 @@ export function NotificationsPage() {
                             {tenants.find((t) => t.id === ch.tenantId)?.name ?? `Tenant #${ch.tenantId}`}
                           </span>
                         )}
+                        {readOnly && (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-bg-tertiary px-2 py-0.5 text-[10px] font-medium text-text-muted">
+                            <Lock size={9} className="shrink-0" />
+                            {t('notifications.readOnlyShared', 'Read-only')}
+                          </span>
+                        )}
                       </div>
                     </div>
 
-                    {/* Global binding toggle */}
+                    {/* Global binding: owner only (a shared channel just shows its state) */}
+                    {readOnly ? (
+                      isGloballyBound(ch.id) && (
+                        <span className="shrink-0 rounded-md bg-accent/10 px-2 py-1 text-xs font-medium text-accent">
+                          <Zap size={12} className="inline mr-1" />
+                          {t('remediations.globalActive')}
+                        </span>
+                      )
+                    ) : (
                     <button
                       onClick={() => toggleGlobalBinding(ch.id)}
                       className={`shrink-0 rounded-md px-2 py-1 text-xs font-medium transition-colors ${
@@ -492,9 +538,10 @@ export function NotificationsPage() {
                       <Zap size={12} className="inline mr-1" />
                       {isGloballyBound(ch.id) ? t('remediations.globalActive') : t('common.enable')}
                     </button>
+                    )}
 
                     {/* Tenant sharing toggle — own channels only, multi-tenant mode only */}
-                    {isMultiTenant && !isShared && (
+                    {isMultiTenant && !isShared && !readOnly && (
                       <button
                         onClick={() => toggleTenantPanel(ch.id)}
                         className={`shrink-0 inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium transition-colors ${
@@ -512,19 +559,29 @@ export function NotificationsPage() {
                       </button>
                     )}
 
-                    {/* Test / Edit / Delete — hidden for shared channels */}
-                    {!isShared && (
+                    {/* Test — any visible channel */}
+                    <button
+                      onClick={() => handleTest(ch.id)}
+                      disabled={testing === ch.id}
+                      className="shrink-0 p-1.5 text-text-muted hover:text-accent opacity-0 group-hover:opacity-100 transition-opacity"
+                      title={t('notifications.sendTest')}
+                    >
+                      {testing === ch.id
+                        ? <Loader2 size={14} className="animate-spin" />
+                        : <TestTube2 size={14} />}
+                    </button>
+
+                    {/* View (read-only) for shared channels, Edit / Delete for owned ones */}
+                    {readOnly ? (
+                      <button
+                        onClick={() => openView(ch)}
+                        className="shrink-0 p-1.5 text-text-muted hover:text-text-primary opacity-0 group-hover:opacity-100 transition-opacity"
+                        title={t('notifications.viewChannel', 'Channel (read-only)')}
+                      >
+                        <Eye size={14} />
+                      </button>
+                    ) : (
                       <>
-                        <button
-                          onClick={() => handleTest(ch.id)}
-                          disabled={testing === ch.id}
-                          className="shrink-0 p-1.5 text-text-muted hover:text-accent opacity-0 group-hover:opacity-100 transition-opacity"
-                          title={t('notifications.sendTest')}
-                        >
-                          {testing === ch.id
-                            ? <Loader2 size={14} className="animate-spin" />
-                            : <TestTube2 size={14} />}
-                        </button>
                         <button
                           onClick={() => openEdit(ch)}
                           className="shrink-0 p-1.5 text-text-muted hover:text-text-primary opacity-0 group-hover:opacity-100 transition-opacity"

@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // ── Timing constants ──────────────────────────────────────────────────────────
@@ -43,6 +45,9 @@ type cmdHeartbeatMsg struct {
 	FirewallBanned []string               `json:"firewallBanned,omitempty"`
 	FirewallName   string                 `json:"firewallName,omitempty"`
 	LanIPs         []string               `json:"lanIPs,omitempty"`
+	// Optional protocol features (update_status, sha256, tls_verify |
+	// tls_unverified, cidr). Older servers ignore the field.
+	Capabilities []string `json:"capabilities,omitempty"`
 }
 
 // cmdEventsMsg carries auth events flushed in near-real-time (≤500 ms debounce).
@@ -50,6 +55,26 @@ type cmdEventsMsg struct {
 	Type   string         `json:"type"` // always "events"
 	Events []AgentIpEvent `json:"events"`
 }
+
+// cmdUpdateStatusMsg reports the progress of a self-update (agent → server),
+// same envelope as cmdEventsMsg. Older servers ignore unknown frame types.
+type cmdUpdateStatusMsg struct {
+	Type          string `json:"type"` // always "update_status"
+	TargetVersion string `json:"targetVersion"`
+	Phase         string `json:"phase"` // downloading | verifying | installing | restarting | failed
+	Error         string `json:"error,omitempty"`
+}
+
+const (
+	updatePhaseDownloading = "downloading"
+	updatePhaseVerifying   = "verifying"
+	updatePhaseInstalling  = "installing"
+	updatePhaseRestarting  = "restarting"
+	updatePhaseFailed      = "failed"
+
+	// updateStatusMaxError caps the error text sent to the server.
+	updateStatusMaxError = 500
+)
 
 // cmdConfigMsg is the server's config response to a heartbeat.
 type cmdConfigMsg struct {
@@ -73,6 +98,9 @@ func runCmdWS(cfg *Config, lw *LogWatcher, fw FirewallManager) {
 		cfg.AgentVersion, cfg.DeviceUUID, cfg.ServerURL)
 
 	checkForUpdate(cfg)
+
+	// Lift any ban already in the firewall that the ban-safety guard refuses.
+	go purgeUnsafeBans(cfg, fw)
 
 	backoff := cmdWSReconnectBase
 
@@ -111,7 +139,8 @@ func cmdWSSession(cfg *Config, lw *LogWatcher, fw FirewallManager) error {
 
 	ws, err := wsConnect(wsURL, http.Header{"X-API-Key": []string{cfg.APIKey}})
 	if err != nil {
-		return fmt.Errorf("connect %s: %w", wsBase, err)
+		// Certificate failures get an explicit hint instead of a silent loop.
+		return fmt.Errorf("connect %s: %s", wsBase, tlsHint(err))
 	}
 	defer ws.Close()
 
@@ -122,6 +151,12 @@ func cmdWSSession(cfg *Config, lw *LogWatcher, fw FirewallManager) error {
 	if err := sendOGHeartbeat(ws, cfg, lw, fw); err != nil {
 		return fmt.Errorf("initial heartbeat: %w", err)
 	}
+
+	// Expose the session to the update goroutine (update_status frames), and
+	// deliver a failure recorded while disconnected (e.g. msiexec exit code).
+	setCurrentCmdWS(ws)
+	defer clearCurrentCmdWS(ws)
+	flushPendingUpdateStatus(ws)
 
 	hbTicker := time.NewTicker(cmdWSHeartbeatInterval)
 	defer hbTicker.Stop()
@@ -237,11 +272,19 @@ func applyOGConfig(cfg *Config, lw *LogWatcher, fw FirewallManager, msg *cmdConf
 		}
 	}
 
-	// Apply ban delta in background (Flush can be slow on Windows with many rules)
+	// Apply ban delta in background (Flush can be slow on Windows with many rules).
+	// The add list goes through the ban-safety guard first (bansafety.go): no
+	// self-ban, no ban of the server or gateway, no range wider than the floors.
 	if msg.BanList != nil && (len(msg.BanList.Add) > 0 || len(msg.BanList.Remove) > 0) {
-		banAdd := msg.BanList.Add
-		banRem := msg.BanList.Remove
+		guard := banSafetyFor(cfg.ServerURL)
+		rawAdd := msg.BanList.Add
+		rawRem := msg.BanList.Remove
 		go func() {
+			// One delta at a time: config frames can arrive faster than a slow Flush.
+			fwApplyMu.Lock()
+			defer fwApplyMu.Unlock()
+			banAdd := guard.Filter(rawAdd)
+			banRem := canonicalBanList(rawRem)
 			addCount, addErr := 0, 0
 			for _, ip := range banAdd {
 				if err := fw.BanIP(ip); err != nil {
@@ -284,10 +327,39 @@ func applyOGConfig(cfg *Config, lw *LogWatcher, fw FirewallManager, msg *cmdConf
 		_ = saveConfig(cfg)
 	}
 
-	// Auto-update if newer version available
+	// Auto-update if newer version available. Runs in the background behind
+	// the in-progress guard: the read loop keeps serving ban deltas and
+	// firewall commands during the download.
 	if msg.LatestVersion != "" {
-		applyUpdateIfNewer(cfg, msg.LatestVersion)
+		startUpdateIfNewer(cfg, msg.LatestVersion)
 	}
+}
+
+// fwApplyMu serializes ban-delta application and the unsafe-ban purge.
+var fwApplyMu sync.Mutex
+
+// purgeUnsafeBans lifts, once per process start, the bans already enforced
+// that the ban-safety guard refuses (left by an older agent, or made unsafe by
+// an address change). The server re-sends them as adds, which the guard then
+// refuses (logged once).
+func purgeUnsafeBans(cfg *Config, fw FirewallManager) {
+	fwApplyMu.Lock()
+	defer fwApplyMu.Unlock()
+	current, err := fw.GetBannedIPs()
+	if err != nil || len(current) == 0 {
+		return
+	}
+	unsafe := banSafetyFor(cfg.ServerURL).Unsafe(current)
+	if len(unsafe) == 0 {
+		return
+	}
+	for _, k := range unsafe {
+		_ = fw.UnbanIP(k)
+	}
+	if err := fw.Flush(); err != nil {
+		log.Printf("Firewall flush: %v", err)
+	}
+	log.Printf("Ban safety: lifted %d unsafe ban(s) found in the firewall", len(unsafe))
 }
 
 // ── Outgoing messages ─────────────────────────────────────────────────────────
@@ -304,6 +376,7 @@ func sendOGHeartbeat(ws *wsConn, cfg *Config, lw *LogWatcher, fw FirewallManager
 		FirewallBanned: banned,
 		FirewallName:   fw.Name(),
 		LanIPs:         getLanIPs(),
+		Capabilities:   append(agentCapabilities(), firewallCapabilities(fw)...),
 	}
 	data, err := json.Marshal(msg)
 	if err != nil {
@@ -322,4 +395,88 @@ func sendOGEvents(ws *wsConn, events []AgentIpEvent) error {
 		return fmt.Errorf("marshal events: %w", err)
 	}
 	return ws.WriteFrame(0x1, data)
+}
+
+// ── Update status reporting ───────────────────────────────────────────────────
+
+var (
+	cmdWSMu      sync.Mutex
+	cmdWSCurrent *wsConn
+	// pendingUpdateStatus holds the last "failed" report that could not be
+	// sent (no session); delivered right after the next initial heartbeat.
+	pendingUpdateStatus *cmdUpdateStatusMsg
+)
+
+func setCurrentCmdWS(ws *wsConn) {
+	cmdWSMu.Lock()
+	cmdWSCurrent = ws
+	cmdWSMu.Unlock()
+}
+
+func clearCurrentCmdWS(ws *wsConn) {
+	cmdWSMu.Lock()
+	if cmdWSCurrent == ws {
+		cmdWSCurrent = nil
+	}
+	cmdWSMu.Unlock()
+}
+
+func newUpdateStatusMsg(target, phase, errMsg string) *cmdUpdateStatusMsg {
+	if len(errMsg) > updateStatusMaxError {
+		// Cut on a rune boundary (x509 / OS messages may be localised).
+		cut := updateStatusMaxError
+		for cut > 0 && !utf8.RuneStart(errMsg[cut]) {
+			cut--
+		}
+		errMsg = errMsg[:cut]
+	}
+	return &cmdUpdateStatusMsg{Type: "update_status", TargetVersion: target, Phase: phase, Error: errMsg}
+}
+
+// queueUpdateStatus keeps a report for the next WS session.
+func queueUpdateStatus(target, phase, errMsg string) {
+	cmdWSMu.Lock()
+	pendingUpdateStatus = newUpdateStatusMsg(target, phase, errMsg)
+	cmdWSMu.Unlock()
+}
+
+// sendUpdateStatus reports an update step on the current WS session. Progress
+// steps are best effort; a failure that cannot be sent now is queued.
+func sendUpdateStatus(target, phase, errMsg string) {
+	msg := newUpdateStatusMsg(target, phase, errMsg)
+	cmdWSMu.Lock()
+	ws := cmdWSCurrent
+	cmdWSMu.Unlock()
+	if ws != nil {
+		if data, err := json.Marshal(msg); err == nil && ws.WriteFrame(0x1, data) == nil {
+			return
+		}
+	}
+	if phase == updatePhaseFailed {
+		cmdWSMu.Lock()
+		pendingUpdateStatus = msg
+		cmdWSMu.Unlock()
+	}
+}
+
+// flushPendingUpdateStatus sends the queued report, if any, on ws.
+func flushPendingUpdateStatus(ws *wsConn) {
+	cmdWSMu.Lock()
+	msg := pendingUpdateStatus
+	pendingUpdateStatus = nil
+	cmdWSMu.Unlock()
+	if msg == nil {
+		return
+	}
+	data, err := json.Marshal(msg)
+	if err == nil {
+		err = ws.WriteFrame(0x1, data)
+	}
+	if err != nil {
+		cmdWSMu.Lock()
+		if pendingUpdateStatus == nil {
+			pendingUpdateStatus = msg
+		}
+		cmdWSMu.Unlock()
+	}
 }

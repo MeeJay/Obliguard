@@ -162,7 +162,6 @@
     "stepLanguage": "Idioma",
     "stepProfile": "Perfil",
     "stepAlerts": "Alertas",
-    "stepPassword": "Senha",
     "stepSecurity": "Segurança",
     "completing": "Finalizando…",
     "complete": "Concluir configuração",
@@ -193,21 +192,6 @@
       "topCenter": "Topo do centro",
       "topCenterDesc": "Apenas o alerta mais recente, desaparece automaticamente após 10 segundos.",
       "previewAlt": "Visualização da posição do alerta"
-    },
-    "password": {
-      "title": "Defina uma senha",
-      "subtitleRequired": "Sua conta foi criada via SSO e ainda não possui senha. Defina uma para poder fazer login diretamente.",
-      "subtitleOptional": "Você já possui uma senha. Deixe os campos em branco para manter a atual.",
-      "label": "Senha",
-      "newLabel": "Nova senha",
-      "confirmLabel": "Confirmar senha",
-      "placeholder": "Pelo menos 8 caracteres",
-      "optionalPlaceholder": "Deixe em branco para manter a atual",
-      "confirmPlaceholder": "Repita sua senha",
-      "tooShort": "A senha deve ter pelo menos 8 caracteres.",
-      "mismatch": "As senhas não correspondem.",
-      "required": "Uma senha é obrigatória para sua conta.",
-      "failed": "Falha ao definir a senha. Por favor, tente novamente."
     },
     "security": {
       "title": "Autenticação de Dois Fatores",

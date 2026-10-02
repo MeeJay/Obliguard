@@ -2,6 +2,14 @@ import type { Request, Response, NextFunction } from 'express';
 import { smtpServerService } from '../services/smtpServer.service';
 import { AppError } from '../middleware/errorHandler';
 
+/** 404 unless the operating tenant owns the server (Default owns all). */
+async function assertOwned(req: Request): Promise<number> {
+  const id = Number(req.params.id);
+  const row = await smtpServerService.getOwned(id, req.tenantId);
+  if (!row) throw new AppError(404, 'SMTP server not found');
+  return row.id;
+}
+
 export const smtpServerController = {
   async list(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
@@ -23,7 +31,7 @@ export const smtpServerController = {
 
   async update(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const id = parseInt(req.params.id, 10);
+      const id = await assertOwned(req);
       const { name, host, port, secure, username, password, fromAddress } = req.body;
       const server = await smtpServerService.update(id, {
         ...(name !== undefined && { name }),
@@ -41,7 +49,7 @@ export const smtpServerController = {
 
   async delete(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const id = parseInt(req.params.id, 10);
+      const id = await assertOwned(req);
       const removed = await smtpServerService.delete(id);
       if (!removed) throw new AppError(404, 'SMTP server not found');
       res.json({ success: true });
@@ -49,8 +57,11 @@ export const smtpServerController = {
   },
 
   async test(req: Request, res: Response, next: NextFunction): Promise<void> {
+    let id: number;
     try {
-      const id = parseInt(req.params.id, 10);
+      id = await assertOwned(req);
+    } catch (err) { next(err); return; }
+    try {
       await smtpServerService.test(id);
       res.json({ success: true, message: 'Connection successful' });
     } catch (err) {

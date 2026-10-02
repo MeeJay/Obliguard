@@ -44,39 +44,16 @@ export const groupsApi = {
     await apiClient.delete(`/groups/${id}`);
   },
 
+  /**
+   * @deprecated Obliview uptime stats: the server route is gone. Kept as a
+   * local no-op for store/groupStore.ts until its fetchGroupStats is removed.
+   */
   async getStats(): Promise<Record<number, { uptimePct: number; total: number; up: number }>> {
-    const res = await apiClient.get<ApiResponse<Record<number, { uptimePct: number; total: number; up: number }>>>('/groups/stats');
-    return res.data.data!;
+    return {};
   },
 
   async reorder(items: { id: number; sortOrder: number }[]): Promise<void> {
     await apiClient.post('/groups/reorder', { items });
-  },
-
-  async clearHeartbeats(id: number): Promise<{ deleted: number; monitorCount: number }> {
-    const res = await apiClient.delete<ApiResponse<{ deleted: number; monitorCount: number }>>(`/groups/${id}/heartbeats`);
-    return res.data.data!;
-  },
-
-  async getDetailStats(id: number, period: string = '24h'): Promise<{
-    total: number;
-    up: number;
-    down: number;
-    uptimePct: number;
-    avgResponseTime: number | null;
-    monitorCount: number;
-    downMonitorNames: string[];
-  }> {
-    const res = await apiClient.get<ApiResponse<{
-      total: number;
-      up: number;
-      down: number;
-      uptimePct: number;
-      avgResponseTime: number | null;
-      monitorCount: number;
-      downMonitorNames: string[];
-    }>>(`/groups/${id}/detail-stats`, { params: { period } });
-    return res.data.data!;
   },
 
   async updateAgentGroupConfig(

@@ -132,8 +132,8 @@ export function createSocketServer(httpServer: HttpServer): SocketIOServer {
         logger.warn(`Socket: user ${user.id} cannot use session tenant ${tenantId} — tenant rooms not joined`);
         tenantId = null;
       }
-      // Until realtime emits are tenant-scoped, broadcasts (ip:flow, heartbeats,
-      // status) reach every socket: a non-admin with no tenant holds none.
+      // Every operational emit targets a tenant room (utils/socketRooms.ts), so a
+      // non-admin without a usable tenant would only hold 'general': refuse it.
       if (tenantId === null && user.role !== 'admin') return next(new Error('No tenant access'));
 
       socket.data.user = user;
@@ -163,8 +163,9 @@ export function createSocketServer(httpServer: HttpServer): SocketIOServer {
       }
     }
     if (user.role === 'admin') {
-      // Legacy platform-admin room (role read from the DB, not the client) —
-      // existing emits still target it during the migration to tenant rooms.
+      // Platform-admin room (role read from the DB, not the client): only for
+      // platform-level events (emitToPlatformAdmins). Tenant data never goes
+      // there — it follows the tenant rooms above.
       socket.join('role:admin');
     }
 

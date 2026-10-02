@@ -2,12 +2,25 @@ import type { Request, Response, NextFunction } from 'express';
 import type { CreateServiceTemplateRequest } from '@obliview/shared';
 import { serviceTemplateService } from '../services/serviceTemplate.service';
 import { AppError } from '../middleware/errorHandler';
+import { assertScopeInTenant, filterOwnedScopeItems } from '../services/tenantScope.service';
 
 export interface UpsertServiceAssignmentRequest {
   logPathOverride?: string | null;
   thresholdOverride?: number | null;
   windowSecondsOverride?: number | null;
   enabledOverride?: boolean | null;
+}
+
+/**
+ * Assignments and local templates target a group or an agent: the target must
+ * belong to the operating tenant (W1-2; Default may read but not write another
+ * tenant's scope), and the template must be visible to that tenant.
+ */
+async function assertAssignable(templateId: number, scope: 'group' | 'agent', scopeId: number, tenantId: number): Promise<void> {
+  await assertScopeInTenant(scope, scopeId, tenantId, 'write');
+  if (!(await serviceTemplateService.getById(templateId, tenantId, false))) {
+    throw new AppError(404, 'Service template not found');
+  }
 }
 
 export async function listTemplates(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -32,6 +45,11 @@ export async function getTemplate(req: Request, res: Response, next: NextFunctio
     if (!template) {
       throw new AppError(404, 'Service template not found');
     }
+    // Platform templates are shared: only list assignments on the operating
+    // tenant's own groups/agents (W1-2; Default keeps the god view).
+    if (template.assignments) {
+      template.assignments = await filterOwnedScopeItems(template.assignments, req.tenantId);
+    }
 
     res.json({ success: true, data: template });
   } catch (err) {
@@ -41,13 +59,21 @@ export async function getTemplate(req: Request, res: Response, next: NextFunctio
 
 export async function createTemplate(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const body = req.body as CreateServiceTemplateRequest;
+    const body = (req.body ?? {}) as CreateServiceTemplateRequest;
 
     if (!body.name?.trim()) {
       throw new AppError(400, 'name is required');
     }
     if (!body.serviceType?.trim()) {
       throw new AppError(400, 'serviceType is required');
+    }
+
+    // A local template is owned by a group/agent of the operating tenant.
+    if (body.ownerScope != null || body.ownerScopeId != null) {
+      if (body.ownerScope !== 'group' && body.ownerScope !== 'agent') {
+        throw new AppError(400, 'ownerScope must be "group" or "agent"');
+      }
+      await assertScopeInTenant(body.ownerScope, body.ownerScopeId, req.tenantId, 'write');
     }
 
     const template = await serviceTemplateService.create(body, req.session?.userId ?? 0, req.tenantId);
@@ -108,7 +134,9 @@ export async function upsertAssignment(req: Request, res: Response, next: NextFu
       throw new AppError(400, 'Invalid scopeId');
     }
 
-    const body = req.body as UpsertServiceAssignmentRequest;
+    await assertAssignable(id, scope, scopeId, req.tenantId);
+
+    const body = (req.body ?? {}) as UpsertServiceAssignmentRequest;
 
     const assignment = await serviceTemplateService.upsertAssignment(id, scope, scopeId, body);
     res.json({ success: true, data: assignment });
@@ -134,6 +162,8 @@ export async function deleteAssignment(req: Request, res: Response, next: NextFu
       throw new AppError(400, 'Invalid scopeId');
     }
 
+    await assertAssignable(id, scope, scopeId, req.tenantId);
+
     await serviceTemplateService.deleteAssignment(id, scope, scopeId);
 
     res.json({ success: true });
@@ -154,6 +184,8 @@ export async function requestSample(req: Request, res: Response, next: NextFunct
       throw new AppError(400, 'Invalid device ID');
     }
 
+    await assertAssignable(templateId, 'agent', deviceId, req.tenantId);
+
     await serviceTemplateService.requestLogSample(templateId, deviceId);
     res.json({ success: true });
   } catch (err) {
@@ -172,6 +204,7 @@ export async function getResolvedForGroup(req: Request, res: Response, next: Nex
     if (isNaN(groupId)) {
       throw new AppError(400, 'Invalid groupId');
     }
+    await assertScopeInTenant('group', groupId, req.tenantId, 'read');
     const configs = await serviceTemplateService.getResolvedForGroup(groupId);
     res.json({ success: true, data: configs });
   } catch (err) {
@@ -193,6 +226,7 @@ export async function listLocalTemplates(req: Request, res: Response, next: Next
     if (isNaN(scopeId)) {
       throw new AppError(400, 'Invalid scopeId');
     }
+    await assertScopeInTenant(scope, scopeId, req.tenantId, 'read');
     const templates = await serviceTemplateService.listLocal(scope, scopeId);
     res.json({ success: true, data: templates });
   } catch (err) {

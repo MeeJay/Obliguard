@@ -22,11 +22,9 @@ import { ProfilePage } from '@/pages/ProfilePage';
 import { GroupDetailPage } from '@/pages/GroupDetailPage';
 import { GroupEditPage } from '@/pages/GroupEditPage';
 import { DownloadPage } from '@/pages/DownloadPage';
-import { ImportExportPage } from '@/pages/ImportExportPage';
 import { AdminTenantsPage } from '@/pages/AdminTenantsPage';
 import { ServiceTemplatesPage } from '@/pages/ServiceTemplatesPage';
 import { RateLimitPage } from '@/pages/RateLimitPage';
-import { SsoEnrollPage } from '@/pages/SsoEnrollPage';
 import { NotFoundPage } from '@/pages/NotFoundPage';
 import '@/i18n';
 import { initTheme } from '@/utils/theme';
@@ -52,8 +50,6 @@ export default function App() {
         <Route element={<ProtectedRoute />}>
           {/* Enrollment — full-screen, outside AppLayout */}
           <Route path="/enroll" element={<EnrollmentPage />} />
-          {/* SSO new-user enrollment — full-screen, outside AppLayout */}
-          <Route path="/sso-enroll" element={<SsoEnrollPage />} />
           <Route element={<AppLayout />}>
             <Route path="/" element={<DashboardPage />} />
             <Route path="/netmap" element={<NetMapPage />} />
@@ -69,6 +65,11 @@ export default function App() {
             <Route path="/agents/:deviceId" element={<AgentDetailPage />} />
             <Route path="/live-events" element={<LiveEventsPage />} />
 
+            {/* Legacy Bans / Whitelist pages → filtered IP Reputation hub. Open
+                to every member (the header ban chip links to /bans). */}
+            <Route path="/bans" element={<Navigate to="/ip-reputation?status=banned" replace />} />
+            <Route path="/whitelist" element={<Navigate to="/ip-reputation?status=whitelisted" replace />} />
+
             {/* Agent-device management → 'monitor_rw' (keys tab hidden for
                 non-admins inside the page) */}
             <Route element={<ProtectedRoute requiredCapability="monitor_rw" />}>
@@ -82,11 +83,8 @@ export default function App() {
 
             {/* Admin-only routes */}
             <Route element={<ProtectedRoute requiredRole="admin" />}>
-              <Route path="/bans" element={<Navigate to="/ip-reputation" replace />} />
-              <Route path="/whitelist" element={<Navigate to="/ip-reputation" replace />} />
               <Route path="/notifications" element={<NotificationsPage />} />
               <Route path="/manage/users" element={<AdminUsersPage />} />
-              <Route path="/manage/import-export" element={<ImportExportPage />} />
               <Route path="/manage/tenants" element={<AdminTenantsPage />} />
               <Route path="/manage/service-templates" element={<ServiceTemplatesPage />} />
               <Route path="/manage/network-limiting" element={<RateLimitPage />} />

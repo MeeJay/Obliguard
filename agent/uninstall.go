@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -179,9 +178,10 @@ func handleFreeBSDUninstall() error {
 // ── Shared helper ─────────────────────────────────────────────────────────────
 
 // downloadFile downloads url and writes it to destPath, creating the file if
-// needed. Uses a 120-second timeout (same as the auto-update download).
+// needed. Uses a 120-second timeout and the agent TLS policy (tlsconfig.go),
+// like every other server connection.
 func downloadFile(url, destPath string) error {
-	client := &http.Client{Timeout: 120 * time.Second}
+	client := newHTTPClient(120 * time.Second)
 	resp, err := client.Get(url)
 	if err != nil {
 		return err

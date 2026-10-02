@@ -87,7 +87,10 @@ describe('01 session / SSO / socket / 2FA', () => {
   it('01.6 Obligate accounts cannot use local password flows [BASELINE]', async () => {
     const r = await h.anon().post('/api/auth/login', { username: 'og_sso', password: 'Verify-Pass-1!' });
     assert.equal(r.status, 401);
-    assert.equal(r.json?.code, 'SSO_ONLY');
+    // Owner default (audit-2026-09-26/waves/_defaults.txt, "SSO_ONLY ... Elle est supprimée"):
+    // an Obligate account gets the same generic credentials error as a wrong password.
+    assert.equal(r.json?.code, undefined);
+    assert.equal(r.json?.error, 'Invalid username or password');
     const f = await h.anon().post('/api/auth/forgot-password', { email: 'og_sso@verify.test' });
     assert.equal(f.status, 200);
     const tokens = await h.db('password_reset_tokens').where({ user_id: OG.userId });
@@ -211,7 +214,8 @@ describe('01 session / SSO / socket / 2FA', () => {
     const me = await r.client.get('/api/auth/me');
     assert.equal(me.json?.data?.user?.id, OG.userId);
     const e = await r.client.post('/api/auth/enrollment', { email: 'attacker@evil.test' });
-    assert.equal(e.status, 200);
+    // og_sso is seeded at enrollment_version 2: a completed enrollment cannot be replayed (W2-5).
+    assert.equal(e.status, 409);
     assert.equal((await userRow(OG.userId)).email, 'og_sso@verify.test');
   });
 
@@ -236,7 +240,7 @@ describe('01 session / SSO / socket / 2FA', () => {
     assert.equal(bans.json?.code, 'noTenantAccess');
   });
 
-  lotIt('UNTRACKED', '01.17 enrollment does not rewrite a local account email without re-verification', async () => {
+  lotIt('W2-5', '01.17 enrollment does not rewrite a local account email without re-verification', async () => {
     const u = await createUser(h.db, { tenants: [2], email: 'a@verify.test' });
     const c = await h.login(u.username);
     await c.post('/api/auth/enrollment', { email: 'attacker@evil.test' });

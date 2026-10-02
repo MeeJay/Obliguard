@@ -4,6 +4,24 @@ import type { SettingsScope } from '@obliview/shared';
 import type { SettingsKey } from '@obliview/shared';
 import { AppError } from '../middleware/errorHandler';
 import type { SetSettingInput, SetSettingsBulkInput, DeleteSettingInput } from '../validators/settings.schema';
+import { groupService } from '../services/group.service';
+import { emitGlobal, emitToTenantAudience } from '../utils/socketRooms';
+
+/**
+ * settings:updated audience: global settings apply to every tenant; a group
+ * override goes to the group's owning tenant (and Default).
+ */
+async function emitSettingsUpdated(req: Request, scope: SettingsScope, scopeId: number | null, payload: Record<string, unknown>): Promise<void> {
+  const io = req.app.get('io');
+  if (!io) return;
+  if (scope === 'global') {
+    emitGlobal(io, 'settings:updated', payload);
+    return;
+  }
+  // The setting is already saved: a failed owner lookup falls back to the operating tenant.
+  const group = scopeId !== null ? await groupService.getById(scopeId).catch(() => null) : null;
+  emitToTenantAudience(io, group?.tenantId ?? req.tenantId, 'settings:updated', payload);
+}
 
 function parseScope(req: Request): { scope: SettingsScope; scopeId: number | null } {
   const { scope, scopeId } = req.params;
@@ -58,10 +76,7 @@ export const settingsController = {
       await settingsService.set(scope, scopeId, key as SettingsKey, value);
 
       // Broadcast settings update
-      const io = req.app.get('io');
-      if (io) {
-        io.to('role:admin').emit('settings:updated', { scope, scopeId, key, value });
-      }
+      await emitSettingsUpdated(req, scope, scopeId, { scope, scopeId, key, value });
 
       res.json({ success: true, message: 'Setting saved' });
     } catch (err: unknown) {
@@ -85,10 +100,7 @@ export const settingsController = {
         overrides.map((o) => ({ key: o.key as SettingsKey, value: o.value })),
       );
 
-      const io = req.app.get('io');
-      if (io) {
-        io.to('role:admin').emit('settings:updated', { scope, scopeId, overrides });
-      }
+      await emitSettingsUpdated(req, scope, scopeId, { scope, scopeId, overrides });
 
       res.json({ success: true, message: 'Settings saved' });
     } catch (err) {
@@ -105,10 +117,7 @@ export const settingsController = {
       const deleted = await settingsService.remove(scope, scopeId, key as SettingsKey);
 
       if (deleted) {
-        const io = req.app.get('io');
-        if (io) {
-          io.to('role:admin').emit('settings:updated', { scope, scopeId, key, removed: true });
-        }
+        await emitSettingsUpdated(req, scope, scopeId, { scope, scopeId, key, removed: true });
       }
 
       res.json({ success: true, message: deleted ? 'Setting reset to inherited' : 'No override found' });

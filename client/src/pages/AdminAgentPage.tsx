@@ -22,13 +22,19 @@ import {
   Eye,
   ArrowUpCircle,
   Lock,
+  AlertTriangle,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { SOCKET_EVENTS } from '@obliview/shared';
-import type { AgentApiKey, AgentDevice, MonitorGroup, AgentUpdatePolicy, AgentVersionDistribution } from '@obliview/shared';
+import type {
+  AgentApiKey, AgentDevice, MonitorGroup, AgentUpdatePolicy, AgentVersionDistribution, AgentTenantUpdatePolicyInfo,
+} from '@obliview/shared';
 import { agentApi } from '@/api/agent.api';
 import { groupsApi } from '@/api/groups.api';
 import { getSocket } from '@/socket/socketClient';
+import { useSocketStore } from '@/store/socketStore';
+import { toDevicePatch } from '@/store/agentStore';
+import { SOCKET_RESYNC_EVENT } from '@/hooks/useSocket';
 import { Button } from '@/components/common/Button';
 import { Input } from '@/components/common/Input';
 import { useUiStore } from '@/store/uiStore';
@@ -36,8 +42,15 @@ import { useAuthStore } from '@/store/authStore';
 import { useTenantStore } from '@/store/tenantStore';
 import { AddMikroTikModal } from '@/components/mikrotik/AddMikroTikModal';
 import { anonHostname, anonIp } from '@/utils/anonymize';
-import { agentUpdateErrorMessage } from '@/utils/agentUpdate';
+import {
+  agentBuildLabel, agentUpdateErrorMessage, isUpdateFailed, isUpdateInFlight, visibleUpdateAttempt,
+} from '@/utils/agentUpdate';
+import { UpdateStatusBadge } from '@/components/agent/UpdateStatusBadge';
+import { LastSeenPill } from '@/components/agent/LastSeenPill';
 import toast from 'react-hot-toast';
+
+/** Emitted to tenant admins when an agent registers (pending approval). */
+const AGENT_DEVICE_CREATED = SOCKET_EVENTS.AGENT_DEVICE_CREATED;
 
 type Tab = 'keys' | 'devices';
 type DeviceStatusFilter = 'pending' | 'approved' | 'refused' | 'suspended' | 'all';
@@ -241,7 +254,6 @@ function EditAgentModal({
   onSave: (data: {
     name: string | null;
     groupId?: number | null;
-    heartbeatMonitoring: boolean;
     overrideGroupSettings: boolean;
     suspended: boolean;
     releaseKeyBinding: boolean;
@@ -250,7 +262,6 @@ function EditAgentModal({
 }) {
   const [name, setName] = useState(device.name ?? '');
   const [groupId, setGroupId] = useState<number | null>(device.groupId ?? null);
-  const [heartbeatMonitoring, setHeartbeatMonitoring] = useState(device.heartbeatMonitoring);
   const [overrideGroupSettings, setOverrideGroupSettings] = useState(device.overrideGroupSettings);
   const [suspended, setSuspended] = useState(device.status === 'suspended');
   const [releaseKeyBinding, setReleaseKeyBinding] = useState(false);
@@ -265,7 +276,6 @@ function EditAgentModal({
     onSave({
       name: name.trim() || null,
       groupId,
-      heartbeatMonitoring,
       overrideGroupSettings,
       suspended,
       releaseKeyBinding,
@@ -307,29 +317,6 @@ function EditAgentModal({
               ))}
             </select>
           </div>
-
-          {/* Heartbeat monitoring toggle */}
-          <label className="flex items-start gap-3 cursor-pointer group">
-            <div className="relative h-4 w-4 shrink-0 mt-0.5">
-              <input
-                type="checkbox"
-                checked={heartbeatMonitoring}
-                onChange={e => setHeartbeatMonitoring(e.target.checked)}
-                className="peer appearance-none h-4 w-4 rounded border cursor-pointer transition-colors bg-bg-tertiary border-border checked:bg-accent checked:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30"
-              />
-              <svg className="pointer-events-none absolute top-0 left-0 hidden h-4 w-4 text-white peer-checked:block" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M2.5 8L6 11.5L13.5 4.5" />
-              </svg>
-            </div>
-            <div>
-              <p className="text-sm font-medium text-text-primary group-hover:text-accent transition-colors">
-                {t('agents.heartbeatMonitoring')}
-              </p>
-              <p className="text-xs text-text-muted leading-relaxed">
-                {t('agents.heartbeatMonitoringDesc')}
-              </p>
-            </div>
-          </label>
 
           {/* Override group settings */}
           <label className="flex items-start gap-3 cursor-pointer group">
@@ -423,7 +410,7 @@ function EditAgentModal({
 
 // ── AgentVersionStrip (C17-1) ─────────────────────────────────────────────────
 
-function AgentVersionStrip({ dist, isAdmin }: { dist: AgentVersionDistribution; isAdmin: boolean }) {
+function AgentVersionStrip({ dist }: { dist: AgentVersionDistribution }) {
   const { t } = useTranslation();
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 mb-4 px-4 py-2.5 rounded-lg border border-border bg-bg-secondary text-xs">
@@ -439,6 +426,9 @@ function AgentVersionStrip({ dist, isAdmin }: { dist: AgentVersionDistribution; 
       )}
       {dist.updatePending > 0 && (
         <span className="text-blue-400">{t('agentUpdate.distribution.pending', { defaultValue: '{{count}} update(s) requested', count: dist.updatePending })}</span>
+      )}
+      {(dist.updateFailed ?? 0) > 0 && (
+        <span className="text-red-400">{t('agents.update.failedCount', { defaultValue: '{{count}} update(s) failed', count: dist.updateFailed })}</span>
       )}
       {dist.unknown > 0 && (
         <span className="text-text-muted">{t('agentUpdate.distribution.unknown', { defaultValue: '{{count}} unknown', count: dist.unknown })}</span>
@@ -457,13 +447,126 @@ function AgentVersionStrip({ dist, isAdmin }: { dist: AgentVersionDistribution; 
           </span>
         ))}
       </span>
-      <span className="ml-auto flex items-center gap-2 text-text-muted">
-        {t('agentUpdate.policyLabel', 'Agent updates')}: {t(`agentUpdate.policy.${dist.globalPolicy}`, dist.globalPolicy)}
-        {dist.globalPolicyIsDefault && ` ${t('agentUpdate.builtInDefault', '(built-in default)')}`}
-        {isAdmin && (
-          <Link to="/settings" className="text-accent hover:underline">{t('agentUpdate.changeDefault', 'Change default')}</Link>
-        )}
-      </span>
+    </div>
+  );
+}
+
+// ── MissingBuildsBanner (FLEET-AGENT-3) ───────────────────────────────────────
+
+/** Artifacts whose build does not match the served version: those platforms are not offered it. */
+function MissingBuildsBanner({ builds, version }: { builds: string[]; version: string | null }) {
+  const { t } = useTranslation();
+  if (builds.length === 0) return null;
+  return (
+    <div className="flex items-start gap-2 mb-4 px-4 py-2.5 rounded-lg border border-amber-500/30 bg-amber-500/10 text-xs text-amber-400">
+      <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+      <div>
+        <p className="font-medium">
+          {t('agents.update.missingBuilds', {
+            defaultValue: 'Build missing for {{builds}}',
+            builds: builds.map(agentBuildLabel).join(', '),
+          })}
+        </p>
+        <p className="text-amber-400/80 mt-0.5">
+          {t('agents.update.missingBuildsDesc', {
+            defaultValue: 'Agents on these platforms are not offered v{{version}} until a matching build is published in agent/dist.',
+            version: version ?? '?',
+          })}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ── AgentUpdatePolicyBar (C17: global -> tenant -> group -> agent) ────────────
+
+/**
+ * Global policy (read-only here, changed in Settings) next to the operating
+ * tenant's policy: a selector for platform admins, read-only otherwise.
+ */
+function AgentUpdatePolicyBar({
+  isAdmin,
+  tenantId,
+  tenantName,
+  onChanged,
+}: {
+  isAdmin: boolean;
+  tenantId: number | null;
+  tenantName: string | null;
+  onChanged: () => void;
+}) {
+  const { t } = useTranslation();
+  const [info, setInfo] = useState<AgentTenantUpdatePolicyInfo | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    agentApi.getTenantUpdatePolicy()
+      .then(i => { if (!cancelled) setInfo(i); })
+      .catch(() => { if (!cancelled) setInfo(null); });
+    return () => { cancelled = true; };
+  }, [tenantId]);
+
+  if (!info) return null;
+
+  const policyName = (p: AgentUpdatePolicy) => t(`agentUpdate.policy.${p}`, p);
+  const globalText = `${policyName(info.globalPolicy)}${info.globalPolicyIsDefault ? ` ${t('agentUpdate.builtInDefault', '(built-in default)')}` : ''}`;
+  const tenantLabel = tenantName
+    ? t('agents.update.tenantPolicyNamed', { defaultValue: 'Tenant policy ({{name}})', name: tenantName })
+    : t('agents.update.tenantPolicy', 'Tenant policy');
+  const inheritText = `${t('agentUpdate.policy.inherit', 'Inherit')} (${policyName(info.globalPolicy)} — ${t('agentUpdate.source.global', 'global')})`;
+
+  const change = async (value: 'inherit' | AgentUpdatePolicy) => {
+    const next = value === 'inherit' ? null : value;
+    if (next === info.updatePolicy) return;
+    if (next === 'auto' && !confirm(t('agents.update.confirmTenantAuto', 'Every agent of this tenant without a group or agent policy will update to the latest version at its next heartbeat, and to every future release. Continue?'))) return;
+    if (next === 'off' && !confirm(t('agents.update.confirmTenantOff', 'Freeze updates for every agent of this tenant? Pending update requests are cancelled, whatever the groups and agents set.'))) return;
+    setSaving(true);
+    try {
+      setInfo(await agentApi.setTenantUpdatePolicy(next));
+      onChanged();
+    } catch (err) {
+      toast.error(agentUpdateErrorMessage(err, t, t('agentUpdate.saveFailed', 'Failed to save')));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="mb-4 px-4 py-2.5 rounded-lg border border-border bg-bg-secondary text-xs">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+        <span className="font-medium text-text-secondary">{t('agentUpdate.policyLabel', 'Agent updates')}</span>
+        <span className="flex items-center gap-2 text-text-muted">
+          {t('agents.update.globalPolicy', 'Global policy')}: <span className="text-text-primary">{globalText}</span>
+          {isAdmin && (
+            <Link to="/settings" className="text-accent hover:underline">{t('agentUpdate.changeDefault', 'Change default')}</Link>
+          )}
+        </span>
+        <span className="flex items-center gap-2 text-text-muted">
+          {tenantLabel}:
+          {isAdmin ? (
+            <select
+              value={info.updatePolicy ?? 'inherit'}
+              onChange={e => void change(e.target.value as 'inherit' | AgentUpdatePolicy)}
+              disabled={saving}
+              className="rounded border border-border bg-bg-tertiary px-2 py-1 text-xs text-text-primary focus:outline-none focus:border-accent disabled:opacity-60"
+            >
+              <option value="inherit">{inheritText}</option>
+              <option value="auto">{policyName('auto')}</option>
+              <option value="manual">{policyName('manual')}</option>
+              <option value="off">{policyName('off')}</option>
+            </select>
+          ) : (
+            <span className="text-text-primary">{info.updatePolicy ? policyName(info.updatePolicy) : inheritText}</span>
+          )}
+          {info.updatePolicy === 'off' && (
+            <span className="inline-flex items-center gap-1 text-amber-400"><Lock size={10} />{t('agentUpdate.frozenBadge', 'Updates frozen')}</span>
+          )}
+        </span>
+      </div>
+      <p className="mt-1.5 text-text-muted leading-relaxed">
+        {t('agents.update.cascadeHelp', 'Cascade: global → tenant → group → agent. The nearest explicit value wins; Off (frozen) at any level is absolute and freezes every level below.')}
+      </p>
     </div>
   );
 }
@@ -480,7 +583,6 @@ function BulkEditAgentModal({
   groups: MonitorGroup[];
   onSave: (data: {
     groupId?: number | null;
-    heartbeatMonitoring?: boolean;
     overrideGroupSettings?: boolean;
     status?: 'approved' | 'suspended';
     updatePolicy?: AgentUpdatePolicy | null;
@@ -491,13 +593,9 @@ function BulkEditAgentModal({
   const agentGroups = groups.filter(g => g.kind === 'agent');
 
   // Compute initial tri-state values: single value if all same, null if mixed
-  const allSameHeartbeat = devices.every(d => d.heartbeatMonitoring === devices[0].heartbeatMonitoring);
   const allSameOverride = devices.every(d => d.overrideGroupSettings === devices[0].overrideGroupSettings);
 
   const [groupSelection, setGroupSelection] = useState<GroupSelection>('keep');
-  const [heartbeatMonitoring, setHeartbeatMonitoring] = useState<boolean | null>(
-    allSameHeartbeat ? devices[0].heartbeatMonitoring : null,
-  );
   const [overrideGroupSettings, setOverrideGroupSettings] = useState<boolean | null>(
     allSameOverride ? devices[0].overrideGroupSettings : null,
   );
@@ -508,14 +606,12 @@ function BulkEditAgentModal({
   const handleSave = async () => {
     const data: {
       groupId?: number | null;
-      heartbeatMonitoring?: boolean;
       overrideGroupSettings?: boolean;
       status?: 'approved' | 'suspended';
       updatePolicy?: AgentUpdatePolicy | null;
     } = {};
 
     if (groupSelection !== 'keep') data.groupId = groupSelection;
-    if (heartbeatMonitoring !== null) data.heartbeatMonitoring = heartbeatMonitoring;
     if (overrideGroupSettings !== null) data.overrideGroupSettings = overrideGroupSettings;
     if (statusAction !== 'no-change') data.status = statusAction;
     if (updatePolicy !== '__keep__') data.updatePolicy = updatePolicy === 'inherit' ? null : updatePolicy;
@@ -559,14 +655,6 @@ function BulkEditAgentModal({
               ))}
             </select>
           </div>
-
-          {/* Heartbeat monitoring */}
-          <TriStateCheckbox
-            value={heartbeatMonitoring}
-            onChange={setHeartbeatMonitoring}
-            label={t('agents.heartbeatMonitoring')}
-            description={t('agents.heartbeatMonitoringDesc')}
-          />
 
           {/* Override group settings */}
           <TriStateCheckbox
@@ -628,6 +716,9 @@ export function AdminAgentPage() {
 
   const [keys, setKeys] = useState<AgentApiKey[]>([]);
   const [devices, setDevices] = useState<AgentDevice[]>([]);
+  // Latest rows for socket handlers (known-device check without re-binding).
+  const devicesRef = useRef<AgentDevice[]>([]);
+  devicesRef.current = devices;
   const [groups, setGroups] = useState<MonitorGroup[]>([]);
 
   const { openAddAgentModal } = useUiStore();
@@ -687,23 +778,37 @@ export function AdminAgentPage() {
     loadGroups();
   }, [loadAll, loadGroups]);
 
-  // Live updates via Socket.io
+  // Live updates via Socket.io. Re-bound when the socket instance changes
+  // (reconnect after a tenant switch / server disconnect).
+  const socketGeneration = useSocketStore(st => st.generation);
   useEffect(() => {
     const socket = getSocket();
     if (!socket) return;
 
-    const onPush = (data: { deviceId: number; agentVersion?: string }) => {
-      if (!data.agentVersion) return;
-      setDevices(prev => prev.map(d =>
-        d.id === data.deviceId && d.agentVersion !== data.agentVersion
-          ? { ...d, agentVersion: data.agentVersion! }
-          : d,
-      ));
+    // Coalesce reloads asked by a burst of events (bulk ops emit one per row).
+    let reloadTimer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleReload = () => {
+      if (reloadTimer) clearTimeout(reloadTimer);
+      reloadTimer = setTimeout(() => { reloadTimer = null; void loadAll(); }, 500);
     };
 
-    const onDeviceUpdated = (data: AgentDevice) => {
-      setDevices(prev => prev.map(d => d.id === data.id ? data : d));
+    // {deviceId, patch} (or a legacy shape) merged into the row. An unknown
+    // device, or a payload without any field, re-reads the list.
+    const onDeviceUpdated = (data: unknown) => {
+      const p = toDevicePatch(data);
+      if (!p) return;
+      const fields = Object.fromEntries(
+        Object.entries(p.patch).filter(([k, v]) => v !== undefined && k !== 'id'),
+      ) as Partial<AgentDevice>;
+      if (!devicesRef.current.some(d => d.id === p.deviceId) || Object.keys(fields).length === 0) {
+        scheduleReload();
+        return;
+      }
+      setDevices(prev => prev.map(d => (d.id === p.deviceId ? { ...d, ...fields } : d)));
     };
+
+    // A new agent registered (pending approval).
+    const onDeviceCreated = () => { scheduleReload(); };
 
     // Auto-delete after uninstall: remove device from list & selection
     const onDeviceDeleted = (data: { deviceId: number }) => {
@@ -715,30 +820,41 @@ export function AdminAgentPage() {
       });
     };
 
-    // Track live operational status per device (e.g. 'updating')
-    const onAgentStatusChanged = (data: { deviceId: number; status: string }) => {
+    // Track live operational status per device (e.g. 'updating') + presence.
+    const onAgentStatusChanged = (data: { deviceId: number; status: string; wsConnected?: boolean }) => {
       setLiveAgentStatus(prev => {
         const next = new Map(prev);
         next.set(data.deviceId, data.status);
         return next;
       });
+      if (data.wsConnected !== undefined) {
+        const ws = data.wsConnected;
+        setDevices(prev => prev.map(d => (d.id === data.deviceId && d.wsConnected !== ws ? { ...d, wsConnected: ws } : d)));
+      }
     };
 
-    socket.on('agentPush', onPush);
+    // Socket reconnected: events emitted meanwhile are lost — reload.
+    const onResync = () => { scheduleReload(); };
+
     socket.on(SOCKET_EVENTS.AGENT_DEVICE_UPDATED, onDeviceUpdated);
+    socket.on(AGENT_DEVICE_CREATED, onDeviceCreated);
     socket.on(SOCKET_EVENTS.AGENT_DEVICE_DELETED, onDeviceDeleted);
     socket.on(SOCKET_EVENTS.AGENT_STATUS_CHANGED, onAgentStatusChanged);
+    window.addEventListener(SOCKET_RESYNC_EVENT, onResync);
     return () => {
-      socket.off('agentPush', onPush);
+      if (reloadTimer) clearTimeout(reloadTimer);
       socket.off(SOCKET_EVENTS.AGENT_DEVICE_UPDATED, onDeviceUpdated);
+      socket.off(AGENT_DEVICE_CREATED, onDeviceCreated);
       socket.off(SOCKET_EVENTS.AGENT_DEVICE_DELETED, onDeviceDeleted);
       socket.off(SOCKET_EVENTS.AGENT_STATUS_CHANGED, onAgentStatusChanged);
+      window.removeEventListener(SOCKET_RESYNC_EVENT, onResync);
     };
-  }, []);
+  }, [socketGeneration, loadAll]);
 
   // Default-tenant god view: other tenants' agents are listed read-only (the
   // server refuses writes on them with 403 — switch tenant to change them).
   const currentTenantId = useTenantStore(s => s.currentTenantId);
+  const currentTenantName = useTenantStore(s => s.tenants.find(tn => tn.id === s.currentTenantId)?.name ?? null);
   const isForeign = useCallback(
     (tid: number | null | undefined) => currentTenantId != null && tid != null && tid !== currentTenantId,
     [currentTenantId],
@@ -878,7 +994,6 @@ export function AdminAgentPage() {
   const handleEditSave = async (data: {
     name: string | null;
     groupId?: number | null;
-    heartbeatMonitoring: boolean;
     overrideGroupSettings: boolean;
     suspended: boolean;
     releaseKeyBinding: boolean;
@@ -891,7 +1006,6 @@ export function AdminAgentPage() {
       await agentApi.updateDevice(editingDevice.id, {
         name: data.name,
         ...(data.groupId !== undefined ? { groupId: data.groupId } : {}),
-        heartbeatMonitoring: data.heartbeatMonitoring,
         overrideGroupSettings: data.overrideGroupSettings,
         ...(newStatus ? { status: newStatus } : {}),
         ...(data.releaseKeyBinding ? { apiKeyId: null } : {}),
@@ -954,6 +1068,12 @@ export function AdminAgentPage() {
     }
   };
 
+  /** Retry from the update badge: merge the refreshed row, refresh the fleet counters. */
+  const handleRetried = (updated: AgentDevice) => {
+    setDevices(prev => prev.map(d => (d.id === updated.id ? { ...d, ...updated } : d)));
+    agentApi.getVersionDistribution().then(setDist).catch(() => {});
+  };
+
   const handleCancelUpdate = async (device: AgentDevice) => {
     try {
       await agentApi.cancelUpdate(device.id);
@@ -987,7 +1107,6 @@ export function AdminAgentPage() {
 
   const handleBulkEditSave = async (data: {
     groupId?: number | null;
-    heartbeatMonitoring?: boolean;
     overrideGroupSettings?: boolean;
     status?: 'approved' | 'suspended';
     updatePolicy?: AgentUpdatePolicy | null;
@@ -1072,7 +1191,14 @@ export function AdminAgentPage() {
       {/* ── Devices Tab ── */}
       {tab === 'devices' && (
         <>
-          {dist && dist.total > 0 && <AgentVersionStrip dist={dist} isAdmin={isAdmin} />}
+          <AgentUpdatePolicyBar
+            isAdmin={isAdmin}
+            tenantId={currentTenantId}
+            tenantName={currentTenantName}
+            onChanged={() => { void loadAll(); }}
+          />
+          {dist && <MissingBuildsBanner builds={dist.missingBuilds ?? []} version={dist.latestVersion} />}
+          {dist && dist.total > 0 && <AgentVersionStrip dist={dist} />}
 
           {/* Status filter */}
           <div className="flex gap-1 mb-4">
@@ -1170,6 +1296,7 @@ export function AdminAgentPage() {
                     <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">OS</th>
                     <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">{t('common.agent')}</th>
                     <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">{t('common.status')}</th>
+                    <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">{t('agents.update.lastSeen', 'Last seen')}</th>
                     <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">Registered</th>
                     <th className="px-4 py-2.5 text-right text-xs font-medium text-text-muted uppercase tracking-wide">{t('common.actions')}</th>
                   </tr>
@@ -1220,7 +1347,15 @@ export function AdminAgentPage() {
                       <td className="px-4 py-3 text-text-muted">
                         <div className="flex items-center gap-1.5 flex-wrap">
                           <span>{device.agentVersion ?? '—'}</span>
-                          {device.updateAvailable && device.latestAgentVersion && (
+                          {device.deviceType === 'agent' && (
+                            <UpdateStatusBadge
+                              device={device}
+                              size="sm"
+                              canRetry={!isForeign(device.tenantId)}
+                              onRetried={handleRetried}
+                            />
+                          )}
+                          {device.updateAvailable && device.latestAgentVersion && !visibleUpdateAttempt(device) && (
                             <span
                               className="rounded-full px-1.5 py-0.5 text-[10px] font-medium bg-amber-500/10 text-amber-400"
                               title={t('agentUpdate.updateAvailableShort', 'Update available')}
@@ -1228,7 +1363,7 @@ export function AdminAgentPage() {
                               ↑ v{device.latestAgentVersion}
                             </span>
                           )}
-                          {device.updatePending && (
+                          {device.updatePending && !isUpdateInFlight(visibleUpdateAttempt(device)) && (
                             <span className="rounded-full px-1.5 py-0.5 text-[10px] font-medium bg-blue-500/10 text-blue-400">
                               {t('agentUpdate.updateRequested', { defaultValue: 'Update to v{{version}} requested', version: device.updateRequestedVersion })}
                             </span>
@@ -1244,7 +1379,7 @@ export function AdminAgentPage() {
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-1.5 flex-wrap">
                           <StatusBadge status={device.status} />
-                          {(liveAgentStatus.get(device.id) === 'updating' ||
+                          {!isUpdateInFlight(visibleUpdateAttempt(device)) && (liveAgentStatus.get(device.id) === 'updating' ||
                             (device.updatingSince != null &&
                               Date.now() - new Date(device.updatingSince).getTime() < 10 * 60 * 1000)) && (
                             <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium bg-blue-500/10 text-blue-400">
@@ -1262,6 +1397,11 @@ export function AdminAgentPage() {
                             </span>
                           )}
                         </div>
+                      </td>
+                      <td className="px-4 py-3">
+                        {device.status === 'pending' && !device.lastSeenAt
+                          ? <span className="text-text-muted text-xs">—</span>
+                          : <LastSeenPill lastSeenAt={device.lastSeenAt} />}
                       </td>
                       <td className="px-4 py-3 text-text-muted text-xs">{formatDate(device.createdAt)}</td>
                       <td className="px-4 py-3 text-right">
@@ -1331,7 +1471,8 @@ export function AdminAgentPage() {
                             </button>
                           )}
                           {device.status === 'approved' && device.deviceType === 'agent' && !device.updatePending
-                            && device.updateAvailable && device.resolvedUpdatePolicy !== 'off' && (
+                            && device.updateAvailable && device.resolvedUpdatePolicy !== 'off'
+                            && !isUpdateFailed(visibleUpdateAttempt(device)) && (
                             <button
                               onClick={() => handleRequestUpdate(device)}
                               className="p-1.5 rounded text-amber-400 hover:text-amber-300 hover:bg-amber-400/10 transition-colors"

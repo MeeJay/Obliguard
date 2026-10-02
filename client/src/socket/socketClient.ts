@@ -51,7 +51,10 @@ export function connectSocket(): Socket {
   });
 
   const s = socket;
-  const { setStatus } = useSocketStore.getState();
+  const { setStatus, bumpGeneration } = useSocketStore.getState();
+  // New instance: listeners bound to the previous one (useSocket, pages) must
+  // re-bind — they depend on the generation counter.
+  bumpGeneration();
 
   socket.on('connect', () => {
     console.log('Socket connected');

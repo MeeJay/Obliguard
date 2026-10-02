@@ -11,6 +11,11 @@ interface Props {
   readOnly?: boolean;
 }
 
+/** The server's `error` message of a failed request, if any. */
+function apiErrorMessage(err: unknown): string | undefined {
+  return (err as { response?: { data?: { error?: string } } })?.response?.data?.error;
+}
+
 export function FirewallPanel({ deviceId, wsConnected, readOnly = false }: Props) {
   const [rules, setRules] = useState<FirewallRule[]>([]);
   const [platform, setPlatform] = useState<string>('');
@@ -41,14 +46,17 @@ export function FirewallPanel({ deviceId, wsConnected, readOnly = false }: Props
     if (wsConnected) void loadRules();
   }, [wsConnected, loadRules]);
 
+  // The agent answers success:false (with its reason) when it refuses or
+  // fails a command: that is an error too, not a "Rule deleted".
   const handleDelete = async (ruleId: string) => {
     if (!confirm('Delete this firewall rule?')) return;
     setPending(p => new Set(p).add(ruleId));
     try {
       const result = await firewallApi.deleteRule(deviceId, ruleId);
+      if (result.success === false) { toast.error(result.error || 'Failed to delete rule'); return; }
       if (result.rules) setRules(result.rules);
       toast.success('Rule deleted');
-    } catch { toast.error('Failed to delete rule'); }
+    } catch (err) { toast.error(apiErrorMessage(err) ?? 'Failed to delete rule'); }
     finally { setPending(p => { const n = new Set(p); n.delete(ruleId); return n; }); }
   };
 
@@ -56,18 +64,29 @@ export function FirewallPanel({ deviceId, wsConnected, readOnly = false }: Props
     setPending(p => new Set(p).add(ruleId));
     try {
       const result = await firewallApi.toggleRule(deviceId, ruleId, enabled);
+      if (result.success === false) { toast.error(result.error || 'Failed to toggle rule'); return; }
       if (result.rules) setRules(result.rules);
-    } catch { toast.error('Failed to toggle rule'); }
+    } catch (err) { toast.error(apiErrorMessage(err) ?? 'Failed to toggle rule'); }
     finally { setPending(p => { const n = new Set(p); n.delete(ruleId); return n; }); }
   };
 
-  const handleAdd = async (req: FirewallAddRequest) => {
+  /** Resolves with the error to show in the form (null on success). */
+  const handleAdd = async (req: FirewallAddRequest): Promise<AddRuleError | null> => {
     try {
       const result = await firewallApi.addRule(deviceId, req);
+      if (result.success === false) return { message: result.error || 'Failed to create rule' };
       if (result.rules) setRules(result.rules);
       toast.success('Rule created');
       setShowAdd(false);
-    } catch { toast.error('Failed to create rule'); }
+      return null;
+    } catch (err) {
+      const data = (err as { response?: { data?: { error?: string; details?: Record<string, string[] | undefined> } } })?.response?.data;
+      const fields: RuleFieldErrors = {};
+      for (const [k, v] of Object.entries(data?.details ?? {})) {
+        if (v?.length && (RULE_FIELDS as readonly string[]).includes(k)) fields[k as RuleField] = v[0];
+      }
+      return { message: data?.error ?? (err as Error)?.message ?? 'Failed to create rule', fields };
+    }
   };
 
   const supportsToggle = platform === 'windows';
@@ -214,11 +233,90 @@ export function FirewallPanel({ deviceId, wsConnected, readOnly = false }: Props
   );
 }
 
+// ── Rule validation (mirrors server/src/validators/firewall.schema.ts) ──────
+// The server and the agent re-validate; this only gives inline errors early.
+
+const RULE_FIELDS = ['name', 'protocol', 'localPort', 'remoteIp'] as const;
+type RuleField = typeof RULE_FIELDS[number];
+type RuleFieldErrors = Partial<Record<RuleField, string>>;
+interface AddRuleError { message: string; fields?: RuleFieldErrors }
+
+const RULE_NAME_RE = /^[A-Za-z0-9 _.-]{1,64}$/;
+const PORT_RE = /^([1-9][0-9]{0,4})(?:-([1-9][0-9]{0,4}))?$/;
+const V4_RE = /^(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}$/;
+const HEXTET_RE = /^[0-9a-fA-F]{1,4}$/;
+
+function isAnyValue(v: string): boolean {
+  const t = v.trim();
+  return t === '' || t.toLowerCase() === 'any';
+}
+
+function isValidPort(v: string): boolean {
+  const m = PORT_RE.exec(v);
+  if (!m) return false;
+  const a = Number(m[1]);
+  const b = m[2] === undefined ? a : Number(m[2]);
+  return a <= 65535 && b <= 65535 && b >= a;
+}
+
+function isValidV6(v: string): boolean {
+  let s = v;
+  // A trailing dotted IPv4 fills the last two hextets.
+  const last = s.lastIndexOf(':');
+  if (s.slice(last + 1).includes('.')) {
+    if (!V4_RE.test(s.slice(last + 1))) return false;
+    s = `${s.slice(0, last + 1)}0:0`;
+  }
+  const dbl = s.indexOf('::');
+  if (dbl !== s.lastIndexOf('::')) return false;
+  const parts = (x: string) => (x ? x.split(':') : []);
+  const groups = dbl >= 0 ? [...parts(s.slice(0, dbl)), ...parts(s.slice(dbl + 2))] : s.split(':');
+  if (dbl >= 0 ? groups.length > 7 : groups.length !== 8) return false;
+  return groups.every((g) => HEXTET_RE.test(g));
+}
+
+/** IP address or CIDR network (same syntax the server accepts). */
+function isValidIpOrCidr(v: string): boolean {
+  if (v.length > 64 || /\s|%/.test(v)) return false;
+  const [addr, prefix, extra] = v.split('/');
+  if (extra !== undefined) return false;
+  const family = V4_RE.test(addr) ? 4 : isValidV6(addr) ? 6 : 0;
+  if (family === 0) return false;
+  if (prefix === undefined) return true;
+  return /^(0|[1-9][0-9]{0,2})$/.test(prefix) && Number(prefix) <= (family === 4 ? 32 : 128);
+}
+
+function validateRuleFields(f: { name: string; protocol: string; localPort: string; remoteIp: string }): RuleFieldErrors {
+  const errors: RuleFieldErrors = {};
+  if (f.name !== '') {
+    if (!RULE_NAME_RE.test(f.name)) errors.name = '1-64 characters: letters, digits, space, _ . - only';
+    else if (f.name.trim() !== f.name) errors.name = 'Must not start or end with a space';
+    else if (f.name.toLowerCase() === 'all' || f.name.toLowerCase().startsWith('obliguard-block-')) errors.name = 'This name is reserved';
+  }
+  if (!['tcp', 'udp', 'icmp', 'any'].includes(f.protocol)) errors.protocol = 'Protocol must be TCP, UDP, ICMP or Any';
+  if (!isAnyValue(f.localPort)) {
+    if (!isValidPort(f.localPort.trim())) errors.localPort = 'A port from 1 to 65535 or a range like 8000-8100';
+    else if (f.protocol !== 'tcp' && f.protocol !== 'udp') errors.localPort = 'A port needs protocol TCP or UDP';
+  }
+  if (!isAnyValue(f.remoteIp) && !isValidIpOrCidr(f.remoteIp.trim())) {
+    errors.remoteIp = 'An IP address or a CIDR network (e.g. 203.0.113.0/24)';
+  }
+  return errors;
+}
+
+function FieldError({ message }: { message?: string }) {
+  if (!message) return null;
+  return <p className="mt-1 text-[11px] text-status-down">{message}</p>;
+}
+
+const inputClass = (invalid: boolean) =>
+  `w-full px-3 py-1.5 rounded border bg-bg-secondary text-sm text-text-primary ${invalid ? 'border-status-down' : 'border-border'}`;
+
 // ── Add Rule Modal ───────────────────────────────────────────────────────────
 
 function AddRuleModal({ platform, onAdd, onClose }: {
   platform: string;
-  onAdd: (req: FirewallAddRequest) => Promise<void>;
+  onAdd: (req: FirewallAddRequest) => Promise<AddRuleError | null>;
   onClose: () => void;
 }) {
   const [name, setName] = useState('');
@@ -229,18 +327,27 @@ function AddRuleModal({ platform, onAdd, onClose }: {
   const [localPort, setLocalPort] = useState('');
   const [remoteIp, setRemoteIp] = useState('');
   const [saving, setSaving] = useState(false);
+  const [touched, setTouched] = useState(false);
+  const [serverError, setServerError] = useState<AddRuleError | null>(null);
   const nameRequired = platform === 'windows';
+
+  const fieldErrors = touched ? validateRuleFields({ name, protocol, localPort, remoteIp }) : {};
+  const errorOf = (f: RuleField) => fieldErrors[f] ?? serverError?.fields?.[f];
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setTouched(true);
+    setServerError(null);
+    if (Object.keys(validateRuleFields({ name, protocol, localPort, remoteIp })).length > 0) return;
     setSaving(true);
     try {
-      await onAdd({
+      const err = await onAdd({
         name: name || undefined,
         direction, action, protocol,
-        localPort: localPort || undefined,
-        remoteIp: remoteIp || undefined,
+        localPort: isAnyValue(localPort) ? undefined : localPort.trim(),
+        remoteIp: isAnyValue(remoteIp) ? undefined : remoteIp.trim(),
       });
+      setServerError(err);
     } finally { setSaving(false); }
   };
 
@@ -258,8 +365,9 @@ function AddRuleModal({ platform, onAdd, onClose }: {
             </label>
             <input type="text" value={name} onChange={e => setName(e.target.value)}
               placeholder={nameRequired ? 'Required on Windows' : 'Optional — auto-generated'}
-              required={nameRequired}
-              className="w-full px-3 py-1.5 rounded border border-border bg-bg-secondary text-sm text-text-primary" />
+              required={nameRequired} maxLength={64} aria-invalid={!!errorOf('name')}
+              className={inputClass(!!errorOf('name'))} />
+            <FieldError message={errorOf('name')} />
           </div>
           <div>
             <label className="block text-xs font-medium text-text-secondary mb-1">Description (optional)</label>
@@ -288,23 +396,29 @@ function AddRuleModal({ platform, onAdd, onClose }: {
           <div>
             <label className="block text-xs font-medium text-text-secondary mb-1">Protocol</label>
             <select value={protocol} onChange={e => setProtocol(e.target.value)}
-              className="w-full px-3 py-1.5 rounded border border-border bg-bg-secondary text-sm text-text-primary">
+              aria-invalid={!!errorOf('protocol')} className={inputClass(!!errorOf('protocol'))}>
               <option value="tcp">TCP</option>
               <option value="udp">UDP</option>
               <option value="any">Any</option>
               <option value="icmp">ICMP</option>
             </select>
+            <FieldError message={errorOf('protocol')} />
           </div>
           <div>
             <label className="block text-xs font-medium text-text-secondary mb-1">Port (optional)</label>
-            <input type="text" value={localPort} onChange={e => setLocalPort(e.target.value)} placeholder="80, 443, 8080-8090"
-              className="w-full px-3 py-1.5 rounded border border-border bg-bg-secondary text-sm text-text-primary" />
+            <input type="text" value={localPort} onChange={e => setLocalPort(e.target.value)} placeholder="443 or 8080-8090"
+              aria-invalid={!!errorOf('localPort')} className={inputClass(!!errorOf('localPort'))} />
+            <FieldError message={errorOf('localPort')} />
           </div>
           <div>
             <label className="block text-xs font-medium text-text-secondary mb-1">Remote IP (optional)</label>
-            <input type="text" value={remoteIp} onChange={e => setRemoteIp(e.target.value)} placeholder="any"
-              className="w-full px-3 py-1.5 rounded border border-border bg-bg-secondary text-sm text-text-primary" />
+            <input type="text" value={remoteIp} onChange={e => setRemoteIp(e.target.value)} placeholder="any, 203.0.113.7 or 203.0.113.0/24"
+              aria-invalid={!!errorOf('remoteIp')} className={inputClass(!!errorOf('remoteIp'))} />
+            <FieldError message={errorOf('remoteIp')} />
           </div>
+          {serverError && !Object.values(serverError.fields ?? {}).some(Boolean) && (
+            <p className="text-xs text-status-down">{serverError.message}</p>
+          )}
           <div className="flex gap-2 pt-2">
             <button type="submit" disabled={saving}
               className="px-4 py-2 rounded text-sm font-medium bg-accent text-white hover:bg-accent-hover disabled:opacity-50 transition-colors">

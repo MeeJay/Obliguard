@@ -6,13 +6,16 @@ import { serviceTemplateService } from '../services/serviceTemplate.service';
 import { configuredPublicOrigins, requestAuthority, requestProto } from '../utils/publicOrigin';
 import { obliguardHub } from '../services/obliguardHub.service';
 import { checkDeviceAccess } from '../services/deviceAccess.service';
-import { warnBindingRefused, getServedAgentVersion, resolveAgentRoot } from '../services/agent.service';
+import {
+  warnBindingRefused, getServedAgentVersion, resolveAgentRoot, getAgentManifest, agentFileSha256,
+} from '../services/agent.service';
 import { deviceAccessVerdict } from '../utils/tenantWriteRules';
 import { isAgentUpdatePolicy } from '../utils/agentUpdate';
 import { AppError } from '../middleware/errorHandler';
 import { db } from '../db';
 import { isDeviceUuidFormat } from '../utils/agentIdentity';
 import { logger } from '../utils/logger';
+import { clientIp as requestClientIp } from '../utils/clientIp';
 import type { AgentThresholds, AgentDevice, AgentUpdatePolicy } from '@obliview/shared';
 import { isMasterTenant } from '@obliview/shared';
 
@@ -105,10 +108,9 @@ export async function agentPush(req: Request, res: Response): Promise<void> {
       return;
     }
 
-    const clientIp =
-      (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() ||
-      req.socket.remoteAddress ||
-      '';
+    // Right-most untrusted X-Forwarded-For hop (utils/clientIp): the
+    // left-most entry is written by the client and must not be trusted.
+    const clientIp = requestClientIp(req);
 
     const result = await agentService.handlePush(
       agentApiKeyId,
@@ -206,10 +208,21 @@ const ALLOWED_AGENT_BINARIES: Record<string, string> = {
   'obliguard-agent-freebsd-amd64':  'obliguard-agent-freebsd-amd64',
 };
 
-export function agentDownload(req: Request, res: Response): void {
+/**
+ * GET /api/agent/download/:filename (public, allow-listed names).
+ *
+ * Integrity (FLEET-AGENT-6, as Obliance): X-Content-SHA256 is the SHA-256 of
+ * the file actually served (streamed, cached per mtime + size); an agent that
+ * knows the header refuses a download that does not match it. X-Agent-Version
+ * is the version the build manifest records for this artifact (absent when
+ * unknown). A manifest hash that differs from the file is logged.
+ */
+export async function agentDownload(req: Request, res: Response): Promise<void> {
   const { filename } = req.params;
 
-  const binaryName = ALLOWED_AGENT_BINARIES[filename];
+  const binaryName = Object.prototype.hasOwnProperty.call(ALLOWED_AGENT_BINARIES, filename)
+    ? ALLOWED_AGENT_BINARIES[filename]
+    : undefined;
   if (!binaryName) {
     res.status(404).json({ error: 'Not found' });
     return;
@@ -223,9 +236,22 @@ export function agentDownload(req: Request, res: Response): void {
     return;
   }
 
-  const isExe = filename.endsWith('.exe');
-  res.setHeader('Content-Type', isExe ? 'application/octet-stream' : 'application/octet-stream');
-  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  let sha256: string;
+  try {
+    sha256 = await agentFileSha256(filePath);
+  } catch {
+    res.status(404).json({ error: 'Agent binary not available' });
+    return;
+  }
+  const entry = getAgentManifest()?.artifacts[binaryName];
+  if (entry?.sha256 && entry.sha256 !== sha256) {
+    logger.warn({ file: binaryName, manifest: entry.sha256, actual: sha256 }, 'Agent download: file differs from the build manifest');
+  }
+
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.setHeader('Content-Disposition', `attachment; filename="${binaryName}"`);
+  res.setHeader('X-Content-SHA256', sha256);
+  if (entry?.version) res.setHeader('X-Agent-Version', entry.version);
   res.sendFile(filePath);
 }
 
@@ -479,12 +505,35 @@ export async function getDevice(req: Request, res: Response): Promise<void> {
   res.json({ success: true, data: device });
 }
 
+/**
+ * GET /agent/devices?status=&groupId=&recursive=1
+ * groupId: that group's devices (recursive=1: the whole subtree through
+ * group_closure); 'none' = ungrouped devices. An unknown status is ignored
+ * (all statuses), as before. Tenant scope unchanged (Default keeps the read
+ * god view).
+ */
 export async function listDevices(req: Request, res: Response): Promise<void> {
-  const status = req.query.status as string | undefined;
+  const status = typeof req.query.status === 'string' ? req.query.status : undefined;
   const validStatuses = ['pending', 'approved', 'refused', 'suspended'];
+  let groupId: number | null | undefined;
+  const rawGroup = req.query.groupId;
+  if (rawGroup !== undefined && rawGroup !== '') {
+    if (rawGroup === 'none') {
+      groupId = null;
+    } else {
+      const n = typeof rawGroup === 'string' && /^\d{1,9}$/.test(rawGroup) ? Number(rawGroup) : NaN;
+      if (!Number.isSafeInteger(n) || n <= 0) {
+        res.status(400).json({ success: false, error: 'Invalid groupId' });
+        return;
+      }
+      groupId = n;
+    }
+  }
+  const recursive = req.query.recursive === '1' || req.query.recursive === 'true';
   const devices = await agentService.listDevices(
     req.tenantId,
     validStatuses.includes(status ?? '') ? (status as 'pending' | 'approved' | 'refused' | 'suspended') : undefined,
+    { groupId, recursive },
   );
 
   res.json({ success: true, data: devices });
@@ -496,7 +545,7 @@ export async function updateDevice(req: Request, res: Response): Promise<void> {
   const id = loaded.id;
   const {
     status, groupId, checkIntervalSeconds, maxMissedPushes, agentThresholds, name,
-    heartbeatMonitoring, sensorDisplayNames, overrideGroupSettings, displayConfig,
+    sensorDisplayNames, overrideGroupSettings, displayConfig,
     notificationTypes, wanMatchingEnabled, evaluateOnly, updatePolicy,
   } = req.body as {
     status?: 'approved' | 'refused' | 'pending' | 'suspended';
@@ -505,7 +554,6 @@ export async function updateDevice(req: Request, res: Response): Promise<void> {
     maxMissedPushes?: number | null;
     agentThresholds?: AgentThresholds;
     name?: string | null;
-    heartbeatMonitoring?: boolean;
     sensorDisplayNames?: Record<string, string> | null;
     overrideGroupSettings?: boolean;
     displayConfig?: import('@obliview/shared').AgentDisplayConfig | null;
@@ -514,6 +562,7 @@ export async function updateDevice(req: Request, res: Response): Promise<void> {
     evaluateOnly?: boolean;
     updatePolicy?: AgentUpdatePolicy | null;
   };
+  // heartbeatMonitoring (Obliview leftover) is no longer read: an old client may still send it.
 
   if (status !== undefined && !['approved', 'refused', 'pending', 'suspended'].includes(status)) {
     res.status(400).json({ success: false, error: 'Invalid status' });
@@ -570,7 +619,7 @@ export async function updateDevice(req: Request, res: Response): Promise<void> {
     if (currentDevice.status === 'suspended') {
       // Reinstate a suspended device: re-activate its monitor, no new monitor created
       await agentService.reinstateDevice(id);
-      const device = await agentService.updateDevice(id, { status: 'approved', name, heartbeatMonitoring });
+      const device = await agentService.updateDevice(id, { status: 'approved', name });
       await applyRelease(device);
       res.json({ success: true, data: device });
       return;
@@ -583,9 +632,9 @@ export async function updateDevice(req: Request, res: Response): Promise<void> {
       res.status(404).json({ success: false, error: 'Device not found' });
       return;
     }
-    // Apply name/heartbeatMonitoring if provided alongside approval
-    if (name !== undefined || heartbeatMonitoring !== undefined) {
-      await agentService.updateDevice(id, { name, heartbeatMonitoring });
+    // Apply the name if provided alongside approval
+    if (name !== undefined) {
+      await agentService.updateDevice(id, { name });
     }
     await applyRelease(device);
     res.json({ success: true, data: device });
@@ -608,7 +657,6 @@ export async function updateDevice(req: Request, res: Response): Promise<void> {
     checkIntervalSeconds,
     ...('maxMissedPushes' in req.body ? { maxMissedPushes } : {}),
     name,
-    heartbeatMonitoring,
     sensorDisplayNames,
     overrideGroupSettings,
     displayConfig,
@@ -667,10 +715,10 @@ export async function bulkDeleteDevices(req: Request, res: Response): Promise<vo
 }
 
 export async function bulkUpdateDevices(req: Request, res: Response): Promise<void> {
-  const { deviceIds, groupId, heartbeatMonitoring, overrideGroupSettings, status, updatePolicy } = req.body as {
+  // heartbeatMonitoring (Obliview leftover) is ignored if an old client sends it.
+  const { deviceIds, groupId, overrideGroupSettings, status, updatePolicy } = req.body as {
     deviceIds: unknown;
     groupId?: number | null;
-    heartbeatMonitoring?: boolean;
     overrideGroupSettings?: boolean;
     status?: 'approved' | 'suspended';
     updatePolicy?: AgentUpdatePolicy | null;
@@ -696,7 +744,7 @@ export async function bulkUpdateDevices(req: Request, res: Response): Promise<vo
   }
   const ids = await agentService.filterDeviceIdsByTenant(requested, req.tenantId);
   const affected = await agentService.bulkUpdateDevices(
-    ids, { groupId, heartbeatMonitoring, overrideGroupSettings, status, ...(hasPolicy ? { updatePolicy } : {}) }, req.tenantId,
+    ids, { groupId, overrideGroupSettings, status, ...(hasPolicy ? { updatePolicy } : {}) }, req.tenantId,
   );
   if (hasPolicy && affected > 0) {
     logger.info({
@@ -788,6 +836,29 @@ export async function requestDeviceUpdate(req: Request, res: Response, next: Nex
   }
 }
 
+/**
+ * POST /agent/devices/:id/update/retry — restart a failed or abandoned update
+ * attempt (fresh budget of 3 offers, explicit request pinned to the served
+ * version). Same permission and refusals as "Update now".
+ */
+export async function retryDeviceUpdate(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const device = await requireDeviceWritable(req, res, req.params.id);
+    if (!device) return;
+    requireServedVersion();
+    const r = await agentService.retryUpdate(device.id, req.tenantId, req.session?.userId ?? null);
+    if (r.requested === 1) {
+      res.json({ success: true, data: await agentService.getDeviceById(device.id) });
+      return;
+    }
+    if (r.skipped.off) throw new AppError(409, 'Updates are disabled for this agent (policy: off)', 'updatePolicyOff');
+    if (r.skipped.current) throw new AppError(409, 'Agent is already up to date', 'alreadyCurrent');
+    throw new AppError(409, 'Only approved agents that reported a version can be updated', 'notUpdatable');
+  } catch (err) {
+    next(err);
+  }
+}
+
 /** DELETE /agent/devices/:id/agent-update — cancel a pending request. */
 export async function cancelDeviceUpdate(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -829,6 +900,40 @@ export async function requestGroupUpdateHandler(req: Request, res: Response, nex
     const r = await agentService.requestGroupUpdate(groupId, req.tenantId, req.session?.userId ?? null);
     if (!r) throw new AppError(404, 'Group not found');
     res.json({ success: true, data: r });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ── Tenant level of the update policy (W2-1 owner amendment) ────────────────
+// The OPERATING tenant's policy (global -> tenant -> group -> agent). Writes
+// are platform-admin only (route guard), like the group and global levels.
+
+/** GET /agent/update-policy/tenant — the operating tenant's policy and the effective global one. */
+export async function getTenantUpdatePolicy(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    res.json({ success: true, data: await agentService.getTenantUpdatePolicyInfo(req.tenantId) });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/** PATCH /agent/update-policy/tenant {updatePolicy: auto|manual|off|null} */
+export async function patchTenantUpdatePolicy(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const body = (req.body ?? {}) as { updatePolicy?: unknown };
+    if (!('updatePolicy' in body) || !isUpdatePolicyInput(body.updatePolicy)) {
+      throw new AppError(400, 'Invalid updatePolicy');
+    }
+    // requireTenant already refused a tab that shows another tenant (409).
+    const r = await agentService.setTenantUpdatePolicy(req.tenantId, body.updatePolicy);
+    if (!r) throw new AppError(404, 'Tenant not found');
+    if (r.before !== body.updatePolicy) {
+      logger.info({
+        event: 'agent_update_tenant_policy', userId: req.session?.userId ?? null, tenantId: req.tenantId, from: r.before, to: body.updatePolicy,
+      }, 'Tenant agent update policy changed');
+    }
+    res.json({ success: true, data: await agentService.getTenantUpdatePolicyInfo(req.tenantId) });
   } catch (err) {
     next(err);
   }

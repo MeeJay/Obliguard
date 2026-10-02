@@ -51,26 +51,9 @@ export function requireRole(...roles: UserRole[]) {
 }
 
 /**
- * Require write permission on a monitor (id from req.params.id).
- * Admins always pass. Non-admins need RW via their teams.
- */
-export function requireMonitorWrite() {
-  return async (req: Request, _res: Response, next: NextFunction): Promise<void> => {
-    try {
-      if (req.session.role === 'admin') return next();
-      const monitorId = parseInt(req.params.id, 10);
-      if (isNaN(monitorId)) return next(new AppError(400, 'Invalid monitor ID'));
-      const canWrite = await permissionService.canWriteMonitor(req.session.userId!, monitorId, false);
-      if (!canWrite) return next(new AppError(403, 'Insufficient permissions'));
-      next();
-    } catch (err) {
-      next(err);
-    }
-  };
-}
-
-/**
  * Require write permission on a group (id from req.params.id).
+ * Admins always pass. Non-admins need RW via their teams of the operating
+ * tenant; the controller then binds the group itself to req.tenantId.
  */
 export function requireGroupWrite() {
   return async (req: Request, _res: Response, next: NextFunction): Promise<void> => {
@@ -78,7 +61,7 @@ export function requireGroupWrite() {
       if (req.session.role === 'admin') return next();
       const groupId = parseInt(req.params.id, 10);
       if (isNaN(groupId)) return next(new AppError(400, 'Invalid group ID'));
-      const canWrite = await permissionService.canWriteGroup(req.session.userId!, groupId, false);
+      const canWrite = await permissionService.canWriteGroup(req.session.userId!, groupId, false, req.tenantId);
       if (!canWrite) return next(new AppError(403, 'Insufficient permissions'));
       next();
     } catch (err) {
@@ -88,13 +71,14 @@ export function requireGroupWrite() {
 }
 
 /**
- * Require canCreate permission (for creating new monitors/groups).
+ * Require canCreate permission (for creating new groups), via a team of the
+ * operating tenant.
  */
 export function requireCanCreate() {
   return async (req: Request, _res: Response, next: NextFunction): Promise<void> => {
     try {
       if (req.session.role === 'admin') return next();
-      const canCreate = await permissionService.canCreate(req.session.userId!, false);
+      const canCreate = await permissionService.canCreate(req.session.userId!, false, req.tenantId);
       if (!canCreate) return next(new AppError(403, 'Insufficient permissions'));
       next();
     } catch (err) {

@@ -162,7 +162,6 @@
     "stepLanguage": "Dil",
     "stepProfile": "Profil",
     "stepAlerts": "Uyarılar",
-    "stepPassword": "Şifre",
     "stepSecurity": "Güvenlik",
     "completing": "Tamamlanıyor…",
     "complete": "Kurulumu bitir",
@@ -193,21 +192,6 @@
       "topCenter": "Üst orta",
       "topCenterDesc": "Yalnızca son uyarı, 10 saniye sonra otomatik gizlenir.",
       "previewAlt": "Uyarı konumu önizlemesi"
-    },
-    "password": {
-      "title": "Bir şifre belirleyin",
-      "subtitleRequired": "Hesabınız SSO ile oluşturuldu ve henüz bir şifresi yok. Doğrudan giriş yapabilmek için bir şifre belirleyin.",
-      "subtitleOptional": "Zaten bir şifreniz var. Mevcut şifrenizi korumak için alanları boş bırakın.",
-      "label": "Şifre",
-      "newLabel": "Yeni şifre",
-      "confirmLabel": "Şifreyi onayla",
-      "placeholder": "En az 8 karakter",
-      "optionalPlaceholder": "Mevcut şifreyi korumak için boş bırakın",
-      "confirmPlaceholder": "Şifrenizi tekrarlayın",
-      "tooShort": "Şifre en az 8 karakter olmalıdır.",
-      "mismatch": "Şifreler eşleşmiyor.",
-      "required": "Hesabınız için bir şifre gereklidir.",
-      "failed": "Şifre ayarlanamadı. Lütfen tekrar deneyin."
     },
     "security": {
       "title": "İki Faktörlü Kimlik Doğrulama",

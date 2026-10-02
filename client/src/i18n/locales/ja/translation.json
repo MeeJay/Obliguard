@@ -162,7 +162,6 @@
     "stepLanguage": "言語",
     "stepProfile": "プロフィール",
     "stepAlerts": "アラート",
-    "stepPassword": "パスワード",
     "stepSecurity": "セキュリティ",
     "completing": "完了中…",
     "complete": "設定を完了",
@@ -193,21 +192,6 @@
       "topCenter": "上部中央",
       "topCenterDesc": "最新のアラートのみ表示、10秒後に自動消去。",
       "previewAlt": "アラート位置のプレビュー"
-    },
-    "password": {
-      "title": "パスワードを設定",
-      "subtitleRequired": "アカウントはSSO経由で作成され、まだパスワードが設定されていません。直接ログインするにはパスワードを設定してください。",
-      "subtitleOptional": "すでにパスワードが設定されています。現在のパスワードを維持するには空欄のままにしてください。",
-      "label": "パスワード",
-      "newLabel": "新しいパスワード",
-      "confirmLabel": "パスワードを確認",
-      "placeholder": "8文字以上",
-      "optionalPlaceholder": "空欄で現在のパスワードを維持",
-      "confirmPlaceholder": "パスワードを繰り返す",
-      "tooShort": "パスワードは8文字以上である必要があります。",
-      "mismatch": "パスワードが一致しません。",
-      "required": "アカウントにパスワードが必要です。",
-      "failed": "パスワードの設定に失敗しました。もう一度お試しください。"
     },
     "security": {
       "title": "2要素認証",

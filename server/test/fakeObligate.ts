@@ -32,6 +32,8 @@ export interface MintOpts {
   /** null → header without typ */
   typ?: string | null;
   jti?: string;
+  /** default: the fake's own url (real Obligate stamps its public URL) */
+  iss?: string;
 }
 
 export interface FakeObligate {
@@ -119,7 +121,7 @@ export async function startFakeObligate(apiKey = OBLIGATE_API_KEY): Promise<Fake
     const header: Record<string, string> = { alg: 'EdDSA', kid };
     if (typ !== null) header.typ = typ;
     const claims = {
-      iss: 'fake-obligate',
+      iss: o.iss ?? url,
       aud: o.aud ?? 'obliguard',
       azp: 'oblihub',
       sub: o.sub,

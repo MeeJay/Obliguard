@@ -94,7 +94,12 @@
     "workspaces": "Workspaces",
     "signOut": "Sign out",
     "pinSidebar": "Pin sidebar",
-    "floatSidebar": "Float sidebar"
+    "floatSidebar": "Float sidebar",
+    "addAgent": "Add agent",
+    "collapseSidebar": "Collapse sidebar",
+    "expandSidebar": "Expand sidebar",
+    "liveEvents": "Live events",
+    "searchAgents": "Search agents…"
   },
   "login": {
     "title": "Monitoring Dashboard",
@@ -126,7 +131,10 @@
     "ssoChecking": "Checking authentication...",
     "ssoRedirecting": "Redirecting to login...",
     "clientVersion": "client v{{version}}",
-    "serverVersion": "server v{{version}}"
+    "serverVersion": "server v{{version}}",
+    "accountDisabled": "Your account is disabled on this server. Ask an administrator to re-enable it.",
+    "signInWithSso": "Sign in with Obligate SSO",
+    "ssoFailed": "SSO authentication failed. Please try local login."
   },
   "forgotPassword": {
     "title": "Reset your password",
@@ -163,7 +171,6 @@
     "stepLanguage": "Language",
     "stepProfile": "Profile",
     "stepAlerts": "Alerts",
-    "stepPassword": "Password",
     "stepSecurity": "Security",
     "completing": "Completing…",
     "complete": "Finish setup",
@@ -194,21 +201,6 @@
       "topCenter": "Top center",
       "topCenterDesc": "Latest alert only, auto-dismiss after 10 seconds.",
       "previewAlt": "Alert position preview"
-    },
-    "password": {
-      "title": "Set a password",
-      "subtitleRequired": "Your account was created via SSO and has no password yet. Set one to be able to log in directly.",
-      "subtitleOptional": "You already have a password. Leave the fields blank to keep your current one.",
-      "label": "Password",
-      "newLabel": "New password",
-      "confirmLabel": "Confirm password",
-      "placeholder": "At least 8 characters",
-      "optionalPlaceholder": "Leave blank to keep current",
-      "confirmPlaceholder": "Repeat your password",
-      "tooShort": "Password must be at least 8 characters.",
-      "mismatch": "Passwords do not match.",
-      "required": "A password is required for your account.",
-      "failed": "Failed to set password. Please try again."
     },
     "security": {
       "title": "Two-Factor Authentication",
@@ -254,7 +246,38 @@
     "selectedCount_one": "{{count}} monitor selected",
     "selectedCount_other": "{{count}} monitors selected",
     "selectedCountAgent_one": "{{count}} agent selected",
-    "selectedCountAgent_other": "{{count}} agents selected"
+    "selectedCountAgent_other": "{{count}} agents selected",
+    "activeBans": "Active Bans",
+    "agents": "Agents",
+    "agentsConnected": "Agents Connected",
+    "agentsEvaluateOnly": "{{count}} evaluate-only",
+    "agentsOnlineCount": "{{online}}/{{total}} online",
+    "agentsOutdated": "{{count}} outdated",
+    "attacks24h": "Attacks (24h)",
+    "bans24h": "bans 24h",
+    "bansTodaySplit": "+{{auto}} auto · +{{manual}} manual today",
+    "colBannedAt": "Banned At",
+    "colCountry": "Country",
+    "colFailures": "Failures",
+    "colLastSeen": "Last Seen",
+    "colReason": "Reason",
+    "colScope": "Scope",
+    "colType": "Type",
+    "events24h": "events 24h",
+    "failuresTodaySub": "{{failures}} failures / {{events}} events today",
+    "hostileIps24h": "Hostile IPs (24h)",
+    "hostileIpsTodaySub": "{{count}} today",
+    "lastSeen": "last seen",
+    "lift": "Lift",
+    "liftConfirm": "Lift the ban on {{ip}}?",
+    "liftFailed": "Failed to lift the ban",
+    "lifted": "Ban on {{ip}} lifted",
+    "noAgents": "No agents registered yet",
+    "noBans": "No active bans",
+    "noIpData": "No IP reputation data",
+    "recentBans": "Recent Bans",
+    "topIps": "Top IPs by Failure Count",
+    "viewAll": "View all"
   },
   "monitors": {
     "new": "Add Monitor",
@@ -482,7 +505,8 @@
       "temperatures": "Temperatures",
       "pauseAll": "Pause All",
       "resumeAll": "Resume All",
-      "clearData": "Clear Data"
+      "clearData": "Clear Data",
+      "suspended": "Suspended"
     }
   },
   "notifications": {
@@ -514,7 +538,10 @@
     "selectTenant": "— Select workspace —",
     "grantAccess": "Grant access",
     "removeTenantAccess": "Remove workspace access",
-    "failedTenantAssign": "Failed to update workspace access"
+    "failedTenantAssign": "Failed to update workspace access",
+    "viewChannel": "Channel (read-only)",
+    "readOnlyHint": "This channel is shared with this workspace by its owner. It cannot be edited here and its secrets are hidden.",
+    "readOnlyShared": "Read-only"
   },
   "settings": {
     "obligate": {
@@ -648,7 +675,8 @@
       "enterCode": "Enter the code sent to {{email}}",
       "emailOtpEnabled": "Email OTP enabled",
       "invalidCode": "Invalid code"
-    }
+    },
+    "emailCurrentPassword": "Current password (required to change the email address)"
   },
   "users": {
     "tabUsers": "Users",
@@ -701,7 +729,12 @@
       "failedAddPermission": "Failed to add permission",
       "failedUpdatePermission": "Failed to update permission",
       "failedRemovePermission": "Failed to remove permission"
-    }
+    },
+    "confirmReset2fa": "Reset the two-factor authentication of {{username}}? Their TOTP and e-mail codes are removed and they are signed out everywhere.",
+    "reset2fa": "Reset 2FA",
+    "reset2faDone": "Two-factor authentication reset",
+    "reset2faFailed": "Failed to reset two-factor authentication",
+    "tabPermissions": "Permissions"
   },
   "agents": {
     "foreignReadOnly": "This agent belongs to another tenant. It is read-only here: switch to its tenant to change it.",
@@ -964,13 +997,15 @@
     "promoteConfirm": "Promote the ban on {{ip}} to a global ban? It will be enforced on every agent of every tenant, and its reason becomes visible to every tenant.",
     "promoted": "{{ip}} is now banned globally",
     "dangerZoneDefaultOnly": "Switch to the Default tenant to use the danger zone: wipes apply to every tenant."
-  },  "header": {
+  },
+  "header": {
     "signedInAs": "Signed in as",
     "disableAlerts": "Disable live alerts",
     "enableAlerts": "Enable live alerts",
     "socketConnected": "Live — connected to server",
     "socketReconnecting": "Reconnecting to server…",
-    "socketDisconnected": "Disconnected from server — Click to reload"
+    "socketDisconnected": "Disconnected from server — Click to reload",
+    "suspiciousIps": "Suspicious IPs"
   },
   "tenant": {
     "pageTitle": "Workspaces",
@@ -1003,7 +1038,8 @@
     "clearFavourite": "Favourite workspace (click to clear)",
     "favouriteHint": "The favourite workspace opens at sign-in",
     "favouriteLabel": "Favourite workspace",
-    "noFavourite": "None (first workspace)"
+    "noFavourite": "None (first workspace)",
+    "label": "Tenant"
   },
   "evaluateOnly": {
     "badge": "Evaluate-only",
@@ -1033,7 +1069,8 @@
       "group": "group",
       "global": "global",
       "default": "default",
-      "unresolved": "unavailable"
+      "unresolved": "unavailable",
+      "tenant": "tenant policy"
     },
     "frozenBy": "Frozen by {{source}}",
     "frozenBadge": "Updates frozen",
@@ -1067,5 +1104,10 @@
       "unknown": "{{count}} unknown"
     },
     "dashboardOutdated": "{{count}} agent(s) behind v{{version}}"
+  },
+  "liveEvents": {
+    "banFailed": "Failed to ban {{ip}}",
+    "whitelistFailed": "Failed to whitelist {{ip}}",
+    "whitelisted": "{{ip}} added to the whitelist"
   }
 }

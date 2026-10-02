@@ -10,6 +10,13 @@ import { anonIp, anonHostname, anonUsername } from '@/utils/anonymize';
 import { useTranslation } from 'react-i18next';
 import { isMasterTenant } from '@obliview/shared';
 import { useTenantStore } from '@/store/tenantStore';
+import { SOCKET_RESYNC_EVENT } from '@/hooks/useSocket';
+import toast from 'react-hot-toast';
+
+/** Server error message of an axios failure, else the fallback. */
+function apiError(err: unknown, fallback: string): string {
+  return (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? fallback;
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -257,6 +264,12 @@ export function LiveEventsPage() {
   }, [page, serviceFilter, typeFilter, agentFilter]);
 
   useEffect(() => { void loadEvents(); }, [loadEvents]);
+  // Socket reconnected (sleep, network cut, tenant switch): reload the page.
+  useEffect(() => {
+    const onResync = () => { void loadEvents(); };
+    window.addEventListener(SOCKET_RESYNC_EVENT, onResync);
+    return () => window.removeEventListener(SOCKET_RESYNC_EVENT, onResync);
+  }, [loadEvents]);
   useEffect(() => { setPage(1); }, [serviceFilter, typeFilter, agentFilter]);
 
   // ── Per-IP summary (from current page) ────────────────────────────────────
@@ -288,8 +301,11 @@ export function LiveEventsPage() {
     setBanningIps(prev => new Set(prev).add(ip));
     try {
       await bansApi.create({ ip, reason: 'Manual ban from live events' });
+      toast.success(isGodView
+        ? t('bans.bannedGlobal', { ip, defaultValue: '{{ip}} banned on every agent' })
+        : t('bans.bannedLocal', { ip, defaultValue: '{{ip}} banned on this tenant' }));
     } catch (err) {
-      alert((err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? `Failed to ban ${ip}`);
+      toast.error(apiError(err, t('liveEvents.banFailed', { ip, defaultValue: 'Failed to ban {{ip}}' })));
     }
     finally { setBanningIps(prev => { const s = new Set(prev); s.delete(ip); return s; }); }
   }, [isGodView, t]);
@@ -299,9 +315,12 @@ export function LiveEventsPage() {
     setWhitelistingIps(prev => new Set(prev).add(ip));
     try {
       await whitelistApi.create({ ip });
-    } catch { alert(`Failed to whitelist ${ip}`); }
+      toast.success(t('liveEvents.whitelisted', { ip, defaultValue: '{{ip}} added to the whitelist' }));
+    } catch (err) {
+      toast.error(apiError(err, t('liveEvents.whitelistFailed', { ip, defaultValue: 'Failed to whitelist {{ip}}' })));
+    }
     finally { setWhitelistingIps(prev => { const s = new Set(prev); s.delete(ip); return s; }); }
-  }, []);
+  }, [t]);
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 

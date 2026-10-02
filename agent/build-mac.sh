@@ -53,6 +53,47 @@ fi
 OUT_DIR="dist"
 mkdir -p "$OUT_DIR"
 
+# ── Build manifest (dist/manifest.json) ───────────────────────────────────────
+# The server advertises an update only to the os-arch whose artifact embeds the
+# served version (agent/VERSION) and sends each file's SHA-256 on download.
+# write_manifest <version> <file>... merges these artifacts into
+# dist/manifest.json, keeping the entries of artifacts built elsewhere.
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | cut -d' ' -f1
+  else
+    shasum -a 256 "$1" | cut -d' ' -f1
+  fi
+}
+
+write_manifest() {
+  local version="$1"; shift
+  local manifest="dist/manifest.json" tmp="dist/.manifest.json.tmp" entries="" name line f
+  if [ -f "$manifest" ]; then
+    while IFS= read -r line; do
+      name="$(printf '%s\n' "$line" | sed -n 's/^    "\([^"]*\)": {.*$/\1/p')"
+      [ -n "$name" ] || continue
+      for f in "$@"; do
+        if [ "$(basename "$f")" = "$name" ]; then continue 2; fi
+      done
+      entries="${entries}${line%,}"$'\n'
+    done < "$manifest"
+  fi
+  for f in "$@"; do
+    [ -f "$f" ] || continue
+    entries="${entries}    \"$(basename "$f")\": {\"sha256\": \"$(sha256_of "$f")\", \"size\": $(wc -c < "$f" | tr -d ' '), \"version\": \"${version}\"}"$'\n'
+  done
+  {
+    printf '{\n  "version": "%s",\n  "artifacts": {\n' "$version"
+    printf '%s' "$entries" | sed '/^$/d' | sort | sed '$!s/$/,/'
+    printf '  }\n}\n'
+  } > "$tmp"
+  mv "$tmp" "$manifest"
+  echo "Manifest: $manifest"
+}
+
+BUILT=()
+
 # ── Build native arch (full CGO) ──────────────────────────────────────────────
 
 echo "Building Obliguard Agent $VERSION for darwin/$NATIVE_GOARCH (native, CGO_ENABLED=1)..."
@@ -62,6 +103,7 @@ CGO_ENABLED=1 GOOS=darwin GOARCH="$NATIVE_GOARCH" \
     -o "$OUT_DIR/obliguard-agent-darwin-$NATIVE_GOARCH" \
     .
 echo "  → $OUT_DIR/obliguard-agent-darwin-$NATIVE_GOARCH"
+BUILT+=("$OUT_DIR/obliguard-agent-darwin-$NATIVE_GOARCH")
 
 # ── Build cross arch (clang -arch) ────────────────────────────────────────────
 
@@ -75,9 +117,17 @@ if CGO_ENABLED=1 GOOS=darwin GOARCH="$CROSS_GOARCH" \
        -o "$OUT_DIR/obliguard-agent-darwin-$CROSS_GOARCH" \
        . 2>&1; then
   echo "  → $OUT_DIR/obliguard-agent-darwin-$CROSS_GOARCH"
+  BUILT+=("$OUT_DIR/obliguard-agent-darwin-$CROSS_GOARCH")
 else
   echo "  WARNING: Cross-compilation to darwin/$CROSS_GOARCH failed — skipping."
   echo "           (The native $NATIVE_GOARCH binary was built successfully.)"
+fi
+
+# ── Manifest ──────────────────────────────────────────────────────────────────
+# A 'dev' build is never recorded: the server would not advertise it anyway.
+
+if [ "$VERSION" != "dev" ]; then
+  write_manifest "$VERSION" "${BUILT[@]}"
 fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────

@@ -130,12 +130,18 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         isInitialized: true,
       });
       syncPreferencesToStore(user);
+      const prevTenantId = useTenantStore.getState().currentTenantId;
       useTenantStore.setState({ currentTenantId: currentTenantId ?? null });
       useTenantStore.getState().fetchTenants();
       if (blocked) {
         // No tenant: no socket (refused server-side anyway), no tenant-scoped fetches.
         disconnectSocket();
       } else {
+        // A live socket joined the previous tenant's rooms at handshake: rebuild
+        // it when the session now operates another tenant.
+        if (prevTenantId != null && currentTenantId != null && prevTenantId !== currentTenantId) {
+          disconnectSocket();
+        }
         connectSocket();
         useLiveAlertsStore.getState().fetchAlerts();
         useGroupStore.getState().fetchTree();

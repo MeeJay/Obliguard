@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 )
 
 const wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -31,13 +32,19 @@ func wsConnect(rawURL string, extraHeaders http.Header) (*wsConn, error) {
 
 	var conn net.Conn
 	if scheme == "wss" {
-		conn, err = tls.Dial("tcp", host, &tls.Config{InsecureSkipVerify: true})
+		// Same TLS policy as every HTTP client of the agent (tlsconfig.go):
+		// verified by default, SNI/host name taken from the URL.
+		dialer := &net.Dialer{Timeout: 30 * time.Second}
+		conn, err = tls.DialWithDialer(dialer, "tcp", host, newTLSConfig(tlsServerName(host)))
 	} else {
-		conn, err = net.Dial("tcp", host)
+		conn, err = net.DialTimeout("tcp", host, 30*time.Second)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("wsConnect: dial %s: %w", host, err)
 	}
+
+	// Bound the HTTP upgrade exchange; the session loop sets its own read deadlines.
+	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 
 	keyBytes := make([]byte, 16)
 	if _, err := rand.Read(keyBytes); err != nil {
@@ -88,6 +95,7 @@ func wsConnect(rawURL string, extraHeaders http.Header) (*wsConn, error) {
 		}
 	}
 
+	_ = conn.SetDeadline(time.Time{})
 	return &wsConn{conn: conn, r: r}, nil
 }
 

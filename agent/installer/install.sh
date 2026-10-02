@@ -2,6 +2,8 @@
 # Obliguard Agent Installer for Linux
 # Usage: curl -fsSL "https://your-server/api/agent/installer/linux?key=<apikey>" | bash
 # Or:    bash install.sh --url https://your-server --key <apikey>
+# Self-signed server certificate: curl -fsSLk "..." | TLS_INSECURE=1 bash
+#                             or: bash install.sh ... --tls-insecure
 
 set -e
 
@@ -11,6 +13,7 @@ INSTALL_DIR="/opt/obliguard-agent"
 CONFIG_DIR="/etc/obliguard-agent"
 SERVICE_NAME="obliguard-agent"
 BINARY_NAME="obliguard-agent"
+TLS_INSECURE="${TLS_INSECURE:-0}"
 
 # Parse args (override injected values)
 for i in "$@"; do
@@ -19,8 +22,19 @@ for i in "$@"; do
     --key=*) API_KEY="${i#*=}" ;;
     --url) SERVER_URL="$2"; shift ;;
     --key) API_KEY="$2"; shift ;;
+    --tls-insecure) TLS_INSECURE=1 ;;
+    --tls-insecure=*) TLS_INSECURE="${i#*=}" ;;
   esac
 done
+
+# TLS: verify the server certificate (default). TLS_INSECURE=1 (environment)
+# or --tls-insecure skips verification on every agent connection, for a
+# self-signed certificate absent from the system trust store; it is written to
+# config.json as tlsInsecureSkipVerify.
+case "$TLS_INSECURE" in
+  1|true|yes|on) TLS_INSECURE_JSON=true; DL_INSECURE="-k" ;;
+  *)             TLS_INSECURE_JSON=false; DL_INSECURE="" ;;
+esac
 
 if [ -z "$SERVER_URL" ] || [ "$SERVER_URL" = "__SERVER_URL__" ]; then
   echo "Error: --url is required"; exit 1
@@ -34,6 +48,9 @@ echo " Obliguard Agent Installer"
 echo "=============================="
 echo "Server URL : $SERVER_URL"
 echo "Install dir: $INSTALL_DIR"
+if [ "$TLS_INSECURE_JSON" = "true" ]; then
+  echo "TLS        : certificate verification DISABLED (TLS_INSECURE=1)"
+fi
 echo ""
 
 # ── 1. Detect architecture ────────────────────────────────────────────────────
@@ -54,7 +71,7 @@ echo "[1/4] Architecture: $ARCH"
 
 echo "[2/4] Downloading agent binary..."
 mkdir -p "$INSTALL_DIR"
-curl -fsSL "${SERVER_URL}/api/agent/download/obliguard-agent-${BINARY_SUFFIX}" \
+curl -fsSL $DL_INSECURE "${SERVER_URL}/api/agent/download/obliguard-agent-${BINARY_SUFFIX}" \
   -o "$INSTALL_DIR/$BINARY_NAME"
 chmod +x "$INSTALL_DIR/$BINARY_NAME"
 
@@ -74,9 +91,11 @@ cat > "$CONFIG_DIR/config.json" <<EOF
   "apiKey": "$API_KEY",
   "deviceUuid": "$DEVICE_UUID",
   "checkIntervalSeconds": 60,
-  "agentVersion": "1.0.0"
+  "agentVersion": "1.0.0",
+  "tlsInsecureSkipVerify": $TLS_INSECURE_JSON
 }
 EOF
+chmod 600 "$CONFIG_DIR/config.json"
 
 # ── 4. Install systemd service ────────────────────────────────────────────────
 

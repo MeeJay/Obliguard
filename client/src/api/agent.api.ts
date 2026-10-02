@@ -1,9 +1,24 @@
 import apiClient from './client';
 import type {
   AgentApiKey, AgentDevice, AgentDisplayConfig, AgentThresholds, ApiResponse, NotificationTypeConfig,
-  AgentUpdatePolicy, AgentUpdateRequestResult, AgentVersionDistribution,
+  AgentUpdatePolicy, AgentUpdateRequestResult, AgentVersionDistribution, AgentTenantUpdatePolicyInfo,
 } from '@obliview/shared';
 import type { AgentPushSnapshot } from '../types/agent';
+
+/** Filters of GET /agent/devices. */
+export interface ListDevicesFilter {
+  status?: AgentDevice['status'];
+  groupId?: number;
+  /** With groupId: include the agents of every descendant group. */
+  recursive?: boolean;
+}
+
+/** GET /agent/version (downloadUrl: legacy servers only). */
+export interface AgentServedVersion {
+  version: string;
+  missingBuilds?: string[];
+  downloadUrl?: string;
+}
 
 export const agentApi = {
   // ── API Keys ─────────────────────────────────────────────────────────────
@@ -33,8 +48,16 @@ export const agentApi = {
     }
   },
 
-  async listDevices(status?: AgentDevice['status']): Promise<AgentDevice[]> {
-    const params = status ? { status } : {};
+  /**
+   * Devices of the operating tenant. Accepts a bare status (legacy call sites)
+   * or filters: groupId (+ recursive = the group's whole sub-tree) and status.
+   */
+  async listDevices(filter?: AgentDevice['status'] | ListDevicesFilter): Promise<AgentDevice[]> {
+    const f: ListDevicesFilter = typeof filter === 'string' ? { status: filter } : (filter ?? {});
+    const params: Record<string, string | number> = {};
+    if (f.status) params.status = f.status;
+    if (f.groupId != null) params.groupId = f.groupId;
+    if (f.groupId != null && f.recursive) params.recursive = 1;
     const res = await apiClient.get<ApiResponse<AgentDevice[]>>('/agent/devices', { params });
     return res.data.data!;
   },
@@ -48,7 +71,6 @@ export const agentApi = {
       maxMissedPushes?: number | null;
       agentThresholds?: AgentThresholds;
       name?: string | null;
-      heartbeatMonitoring?: boolean;
       sensorDisplayNames?: Record<string, string> | null;
       overrideGroupSettings?: boolean;
       displayConfig?: AgentDisplayConfig | null;
@@ -104,7 +126,6 @@ export const agentApi = {
     deviceIds: number[],
     data: {
       groupId?: number | null;
-      heartbeatMonitoring?: boolean;
       overrideGroupSettings?: boolean;
       status?: 'approved' | 'suspended';
       updatePolicy?: AgentUpdatePolicy | null;
@@ -119,6 +140,16 @@ export const agentApi = {
   /** "Update now": offered to the agent at its next heartbeat (policy permitting). */
   async requestUpdate(id: number): Promise<AgentDevice> {
     const res = await apiClient.post<ApiResponse<AgentDevice>>(`/agent/devices/${id}/agent-update`);
+    return res.data.data!;
+  },
+
+  /**
+   * Retry a failed (or capped) update attempt: the attempt is reset to
+   * 'offered' with no offers counted and re-offered at the next heartbeat,
+   * also under the 'manual' policy. Same 409 refusals as requestUpdate.
+   */
+  async retryUpdate(id: number): Promise<AgentDevice> {
+    const res = await apiClient.post<ApiResponse<AgentDevice>>(`/agent/devices/${id}/update/retry`);
     return res.data.data!;
   },
 
@@ -142,10 +173,26 @@ export const agentApi = {
     return res.data.data!;
   },
 
+  /** Tenant level of the update policy (operating tenant; readable by members). */
+  async getTenantUpdatePolicy(): Promise<AgentTenantUpdatePolicyInfo> {
+    const res = await apiClient.get<ApiResponse<AgentTenantUpdatePolicyInfo>>('/agent/update-policy/tenant');
+    return res.data.data!;
+  },
+
+  /** Set the operating tenant's policy (null = inherit the global one). Platform admins only. */
+  async setTenantUpdatePolicy(updatePolicy: AgentUpdatePolicy | null): Promise<AgentTenantUpdatePolicyInfo> {
+    const res = await apiClient.patch<ApiResponse<AgentTenantUpdatePolicyInfo>>('/agent/update-policy/tenant', { updatePolicy });
+    return res.data.data!;
+  },
+
   // ── Agent version ─────────────────────────────────────────────────────────
 
-  async getVersion(): Promise<{ version: string; downloadUrl: string }> {
-    const res = await apiClient.get<{ version: string; downloadUrl: string }>('/agent/version');
+  /**
+   * Served agent version. missingBuilds lists the artifacts whose build does
+   * not match it (nothing is advertised to those platforms).
+   */
+  async getVersion(): Promise<AgentServedVersion> {
+    const res = await apiClient.get<AgentServedVersion>('/agent/version');
     return res.data;
   },
 

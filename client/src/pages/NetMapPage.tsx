@@ -21,6 +21,8 @@ import { useTenantStore } from '@/store/tenantStore';
 
 const NetMap3D = lazy(() => import('../netmap3d/NetMap3D'));
 import { getSocket } from '../socket/socketClient';
+import { useSocketStore } from '../store/socketStore';
+import { SOCKET_RESYNC_EVENT } from '../hooks/useSocket';
 import apiClient from '../api/client';
 import { ipLabelsApi } from '../api/ipLabels.api';
 import { anonHostname, anonIp } from '../utils/anonymize';
@@ -1583,6 +1585,10 @@ export function NetMapPage() {
 
   // ── Socket events ─────────────────────────────────────────────────────────
 
+  // A server-initiated disconnect rebuilds the socket (new generation): the
+  // effects below re-bind to the new instance.
+  const socketGeneration = useSocketStore(s => s.generation);
+
   useEffect(() => {
     const socket = getSocket();
     if (!socket) return;
@@ -1771,7 +1777,7 @@ export function NetMapPage() {
       agentRefreshTimersRef.current.clear();
       if (relayoutTimerRef.current) clearTimeout(relayoutTimerRef.current);
     };
-  }, [upsertIp, spawnParticle, spawnPeerParticle, upsertPeerLink, scheduleRelayout]);
+  }, [upsertIp, spawnParticle, spawnPeerParticle, upsertPeerLink, scheduleRelayout, socketGeneration]);
 
   // ── Socket connection status ───────────────────────────────────────────────
 
@@ -1784,6 +1790,15 @@ export function NetMapPage() {
     socket.on('connect',    onConnect);
     socket.on('disconnect', onDisconnect);
     return () => { socket.off('connect', onConnect); socket.off('disconnect', onDisconnect); };
+  }, [socketGeneration]);
+
+  // Events missed while the socket was down: rebuild the map after a reconnect.
+  const initRef = useRef(init);
+  initRef.current = init;
+  useEffect(() => {
+    const onResync = () => { void initRef.current(); };
+    window.addEventListener(SOCKET_RESYNC_EVENT, onResync);
+    return () => window.removeEventListener(SOCKET_RESYNC_EVENT, onResync);
   }, []);
 
   // ── Wheel zoom ────────────────────────────────────────────────────────────

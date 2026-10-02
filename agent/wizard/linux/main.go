@@ -87,9 +87,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Certificates are verified unless the admin opts out (self-signed server).
+	// TLS_INSECURE=1 in the environment pre-selects "yes", as with install.sh.
+	tlsDefault := "n"
+	if v := strings.TrimSpace(os.Getenv("TLS_INSECURE")); v == "1" || strings.EqualFold(v, "true") {
+		tlsDefault = "y"
+	}
+	tlsAnswer := promptDefault(reader, "Skip TLS certificate verification (self-signed server)? y/n", tlsDefault, "n")
+	tlsInsecure := strings.HasPrefix(strings.ToLower(tlsAnswer), "y")
+
 	fmt.Println()
 	fmt.Println("Installing…")
-	if err := install(serverURL, apiKey); err != nil {
+	if err := install(serverURL, apiKey, tlsInsecure); err != nil {
 		fmt.Fprintf(os.Stderr, "✗ Install failed: %v\n", err)
 		os.Exit(1)
 	}
@@ -102,7 +111,7 @@ func main() {
 
 // ── Install logic ───────────────────────────────────────────────────────────
 
-func install(serverURL, apiKey string) error {
+func install(serverURL, apiKey string, tlsInsecure bool) error {
 	// Deterministic stop → replace → start so admins don't end up with two
 	// generations of the agent running at once.
 	if hasSystemd() {
@@ -131,12 +140,17 @@ func install(serverURL, apiKey string) error {
 		"deviceUuid":           genUUID(),
 		"checkIntervalSeconds": 60,
 		"agentVersion":         version,
+		// Explicit, so the agent never applies its legacy (upgraded install) rule.
+		"tlsInsecureSkipVerify": tlsInsecure,
 	}
 	cfgBytes, _ := json.MarshalIndent(cfgPayload, "", "  ")
 	if err := os.WriteFile(cfgPath, cfgBytes, 0o600); err != nil {
 		return fmt.Errorf("write %s: %w", cfgPath, err)
 	}
 	fmt.Printf("  ✓ Wrote %s\n", cfgPath)
+	if tlsInsecure {
+		fmt.Println("  ! TLS certificate verification is disabled for this agent.")
+	}
 
 	if hasSystemd() {
 		return installSystemd()

@@ -10,7 +10,6 @@ interface GroupRow {
   parent_id: number | null;
   sort_order: number;
   is_general: boolean;
-  group_notifications: boolean;
   evaluate_only?: boolean;
   kind: string;
   tenant_id: number;
@@ -29,7 +28,6 @@ function rowToGroup(row: GroupRow): MonitorGroup {
     parentId: row.parent_id,
     sortOrder: row.sort_order,
     isGeneral: row.is_general,
-    groupNotifications: row.group_notifications,
     evaluateOnly: row.evaluate_only ?? false,
     kind: (row.kind as MonitorGroup['kind']) || 'monitor',
     tenantId: row.tenant_id,
@@ -76,14 +74,21 @@ export const groupService = {
     return row ? rowToGroup(row) : null;
   },
 
+  /** Owning tenant of each existing group id (missing ids are absent from the map). */
+  async getTenantIds(ids: number[]): Promise<Map<number, number>> {
+    const unique = [...new Set(ids)];
+    if (unique.length === 0) return new Map();
+    const rows = await db('monitor_groups').whereIn('id', unique).select('id', 'tenant_id') as Array<{ id: number; tenant_id: number }>;
+    return new Map(rows.map((r) => [r.id, r.tenant_id]));
+  },
+
   async create(data: {
     name: string;
     description?: string | null;
     parentId?: number | null;
     sortOrder?: number;
     isGeneral?: boolean;
-    groupNotifications?: boolean;
-    kind?: 'monitor' | 'agent';
+    kind?: 'agent';
   }, tenantId: number): Promise<MonitorGroup> {
     const slug = await ensureUniqueSlug(slugify(data.name));
 
@@ -95,8 +100,7 @@ export const groupService = {
         parent_id: data.parentId ?? null,
         sort_order: data.sortOrder ?? 0,
         is_general: data.isGeneral ?? false,
-        group_notifications: data.groupNotifications ?? false,
-        kind: data.kind ?? 'monitor',
+        kind: 'agent',
         tenant_id: tenantId,
       })
       .returning('*');
@@ -130,7 +134,6 @@ export const groupService = {
       description?: string | null;
       sortOrder?: number;
       isGeneral?: boolean;
-      groupNotifications?: boolean;
       evaluateOnly?: boolean;
     },
   ): Promise<MonitorGroup | null> {
@@ -143,7 +146,6 @@ export const groupService = {
     if (data.description !== undefined) updateData.description = data.description;
     if (data.sortOrder !== undefined) updateData.sort_order = data.sortOrder;
     if (data.isGeneral !== undefined) updateData.is_general = data.isGeneral;
-    if (data.groupNotifications !== undefined) updateData.group_notifications = data.groupNotifications;
     if (data.evaluateOnly !== undefined) updateData.evaluate_only = data.evaluateOnly;
 
     const [row] = await db<GroupRow>('monitor_groups')
@@ -262,30 +264,15 @@ export const groupService = {
     return roots;
   },
 
-  /** Batch-update sortOrder for multiple groups at once */
-  async reorder(items: { id: number; sortOrder: number }[]): Promise<void> {
+  /** Batch-update sortOrder for multiple groups of one tenant at once */
+  async reorder(items: { id: number; sortOrder: number }[], tenantId: number): Promise<void> {
     await db.transaction(async (trx) => {
       for (const item of items) {
         await trx('monitor_groups')
-          .where({ id: item.id })
+          .where({ id: item.id, tenant_id: tenantId })
           .update({ sort_order: item.sortOrder, updated_at: new Date() });
       }
     });
-  },
-
-  /**
-   * Find the nearest ancestor (or self) with group_notifications = true.
-   * Uses the closure table, ordered by depth ASC (self = depth 0 first).
-   * Returns the group if found, null otherwise.
-   */
-  async findGroupNotificationAncestor(groupId: number): Promise<MonitorGroup | null> {
-    const row = await db<GroupRow>('monitor_groups')
-      .join('group_closure', 'monitor_groups.id', 'group_closure.ancestor_id')
-      .where('group_closure.descendant_id', groupId)
-      .where('monitor_groups.group_notifications', true)
-      .orderBy('group_closure.depth', 'asc')
-      .first('monitor_groups.*');
-    return row ? rowToGroup(row) : null;
   },
 
   /** Update the default thresholds for an agent group */
@@ -297,14 +284,13 @@ export const groupService = {
     return row ? rowToGroup(row) : null;
   },
 
-  /** Update the agent-group config (push interval, heartbeat monitoring, max missed pushes, notification types) */
+  /** Update the agent-group config (push interval, max missed pushes, notification types, update policy) */
   async updateAgentGroupConfig(id: number, config: Partial<AgentGroupConfig>): Promise<MonitorGroup | null> {
     // Merge with existing config
     const existing = await db('monitor_groups').where({ id }).select('agent_group_config').first() as
       { agent_group_config: AgentGroupConfig | null } | undefined;
     const merged: AgentGroupConfig = {
       pushIntervalSeconds: null,
-      heartbeatMonitoring: null,
       maxMissedPushes: null,
       notificationTypes: null,
       ...(typeof existing?.agent_group_config === 'string'

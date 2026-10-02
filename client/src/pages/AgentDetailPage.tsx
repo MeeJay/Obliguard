@@ -17,6 +17,8 @@ import { NetworkLimitsPanel } from '@/pages/RateLimitPage';
 import { whitelistApi } from '@/api/whitelist.api';
 import { serviceTemplatesApi } from '@/api/serviceTemplates.api';
 import { getSocket } from '@/socket/socketClient';
+import { useSocketStore } from '@/store/socketStore';
+import { SOCKET_RESYNC_EVENT } from '@/hooks/useSocket';
 import type {
   AgentDevice,
   ServiceTemplate,
@@ -32,7 +34,13 @@ import { isMasterTenant, CAPABILITIES } from '@obliview/shared';
 import type { AgentUpdatePolicy } from '@obliview/shared';
 import { useTenantStore } from '@/store/tenantStore';
 import { useAuthStore } from '@/store/authStore';
-import { agentUpdateErrorMessage } from '@/utils/agentUpdate';
+import { useGroupStore } from '@/store/groupStore';
+import { toDevicePatch } from '@/store/agentStore';
+import {
+  agentUpdateErrorMessage, findGroupInTree, isUpdateFailed, isUpdateInFlight, updatePolicySourceLabel, visibleUpdateAttempt,
+} from '@/utils/agentUpdate';
+import { UpdateStatusBadge } from '@/components/agent/UpdateStatusBadge';
+import { LastSeenPill } from '@/components/agent/LastSeenPill';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -182,6 +190,8 @@ interface AgentMiniMapProps {
 }
 
 function AgentMiniMap({ deviceId, summaryEvents, onSelectIp }: AgentMiniMapProps) {
+  // Re-bind the socket listener when the socket is rebuilt (new generation).
+  const socketGeneration = useSocketStore(s => s.generation);
   const canvasRef      = useRef<HTMLCanvasElement>(null);
   const animRef        = useRef<number>(0);
   const particlesRef   = useRef<MiniParticle[]>([]);
@@ -363,7 +373,7 @@ function AgentMiniMap({ deviceId, summaryEvents, onSelectIp }: AgentMiniMapProps
 
     socket.on('ip:flow', handleFlow);
     return () => { socket.off('ip:flow', handleFlow); };
-  }, [deviceId]);
+  }, [deviceId, socketGeneration]);
 
   // ── Mouse interactions ────────────────────────────────────────────────────
   function handleMouseMove(e: React.MouseEvent<HTMLCanvasElement>) {
@@ -587,6 +597,11 @@ function AgentSettingsPanel({
   const resolvedPolicy = device.resolvedUpdatePolicy ?? 'manual';
   const policySource = device.updatePolicySource ?? 'default';
   const frozenFromAbove = resolvedPolicy === 'off' && policySource !== 'agent';
+  // Source names: the device's tenant (tenant level) or the group that sets the value.
+  const policyTenantName = useTenantStore(s => s.tenants.find(tn => tn.id === device.tenantId)?.name ?? null);
+  const policyGroupName = useGroupStore(s =>
+    device.updatePolicySourceGroupId != null ? (findGroupInTree(s.tree, device.updatePolicySourceGroupId)?.name ?? null) : null);
+  const policySourceText = updatePolicySourceLabel(policySource, t, { tenantName: policyTenantName, groupName: policyGroupName });
   const policySelectDisabled = saving || !canEditUpdatePolicy || frozenFromAbove;
 
   function Toggle({ value, onChange }: { value: boolean; onChange: () => void }) {
@@ -751,7 +766,7 @@ function AgentSettingsPanel({
             className="rounded border border-border bg-bg-tertiary px-2 py-1 text-xs text-text-primary focus:outline-none focus:border-accent disabled:opacity-60"
           >
             <option value="inherit">
-              {`${t('agentUpdate.policy.inherit', 'Inherit')} (${t(`agentUpdate.policy.${resolvedPolicy}`, resolvedPolicy)} — ${t(`agentUpdate.source.${policySource}`, policySource)})`}
+              {`${t('agentUpdate.policy.inherit', 'Inherit')} (${t(`agentUpdate.policy.${resolvedPolicy}`, resolvedPolicy)} — ${policySourceText})`}
             </option>
             <option value="auto">{t('agentUpdate.policy.auto', 'Automatic')}</option>
             <option value="manual">{t('agentUpdate.policy.manual', 'Manual')}</option>
@@ -759,7 +774,7 @@ function AgentSettingsPanel({
           </select>
           {frozenFromAbove && (
             <span className="text-[10px] text-amber-400">
-              {t('agentUpdate.frozenBy', { defaultValue: 'Frozen by {{source}}', source: t(`agentUpdate.source.${policySource}`, policySource) })}
+              {t('agentUpdate.frozenBy', { defaultValue: 'Frozen by {{source}}', source: policySourceText })}
             </span>
           )}
         </div>
@@ -1152,6 +1167,7 @@ export function AgentDetailPage() {
   }, [device?.uuid]);
 
   // ── Live wsConnected updates ────────────────────────────────────────────────
+  const socketGeneration = useSocketStore(s => s.generation);
   useEffect(() => {
     const socket = getSocket();
     if (!socket || !devId) return;
@@ -1159,9 +1175,23 @@ export function AgentDetailPage() {
       if (data.deviceId !== devId || data.wsConnected === undefined) return;
       setDevice(prev => prev ? { ...prev, wsConnected: data.wsConnected! } : prev);
     }
+    // {deviceId, patch}: update attempt phase, presence (lastSeenAt), policy...
+    function handleDeviceUpdated(data: unknown) {
+      const p = toDevicePatch(data);
+      if (!p || p.deviceId !== devId) return;
+      const fields = Object.fromEntries(
+        Object.entries(p.patch).filter(([k, v]) => v !== undefined && k !== 'id'),
+      ) as Partial<AgentDevice>;
+      if (Object.keys(fields).length === 0) return;
+      setDevice(prev => prev ? { ...prev, ...fields } : prev);
+    }
     socket.on(SOCKET_EVENTS.AGENT_STATUS_CHANGED, handleStatus);
-    return () => { socket.off(SOCKET_EVENTS.AGENT_STATUS_CHANGED, handleStatus); };
-  }, [devId]);
+    socket.on(SOCKET_EVENTS.AGENT_DEVICE_UPDATED, handleDeviceUpdated);
+    return () => {
+      socket.off(SOCKET_EVENTS.AGENT_STATUS_CHANGED, handleStatus);
+      socket.off(SOCKET_EVENTS.AGENT_DEVICE_UPDATED, handleDeviceUpdated);
+    };
+  }, [devId, socketGeneration]);
 
 
   // ── Load paginated events ───────────────────────────────────────────────────
@@ -1200,6 +1230,18 @@ export function AgentDetailPage() {
   }, [devId]);
 
   useEffect(() => { void loadSummary(); }, [loadSummary]);
+
+  // ── Reload after a socket reconnect (status and events may have moved) ──────
+  useEffect(() => {
+    if (!devId) return;
+    const onResync = () => {
+      agentApi.getDeviceById(devId).then(d => setDevice(d)).catch(() => {});
+      void loadEvents();
+      void loadSummary();
+    };
+    window.addEventListener(SOCKET_RESYNC_EVENT, onResync);
+    return () => window.removeEventListener(SOCKET_RESYNC_EVENT, onResync);
+  }, [devId, loadEvents, loadSummary]);
 
   // ── Compute IP summary ──────────────────────────────────────────────────────
   const ipSummary = useMemo<IpSummaryItem[]>(() => {
@@ -1299,6 +1341,8 @@ export function AgentDetailPage() {
   }
 
   const displayName = device.name ?? device.hostname;
+  // Attempt shown by UpdateStatusBadge (null when settled / superseded).
+  const updateShown = device.deviceType === 'agent' ? visibleUpdateAttempt(device) : null;
   const osLabel     = device.osInfo
     ? [device.osInfo.distro ?? device.osInfo.platform, device.osInfo.release].filter(Boolean).join(' ')
     : null;
@@ -1351,19 +1395,26 @@ export function AgentDetailPage() {
             {device.agentVersion && (
               <span className="text-xs text-text-muted font-mono">v{device.agentVersion}</span>
             )}
-            {/* ── Agent update (C17-1) ── */}
-            {device.updateAvailable && device.latestAgentVersion && !device.updatePending && (
+            {/* ── Agent update (C17-1): attempt state, then availability / request ── */}
+            {device.deviceType === 'agent' && (
+              <UpdateStatusBadge
+                device={device}
+                canRetry={canManage && !foreign}
+                onRetried={d => setDevice(d)}
+              />
+            )}
+            {device.updateAvailable && device.latestAgentVersion && !device.updatePending && !updateShown && (
               <span className="rounded-full px-2 py-0.5 text-[11px] font-medium bg-amber-500/10 text-amber-400">
                 {t('agentUpdate.updateAvailable', { defaultValue: 'Update available: v{{version}}', version: device.latestAgentVersion })}
               </span>
             )}
-            {device.updatePending && (
+            {device.updatePending && !isUpdateInFlight(updateShown) && (
               <span className="rounded-full px-2 py-0.5 text-[11px] font-medium bg-blue-500/10 text-blue-400">
                 {t('agentUpdate.updateRequested', { defaultValue: 'Update to v{{version}} requested', version: device.updateRequestedVersion })}
               </span>
             )}
             {canManage && !foreign && device.deviceType === 'agent' && device.updateAvailable
-              && !device.updatePending && device.resolvedUpdatePolicy !== 'off' && (
+              && !device.updatePending && device.resolvedUpdatePolicy !== 'off' && !isUpdateFailed(updateShown) && (
               <button
                 type="button"
                 disabled={updateBusy}
@@ -1424,7 +1475,10 @@ export function AgentDetailPage() {
                 <Wifi size={11} className="text-text-muted" />{anonIp(device.ip)}
               </span>
             )}
-            <span className="text-text-muted">Last seen: {new Date(device.updatedAt).toLocaleString()}</span>
+            <span className="flex items-center gap-1 text-text-muted">
+              {t('agents.update.lastSeen', 'Last seen')}
+              <LastSeenPill lastSeenAt={device.lastSeenAt} />
+            </span>
           </div>
         </div>
 

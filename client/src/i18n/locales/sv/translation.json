@@ -162,7 +162,6 @@
     "stepLanguage": "Språk",
     "stepProfile": "Profil",
     "stepAlerts": "Aviseringar",
-    "stepPassword": "Lösenord",
     "stepSecurity": "Säkerhet",
     "completing": "Slutför…",
     "complete": "Slutför konfiguration",
@@ -193,21 +192,6 @@
       "topCenter": "Överst i mitten",
       "topCenterDesc": "Endast den senaste aviseringen, försvinner automatiskt efter 10 sekunder.",
       "previewAlt": "Förhandsvisning av aviserings position"
-    },
-    "password": {
-      "title": "Ange ett lösenord",
-      "subtitleRequired": "Ditt konto skapades via SSO och har inget lösenord ännu. Ange ett för att kunna logga in direkt.",
-      "subtitleOptional": "Du har redan ett lösenord. Lämna fälten tomma för att behålla det nuvarande.",
-      "label": "Lösenord",
-      "newLabel": "Nytt lösenord",
-      "confirmLabel": "Bekräfta lösenord",
-      "placeholder": "Minst 8 tecken",
-      "optionalPlaceholder": "Lämna tomt för att behålla nuvarande",
-      "confirmPlaceholder": "Upprepa ditt lösenord",
-      "tooShort": "Lösenordet måste vara minst 8 tecken.",
-      "mismatch": "Lösenorden matchar inte.",
-      "required": "Ett lösenord är obligatoriskt för ditt konto.",
-      "failed": "Det gick inte att ange lösenordet. Försök igen."
     },
     "security": {
       "title": "Tvåfaktorsautentisering",

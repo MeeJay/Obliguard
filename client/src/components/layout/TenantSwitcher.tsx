@@ -3,7 +3,7 @@ import { ChevronDown, Building2, Check, Star } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useTenantStore } from '@/store/tenantStore';
 import { useGroupStore } from '@/store/groupStore';
-import { useMonitorStore } from '@/store/monitorStore';
+import { useAgentStore } from '@/store/agentStore';
 import { disconnectSocket, connectSocket } from '@/socket/socketClient';
 import { useAuthStore } from '@/store/authStore';
 import { cn } from '@/utils/cn';
@@ -49,18 +49,26 @@ export function TenantSwitcher() {
 
     try {
       await setCurrentTenant(tenantId);
+      // Switch refused (network / 403): nothing else to reload.
+      if (useTenantStore.getState().currentTenantId !== tenantId) {
+        toast.error(t('common.error', 'Error'));
+        return;
+      }
 
-      // Reload all tenant-scoped data in parallel
-      await Promise.all([
-        useMonitorStore.getState().fetchMonitors(),
-        useGroupStore.getState().fetchTree(),
-      ]);
-
-      // Reconnect the socket: the server reads the new tenant from the session
+      // Reconnect the socket first: the server reads the new tenant from the
+      // session, and the new instance bumps the socket generation so every
+      // listener re-binds to it (useSocket, pages).
       if (user) {
         disconnectSocket();
         connectSocket();
       }
+
+      // Reload the tenant-scoped stores. The agent store drops the previous
+      // tenant's rows on its own (cache key = user + tenant).
+      await Promise.all([
+        useGroupStore.getState().fetchTree(),
+        useAgentStore.getState().fetchDevices(),
+      ]);
     } finally {
       setSwitching(false);
     }

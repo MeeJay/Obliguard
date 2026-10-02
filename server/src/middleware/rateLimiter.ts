@@ -72,6 +72,32 @@ export const authLimiter = rateLimit({
   },
 });
 
+// Current-password limiter — the profile's current-password check (password
+// change, e-mail change) is a password oracle reachable with a session cookie
+// alone: a stolen cookie must not get unlimited guesses at the password.
+//
+// Key = the ACCOUNT (session user id), not the IP: the guesses are bounded per
+// account wherever they come from. Only REJECTED current passwords count: the
+// controller sets res.locals.currentPasswordRejected before answering 400, so
+// validation errors and successful changes cost nothing. Once the budget is
+// spent every request answers 429 until the window slides.
+export const CURRENT_PASSWORD_MAX_FAILURES = 5;
+export const CURRENT_PASSWORD_WINDOW_MS = 15 * 60 * 1000;
+
+export const currentPasswordLimiter = rateLimit({
+  windowMs: CURRENT_PASSWORD_WINDOW_MS,
+  max: CURRENT_PASSWORD_MAX_FAILURES,
+  skipSuccessfulRequests: true,
+  requestWasSuccessful: (_req, res) => res.locals.currentPasswordRejected !== true,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `user:${req.session?.userId ?? 'anonymous'}`,
+  message: {
+    success: false,
+    error: 'Too many incorrect passwords, please try again in 15 minutes',
+  },
+});
+
 // M365 enrolment limiter — the two session-less endpoints that validate a
 // single-use enrolment token.
 //

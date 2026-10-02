@@ -1,10 +1,9 @@
-import { useState, useEffect, type FormEvent } from 'react';
+import { useState, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { Check, ChevronRight, KeyRound } from 'lucide-react';
+import { Check, ChevronRight } from 'lucide-react';
 import apiClient from '@/api/client';
 import { twoFactorApi, type TotpSetupData } from '@/api/twoFactor.api';
-import { profileApi } from '@/api/profile.api';
 import { useAuthStore } from '@/store/authStore';
 import { SUPPORTED_LANGUAGES, setLanguage } from '@/i18n';
 import { Button } from '@/components/common/Button';
@@ -13,8 +12,10 @@ import { ThemePicker } from '@/components/common/ThemePicker';
 import { Logo } from '@/components/common/Logo';
 import { loadSavedTheme, type AppTheme } from '@/utils/theme';
 
-type Step = 'language' | 'profile' | 'alerts' | 'appearance' | 'password' | 'security';
-const ALL_STEPS: Step[] = ['language', 'profile', 'alerts', 'appearance', 'password', 'security'];
+// No password step: an account always has its password (local) or signs in
+// through Obligate; a password change goes through the profile.
+type Step = 'language' | 'profile' | 'alerts' | 'appearance' | 'security';
+const ALL_STEPS: Step[] = ['language', 'profile', 'alerts', 'appearance', 'security'];
 
 interface EnrollData {
   preferredLanguage: string;
@@ -41,7 +42,6 @@ function Stepper({ currentStep, steps }: { currentStep: Step; steps: Step[] }) {
     profile:    t('enrollment.stepProfile'),
     alerts:     t('enrollment.stepAlerts'),
     appearance: 'Apparence',
-    password:   t('enrollment.stepPassword'),
     security:   t('enrollment.stepSecurity'),
   };
   const currentIdx = steps.indexOf(currentStep);
@@ -111,10 +111,12 @@ function LanguageStep({ selected, onSelect }: { selected: string; onSelect: (cod
 
 // ── Step 2: Profile ──────────────────────────────────────────────────────────
 function ProfileStep({
-  displayName, email, emailError,
+  displayName, email, emailError, emailLocked,
   onDisplayName, onEmail,
 }: {
   displayName: string; email: string; emailError: string;
+  /** An address already on file is changed from the profile (current password). */
+  emailLocked: boolean;
   onDisplayName: (v: string) => void; onEmail: (v: string) => void;
 }) {
   const { t } = useTranslation();
@@ -139,6 +141,7 @@ function ProfileStep({
             onChange={(e) => onEmail(e.target.value)}
             placeholder={t('enrollment.profile.emailPlaceholder')}
             required
+            disabled={emailLocked}
           />
           {emailError ? (
             <p className="mt-1 text-xs text-status-down">{emailError}</p>
@@ -248,52 +251,6 @@ function AlertsStep({
   );
 }
 
-// ── Step 5: Password ─────────────────────────────────────────────────────────
-function PasswordStep({
-  hasPassword, password, confirmPassword, error,
-  onPassword, onConfirm,
-}: {
-  hasPassword: boolean;
-  password: string;
-  confirmPassword: string;
-  error: string;
-  onPassword: (v: string) => void;
-  onConfirm: (v: string) => void;
-}) {
-  const { t } = useTranslation();
-  return (
-    <div>
-      <div className="flex items-center gap-2 mb-1">
-        <KeyRound size={20} className="text-accent" />
-        <h2 className="text-xl font-semibold text-text-primary">{t('enrollment.password.title')}</h2>
-      </div>
-      <p className="text-sm text-text-muted mb-5">
-        {hasPassword
-          ? t('enrollment.password.subtitleOptional')
-          : t('enrollment.password.subtitleRequired')}
-      </p>
-      <div className="space-y-4">
-        <Input
-          label={hasPassword ? t('enrollment.password.newLabel') : t('enrollment.password.label')}
-          type="password"
-          value={password}
-          onChange={(e) => onPassword(e.target.value)}
-          placeholder={hasPassword ? t('enrollment.password.optionalPlaceholder') : t('enrollment.password.placeholder')}
-          autoFocus
-        />
-        <Input
-          label={t('enrollment.password.confirmLabel')}
-          type="password"
-          value={confirmPassword}
-          onChange={(e) => onConfirm(e.target.value)}
-          placeholder={t('enrollment.password.confirmPlaceholder')}
-        />
-        {error && <p className="text-xs text-status-down">{error}</p>}
-      </div>
-    </div>
-  );
-}
-
 // ── Step 4: Security (TOTP) ──────────────────────────────────────────────────
 function SecurityStep({
   totpAlreadyEnabled, totpSetup, totpCode, totpLoading,
@@ -379,7 +336,9 @@ export function EnrollmentPage() {
   const { checkSession, user } = useAuthStore();
 
   const isObligateUser = user?.foreignSource === 'obligate';
-  const STEPS = isObligateUser ? ALL_STEPS.filter(s => s !== 'password' && s !== 'security' && s !== 'profile' && s !== 'alerts') : ALL_STEPS;
+  const STEPS = isObligateUser ? ALL_STEPS.filter(s => s !== 'security' && s !== 'profile' && s !== 'alerts') : ALL_STEPS;
+  // The server keeps an address already on file (PUT /profile changes it).
+  const emailLocked = !!user?.email;
 
   const [step, setStep] = useState<Step>('language');
   const [data, setData] = useState<EnrollData>({
@@ -390,17 +349,6 @@ export function EnrollmentPage() {
     toastPosition: 'bottom-right',
     preferredTheme: loadSavedTheme(),
   });
-
-  const [hasPassword, setHasPassword] = useState(true); // optimistic: assume true until fetched
-  const [password, setPassword] = useState('');
-  const [confirmPassword, setConfirmPassword] = useState('');
-  const [passwordError, setPasswordError] = useState('');
-
-  useEffect(() => {
-    profileApi.get()
-      .then((p) => setHasPassword(!!(p as unknown as { hasPassword: boolean }).hasPassword))
-      .catch(() => {}); // keep true on error (safest fallback)
-  }, []);
 
   const [emailError, setEmailError] = useState('');
   const [totpAlreadyEnabled, setTotpAlreadyEnabled] = useState(false);
@@ -465,25 +413,6 @@ export function EnrollmentPage() {
     if (step === 'alerts') { setStep('appearance'); return; }
     if (step === 'appearance') {
       if (isObligateUser) { await completeEnrollment(); return; }
-      setStep('password'); return;
-    }
-
-    if (step === 'password') {
-      if (password) {
-        if (password.length < 8) { setPasswordError(t('enrollment.password.tooShort')); return; }
-        if (password !== confirmPassword) { setPasswordError(t('enrollment.password.mismatch')); return; }
-        setPasswordError('');
-        try {
-          await profileApi.setLocalPassword(password);
-          setHasPassword(true);
-        } catch {
-          setPasswordError(t('enrollment.password.failed'));
-          return;
-        }
-      } else if (!hasPassword) {
-        setPasswordError(t('enrollment.password.required'));
-        return;
-      }
       await handleAdvanceToSecurity();
       return;
     }
@@ -503,7 +432,7 @@ export function EnrollmentPage() {
 
       await apiClient.post('/auth/enrollment', {
         displayName: data.displayName || null,
-        email: data.email,
+        email: data.email || null,
         preferredLanguage: data.preferredLanguage,
         toastEnabled: data.toastEnabled,
         toastPosition: data.toastPosition,
@@ -513,9 +442,13 @@ export function EnrollmentPage() {
       await checkSession();
       navigate('/', { replace: true });
     } catch (err: unknown) {
-      const axiosErr = err as { response?: { data?: { error?: string } } };
+      const axiosErr = err as { response?: { status?: number; data?: { error?: string } } };
       const msg = axiosErr?.response?.data?.error ?? '';
-      if (msg.toLowerCase().includes('email')) {
+      if (axiosErr?.response?.status === 409 && !msg.toLowerCase().includes('email')) {
+        // Already enrolled (e.g. a second tab): just leave the wizard.
+        await checkSession();
+        navigate('/', { replace: true });
+      } else if (msg.toLowerCase().includes('email')) {
         setEmailError(t('enrollment.profile.emailInUse'));
         setStep('profile');
       } else {
@@ -560,6 +493,7 @@ export function EnrollmentPage() {
               displayName={data.displayName}
               email={data.email}
               emailError={emailError}
+              emailLocked={emailLocked}
               onDisplayName={(v) => setData((d) => ({ ...d, displayName: v }))}
               onEmail={(v) => setData((d) => ({ ...d, email: v }))}
             />
@@ -581,14 +515,6 @@ export function EnrollmentPage() {
                 onChange={(theme) => setData((d) => ({ ...d, preferredTheme: theme }))}
               />
             </div>
-          )}
-          {step === 'password' && (
-            <PasswordStep
-              hasPassword={hasPassword}
-              password={password} confirmPassword={confirmPassword} error={passwordError}
-              onPassword={(v) => { setPassword(v); setPasswordError(''); }}
-              onConfirm={(v) => { setConfirmPassword(v); setPasswordError(''); }}
-            />
           )}
           {step === 'security' && (
             <SecurityStep

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import {
   DndContext,
@@ -18,7 +18,6 @@ import {
   LogOut,
   Cpu,
   Server,
-  PackageOpen,
   ChevronDown,
   ChevronRight,
   ChevronsLeft,
@@ -32,6 +31,7 @@ import {
   Gauge,
   Building2,
   Plus,
+  Activity,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { cn } from '@/utils/cn';
@@ -39,10 +39,10 @@ import { useAuthStore } from '@/store/authStore';
 import { useGroupStore } from '@/store/groupStore';
 import { useUiStore } from '@/store/uiStore';
 import { useTenantStore } from '@/store/tenantStore';
+import { useAgentStore, useAgentDevices } from '@/store/agentStore';
 import { agentApi } from '@/api/agent.api';
-import { getSocket } from '@/socket/socketClient';
-import type { AgentDevice, MonitorStatus, GroupTreeNode, Capability } from '@obliview/shared';
-import { SOCKET_EVENTS, CAPABILITIES } from '@obliview/shared';
+import type { AgentDevice, AgentLiveStatus, GroupTreeNode, Capability } from '@obliview/shared';
+import { CAPABILITIES } from '@obliview/shared';
 import { groupsApi } from '@/api/groups.api';
 import { anonHostname, anonUsername } from '@/utils/anonymize';
 import { UserAvatar } from '@/components/common/UserAvatar';
@@ -71,17 +71,13 @@ function usePersisted<T>(key: string, initial: T): [T, (v: T | ((prev: T) => T))
 
 // ── Status badge (dot + label) ────────────────────────────────────────────────
 
-function AgentStatusBadge({ status }: { status: MonitorStatus | 'suspended' | undefined }) {
+function AgentStatusBadge({ status }: { status: AgentLiveStatus | 'suspended' | undefined }) {
   const cfg: Record<string, { dot: string; text: string; label: string }> = {
     up:          { dot: 'bg-green-500',               text: 'text-green-400',  label: 'UP'       },
     down:        { dot: 'bg-red-500',                 text: 'text-red-400',    label: 'DOWN'     },
     alert:       { dot: 'bg-orange-500',              text: 'text-orange-400', label: 'ALERT'    },
     inactive:    { dot: 'bg-gray-400',                text: 'text-gray-400',   label: 'OFFLINE'  },
     suspended:   { dot: 'bg-gray-500',                text: 'text-gray-500',   label: 'PAUSED'   },
-    paused:      { dot: 'bg-gray-500',                text: 'text-gray-500',   label: 'PAUSED'   },
-    pending:     { dot: 'bg-yellow-500',              text: 'text-yellow-400', label: 'PENDING'  },
-    ssl_warning: { dot: 'bg-yellow-400',              text: 'text-yellow-400', label: 'WARN'     },
-    ssl_expired: { dot: 'bg-red-500',                 text: 'text-red-400',    label: 'EXPIRED'  },
     updating:    { dot: 'bg-blue-500 animate-pulse',  text: 'text-blue-400',   label: 'UPDATE'   },
   };
   const s = cfg[status ?? ''] ?? { dot: 'bg-gray-400', text: 'text-gray-400', label: '···' };
@@ -97,11 +93,11 @@ function AgentStatusBadge({ status }: { status: MonitorStatus | 'suspended' | un
 
 function DraggableDeviceItem({
   device,
-  monitorStatus,
+  agentStatus,
   depth = 0,
 }: {
   device: AgentDevice;
-  monitorStatus: MonitorStatus | undefined;
+  agentStatus: AgentLiveStatus | undefined;
   depth?: number;
 }) {
   const location = useLocation();
@@ -112,7 +108,7 @@ function DraggableDeviceItem({
   });
 
   const displayName = device.name ?? device.hostname;
-  const effectiveStatus = device.status === 'suspended' ? 'suspended' : monitorStatus;
+  const effectiveStatus = device.status === 'suspended' ? 'suspended' : agentStatus;
 
   return (
     <div
@@ -147,12 +143,12 @@ function AgentGroupSection({
   group,
   devices,
   depth,
-  getMonitorStatus,
+  getAgentLiveStatus,
 }: {
   group: GroupTreeNode;
   devices: AgentDevice[];
   depth: number;
-  getMonitorStatus: (id: number) => MonitorStatus | undefined;
+  getAgentLiveStatus: (id: number) => AgentLiveStatus | undefined;
 }) {
   const location = useLocation();
   const [expanded, setExpanded] = usePersisted<boolean>(`sidebar:group-${group.id}-open`, true);
@@ -229,14 +225,14 @@ function AgentGroupSection({
               group={child}
               devices={devices}
               depth={depth + 1}
-              getMonitorStatus={getMonitorStatus}
+              getAgentLiveStatus={getAgentLiveStatus}
             />
           ))}
           {groupDevices.map(device => (
             <DraggableDeviceItem
               key={device.id}
               device={device}
-              monitorStatus={getMonitorStatus(device.id)}
+              agentStatus={getAgentLiveStatus(device.id)}
               depth={depth + 1}
             />
           ))}
@@ -294,6 +290,7 @@ export function Sidebar() {
     { label: t('nav.dashboard'),        path: '/',                       icon: <LayoutDashboard size={18} /> },
     { label: t('nav.netmap'),           path: '/netmap',                  icon: <Network size={18} /> },
     { label: t('nav.ipReputation'),     path: '/ip-reputation',           icon: <Shield size={18} /> },
+    { label: t('nav.liveEvents', { defaultValue: 'Live events' }), path: '/live-events', icon: <Activity size={18} /> },
     { label: t('nav.agents'),           path: '/manage/agents',            icon: <Cpu size={18} />,          capability: CAPABILITIES.MONITOR_RW },
     { label: t('nav.groups'),           path: '/groups',                  icon: <FolderTree size={18} />,   capability: CAPABILITIES.GROUP_RW },
     { label: t('nav.notifications'),    path: '/notifications',           icon: <Bell size={18} />,         adminOnly: true },
@@ -301,7 +298,6 @@ export function Sidebar() {
     { label: t('nav.networkLimiting'),  path: '/manage/network-limiting',  icon: <Gauge size={18} />,        adminOnly: true },
     { label: t('nav.workspaces'),        path: '/manage/tenants',           icon: <Building2 size={18} />,    adminOnly: true },
     { label: t('nav.users'),            path: '/manage/users',             icon: <Users size={18} />,        adminOnly: true },
-    { label: t('nav.importExport'),     path: '/manage/import-export',     icon: <PackageOpen size={18} />,  adminOnly: true },
     { label: t('nav.settings'),         path: '/settings',                icon: <Settings size={18} />,     adminOnly: true },
   ];
 
@@ -327,8 +323,19 @@ export function Sidebar() {
     return m;
   }, [tree]);
 
-  const [approvedDevices, setApprovedDevices] = useState<AgentDevice[]>([]);
-  const [deviceStatuses, setDeviceStatuses] = useState<Map<number, string>>(new Map());
+  // Shared agent store (fetched + polled by AppLayout, live via useSocket):
+  // the tree shows approved and suspended agents.
+  const allDevices = useAgentDevices();
+  const liveStatus = useAgentStore(s => s.liveStatus);
+  const approvedDevices = useMemo(
+    () => allDevices.filter(d => d.status === 'approved' || d.status === 'suspended'),
+    [allDevices],
+  );
+  const wsConnectedById = useMemo(
+    () => new Map(approvedDevices.map(d => [d.id, d.wsConnected])),
+    [approvedDevices],
+  );
+  const loadDevices = useCallback(() => { void useAgentStore.getState().fetchDevices(); }, []);
 
   const [search, setSearch] = useState('');
   const [adminMenuOpen, setAdminMenuOpen] = usePersisted<boolean>('sidebar:admin-open', true);
@@ -344,84 +351,17 @@ export function Sidebar() {
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
   );
 
-  const loadDevices = useCallback(() => {
-    Promise.all([
-      agentApi.listDevices('approved'),
-      agentApi.listDevices('suspended'),
-    ])
-      .then(([approved, suspended]) => {
-        const all = [...approved, ...suspended];
-        setApprovedDevices(all);
-        // Seed the status dot from the authoritative wsConnected the SERVER already
-        // computed (live hub state + grace period), so it's correct on first paint
-        // instead of staying a grey "···" until an AGENT_STATUS_CHANGED event happens
-        // to fire. The 30s poll re-syncs from this same source of truth, and socket
-        // events give live transitions in between. A transient 'updating' override
-        // (set by a socket event) is preserved across polls.
-        setDeviceStatuses(prev => {
-          const next = new Map<number, string>();
-          for (const d of all) {
-            next.set(d.id, prev.get(d.id) === 'updating' ? 'updating' : (d.wsConnected ? 'up' : 'down'));
-          }
-          return next;
-        });
-      })
-      .catch(() => {});
-  }, []);
-
-  useEffect(() => {
-    loadDevices();
-    const id = setInterval(loadDevices, 30000);
-    return () => clearInterval(id);
-  }, [loadDevices]);
-
-  useEffect(() => {
-    const socket = getSocket();
-    if (!socket) return;
-
-    const onDeviceUpdated = (data: {
-      deviceId: number;
-      name: string | null;
-      hostname: string;
-      status: AgentDevice['status'];
-      groupId: number | null;
-    }) => {
-      setApprovedDevices(prev => {
-        const isTracked = prev.some(d => d.id === data.deviceId);
-        if (!isTracked) {
-          loadDevices();
-          return prev;
-        }
-        if (data.status !== 'approved' && data.status !== 'suspended') {
-          return prev.filter(d => d.id !== data.deviceId);
-        }
-        return prev.map(d =>
-          d.id === data.deviceId
-            ? { ...d, name: data.name, hostname: data.hostname, status: data.status, groupId: data.groupId }
-            : d,
-        );
-      });
-    };
-
-    const onStatusChanged = (data: { deviceId: number; status: string }) => {
-      setDeviceStatuses(prev => new Map(prev).set(data.deviceId, data.status));
-    };
-
-    socket.on(SOCKET_EVENTS.AGENT_DEVICE_UPDATED, onDeviceUpdated);
-    socket.on(SOCKET_EVENTS.AGENT_STATUS_CHANGED, onStatusChanged);
-    return () => {
-      socket.off(SOCKET_EVENTS.AGENT_DEVICE_UPDATED, onDeviceUpdated);
-      socket.off(SOCKET_EVENTS.AGENT_STATUS_CHANGED, onStatusChanged);
-    };
-  }, [loadDevices]);
-
-  const getMonitorStatus = useCallback(
-    (deviceId: number): MonitorStatus | undefined => {
-      const live = deviceStatuses.get(deviceId);
-      if (live) return live as MonitorStatus;
-      return undefined;
+  // Live status from the last AGENT_STATUS_CHANGED, else the authoritative
+  // wsConnected computed by the server (live hub state + grace period).
+  const getAgentLiveStatus = useCallback(
+    (deviceId: number): AgentLiveStatus | undefined => {
+      const live = liveStatus[deviceId];
+      if (live) return live as AgentLiveStatus;
+      const ws = wsConnectedById.get(deviceId);
+      if (ws === undefined) return undefined;
+      return ws ? 'up' : 'down';
     },
-    [deviceStatuses],
+    [liveStatus, wsConnectedById],
   );
 
   const handleAgentDragEnd = useCallback(
@@ -474,11 +414,11 @@ export function Sidebar() {
     [loadDevices, fetchTree, canManageAgents, isForeign, groupTenant, t],
   );
 
+  // The search box filters the agent tree only; navigation stays complete.
   const filteredNavItems = navItems.filter(item => {
     if (item.adminOnly && !admin) return false;
     if (item.capability && !admin && !hasCapability(item.capability)) return false;
-    if (!search) return true;
-    return item.label.toLowerCase().includes(search.toLowerCase());
+    return true;
   });
 
   const filteredDevices = search
@@ -503,7 +443,7 @@ export function Sidebar() {
             group={group}
             devices={filteredDevices}
             depth={0}
-            getMonitorStatus={getMonitorStatus}
+            getAgentLiveStatus={getAgentLiveStatus}
           />
         ))}
 
@@ -516,7 +456,7 @@ export function Sidebar() {
               <DraggableDeviceItem
                 key={device.id}
                 device={device}
-                monitorStatus={getMonitorStatus(device.id)}
+                agentStatus={getAgentLiveStatus(device.id)}
                 depth={0}
               />
             ))}
@@ -653,7 +593,7 @@ export function Sidebar() {
       <div className="px-3 py-2.5">
         <input
           type="text"
-          placeholder={t('common.search')}
+          placeholder={t('nav.searchAgents', { defaultValue: 'Search agents…' })}
           value={search}
           onChange={e => setSearch(e.target.value)}
           className="w-full rounded-md bg-bg-tertiary px-3 py-2 text-[13px] text-text-primary placeholder:text-text-muted focus:outline-none focus:ring-1 focus:ring-accent"

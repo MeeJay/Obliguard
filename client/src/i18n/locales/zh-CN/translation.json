@@ -162,7 +162,6 @@
     "stepLanguage": "语言",
     "stepProfile": "个人资料",
     "stepAlerts": "警报",
-    "stepPassword": "密码",
     "stepSecurity": "安全",
     "completing": "完成中…",
     "complete": "完成设置",
@@ -193,21 +192,6 @@
       "topCenter": "顶部居中",
       "topCenterDesc": "仅显示最新警报，10 秒后自动消失。",
       "previewAlt": "警报位置预览"
-    },
-    "password": {
-      "title": "设置密码",
-      "subtitleRequired": "您的账户通过 SSO 创建，尚未设置密码。请设置一个密码以便直接登录。",
-      "subtitleOptional": "您已有密码。留空则保留当前密码。",
-      "label": "密码",
-      "newLabel": "新密码",
-      "confirmLabel": "确认密码",
-      "placeholder": "至少 8 个字符",
-      "optionalPlaceholder": "留空以保留当前密码",
-      "confirmPlaceholder": "重复您的密码",
-      "tooShort": "密码长度至少为 8 个字符。",
-      "mismatch": "两次密码不一致。",
-      "required": "您的账户需要设置密码。",
-      "failed": "密码设置失败，请重试。"
     },
     "security": {
       "title": "双因素身份验证",

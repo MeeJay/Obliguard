@@ -1,42 +1,24 @@
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, Link } from 'react-router-dom';
-import { ShieldOff, Cpu, Activity, Calendar, Server, Wifi, ChevronRight } from 'lucide-react';
+import { ShieldOff, Cpu, Activity, Calendar, Server, Wifi, ChevronRight, Crosshair, AlertTriangle } from 'lucide-react';
+import toast from 'react-hot-toast';
 import apiClient from '@/api/client';
-import { getSocket } from '@/socket/socketClient';
-import { SOCKET_EVENTS } from '@obliview/shared';
-import type { AgentDevice, AgentVersionDistribution, ApiResponse } from '@obliview/shared';
+import { bansApi } from '@/api/bans.api';
+import { dashboardApi } from '@/api/dashboard.api';
+import { useAgentDevices, useAgentDevicesLoaded } from '@/store/agentStore';
+import { SOCKET_RESYNC_EVENT } from '@/hooks/useSocket';
+import type {
+  AgentDevice, AgentVersionDistribution, ApiResponse, DashboardSummary, IpBan,
+} from '@obliview/shared';
 import { anonHostname, anonIp } from '@/utils/anonymize';
 
-// ── Types ─────────────────────────────────────────────────────────────────────
+/** Background refresh of the summary while the page is visible. */
+const SUMMARY_REFRESH_MS = 60_000;
 
-interface BanRecord {
-  id: number;
-  ip: string;
-  service?: string | null;
-  reason?: string | null;
-  agentName?: string | null;
-  bannedAt: string;
-}
-
-interface IpReputationRecord {
-  ip: string;
-  country?: string | null;
-  failureCount: number;
-  services?: string[];
-  status?: string | null;
-}
-
-interface DashboardStats {
-  activeBans: number;
-  blockedToday: number;
-  agentsOnline: number;
-  eventsToday: number;
-}
-
-interface AgentEventCount {
-  count: number;
-  failures: number;
+/** Server error message of an axios failure, else the fallback. */
+function apiError(err: unknown, fallback: string): string {
+  return (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? fallback;
 }
 
 // ── Skeleton ──────────────────────────────────────────────────────────────────
@@ -52,13 +34,15 @@ function Skeleton({ className }: { className?: string }) {
 function StatCard({
   label,
   value,
+  sub,
   icon,
   loading,
   colorClass = 'text-text-primary',
   status,
 }: {
   label: string;
-  value: number | null;
+  value: React.ReactNode;
+  sub?: React.ReactNode;
   icon: React.ReactNode;
   loading: boolean;
   colorClass?: string;
@@ -73,9 +57,12 @@ function StatCard({
       {loading ? (
         <Skeleton className="h-8 w-20 mt-1" />
       ) : (
-        <div className={`text-2xl font-bold ${colorClass}`}>
-          {value ?? '—'}
-        </div>
+        <>
+          <div className={`text-2xl font-bold ${colorClass}`}>
+            {value ?? '—'}
+          </div>
+          {sub && <div className="mt-1 text-xs text-text-muted">{sub}</div>}
+        </>
       )}
     </div>
   );
@@ -84,7 +71,7 @@ function StatCard({
 // ── Agent Card ────────────────────────────────────────────────────────────────
 
 function relativeTime(ts: string): string {
-  const diff = Math.floor((Date.now() - new Date(ts).getTime()) / 1000);
+  const diff = Math.max(0, Math.floor((Date.now() - new Date(ts).getTime()) / 1000));
   if (diff < 60) return `${diff}s ago`;
   if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
@@ -93,17 +80,20 @@ function relativeTime(ts: string): string {
 
 function AgentCard({
   device,
-  eventCount,
-  failureCount,
+  events24h,
+  bans24h,
   onClick,
 }: {
   device: AgentDevice;
-  eventCount: number;
-  failureCount: number;
+  events24h: number;
+  bans24h: number;
   onClick: () => void;
 }) {
+  const { t } = useTranslation();
   const displayName = anonHostname(device.name ?? device.hostname);
   const isOnline = device.wsConnected;
+  // Presence (heartbeats / events only): admin edits move updatedAt, not this.
+  const lastSeen = device.lastSeenAt ?? null;
 
   const osLabel = device.osInfo
     ? [device.osInfo.distro ?? device.osInfo.platform, device.osInfo.release]
@@ -152,27 +142,29 @@ function AgentCard({
         )}
       </div>
 
-      {/* Stats */}
+      {/* Stats (last 24 h) */}
       <div className="mt-3 pt-3 border-t border-border grid grid-cols-3 text-center">
         <div>
-          <div className="text-base font-bold text-accent">{eventCount}</div>
-          <div className="text-[10px] text-text-muted leading-tight">events</div>
+          <div className="text-base font-bold text-accent">{events24h}</div>
+          <div className="text-[10px] text-text-muted leading-tight">
+            {t('dashboard.events24h', { defaultValue: 'events 24h' })}
+          </div>
         </div>
         <div>
-          <div
-            className={`text-base font-bold ${
-              failureCount > 0 ? 'text-status-down' : 'text-text-muted'
-            }`}
-          >
-            {failureCount}
+          <div className={`text-base font-bold ${bans24h > 0 ? 'text-status-down' : 'text-text-muted'}`}>
+            {bans24h}
           </div>
-          <div className="text-[10px] text-text-muted leading-tight">failures</div>
+          <div className="text-[10px] text-text-muted leading-tight">
+            {t('dashboard.bans24h', { defaultValue: 'bans 24h' })}
+          </div>
         </div>
         <div>
           <div className="text-xs font-medium text-text-muted">
-            {relativeTime(device.updatedAt)}
+            {lastSeen ? relativeTime(lastSeen) : '—'}
           </div>
-          <div className="text-[10px] text-text-muted leading-tight">last seen</div>
+          <div className="text-[10px] text-text-muted leading-tight">
+            {t('dashboard.lastSeen', { defaultValue: 'last seen' })}
+          </div>
         </div>
       </div>
     </button>
@@ -185,144 +177,91 @@ export function DashboardPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
 
-  const [stats, setStats] = useState<DashboardStats | null>(null);
-  const [statsLoading, setStatsLoading] = useState(true);
+  const [summary, setSummary] = useState<DashboardSummary | null>(null);
+  const [summaryLoading, setSummaryLoading] = useState(true);
 
-  const [recentBans, setRecentBans] = useState<BanRecord[]>([]);
+  const [recentBans, setRecentBans] = useState<IpBan[]>([]);
   const [bansLoading, setBansLoading] = useState(true);
+  const [liftingId, setLiftingId] = useState<number | null>(null);
 
-  const [topIps, setTopIps] = useState<IpReputationRecord[]>([]);
-  const [ipsLoading, setIpsLoading] = useState(true);
-
-  const [agentDevices, setAgentDevices] = useState<AgentDevice[]>([]);
-  const [agentEventCounts, setAgentEventCounts] = useState<Map<number, AgentEventCount>>(new Map());
-  const [agentsLoading, setAgentsLoading] = useState(true);
   // Agent version distribution (C17-1): outdated / update-requested chip.
   const [versionDist, setVersionDist] = useState<AgentVersionDistribution | null>(null);
 
-  // Fetch stats
-  useEffect(() => {
-    async function fetchStats() {
-      try {
-        const [bansRes, agentsRes, eventsRes] = await Promise.allSettled([
-          apiClient.get<ApiResponse<{ active: number; today: number }>>('/bans/stats'),
-          apiClient.get<ApiResponse<{ online: number }>>('/agent/devices/stats'),
-          apiClient.get<ApiResponse<{ today: number }>>('/ip-events/stats'),
-        ]);
+  // Agents come from the shared store (polled by AppLayout, live via sockets).
+  const allDevices = useAgentDevices();
+  const agentsLoaded = useAgentDevicesLoaded();
+  const agentDevices = allDevices.filter(d => d.status === 'approved' || d.status === 'pending');
 
-        const activeBans =
-          bansRes.status === 'fulfilled' ? (bansRes.value.data.data?.active ?? 0) : 0;
-        const blockedToday =
-          bansRes.status === 'fulfilled' ? (bansRes.value.data.data?.today ?? 0) : 0;
-        const agentsOnline =
-          agentsRes.status === 'fulfilled' ? (agentsRes.value.data.data?.online ?? 0) : 0;
-        const eventsToday =
-          eventsRes.status === 'fulfilled' ? (eventsRes.value.data.data?.today ?? 0) : 0;
-
-        setStats({ activeBans, blockedToday, agentsOnline, eventsToday });
-      } catch {
-        setStats({ activeBans: 0, blockedToday: 0, agentsOnline: 0, eventsToday: 0 });
-      } finally {
-        setStatsLoading(false);
-      }
-    }
-    fetchStats();
-  }, []);
-
-  // Fetch recent bans
-  useEffect(() => {
-    apiClient
-      .get<ApiResponse<BanRecord[]>>('/bans', { params: { active: 'true', pageSize: 10 } })
-      .then(res => setRecentBans(res.data.data ?? []))
-      .catch(() => setRecentBans([]))
-      .finally(() => setBansLoading(false));
-  }, []);
-
-  // Fetch top IPs by failure count
-  useEffect(() => {
-    apiClient
-      .get<ApiResponse<IpReputationRecord[]>>('/ip-reputation', { params: { limit: 5 } })
-      .then(res => setTopIps(res.data.data ?? []))
-      .catch(() => setTopIps([]))
-      .finally(() => setIpsLoading(false));
-  }, []);
-
-  // Fetch agents + today's event counts
-  useEffect(() => {
-    async function fetchAgents() {
-      try {
-        const todayStart = new Date();
-        todayStart.setHours(0, 0, 0, 0);
-
-        const [devicesRes, eventsRes, versionsRes] = await Promise.allSettled([
-          apiClient.get<ApiResponse<AgentDevice[]>>('/agent/devices'),
-          apiClient.get('/ip-events', {
-            params: { from: todayStart.toISOString(), pageSize: 1000 },
-          }),
-          apiClient.get<ApiResponse<AgentVersionDistribution>>('/agent/devices/versions'),
-        ]);
-        setVersionDist(versionsRes.status === 'fulfilled' ? (versionsRes.value.data.data ?? null) : null);
-
-        const devices =
-          devicesRes.status === 'fulfilled' ? (devicesRes.value.data.data ?? []) : [];
-        setAgentDevices(devices.filter(d => d.status === 'approved' || d.status === 'pending'));
-
-        const countsMap = new Map<number, AgentEventCount>();
-        if (eventsRes.status === 'fulfilled') {
-          for (const ev of (eventsRes.value.data.data ?? [])) {
-            const did = ev.device_id ?? ev.deviceId;
-            if (!did) continue;
-            const cur = countsMap.get(did);
-            if (cur) {
-              cur.count++;
-              if (ev.event_type === 'auth_failure' || ev.eventType === 'auth_failure') {
-                cur.failures++;
-              }
-            } else {
-              countsMap.set(did, {
-                count: 1,
-                failures:
-                  ev.event_type === 'auth_failure' || ev.eventType === 'auth_failure' ? 1 : 0,
-              });
-            }
-          }
-        }
-        setAgentEventCounts(countsMap);
-      } finally {
-        setAgentsLoading(false);
-      }
-    }
-    fetchAgents();
-  }, []);
-
-  // Live-update wsConnected when agents connect/disconnect
-  useEffect(() => {
-    const socket = getSocket();
-    if (!socket) return;
-    function handleStatus(data: { deviceId: number; wsConnected?: boolean }) {
-      if (data.wsConnected === undefined) return;
-      setAgentDevices(prev =>
-        prev.map(d => d.id === data.deviceId ? { ...d, wsConnected: data.wsConnected! } : d),
-      );
-    }
-    socket.on(SOCKET_EVENTS.AGENT_STATUS_CHANGED, handleStatus);
-    return () => { socket.off(SOCKET_EVENTS.AGENT_STATUS_CHANGED, handleStatus); };
-  }, []);
-
-  const handleLiftBan = async (banId: number) => {
+  const loadSummary = useCallback(async () => {
     try {
-      await apiClient.delete(`/bans/${banId}`);
-      setRecentBans(prev => prev.filter(b => b.id !== banId));
-      setStats(prev => prev ? { ...prev, activeBans: Math.max(0, prev.activeBans - 1) } : prev);
+      setSummary(await dashboardApi.summary());
     } catch {
-      // silently ignore — page will show stale data
+      // Keep the previous numbers; the cards show '—' on first failure.
+    } finally {
+      setSummaryLoading(false);
+    }
+  }, []);
+
+  const loadBans = useCallback(async () => {
+    try {
+      const res = await bansApi.list({ active: true, pageSize: 10 });
+      setRecentBans(res.data ?? []);
+    } catch {
+      setRecentBans([]);
+    } finally {
+      setBansLoading(false);
+    }
+  }, []);
+
+  const loadVersions = useCallback(() => {
+    apiClient
+      .get<ApiResponse<AgentVersionDistribution>>('/agent/devices/versions')
+      .then(res => setVersionDist(res.data.data ?? null))
+      .catch(() => setVersionDist(null));
+  }, []);
+
+  useEffect(() => {
+    void loadSummary();
+    void loadBans();
+    loadVersions();
+  }, [loadSummary, loadBans, loadVersions]);
+
+  // Refresh: every minute while visible, on return to the tab, and after a
+  // socket reconnect (events emitted while it was down are lost).
+  useEffect(() => {
+    const refresh = () => {
+      if (document.visibilityState === 'hidden') return;
+      void loadSummary();
+      void loadBans();
+      loadVersions();
+    };
+    const id = setInterval(refresh, SUMMARY_REFRESH_MS);
+    const onVisible = () => { if (document.visibilityState === 'visible') refresh(); };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener(SOCKET_RESYNC_EVENT, refresh);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener(SOCKET_RESYNC_EVENT, refresh);
+    };
+  }, [loadSummary, loadBans, loadVersions]);
+
+  const handleLiftBan = async (ban: IpBan) => {
+    if (!window.confirm(t('dashboard.liftConfirm', { ip: ban.ip, defaultValue: 'Lift the ban on {{ip}}?' }))) return;
+    setLiftingId(ban.id);
+    try {
+      await bansApi.lift(ban.id);
+      setRecentBans(prev => prev.filter(b => b.id !== ban.id));
+      toast.success(t('dashboard.lifted', { ip: ban.ip, defaultValue: 'Ban on {{ip}} lifted' }));
+      void loadSummary();
+    } catch (err) {
+      toast.error(apiError(err, t('dashboard.liftFailed', { defaultValue: 'Failed to lift the ban' })));
+    } finally {
+      setLiftingId(null);
     }
   };
 
-  // Count how many agents are online
-  const onlineCount = useMemo(() => {
-    return agentDevices.filter(d => d.wsConnected).length;
-  }, [agentDevices]);
+  const perAgent = new Map((summary?.perAgent ?? []).map(a => [a.deviceId, a]));
 
   return (
     <div className="p-6">
@@ -337,41 +276,74 @@ export function DashboardPage() {
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
         <StatCard
           label={t('dashboard.activeBans', { defaultValue: 'Active Bans' })}
-          value={stats?.activeBans ?? null}
+          value={summary?.activeBans ?? null}
+          sub={summary && t('dashboard.bansTodaySplit', {
+            defaultValue: '+{{auto}} auto · +{{manual}} manual today',
+            auto: summary.bansToday.auto,
+            manual: summary.bansToday.manual,
+          })}
           icon={<ShieldOff size={16} />}
-          loading={statsLoading}
+          loading={summaryLoading}
           colorClass="text-status-down"
           status="down"
         />
         <StatCard
-          label={t('dashboard.blockedToday', { defaultValue: 'IPs Blocked Today' })}
-          value={stats?.blockedToday ?? null}
-          icon={<ShieldOff size={16} />}
-          loading={statsLoading}
+          label={t('dashboard.attacks24h', { defaultValue: 'Attacks (24h)' })}
+          value={summary?.failures24h ?? null}
+          sub={summary && t('dashboard.failuresTodaySub', {
+            defaultValue: '{{failures}} failures / {{events}} events today',
+            failures: summary.failuresToday,
+            events: summary.eventsToday,
+          })}
+          icon={<Activity size={16} />}
+          loading={summaryLoading}
           colorClass="text-orange-400"
           status="alert"
         />
         <StatCard
-          label={t('dashboard.agentsOnline', { defaultValue: 'Agents Online' })}
-          value={stats?.agentsOnline ?? null}
+          label={t('dashboard.agentsConnected', { defaultValue: 'Agents Connected' })}
+          value={summary ? `${summary.agentsConnected}/${summary.agentsTotal}` : null}
+          sub={summary && (summary.agentsEvaluateOnly > 0 || summary.agentsOutdated > 0)
+            ? [
+                summary.agentsEvaluateOnly > 0
+                  ? t('dashboard.agentsEvaluateOnly', { defaultValue: '{{count}} evaluate-only', count: summary.agentsEvaluateOnly })
+                  : null,
+                summary.agentsOutdated > 0
+                  ? t('dashboard.agentsOutdated', { defaultValue: '{{count}} outdated', count: summary.agentsOutdated })
+                  : null,
+              ].filter(Boolean).join(' · ')
+            : undefined}
           icon={<Cpu size={16} />}
-          loading={statsLoading}
+          loading={summaryLoading}
           colorClass="text-status-up"
           status="up"
         />
         <StatCard
-          label={t('dashboard.eventsToday', { defaultValue: 'Events Today' })}
-          value={stats?.eventsToday ?? null}
-          icon={<Activity size={16} />}
-          loading={statsLoading}
+          label={t('dashboard.hostileIps24h', { defaultValue: 'Hostile IPs (24h)' })}
+          value={summary?.uniqueIps24h ?? null}
+          sub={summary && t('dashboard.hostileIpsTodaySub', {
+            defaultValue: '{{count}} today',
+            count: summary.uniqueIpsToday,
+          })}
+          icon={<Crosshair size={16} />}
+          loading={summaryLoading}
           colorClass="text-purple-400"
           status="events"
         />
       </div>
 
-      {/* Agent updates (C17-1) */}
-      {versionDist && (versionDist.outdated > 0 || versionDist.updatePending > 0) && (
+      {/* Agent updates (C17-1): failed attempts, outdated agents, pending requests */}
+      {versionDist && (versionDist.outdated > 0 || versionDist.updatePending > 0 || (versionDist.updateFailed ?? 0) > 0) && (
         <Link to="/manage/agents" className="mb-6 flex flex-wrap items-center gap-2 text-xs w-fit">
+          {(versionDist.updateFailed ?? 0) > 0 && (
+            <span
+              className="inline-flex items-center gap-1 rounded-full px-2.5 py-1 font-medium bg-red-500/10 text-red-400 border border-red-500/20"
+              data-testid="dashboard-updates-failed"
+            >
+              <AlertTriangle size={11} />
+              {t('agents.update.failedCount', { defaultValue: '{{count}} update(s) failed', count: versionDist.updateFailed })}
+            </span>
+          )}
           {versionDist.outdated > 0 && (
             <span className="rounded-full px-2.5 py-1 font-medium bg-amber-500/10 text-amber-400 border border-amber-500/20">
               {t('agentUpdate.dashboardOutdated', {
@@ -392,10 +364,13 @@ export function DashboardPage() {
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
         {/* Recent Bans */}
         <div className="rounded-lg border border-border bg-bg-secondary">
-          <div className="px-4 py-3 border-b border-border">
+          <div className="px-4 py-3 border-b border-border flex items-center justify-between">
             <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide">
               {t('dashboard.recentBans', { defaultValue: 'Recent Bans' })}
             </h2>
+            <Link to="/ip-reputation?status=banned" className="text-xs text-accent hover:underline">
+              {t('dashboard.viewAll', { defaultValue: 'View all' })}
+            </Link>
           </div>
           <div className="overflow-x-auto">
             {bansLoading ? (
@@ -414,13 +389,13 @@ export function DashboardPage() {
                   <tr className="text-xs uppercase text-text-muted border-b border-border">
                     <th className="text-left px-4 py-2 font-medium">IP</th>
                     <th className="text-left px-4 py-2 font-medium">
-                      {t('dashboard.colService', { defaultValue: 'Service' })}
+                      {t('dashboard.colScope', { defaultValue: 'Scope' })}
+                    </th>
+                    <th className="text-left px-4 py-2 font-medium">
+                      {t('dashboard.colType', { defaultValue: 'Type' })}
                     </th>
                     <th className="text-left px-4 py-2 font-medium">
                       {t('dashboard.colReason', { defaultValue: 'Reason' })}
-                    </th>
-                    <th className="text-left px-4 py-2 font-medium">
-                      {t('dashboard.colAgent', { defaultValue: 'Agent' })}
                     </th>
                     <th className="text-left px-4 py-2 font-medium">
                       {t('dashboard.colBannedAt', { defaultValue: 'Banned At' })}
@@ -431,15 +406,19 @@ export function DashboardPage() {
                 <tbody className="divide-y divide-border">
                   {recentBans.map(ban => (
                     <tr key={ban.id} className="hover:bg-bg-hover transition-colors">
-                      <td className="px-4 py-2.5 font-mono text-xs text-text-primary">{anonIp(ban.ip)}</td>
-                      <td className="px-4 py-2.5 text-text-secondary truncate max-w-[100px]">
-                        {ban.service ?? <span className="text-text-muted">—</span>}
+                      <td className="px-4 py-2.5 font-mono text-xs text-text-primary">
+                        <Link to={`/ip-reputation?search=${encodeURIComponent(ban.ip)}`} className="hover:underline">
+                          {anonIp(ban.ip)}{ban.cidrPrefix != null ? `/${ban.cidrPrefix}` : ''}
+                        </Link>
                       </td>
-                      <td className="px-4 py-2.5 text-text-secondary truncate max-w-[120px]">
+                      <td className="px-4 py-2.5 text-text-secondary text-xs whitespace-nowrap">
+                        {ban.scope}
+                      </td>
+                      <td className="px-4 py-2.5 text-text-secondary text-xs whitespace-nowrap">
+                        {ban.banType}
+                      </td>
+                      <td className="px-4 py-2.5 text-text-secondary truncate max-w-[160px]" title={ban.reason ?? undefined}>
                         {ban.reason ?? <span className="text-text-muted">—</span>}
-                      </td>
-                      <td className="px-4 py-2.5 text-text-secondary truncate max-w-[100px]">
-                        {ban.agentName ? anonHostname(ban.agentName) : <span className="text-text-muted">—</span>}
                       </td>
                       <td className="px-4 py-2.5 text-text-muted text-xs whitespace-nowrap">
                         <span className="inline-flex items-center gap-1">
@@ -454,8 +433,9 @@ export function DashboardPage() {
                       </td>
                       <td className="px-4 py-2.5 text-right">
                         <button
-                          onClick={() => handleLiftBan(ban.id)}
-                          className="text-xs text-red-400 hover:text-red-300 transition-colors"
+                          onClick={() => { void handleLiftBan(ban); }}
+                          disabled={liftingId === ban.id}
+                          className="text-xs text-red-400 hover:text-red-300 transition-colors disabled:opacity-50"
                         >
                           {t('dashboard.lift', { defaultValue: 'Lift' })}
                         </button>
@@ -476,13 +456,13 @@ export function DashboardPage() {
             </h2>
           </div>
           <div className="overflow-x-auto">
-            {ipsLoading ? (
+            {summaryLoading ? (
               <div className="p-4 space-y-2">
                 {Array.from({ length: 5 }).map((_, i) => (
                   <Skeleton key={i} className="h-8 w-full" />
                 ))}
               </div>
-            ) : topIps.length === 0 ? (
+            ) : !summary || summary.topIps.length === 0 ? (
               <div className="px-4 py-8 text-center text-sm text-text-muted">
                 {t('dashboard.noIpData', { defaultValue: 'No IP reputation data' })}
               </div>
@@ -498,42 +478,26 @@ export function DashboardPage() {
                       {t('dashboard.colFailures', { defaultValue: 'Failures' })}
                     </th>
                     <th className="text-left px-4 py-2 font-medium">
-                      {t('dashboard.colServices', { defaultValue: 'Services' })}
-                    </th>
-                    <th className="text-left px-4 py-2 font-medium">
-                      {t('dashboard.colStatus', { defaultValue: 'Status' })}
+                      {t('dashboard.colLastSeen', { defaultValue: 'Last Seen' })}
                     </th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border">
-                  {topIps.map((rec, i) => (
-                    <tr key={i} className="hover:bg-bg-hover transition-colors">
-                      <td className="px-4 py-2.5 font-mono text-xs text-text-primary">{rec.ip}</td>
+                  {summary.topIps.map(rec => (
+                    <tr key={rec.ip} className="hover:bg-bg-hover transition-colors">
+                      <td className="px-4 py-2.5 font-mono text-xs text-text-primary">
+                        <Link to={`/ip-reputation?search=${encodeURIComponent(rec.ip)}`} className="hover:underline">
+                          {anonIp(rec.ip)}
+                        </Link>
+                      </td>
                       <td className="px-4 py-2.5 text-text-secondary">
-                        {rec.country ?? <span className="text-text-muted">—</span>}
+                        {rec.geoCountryCode ?? <span className="text-text-muted">—</span>}
                       </td>
                       <td className="px-4 py-2.5">
-                        <span className="font-semibold text-orange-400">{rec.failureCount}</span>
+                        <span className="font-semibold text-orange-400">{rec.totalFailures}</span>
                       </td>
-                      <td className="px-4 py-2.5 text-text-secondary truncate max-w-[120px]">
-                        {rec.services && rec.services.length > 0
-                          ? rec.services.join(', ')
-                          : <span className="text-text-muted">—</span>}
-                      </td>
-                      <td className="px-4 py-2.5">
-                        {rec.status ? (
-                          <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${
-                            rec.status === 'banned'
-                              ? 'bg-red-500/10 text-red-400'
-                              : rec.status === 'whitelisted'
-                              ? 'bg-green-500/10 text-green-400'
-                              : 'bg-bg-tertiary text-text-muted'
-                          }`}>
-                            {rec.status.toUpperCase()}
-                          </span>
-                        ) : (
-                          <span className="text-text-muted text-xs">—</span>
-                        )}
+                      <td className="px-4 py-2.5 text-text-muted text-xs whitespace-nowrap">
+                        {rec.lastSeen ? relativeTime(rec.lastSeen) : '—'}
                       </td>
                     </tr>
                   ))}
@@ -550,14 +514,18 @@ export function DashboardPage() {
           <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide">
             {t('dashboard.agents', { defaultValue: 'Agents' })}
           </h2>
-          {!agentsLoading && agentDevices.length > 0 && (
+          {agentDevices.length > 0 && (
             <span className="text-xs text-text-muted">
-              {onlineCount}/{agentDevices.length} online
+              {t('dashboard.agentsOnlineCount', {
+                defaultValue: '{{online}}/{{total}} online',
+                online: agentDevices.filter(d => d.wsConnected).length,
+                total: agentDevices.length,
+              })}
             </span>
           )}
         </div>
 
-        {agentsLoading ? (
+        {!agentsLoaded ? (
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
             {Array.from({ length: 4 }).map((_, i) => (
               <Skeleton key={i} className="h-36 w-full" />
@@ -570,13 +538,13 @@ export function DashboardPage() {
         ) : (
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
             {agentDevices.map(device => {
-              const counts = agentEventCounts.get(device.id) ?? { count: 0, failures: 0 };
+              const counts = perAgent.get(device.id);
               return (
                 <AgentCard
                   key={device.id}
                   device={device}
-                  eventCount={counts.count}
-                  failureCount={counts.failures}
+                  events24h={counts?.events24h ?? 0}
+                  bans24h={counts?.bans24h ?? 0}
                   onClick={() => navigate(`/agents/${device.id}`)}
                 />
               );

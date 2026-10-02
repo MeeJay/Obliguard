@@ -350,8 +350,15 @@ router.get('/callback', async (req, res) => {
     await regenerateSession(req);
     invalidateUserState(localUserId); // is_active / role were just (re)written
     invalidateTenantAccess(localUserId); // memberships may have just been added
+    // The account may have been disabled meanwhile (sso-user-sync racing this
+    // sign-in): never open a session on it, and tell the login page why.
+    const user = await db('users').where({ id: localUserId }).first() as { username: string; role: string; is_active: boolean } | undefined;
+    if (!user?.is_active) {
+      logger.warn({ userId: localUserId, obligateUserId: assertion.obligateUserId }, 'Obligate callback: local account is disabled — no session');
+      res.redirect('/login?error=account_disabled');
+      return;
+    }
     req.session.userId = localUserId;
-    const user = await db('users').where({ id: localUserId }).first() as { username: string; role: string } | undefined;
     if (user) {
       req.session.username = user.username;
       // Platform role straight from the verified assertion (already written to

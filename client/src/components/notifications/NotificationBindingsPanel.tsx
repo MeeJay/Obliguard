@@ -9,7 +9,7 @@ interface ResolvedBinding {
   channelId: number;
   channelName: string;
   channelType: string;
-  source: 'global' | 'group' | 'monitor' | 'agent';
+  source: 'global' | 'group' | 'agent';
   sourceId: number | null;
   sourceName: string;
   isDirect: boolean;
@@ -17,7 +17,7 @@ interface ResolvedBinding {
 }
 
 interface NotificationBindingsPanelProps {
-  scope: 'group' | 'monitor' | 'agent';
+  scope: 'group' | 'agent';
   scopeId: number;
   title?: string;
 }

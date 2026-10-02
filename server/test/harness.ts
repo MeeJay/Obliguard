@@ -27,6 +27,7 @@ import { logger } from '../src/utils/logger';
 import { setAgentServiceIO } from '../src/services/agent.service';
 import { setLiveAlertIO } from '../src/services/liveAlert.service';
 import { setUserSessionsIO } from '../src/services/userSessions.service';
+import { setBanServiceIO } from '../src/services/ban.service';
 import { invalidateUserState } from '../src/middleware/sessionUserGuard';
 import { getProtectedAddresses } from '../src/utils/protectedIps';
 import { PASSWORD, VERIFY_HOST, VERIFY_ORIGIN, OBLIGATE_API_KEY, KEYS, D } from './fixtures';
@@ -36,7 +37,7 @@ import type { FakeObligate, RecordedRequest } from './fakeObligate';
 import { adapters } from './adapters';
 
 /** Exact mirror of the set*IO(io) calls of index.ts main() (00#4). */
-export const WIRED_IO_SETTERS = ['setAgentServiceIO', 'setLiveAlertIO', 'setUserSessionsIO'] as const;
+export const WIRED_IO_SETTERS = ['setAgentServiceIO', 'setLiveAlertIO', 'setUserSessionsIO', 'setBanServiceIO'] as const;
 
 // ── HTTP client ──────────────────────────────────────────────────────────────
 
@@ -333,6 +334,7 @@ export async function startHarness(opts: { obligate?: boolean } = {}): Promise<H
   setAgentServiceIO(io);
   setLiveAlertIO(io);
   setUserSessionsIO(io);
+  setBanServiceIO(io);
   adapters.agentWs?.attach(server);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   // Pre-warm the protected set (A2) so no timed check pays for its first build.

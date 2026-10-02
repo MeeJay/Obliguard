@@ -1,4 +1,5 @@
-import type { NotificationPlugin, NotificationPayload } from '../types';
+import type { NotificationPlugin } from '../types';
+import type { IpsNotificationPayload } from '../../services/notification.service';
 import { statusIcon } from '../statusIcons';
 
 export const gotifyPlugin: NotificationPlugin = {
@@ -11,17 +12,21 @@ export const gotifyPlugin: NotificationPlugin = {
     { key: 'priority', label: 'Priority (0-10)', type: 'number', placeholder: '5' },
   ],
 
-  async send(config, payload) {
+  // Gotify renders plain text (no markdown extras are sent).
+  async send(config, payload: IpsNotificationPayload) {
     const icon = statusIcon(payload.newStatus);
-    const prefix = payload.appName || 'Obliview';
+    const prefix = payload.appName || 'Obliguard';
     const url = `${String(config.serverUrl).replace(/\/$/, '')}/message`;
+    const message = payload.kind
+      ? (payload.message ?? payload.title ?? payload.monitorName)
+      : `${payload.oldStatus} → ${payload.newStatus}${payload.message ? `\n${payload.message}` : ''}`;
 
-    const res = await fetch(`${url}?token=${config.appToken}`, {
+    const res = await fetch(`${url}?token=${encodeURIComponent(String(config.appToken))}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        title: `[${prefix}] ${icon} ${payload.monitorName}`,
-        message: `${payload.oldStatus} → ${payload.newStatus}${payload.message ? `\n${payload.message}` : ''}`,
+        title: `[${prefix}] ${icon} ${payload.title ?? payload.monitorName}`,
+        message,
         priority: Number(config.priority) || 5,
       }),
       signal: AbortSignal.timeout(10000),
@@ -30,12 +35,15 @@ export const gotifyPlugin: NotificationPlugin = {
   },
 
   async sendTest(config) {
-    await this.send(config, {
-      monitorName: 'Test Monitor',
+    const payload: IpsNotificationPayload = {
+      monitorName: 'Obliguard',
       oldStatus: 'up',
-      newStatus: 'down',
-      message: 'Test from Obliview',
+      newStatus: 'up',
+      kind: 'test',
+      title: 'Test notification',
+      message: 'Test from Obliguard',
       timestamp: new Date().toISOString(),
-    });
+    };
+    await this.send(config, payload);
   },
 };

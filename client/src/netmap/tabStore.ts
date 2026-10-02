@@ -37,12 +37,18 @@ function saveToLocalStorage(tabs: NetMapTab[]): void {
 
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
 
+/**
+ * Debounced save into the user's preferences: PUT /profile with only the
+ * netmapTabs key — the server merges it into the stored preferences (toast,
+ * theme... are kept). localStorage stays the offline fallback.
+ */
 function persistToServer(tabs: NetMapTab[]): void {
   saveToLocalStorage(tabs);
   if (persistTimer) clearTimeout(persistTimer);
   persistTimer = setTimeout(async () => {
+    persistTimer = null;
     try {
-      await apiClient.patch('/profile', { preferences: { netmapTabs: tabs } });
+      await apiClient.put('/profile', { preferences: { netmapTabs: tabs } });
     } catch { /* silent — localStorage is the fallback */ }
   }, 1500);
 }
@@ -68,7 +74,10 @@ export const useNetMapTabStore = create<TabState>((set, get) => ({
     try {
       const res = await apiClient.get<{ data: { preferences?: { netmapTabs?: NetMapTab[] } } }>('/profile');
       const serverTabs = res.data?.data?.preferences?.netmapTabs;
-      if (Array.isArray(serverTabs) && serverTabs.length > 0) {
+      // A local edit still waiting to be saved wins over the server copy.
+      if (persistTimer) {
+        set({ loaded: true });
+      } else if (Array.isArray(serverTabs) && serverTabs.length > 0) {
         set({ tabs: serverTabs, loaded: true });
         saveToLocalStorage(serverTabs);
       } else {

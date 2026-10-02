@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Outlet } from 'react-router-dom';
+import { Outlet, useNavigate } from 'react-router-dom';
 import { Sidebar } from './Sidebar';
 import { Header } from './Header';
 import { DesktopUpdateBanner } from './DesktopUpdateBanner';
 import { LiveAlerts } from './LiveAlerts';
 import { GlobalAddAgentModal } from './GlobalAddAgentModal';
 import { useUiStore } from '@/store/uiStore';
+import { useTenantStore } from '@/store/tenantStore';
+import { useAgentDevicesPolling } from '@/store/agentStore';
 import { useSocket } from '@/hooks/useSocket';
 import { cn } from '@/utils/cn';
 
@@ -23,6 +25,34 @@ import { cn } from '@/utils/cn';
 export function AppLayout() {
   // Global socket subscriptions — always active regardless of which page is open
   useSocket();
+  // Agent devices of the operating tenant (sidebar tree, group pages): 30 s
+  // visibility-aware poll on top of the socket deltas.
+  useAgentDevicesPolling();
+
+  // ── Tenant-switch safety net ──────────────────────────────────────────────
+  // Tenant-scoped pages (agent detail, group detail...) hold an ID in the URL
+  // that only resolves under the active tenant. After a switch that ID is a
+  // dead end, so go back to the dashboard. The first transition (null → first
+  // tenant on app boot) is skipped to keep a deep link hit while logging in.
+  const currentTenantId = useTenantStore((s) => s.currentTenantId);
+  const previousTenantIdRef = useRef<number | null>(null);
+  const navigate = useNavigate();
+  useEffect(() => {
+    const previous = previousTenantIdRef.current;
+    previousTenantIdRef.current = currentTenantId;
+    if (previous == null) return;                  // app boot — keep deep link
+    if (currentTenantId == null) return;           // logout / mid-fetch
+    if (previous === currentTenantId) return;      // unchanged — no-op
+    // A caller that wants the URL to survive the switch sets this flag right
+    // before switching. Honour it once and clear it.
+    try {
+      if (sessionStorage.getItem('skipTenantSwitchRedirect') === '1') {
+        sessionStorage.removeItem('skipTenantSwitchRedirect');
+        return;
+      }
+    } catch { /* storage unavailable: redirect */ }
+    navigate('/', { replace: true });
+  }, [currentTenantId, navigate]);
 
   const {
     sidebarOpen,
@@ -168,7 +198,9 @@ export function AppLayout() {
 
         {/* Main content */}
         <main className="flex-1 overflow-y-auto flex flex-col">
-          <Outlet />
+          {/* Keyed on the tenant: every page remounts after a switch, so no
+              state or listener of the previous tenant survives. */}
+          <Outlet key={currentTenantId ?? 'none'} />
         </main>
 
       </div>

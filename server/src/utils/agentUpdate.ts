@@ -1,24 +1,40 @@
 /**
- * Agent update control (C17-1) — pure helpers. No DB, no fs.
+ * Agent update control (C17-1, W2-1) — pure helpers. No DB, no fs.
  *
- * Policy model: 'auto' | 'manual' | 'off' at three levels (global, group chain,
- * agent). 'off' at any level is absolute; otherwise the nearest explicit value
- * wins; nothing set anywhere = DEFAULT_AGENT_UPDATE_POLICY ('manual').
+ * Policy model: 'auto' | 'manual' | 'off' at four levels (global, tenant,
+ * group chain, agent). 'off' at any level is absolute; otherwise the nearest
+ * explicit value wins; nothing set anywhere = DEFAULT_AGENT_UPDATE_POLICY
+ * ('manual').
  *
  * The version comparison mirrors the Go agent (agent/main.go parseSemver /
  * isStrictlyNewer) so the server never advertises a version the agent would
  * not install, and vice versa.
  */
 import path from 'path';
-import type { AgentUpdatePolicy } from '@obliview/shared';
-import { AGENT_UPDATE_POLICIES, DEFAULT_AGENT_UPDATE_POLICY } from '@obliview/shared';
+import type { AgentUpdatePhase, AgentUpdatePolicy } from '@obliview/shared';
+import { AGENT_REPORTED_UPDATE_PHASES, AGENT_UPDATE_POLICIES, DEFAULT_AGENT_UPDATE_POLICY } from '@obliview/shared';
 
 /** An explicit "Update now" request lives 24 h. */
 export const AGENT_UPDATE_REQUEST_TTL_MS = 24 * 3600 * 1000;
 /** At most one update offer per device every 10 minutes. */
 export const UPDATE_OFFER_MIN_INTERVAL_MS = 10 * 60 * 1000;
-/** A request is abandoned after 3 offers the agent did not act upon. */
+/**
+ * At most 3 offers per (device, target version) under every policy, 'auto'
+ * included (1 + 2 redeliveries, as Obliance UPDATE_AGENT_MAX_REDELIVERIES):
+ * then the attempt is 'failed' ('no_progress') until an admin retries.
+ */
 export const UPDATE_REQUEST_MAX_OFFERS = 3;
+/** An attempt stuck in a progress phase (or 'updating') this long is 'failed' ('timeout'). */
+export const UPDATE_ATTEMPT_TIMEOUT_MS = 10 * 60 * 1000;
+/** Phases after which nothing more happens for this target until a retry. */
+export const TERMINAL_UPDATE_PHASES: readonly AgentUpdatePhase[] = ['succeeded', 'failed', 'cancelled'];
+/** Phases reported by an agent that is applying the update. */
+export const PROGRESS_UPDATE_PHASES: readonly AgentUpdatePhase[] = ['downloading', 'verifying', 'installing', 'restarting'];
+/** Heartbeat capabilities: at most this many entries of at most this many characters. */
+export const MAX_AGENT_CAPABILITIES = 32;
+export const MAX_AGENT_CAPABILITY_LEN = 32;
+/** Max stored length of an agent-reported update error. */
+export const MAX_UPDATE_ERROR_LEN = 500;
 /** Matches agent_devices.update_requested_version (varchar 64). */
 export const MAX_AGENT_VERSION_LEN = 64;
 
@@ -72,31 +88,59 @@ export interface GroupPolicyEntry {
 
 export interface ResolvedAgentUpdatePolicy {
   policy: AgentUpdatePolicy;
-  source: 'agent' | 'group' | 'global' | 'default';
+  source: 'agent' | 'group' | 'tenant' | 'global' | 'default';
   sourceGroupId: number | null;
 }
 
 /**
- * Resolve a device's effective policy. `groupChain` is ordered nearest first
+ * Resolve a device's effective policy over the four levels GLOBAL -> TENANT ->
+ * GROUP (closure chain) -> AGENT. `groupChain` is ordered nearest first
  * (closure depth ascending, own group = depth 0) and already filtered to the
  * device's tenant.
+ *
+ *   - 'off' at any level is absolute; the highest level that froze the device
+ *     is reported: global > tenant > farthest group > agent;
+ *   - otherwise the nearest explicit value wins: agent > nearest group >
+ *     tenant > global; nothing set = DEFAULT_AGENT_UPDATE_POLICY ('manual').
+ *
+ * The 3-argument form (device, chain, global) is the pre-tenant signature: no
+ * tenant level.
  */
 export function resolveAgentUpdatePolicy(
   devicePolicy: AgentUpdatePolicy | null,
   groupChain: GroupPolicyEntry[],
+  tenantPolicy: AgentUpdatePolicy | null | undefined,
   globalPolicy: AgentUpdatePolicy | null | undefined,
+): ResolvedAgentUpdatePolicy;
+export function resolveAgentUpdatePolicy(
+  devicePolicy: AgentUpdatePolicy | null,
+  groupChain: GroupPolicyEntry[],
+  globalPolicy: AgentUpdatePolicy | null | undefined,
+): ResolvedAgentUpdatePolicy;
+export function resolveAgentUpdatePolicy(
+  devicePolicy: AgentUpdatePolicy | null,
+  groupChain: GroupPolicyEntry[],
+  a: AgentUpdatePolicy | null | undefined,
+  b?: AgentUpdatePolicy | null,
 ): ResolvedAgentUpdatePolicy {
+  // eslint-disable-next-line prefer-rest-params
+  const withTenant = arguments.length >= 4;
+  const tenantPolicy = withTenant ? a : null;
+  const globalPolicy = withTenant ? b : a;
   // 1. Global kill-switch.
   if (globalPolicy === 'off') return { policy: 'off', source: 'global', sourceGroupId: null };
-  // 2. 'off' on any ancestor freezes the subtree: the farthest one is reported.
+  // 2. Tenant freeze.
+  if (tenantPolicy === 'off') return { policy: 'off', source: 'tenant', sourceGroupId: null };
+  // 3. 'off' on any ancestor freezes the subtree: the farthest one is reported.
   for (let i = groupChain.length - 1; i >= 0; i--) {
     if (groupChain[i].policy === 'off') return { policy: 'off', source: 'group', sourceGroupId: groupChain[i].groupId };
   }
-  // 3. Device freeze.
+  // 4. Device freeze.
   if (devicePolicy === 'off') return { policy: 'off', source: 'agent', sourceGroupId: null };
-  // 4. Nearest explicit value.
+  // 5. Nearest explicit value.
   if (devicePolicy) return { policy: devicePolicy, source: 'agent', sourceGroupId: null };
   if (groupChain.length > 0) return { policy: groupChain[0].policy, source: 'group', sourceGroupId: groupChain[0].groupId };
+  if (tenantPolicy) return { policy: tenantPolicy, source: 'tenant', sourceGroupId: null };
   if (globalPolicy) return { policy: globalPolicy, source: 'global', sourceGroupId: null };
   return { policy: DEFAULT_AGENT_UPDATE_POLICY, source: 'default', sourceGroupId: null };
 }
@@ -142,9 +186,139 @@ export function sanitizeImportedAgentGroupConfig(cfg: unknown): Record<string, u
   if (cfg === null || typeof cfg !== 'object' || Array.isArray(cfg)) return null;
   const src = cfg as Record<string, unknown>;
   const out: Record<string, unknown> = {};
-  for (const k of ['pushIntervalSeconds', 'heartbeatMonitoring', 'maxMissedPushes', 'notificationTypes']) {
+  for (const k of ['pushIntervalSeconds', 'maxMissedPushes', 'notificationTypes']) {
     if (k in src) out[k] = src[k];
   }
   if (src.updatePolicy === 'manual' || src.updatePolicy === 'off') out.updatePolicy = src.updatePolicy;
   return out;
+}
+
+// ── Heartbeat capabilities and update_status frames (W2-1) ──────────────────
+
+/**
+ * Heartbeat `capabilities`: strings only, trimmed, 1..32 characters, deduped,
+ * at most 32 entries. Anything that is not an array yields null (= not
+ * reported: the stored value is left untouched).
+ */
+export function sanitizeAgentCapabilities(raw: unknown): string[] | null {
+  if (!Array.isArray(raw)) return null;
+  const out: string[] = [];
+  for (const v of raw) {
+    if (typeof v !== 'string') continue;
+    const s = v.trim();
+    if (s.length === 0 || s.length > MAX_AGENT_CAPABILITY_LEN || out.includes(s)) continue;
+    out.push(s);
+    if (out.length >= MAX_AGENT_CAPABILITIES) break;
+  }
+  return out;
+}
+
+export interface ParsedUpdateStatus {
+  targetVersion: string;
+  phase: AgentUpdatePhase;
+  error: string | null;
+}
+
+/** A valid update_status frame, or null (unknown phase, bad version: ignored). */
+export function parseUpdateStatusFrame(msg: unknown): ParsedUpdateStatus | null {
+  if (msg === null || typeof msg !== 'object') return null;
+  const m = msg as Record<string, unknown>;
+  if (typeof m.targetVersion !== 'string' || !isValidServedAgentVersion(m.targetVersion)) return null;
+  if (typeof m.phase !== 'string' || !(AGENT_REPORTED_UPDATE_PHASES as readonly string[]).includes(m.phase)) return null;
+  const err = typeof m.error === 'string' && m.error.trim() ? m.error.trim().slice(0, MAX_UPDATE_ERROR_LEN) : null;
+  return { targetVersion: m.targetVersion, phase: m.phase as AgentUpdatePhase, error: err };
+}
+
+// ── Build manifest (agent/dist/manifest.json, W2-1 / FLEET-AGENT-3) ─────────
+
+export interface AgentManifestArtifact {
+  sha256: string;
+  size: number;
+  version: string;
+}
+
+export interface AgentManifest {
+  version: string;
+  artifacts: Record<string, AgentManifestArtifact>;
+}
+
+/** Artifacts an updating agent downloads, one per supported os-arch. */
+export const UPDATE_ARTIFACTS: readonly string[] = [
+  'obliguard-agent.msi',
+  'obliguard-agent-linux-amd64',
+  'obliguard-agent-linux-arm64',
+  'obliguard-agent-darwin-amd64',
+  'obliguard-agent-darwin-arm64',
+  'obliguard-agent-freebsd-amd64',
+];
+
+/** GOARCH of an osInfo.arch (the legacy Node agent reported Node's names). */
+function goArch(arch: string): string {
+  const a = arch.trim().toLowerCase();
+  if (a === 'x64' || a === 'x86_64') return 'amd64';
+  if (a === 'aarch64') return 'arm64';
+  return a;
+}
+
+/**
+ * The file an agent of this osInfo downloads to update (mirror of
+ * agent/main.go applyUpdateIfNewer: the MSI on Windows, the bare
+ * obliguard-agent-<GOOS>-<GOARCH> binary elsewhere), or null when unknown.
+ */
+export function updateArtifactForOs(osInfo: { platform?: unknown; arch?: unknown } | null | undefined): string | null {
+  if (!osInfo || typeof osInfo.platform !== 'string') return null;
+  const platform = osInfo.platform.trim().toLowerCase();
+  if (platform === 'windows' || platform === 'win32') return 'obliguard-agent.msi';
+  if (typeof osInfo.arch !== 'string' || !osInfo.arch.trim()) return null;
+  return `obliguard-agent-${platform}-${goArch(osInfo.arch)}`;
+}
+
+/** A parsed manifest.json, or null when malformed. Unknown / invalid entries are dropped. */
+export function parseAgentManifest(raw: unknown): AgentManifest | null {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  const arts = r.artifacts;
+  if (arts === null || typeof arts !== 'object' || Array.isArray(arts)) return null;
+  const artifacts: Record<string, AgentManifestArtifact> = {};
+  for (const [file, v] of Object.entries(arts as Record<string, unknown>)) {
+    if (!/^[A-Za-z0-9._-]{1,128}$/.test(file) || v === null || typeof v !== 'object') continue;
+    const a = v as Record<string, unknown>;
+    if (typeof a.version !== 'string' || !a.version.trim()) continue;
+    artifacts[file] = {
+      version: a.version.trim(),
+      sha256: typeof a.sha256 === 'string' ? a.sha256.toLowerCase() : '',
+      size: typeof a.size === 'number' && Number.isFinite(a.size) ? a.size : 0,
+    };
+  }
+  return { version: typeof r.version === 'string' ? r.version.trim() : '', artifacts };
+}
+
+/** Merge manifests (later ones win per artifact): manifest.json plus host fragments. */
+export function mergeAgentManifests(list: AgentManifest[]): AgentManifest | null {
+  if (list.length === 0) return null;
+  const out: AgentManifest = { version: '', artifacts: {} };
+  for (const m of list) {
+    if (m.version) out.version = m.version;
+    Object.assign(out.artifacts, m.artifacts);
+  }
+  return out;
+}
+
+/** Update artifacts whose manifest build does not match `served` (missing or other version). */
+export function missingBuildsFor(manifest: AgentManifest | null, served: string | null): string[] {
+  if (!manifest || served === null) return [];
+  return UPDATE_ARTIFACTS.filter((f) => manifest.artifacts[f]?.version !== served);
+}
+
+/**
+ * Whether the served version may be advertised to an agent of this osInfo.
+ * No manifest = legacy layout (no check). With a manifest, the agent's
+ * artifact must exist and embed the served version; an unknown platform is
+ * never advertised.
+ */
+export function buildMatchesServed(manifest: AgentManifest | null, served: string, osInfo: { platform?: unknown; arch?: unknown } | null | undefined): boolean {
+  if (!manifest) return true;
+  const file = updateArtifactForOs(osInfo);
+  if (!file) return false;
+  return manifest.artifacts[file]?.version === served;
 }

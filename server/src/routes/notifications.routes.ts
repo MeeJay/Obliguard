@@ -6,8 +6,11 @@ import { validate } from '../middleware/validate';
 import {
   createChannelSchema,
   updateChannelSchema,
+  channelTenantsSchema,
   addBindingSchema,
   removeBindingSchema,
+  listBindingsQuerySchema,
+  resolvedBindingsQuerySchema,
 } from '../validators/notification.schema';
 
 const router = Router();
@@ -26,11 +29,11 @@ router.put('/channels/:id', validate(updateChannelSchema), notificationsControll
 router.delete('/channels/:id', notificationsController.deleteChannel);
 router.post('/channels/:id/test', notificationsController.testChannel);
 router.get('/channels/:id/tenants', notificationsController.getChannelTenants);
-router.put('/channels/:id/tenants', notificationsController.setChannelTenants);
+router.put('/channels/:id/tenants', validate(channelTenantsSchema), notificationsController.setChannelTenants);
 
 // Bindings
-router.get('/bindings/resolved', notificationsController.resolvedBindings);
-router.get('/bindings', notificationsController.listBindings);
+router.get('/bindings/resolved', validate(resolvedBindingsQuerySchema, 'query'), notificationsController.resolvedBindings);
+router.get('/bindings', validate(listBindingsQuerySchema, 'query'), notificationsController.listBindings);
 router.post('/bindings', validate(addBindingSchema), notificationsController.addBinding);
 router.delete('/bindings', validate(removeBindingSchema), notificationsController.removeBinding);
 

@@ -488,7 +488,7 @@ export const obligateService = {
   async getConnectedApps(
     obligateUserId?: number | null,
     opts: { timeoutMs?: number } = {},
-  ): Promise<Array<{ appType: string; name: string; baseUrl: string; icon: string | null; color: string | null }>> {
+  ): Promise<Array<{ appType: string; name: string; baseUrl: string; icon: string; color: string | null; self?: true }>> {
     const raw = await appConfigService.getObligateRaw();
     if (!raw.url || !raw.apiKey) return [];
 
@@ -504,7 +504,7 @@ export const obligateService = {
         signal: AbortSignal.timeout(opts.timeoutMs ?? 5000),
       });
       if (!res.ok) return [];
-      const data = await res.json() as { success: boolean; data?: Array<{ appType: string; name: string; baseUrl: string; icon: string | null; color: string | null }> };
+      const data = await res.json() as { success: boolean; data?: Array<{ appType: string; name: string; baseUrl: string; icon: string; color: string | null; self?: true }> };
       return data.data ?? [];
     } catch {
       return [];

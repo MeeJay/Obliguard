@@ -9,7 +9,7 @@ import { authService } from './services/auth.service';
 import { setAgentServiceIO, agentService } from './services/agent.service';
 import { setLiveAlertIO } from './services/liveAlert.service';
 import { setUserSessionsIO } from './services/userSessions.service';
-import { banEngine } from './services/ban.service';
+import { banEngine, banService, setBanServiceIO } from './services/ban.service';
 import { attachAgentWebSocket } from './services/agentWsGate';
 import { obligateService } from './services/obligate.service';
 
@@ -39,6 +39,7 @@ async function main() {
   setAgentServiceIO(io);
   setLiveAlertIO(io);
   setUserSessionsIO(io);
+  setBanServiceIO(io);
 
   // ── Obliguard agent WebSocket command channel ────────────────────────────
   // The agent WS endpoint shares the REST port: attachAgentWebSocket takes over
@@ -55,6 +56,9 @@ async function main() {
   mikrotikLogPoller.start();
   const { mikrotikImport } = await import('./services/mikrotik/mikrotikImport.service');
   mikrotikImport.start();
+  // Hourly reconciliation of every router's address-list with its tenant's bans
+  const { mikrotikBanSync } = await import('./services/mikrotik/mikrotikBanSync.service');
+  mikrotikBanSync.startReconciler();
 
   // 8. Listen
   server.listen(config.port, () => {
@@ -91,14 +95,11 @@ async function main() {
     }
   }, 5 * 60 * 1000);
 
-  // 10. ip_bans expiry job — mark expired bans as inactive every 5 minutes
+  // 10. ip_bans expiry job — every 5 minutes, through banService.deactivateBans
+  // (lifted_at stamped, announced as ban:lifted, removed from MikroTik routers)
   const banExpiryTimer = setInterval(async () => {
     try {
-      const expired = await db('ip_bans')
-        .where('is_active', true)
-        .whereNotNull('expires_at')
-        .where('expires_at', '<', new Date())
-        .update({ is_active: false });
+      const expired = await banService.expireBans();
       if (expired > 0) {
         logger.info(`BanExpiry: deactivated ${expired} expired bans`);
       }
@@ -112,9 +113,15 @@ async function main() {
   const remoteBlocklistTimer = setInterval(async () => {
     try {
       await remoteBlocklistService.syncAll();
-      await remoteBlocklistService.pushNewBans();
     } catch (err) {
       logger.error(err, 'Remote blocklist sync failed');
+    }
+    // Separate try: pushNewBans throws on upstream failure and must not be
+    // reported as a sync failure.
+    try {
+      await remoteBlocklistService.pushNewBans();
+    } catch (err) {
+      logger.error(err, 'obli.tools push failed');
     }
   }, 10 * 60 * 1000);
 
@@ -137,6 +144,7 @@ async function main() {
     clearInterval(banExpiryTimer);
     clearInterval(remoteBlocklistTimer);
     banEngine.stop();
+    mikrotikBanSync.stopReconciler();
 
     // Stop accepting new work BEFORE tearing down the DB pool.
     try { agentWss.close(); } catch { /* ignore */ }

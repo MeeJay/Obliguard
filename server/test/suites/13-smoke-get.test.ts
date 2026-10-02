@@ -27,12 +27,12 @@ const PATHS = [
   '/api/remote-blocklists/stats', '/api/rate-limit-policies', '/api/live-alerts', '/api/admin/config',
   '/api/admin/config/agent-global', '/api/system', '/api/permission-sets', '/api/profile',
   '/api/profile/2fa/status', '/api/admin/smtp-servers',
+  '/api/ip-events/stats', '/api/dashboard/summary', '/api/agent/devices/versions',
+  '/api/agent/update-policy/tenant',
 ];
 
 // 500 without the ?scope= query param (knex undefined binding in notificationService.getBindings) — no owning lot yet.
-const KNOWN_BROKEN: Record<string, Lot> = {
-  '/api/notifications/bindings': 'UNTRACKED',
-};
+const KNOWN_BROKEN: Record<string, Lot> = {};
 
 describe('13 GET smoke', () => {
   let h: Harness;

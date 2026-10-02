@@ -46,18 +46,24 @@ export const userSessionsService = {
    * Socket.io connections (sockets join `user:<id>` on connect).
    *
    * Sessions cache userId + role, so this is required whenever an account is
-   * disabled, deleted or demoted, or its credentials change upstream.
+   * disabled, deleted or demoted, or its credentials change (password change,
+   * admin password or 2FA reset).
+   *
+   * `exceptSid` keeps one session alive: the caller's own, when a user changes
+   * their own password (every OTHER session is signed out). Its sockets are
+   * closed too and reconnect with the (regenerated) session cookie.
    */
-  async destroyForUser(userId: number): Promise<number> {
+  async destroyForUser(userId: number, opts: { exceptSid?: string } = {}): Promise<number> {
     // Drop the cached account state first so sessionUserGuard re-reads the DB
     // (catches a session re-saved by a request that was in flight).
     invalidateUserState(userId);
     invalidateTenantAccess(userId);
     const id = String(userId);
-    const deleted = await db('session')
-      .whereRaw(`sess->>'userId' = ?`, [id])
-      .orWhereRaw(`sess->>'pendingMfaUserId' = ?`, [id])
-      .del();
+    const q = db('session').where((w) => {
+      w.whereRaw(`sess->>'userId' = ?`, [id]).orWhereRaw(`sess->>'pendingMfaUserId' = ?`, [id]);
+    });
+    if (opts.exceptSid) q.andWhereNot('sid', opts.exceptSid);
+    const deleted = await q.del();
     disconnectSockets(userId);
     return deleted;
   },

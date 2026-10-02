@@ -1,6 +1,10 @@
 import { db } from '../db';
 import type { UserTeam, TeamPermission } from '@obliview/shared';
 import { isMasterTenant } from '@obliview/shared';
+import { AppError } from '../middleware/errorHandler';
+import { TEAM_PERMISSION_SCOPES } from '../validators/team.schema';
+
+type TeamPermissionScope = typeof TEAM_PERMISSION_SCOPES[number];
 
 interface TeamRow {
   id: number;
@@ -32,6 +36,33 @@ function rowToTeam(row: TeamRow): UserTeam {
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
   };
+}
+
+/** The tenant a team belongs to (404 when the team does not exist). */
+async function resolveTeamTenantId(teamId: number): Promise<number> {
+  const team = await db('user_teams').where({ id: teamId }).select('tenant_id').first() as { tenant_id: number } | undefined;
+  if (!team) throw new AppError(404, 'Team not found');
+  return team.tenant_id;
+}
+
+/**
+ * Team grants are tenant-bound: every group / agent a team is granted must
+ * belong to the team's own tenant (the Default tenant included: no bypass).
+ */
+async function assertScopesInTenant(
+  perms: Array<{ scope: TeamPermissionScope; scopeId: number }>,
+  tenantId: number,
+): Promise<void> {
+  const groupIds = [...new Set(perms.filter((p) => p.scope === 'group').map((p) => p.scopeId))];
+  const agentIds = [...new Set(perms.filter((p) => p.scope === 'agent').map((p) => p.scopeId))];
+  if (groupIds.length > 0) {
+    const rows = await db('monitor_groups').whereIn('id', groupIds).where({ tenant_id: tenantId }).select('id');
+    if (rows.length !== groupIds.length) throw new AppError(400, 'Group not found in the team tenant');
+  }
+  if (agentIds.length > 0) {
+    const rows = await db('agent_devices').whereIn('id', agentIds).where({ tenant_id: tenantId }).select('id');
+    if (rows.length !== agentIds.length) throw new AppError(400, 'Agent not found in the team tenant');
+  }
 }
 
 function rowToPermission(row: PermissionRow): TeamPermission {
@@ -131,23 +162,44 @@ export const teamService = {
 
   // ── Permissions ──
 
+  /**
+   * A team's grants. Legacy Obliview rows (scope 'monitor') are ignored here
+   * and dropped on the team's next setPermissions.
+   */
   async getPermissions(teamId: number): Promise<TeamPermission[]> {
     const rows = await db<PermissionRow>('team_permissions')
       .where({ team_id: teamId })
+      .whereIn('scope', [...TEAM_PERMISSION_SCOPES])
       .orderBy('scope')
       .orderBy('scope_id');
     return rows.map(rowToPermission);
   },
 
+  /**
+   * Replace every grant of a team (legacy 'monitor' rows included). Each
+   * scopeId must belong to the team's tenant (400 otherwise); duplicates are
+   * merged, the highest level wins.
+   */
   async setPermissions(
     teamId: number,
-    permissions: Array<{ scope: 'group' | 'monitor'; scopeId: number; level: 'ro' | 'rw' }>,
+    permissions: Array<{ scope: TeamPermissionScope; scopeId: number; level: 'ro' | 'rw' }>,
   ): Promise<TeamPermission[]> {
+    const tenantId = await resolveTeamTenantId(teamId);
+
+    const merged = new Map<string, { scope: TeamPermissionScope; scopeId: number; level: 'ro' | 'rw' }>();
+    for (const p of permissions) {
+      const key = `${p.scope}:${p.scopeId}`;
+      const existing = merged.get(key);
+      if (!existing || (existing.level === 'ro' && p.level === 'rw')) merged.set(key, { ...p });
+    }
+    const list = [...merged.values()];
+    await assertScopesInTenant(list, tenantId);
+
     return db.transaction(async (trx) => {
       await trx('team_permissions').where({ team_id: teamId }).del();
-      if (permissions.length > 0) {
+      if (list.length > 0) {
         await trx('team_permissions').insert(
-          permissions.map((p) => ({
+          list.map((p) => ({
             team_id: teamId,
             scope: p.scope,
             scope_id: p.scopeId,
@@ -163,12 +215,15 @@ export const teamService = {
     });
   },
 
+  /** Upsert one grant; the scopeId must belong to the team's tenant (400 otherwise). */
   async addPermission(
     teamId: number,
-    scope: 'group' | 'agent',
+    scope: TeamPermissionScope,
     scopeId: number,
     level: 'ro' | 'rw',
   ): Promise<TeamPermission> {
+    const tenantId = await resolveTeamTenantId(teamId);
+    await assertScopesInTenant([{ scope, scopeId }], tenantId);
     const [row] = await db<PermissionRow>('team_permissions')
       .insert({ team_id: teamId, scope, scope_id: scopeId, level })
       .onConflict(['team_id', 'scope', 'scope_id'])
@@ -177,8 +232,9 @@ export const teamService = {
     return rowToPermission(row);
   },
 
-  async removePermission(permissionId: number): Promise<boolean> {
-    const count = await db('team_permissions').where({ id: permissionId }).del();
+  /** Remove one grant of a team (a permission id of another team is not found). */
+  async removePermission(teamId: number, permissionId: number): Promise<boolean> {
+    const count = await db('team_permissions').where({ id: permissionId, team_id: teamId }).del();
     return count > 0;
   },
 };

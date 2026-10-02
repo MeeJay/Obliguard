@@ -1,21 +1,32 @@
 import type { Request, Response, NextFunction } from 'express';
 import { remoteBlocklistService } from '../services/remoteBlocklist.service';
 import { AppError } from '../middleware/errorHandler';
+import { parseLimitOffset } from '../utils/pagination';
+import { SsrfRefusedError } from '../utils/ssrfGuard';
+
+function parseId(raw: string): number {
+  if (!/^[1-9][0-9]{0,9}$/.test(raw)) throw new AppError(400, 'Invalid id');
+  return Number(raw);
+}
+
+/** A sync or push failure is the remote side's fault: 502 (a refused URL stays a 400). */
+function upstreamError(err: unknown): AppError {
+  if (err instanceof AppError) return err;
+  if (err instanceof SsrfRefusedError) return new AppError(400, err.message);
+  return new AppError(502, err instanceof Error ? err.message : 'Unknown error');
+}
 
 export const remoteBlocklistController = {
-  async list(_req: Request, res: Response, next: NextFunction): Promise<void> {
+  async list(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const data = await remoteBlocklistService.list();
+      const data = await remoteBlocklistService.list(req.tenantId);
       res.json({ success: true, data });
     } catch (err) { next(err); }
   },
 
   async create(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const { name, sourceType, url, apiKey, syncInterval } = req.body as {
-        name: string; sourceType: 'oblitools' | 'url'; url: string;
-        apiKey?: string; syncInterval?: number;
-      };
+      const { name, sourceType, url, apiKey, syncInterval } = (req.body ?? {}) as Record<string, unknown>;
       if (!name || !sourceType || !url) throw new AppError(400, 'name, sourceType, and url are required');
       const data = await remoteBlocklistService.create({
         name, sourceType, url, apiKey,
@@ -27,8 +38,9 @@ export const remoteBlocklistController = {
 
   async update(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const id = parseInt(req.params.id, 10);
-      const data = await remoteBlocklistService.update(id, req.body);
+      const id = parseId(req.params.id);
+      const { name, url, apiKey, enabled, syncInterval } = (req.body ?? {}) as Record<string, unknown>;
+      const data = await remoteBlocklistService.update(id, req.tenantId, { name, url, apiKey, enabled, syncInterval });
       if (!data) throw new AppError(404, 'Blocklist not found');
       res.json({ success: true, data });
     } catch (err) { next(err); }
@@ -36,8 +48,8 @@ export const remoteBlocklistController = {
 
   async delete(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const id = parseInt(req.params.id, 10);
-      const ok = await remoteBlocklistService.delete(id);
+      const id = parseId(req.params.id);
+      const ok = await remoteBlocklistService.delete(id, req.tenantId);
       if (!ok) throw new AppError(404, 'Blocklist not found');
       res.json({ success: true, message: 'Blocklist deleted' });
     } catch (err) { next(err); }
@@ -45,37 +57,48 @@ export const remoteBlocklistController = {
 
   async forceSync(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const id = parseInt(req.params.id, 10);
-      await remoteBlocklistService.forceSync(id);
+      const id = parseId(req.params.id);
+      let found: boolean;
+      try {
+        found = await remoteBlocklistService.forceSync(id, req.tenantId);
+      } catch (err) {
+        throw upstreamError(err);
+      }
+      if (!found) throw new AppError(404, 'Blocklist not found');
       res.json({ success: true, message: 'Sync completed' });
     } catch (err) { next(err); }
   },
 
   async listIps(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const blocklistId = req.query.blocklistId ? parseInt(req.query.blocklistId as string, 10) : undefined;
-      const search = req.query.search as string | undefined;
-      const enabled = req.query.enabled !== undefined ? req.query.enabled === 'true' : undefined;
-      const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 50;
-      const offset = req.query.offset ? parseInt(req.query.offset as string, 10) : 0;
-      const result = await remoteBlocklistService.listIps({ blocklistId, search, enabled, limit, offset });
+      const q = req.query as Record<string, unknown>;
+      const blocklistId = typeof q.blocklistId === 'string' && /^[1-9][0-9]{0,9}$/.test(q.blocklistId)
+        ? Number(q.blocklistId)
+        : undefined;
+      const search = typeof q.search === 'string' && q.search ? q.search.slice(0, 64) : undefined;
+      const enabled = q.enabled === 'true' ? true : q.enabled === 'false' ? false : undefined;
+      const { limit, offset } = parseLimitOffset(q, { defaultLimit: 50, max: 1000 });
+      const result = await remoteBlocklistService.listIps({
+        tenantId: req.tenantId, blocklistId, search, enabled, limit, offset,
+      });
       res.json({ success: true, data: result.data, total: result.total });
     } catch (err) { next(err); }
   },
 
   async toggleIp(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const id = parseInt(req.params.id, 10);
-      const { enabled } = req.body as { enabled: boolean };
-      const ok = await remoteBlocklistService.toggleIp(id, enabled);
+      const id = parseId(req.params.id);
+      const { enabled } = (req.body ?? {}) as { enabled?: unknown };
+      if (typeof enabled !== 'boolean') throw new AppError(400, 'enabled must be a boolean');
+      const ok = await remoteBlocklistService.toggleIp(id, enabled, req.tenantId);
       if (!ok) throw new AppError(404, 'IP not found');
       res.json({ success: true, message: enabled ? 'IP enabled' : 'IP disabled' });
     } catch (err) { next(err); }
   },
 
-  async stats(_req: Request, res: Response, next: NextFunction): Promise<void> {
+  async stats(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const data = await remoteBlocklistService.getStats();
+      const data = await remoteBlocklistService.getStats(req.tenantId);
       res.json({ success: true, data });
     } catch (err) { next(err); }
   },
@@ -86,7 +109,7 @@ export const remoteBlocklistController = {
       res.json({ success: true, message: result ?? 'Push completed' });
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unknown error';
-      res.status(502).json({ success: false, message: msg });
+      res.status(502).json({ success: false, message: msg, error: msg });
     }
   },
 };

@@ -17,22 +17,30 @@ export function LoginPage() {
 
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
-  // sso_failed: the SSO round-trip failed. sso_misconfigured: this address is
-  // not an allowed SSO origin (configuration issue, not an outage) — never
+  // SSO failure reason set by the server redirect (?error=, ?sso_error= alias):
+  // sso_failed: the SSO round-trip failed. account_disabled: SSO worked but the
+  // local account is disabled here. sso_misconfigured: this address is not an
+  // allowed SSO origin (configuration issue, not an outage) — never
   // auto-redirect or poll in that case, it would only bounce back here.
-  const ssoError = searchParams.get('error');
+  const ssoError = searchParams.get('error') ?? searchParams.get('sso_error');
   const ssoMisconfigured = ssoError === 'sso_misconfigured';
   const [error, setError] = useState(
     ssoError === 'sso_failed'
-      ? 'SSO authentication failed. Please try local login.'
-      : ssoMisconfigured
-        ? t('login.ssoMisconfigured', 'Single sign-on is not available on this address. Open the configured URL of this instance, or sign in with a local account.')
-        : '',
+      ? t('login.ssoFailed', 'SSO authentication failed. Please try local login.')
+      : ssoError === 'account_disabled'
+        ? t('login.accountDisabled', 'Your account is disabled on this server. Ask an administrator to re-enable it.')
+        : ssoMisconfigured
+          ? t('login.ssoMisconfigured', 'Single sign-on is not available on this address. Open the configured URL of this instance, or sign in with a local account.')
+          : '',
   );
   const [serverVersion, setServerVersion] = useState<string | null>(null);
 
   // If we arrived here after an SSO failure, don't auto-redirect to Obligate again
-  const ssoFailed = ssoError === 'sso_failed' || ssoMisconfigured;
+  const ssoFailed = ssoError === 'sso_failed' || ssoError === 'account_disabled' || ssoMisconfigured;
+  // Break-glass: ?local=1 forces the local username/password form and skips
+  // the automatic SSO redirect (and its polling), so a local admin can sign in
+  // even when Obligate is up but SSO is misconfigured (Obliance LoginPage).
+  const forceLocal = searchParams.get('local') === '1' || searchParams.get('local') === 'true';
 
   const [step, setStep] = useState<Step>('credentials');
   const [mfaMethods, setMfaMethods] = useState<{ totp: boolean; email: boolean }>({ totp: false, email: false });
@@ -42,13 +50,17 @@ export function LoginPage() {
 
   // SSO state: 'checking' = initial check, 'redirecting' = going to Obligate,
   // 'unavailable' = Obligate down (show local login + warning), 'local' = no Obligate configured
-  const [ssoState, setSsoState] = useState<'checking' | 'redirecting' | 'unavailable' | 'local'>(ssoFailed ? 'unavailable' : 'checking');
+  // Obligate is configured: the local form always offers the SSO sign-in too
+  // (the generic login error no longer says which accounts are SSO accounts).
+  const [ssoEnabled, setSsoEnabled] = useState(false);
+  const [ssoState, setSsoState] = useState<'checking' | 'redirecting' | 'unavailable' | 'local'>(ssoFailed ? 'unavailable' : forceLocal ? 'local' : 'checking');
 
   const checkSso = () => {
     return fetch('/api/auth/sso-config')
       .then(r => r.json())
       .then((data: { success: boolean; data?: { obligateUrl: string | null; obligateReachable: boolean; obligateEnabled: boolean } }) => {
         if (data.success && data.data?.obligateEnabled && data.data.obligateUrl) {
+          setSsoEnabled(true);
           if (data.data.obligateReachable) {
             // Anti-loop: if we redirected to SSO less than 15s ago and ended up back here, Gate is broken
             const lastRedirect = sessionStorage.getItem('_sso_redirect_ts');
@@ -70,6 +82,23 @@ export function LoginPage() {
       .catch(() => { setSsoState('unavailable'); return 'unavailable'; });
   };
 
+  // Only learns whether Obligate is configured (no redirect): used when the
+  // automatic redirect is skipped (?local=1, or back from an SSO failure).
+  const detectSso = () => {
+    fetch('/api/auth/sso-config')
+      .then(r => r.json())
+      .then((data: { success: boolean; data?: { obligateUrl: string | null; obligateEnabled: boolean } }) => {
+        setSsoEnabled(!!(data.success && data.data?.obligateEnabled && data.data.obligateUrl));
+      })
+      .catch(() => {});
+  };
+
+  const startSso = () => {
+    sessionStorage.removeItem('_sso_redirect_ts');
+    setSsoState('redirecting');
+    window.location.href = '/auth/sso-redirect';
+  };
+
   useEffect(() => {
     fetch('/health')
       .then((r) => r.json())
@@ -81,18 +110,20 @@ export function LoginPage() {
       .then(r => r.json())
       .then((d: { success?: boolean }) => {
         if (d.success) { navigate('/', { replace: true }); return; }
-        // No session — check Obligate unless we just failed
-        if (!ssoFailed) checkSso();
+        // No session — check Obligate unless we just failed or local login is forced
+        if (forceLocal || ssoFailed) detectSso();
+        if (forceLocal) setSsoState('local');
+        else if (!ssoFailed) checkSso();
         else setSsoState('unavailable');
       })
-      .catch(() => { if (!ssoFailed) checkSso(); });
+      .catch(() => { if (!ssoFailed && !forceLocal) checkSso(); });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Poll Obligate every 60s when unavailable — redirect as soon as it comes back.
   // Not on a misconfigured address (it would bounce back every minute) and not
   // during the 2FA step (the redirect would throw the user out of it).
   useEffect(() => {
-    if (ssoState !== 'unavailable' || ssoMisconfigured || step === '2fa') return;
+    if (ssoState !== 'unavailable' || ssoMisconfigured || forceLocal || step === '2fa') return;
     const interval = setInterval(() => {
       checkSso();
     }, 60_000);
@@ -171,7 +202,7 @@ export function LoginPage() {
           <p className="mt-2 text-sm text-text-secondary">{t('login.title')}</p>
         </div>
 
-        {ssoState === 'unavailable' && !ssoMisconfigured && (
+        {ssoState === 'unavailable' && !ssoMisconfigured && ssoError !== 'account_disabled' && (
           <div className="bg-status-pending-bg border border-status-pending/30 rounded-lg p-3 text-sm text-status-pending">
             {t('login.ssoUnavailable', 'Centralized login (Obligate) is unavailable. Using local authentication.')}
           </div>
@@ -206,6 +237,11 @@ export function LoginPage() {
             <Button type="submit" className="w-full" loading={isLoading}>
               {t('login.signIn')}
             </Button>
+            {ssoEnabled && !ssoMisconfigured && (
+              <Button type="button" variant="secondary" className="w-full" onClick={startSso}>
+                {t('login.signInWithSso', 'Sign in with Obligate SSO')}
+              </Button>
+            )}
             <div className="text-center">
               <Link to="/forgot-password" className="text-xs text-text-muted hover:text-text-primary transition-colors">
                 {t('login.forgotPassword')}

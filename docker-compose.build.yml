@@ -27,7 +27,12 @@ services:
       NODE_ENV: production
       PORT: 3001
       DATABASE_URL: postgres://obliguard:${DB_PASSWORD:-changeme}@postgres:5432/obliguard
-      SESSION_SECRET: ${SESSION_SECRET:-change-this-in-production}
+      # Required, 32+ random characters (openssl rand -hex 32): the server refuses
+      # to start in production with a missing, short or published value.
+      SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET must be set in .env (openssl rand -hex 32)}
+      # Optional dedicated key for stored credentials (MikroTik, M365); falls back to SESSION_SECRET.
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-}
+      PREVIOUS_SESSION_SECRET: ${PREVIOUS_SESSION_SECRET:-}
       CLIENT_ORIGIN: ${CLIENT_ORIGIN:-http://localhost}
       # Public URL of this instance (SSO redirect_uri, e-mail links) + extra hostnames allowed for SSO
       APP_URL: ${APP_URL:-}
@@ -38,7 +43,15 @@ services:
       AGENT_MAX_PENDING_PER_KEY: ${AGENT_MAX_PENDING_PER_KEY:-500}
       AGENT_KEY_BINDING: ${AGENT_KEY_BINDING:-strict}
       DEFAULT_ADMIN_USERNAME: ${DEFAULT_ADMIN_USERNAME:-admin}
-      DEFAULT_ADMIN_PASSWORD: ${DEFAULT_ADMIN_PASSWORD:-admin123}
+      # Only used on a fresh database (install.sh generates one). Unset = admin123, logged as a warning.
+      DEFAULT_ADMIN_PASSWORD: ${DEFAULT_ADMIN_PASSWORD:-}
+      # Client IP resolution behind proxies (see .env.example).
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
+      TRUSTED_PROXY_HOPS: ${TRUSTED_PROXY_HOPS:-}
+      # External bans pushed by sibling apps (Oblihub) through Obligate delegation (see .env.example).
+      EXTERNAL_BAN_MAX_SECONDS: ${EXTERNAL_BAN_MAX_SECONDS:-}
+      OBLIGATE_ISSUER: ${OBLIGATE_ISSUER:-}
+      DELEGATION_ALLOW_JTI_REUSE: ${DELEGATION_ALLOW_JTI_REUSE:-}
     volumes:
       # Persistent custom directory: scripts, SSH keys, etc.
       # SSH keys: chmod 700 custom/.ssh && chmod 600 custom/.ssh/id_*

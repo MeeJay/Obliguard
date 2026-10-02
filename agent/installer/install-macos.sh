@@ -6,12 +6,16 @@
 #
 # Manual usage:
 #   sudo bash install-macos.sh --url https://your-server --key <apikey>
+#
+# Self-signed server certificate (not in the system trust store):
+#   sudo TLS_INSECURE=1 bash -c "$(curl -fsSLk '...')"   or add --tls-insecure
 
 set -e
 
 SERVER_URL="__SERVER_URL__"
 API_KEY="__API_KEY__"
 TMP_BINARY="/tmp/obliguard-agent-install"
+TLS_INSECURE="${TLS_INSECURE:-0}"
 
 # ── Parse optional override args ──────────────────────────────────────────────
 
@@ -21,9 +25,20 @@ while [ $# -gt 0 ]; do
     --url=*) SERVER_URL="${1#*=}"; shift ;;
     --key)   API_KEY="$2"; shift 2 ;;
     --key=*) API_KEY="${1#*=}"; shift ;;
+    --tls-insecure) TLS_INSECURE=1; shift ;;
+    --tls-insecure=*) TLS_INSECURE="${1#*=}"; shift ;;
     *) shift ;;
   esac
 done
+
+# TLS: verify the server certificate (default). TLS_INSECURE=1 (environment)
+# or --tls-insecure skips verification on every agent connection, for a
+# self-signed certificate absent from the system trust store; it is written to
+# config.json as tlsInsecureSkipVerify.
+case "$TLS_INSECURE" in
+  1|true|yes|on) TLS_INSECURE_JSON=true; TLS_FLAG="--tls-insecure=1"; DL_INSECURE="-k" ;;
+  *)             TLS_INSECURE_JSON=false; TLS_FLAG="--tls-insecure=0"; DL_INSECURE="" ;;
+esac
 
 if [ -z "$SERVER_URL" ] || [ "$SERVER_URL" = "__SERVER_URL__" ]; then
   echo "Error: Server URL not set."
@@ -51,6 +66,9 @@ echo " Obliguard Agent Installer"
 echo " macOS"
 echo "=============================="
 echo "Server : $SERVER_URL"
+if [ "$TLS_INSECURE_JSON" = "true" ]; then
+  echo "TLS    : certificate verification DISABLED (TLS_INSECURE=1)"
+fi
 echo ""
 
 # ── 1. Detect architecture ────────────────────────────────────────────────────
@@ -70,7 +88,7 @@ echo "[1/3] Architecture: $ARCH → obliguard-agent-${BINARY_SUFFIX}"
 # ── 2. Download agent binary ──────────────────────────────────────────────────
 
 echo "[2/3] Downloading binary..."
-curl -fsSL "${SERVER_URL}/api/agent/download/obliguard-agent-${BINARY_SUFFIX}" \
+curl -fsSL $DL_INSECURE "${SERVER_URL}/api/agent/download/obliguard-agent-${BINARY_SUFFIX}" \
   -o "$TMP_BINARY"
 chmod +x "$TMP_BINARY"
 
@@ -79,11 +97,12 @@ chmod +x "$TMP_BINARY"
 echo "[3/3] Installing service..."
 
 # The binary's "install" subcommand:
-#   - Writes /etc/obliguard-agent/config.json (generates device UUID)
+#   - Writes /etc/obliguard-agent/config.json (generates device UUID,
+#     tlsInsecureSkipVerify from --tls-insecure=0|1)
 #   - Copies itself to /usr/local/bin/obliguard-agent
 #   - Writes /Library/LaunchDaemons/com.obliguard.agent.plist
 #   - Runs: launchctl load <plist>
-"$TMP_BINARY" --url "$SERVER_URL" --key "$API_KEY" install
+"$TMP_BINARY" --url "$SERVER_URL" --key "$API_KEY" "$TLS_FLAG" install
 
 # Clean up temp binary (the binary already copied itself to /usr/local/bin/)
 rm -f "$TMP_BINARY"

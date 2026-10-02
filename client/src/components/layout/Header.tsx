@@ -20,36 +20,32 @@ const isNativeApp = typeof window !== 'undefined' &&
 
 // ── App switcher data ───────────────────────────────────────────────────────
 //
-// Per D:\Mockup\obli-design-system.md §1 + §4.1 — seven fixed pills, current
-// app glowing with its own brand colour. Order is fixed across the suite so
-// muscle memory carries between apps.
+// Per D:\Mockup\obli-design-system.md §1 + §4.1 — pills, current app glowing
+// with its own brand colour. The set of apps, their label, colour and order
+// come entirely from Obligate (GET /api/auth/connected-apps, already sorted
+// by its admin-controlled sort_order): a new app registered in Obligate
+// appears here with zero code change. Obliguard only needs to know its own
+// identity (CURRENT_APP) to find itself in that list — never the others.
 
-type AppType = 'obliview' | 'obliguard' | 'oblimap' | 'obliance' | 'obliplan' | 'oblidesk' | 'oblihub';
+const CURRENT_APP = 'obliguard';
 
-interface AppEntry {
-  type: AppType;
-  label: string;
-  /** Brand dot colour. Reused as the active pill's text + glow. */
-  color: string;
+/** Fallback dot colour for an app Obligate hasn't been given a brand colour for yet. */
+const FALLBACK_COLOR = '#8B949E';
+
+interface ConnectedAppEntry {
+  appType: string;
+  name: string;
+  baseUrl: string;
+  icon: string;
+  color: string | null;
+  self?: boolean;
 }
-
-const APP_ORDER: AppEntry[] = [
-  { type: 'obliview',  label: 'Obliview',  color: '#2bc4bd' },
-  { type: 'obliguard', label: 'Obliguard', color: '#f5a623' },
-  { type: 'oblimap',   label: 'Oblimap',   color: '#1edd8a' },
-  { type: 'obliance',  label: 'Obliance',  color: '#e03a3a' },
-  { type: 'obliplan',  label: 'Obliplan',  color: '#7c6cff' },
-  { type: 'oblidesk',  label: 'Oblidesk',  color: '#22b8f5' },
-  { type: 'oblihub',   label: 'Oblihub',   color: '#2d4ec9' },
-];
-
-const CURRENT_APP: AppType = 'obliguard';
 
 export function Header() {
   const { t } = useTranslation();
   const { user, logout } = useAuthStore();
   const { status: socketStatus } = useSocketStore();
-  const [connectedApps, setConnectedApps] = useState<Array<{ appType: string; name: string; baseUrl: string }>>([]);
+  const [connectedApps, setConnectedApps] = useState<ConnectedAppEntry[]>([]);
 
   // Security chips data — Obliguard-specific (shows active bans + suspicious IPs)
   const [activeBans, setActiveBans] = useState<number | null>(null);
@@ -58,7 +54,7 @@ export function Header() {
   useEffect(() => {
     fetch('/api/auth/connected-apps', { credentials: 'include' })
       .then(r => r.json())
-      .then((d: { success: boolean; data?: Array<{ appType: string; name: string; baseUrl: string }> }) => {
+      .then((d: { success: boolean; data?: ConnectedAppEntry[] }) => {
         if (d.success && d.data) setConnectedApps(d.data);
       })
       .catch(() => {});
@@ -88,14 +84,20 @@ export function Header() {
     return () => clearInterval(interval);
   }, []);
 
-  // Build a map of which apps are reachable so we know which pills are
-  // clickable. The current app (Obliguard) is always available.
-  const reachable = new Set<string>([CURRENT_APP]);
-  for (const a of connectedApps) reachable.add(a.appType);
+  // The pills to render: Obligate's list as-is (already sorted by its
+  // admin-controlled sort_order), self-marked entry (or a fallback match on
+  // CURRENT_APP for an Obligate that predates the `self` field) treated as
+  // current. If Obligate is unreachable / hasn't listed us yet, synthesize a
+  // minimal self entry so the current app's own pill never disappears.
+  const hasSelf = connectedApps.some(a => a.self === true || a.appType === CURRENT_APP);
+  const switcherApps: ConnectedAppEntry[] = hasSelf
+    ? connectedApps
+    : [{ appType: CURRENT_APP, name: 'Obliguard', baseUrl: '', icon: '', color: null, self: true }, ...connectedApps];
 
-  const goApp = (app: AppEntry) => {
-    if (app.type === CURRENT_APP) return;
-    const target = connectedApps.find(c => c.appType === app.type);
+  const goApp = (app: ConnectedAppEntry) => {
+    const isCurrent = app.self === true || app.appType === CURRENT_APP;
+    if (isCurrent) return;
+    const target = connectedApps.find(c => c.appType === app.appType);
     if (!target) return;
     // Cross-app tenant handoff: forward the current tenant slug so the target
     // app can re-select the same tenant after Obligate SSO completes. Falls
@@ -129,31 +131,29 @@ export function Header() {
           apps are hidden entirely rather than greyed out. */}
       {!isNativeApp && (
         <nav className="flex items-center gap-1 rounded-lg bg-bg-hover p-1 ml-1">
-          {APP_ORDER
-            .filter((app) => app.type === CURRENT_APP || reachable.has(app.type))
-            .map((app) => {
-              const isCurrent = app.type === CURRENT_APP;
-              return (
-                <button
-                  key={app.type}
-                  type="button"
-                  onClick={() => goApp(app)}
-                  className={cn(
-                    'flex items-center gap-2 px-3 py-1.5 rounded-md text-[12.5px] font-medium transition-colors',
-                    isCurrent
-                      ? 'bg-bg-secondary text-text-primary font-semibold shadow-[0_1px_3px_rgb(46_52_64_/_0.1)]'
-                      : 'text-text-secondary hover:bg-bg-active hover:text-text-primary',
-                  )}
-                  title={app.label}
-                >
-                  <span
-                    className="w-2 h-2 rounded-full shrink-0"
-                    style={{ background: app.color }}
-                  />
-                  {app.label}
-                </button>
-              );
-            })}
+          {switcherApps.map((app) => {
+            const isCurrent = app.self === true || app.appType === CURRENT_APP;
+            return (
+              <button
+                key={app.appType}
+                type="button"
+                onClick={() => goApp(app)}
+                className={cn(
+                  'flex items-center gap-2 px-3 py-1.5 rounded-md text-[12.5px] font-medium transition-colors',
+                  isCurrent
+                    ? 'bg-bg-secondary text-text-primary font-semibold shadow-[0_1px_3px_rgb(46_52_64_/_0.1)]'
+                    : 'text-text-secondary hover:bg-bg-active hover:text-text-primary',
+                )}
+                title={app.name}
+              >
+                <span
+                  className="w-2 h-2 rounded-full shrink-0"
+                  style={{ background: app.color ?? FALLBACK_COLOR }}
+                />
+                {app.name}
+              </button>
+            );
+          })}
         </nav>
       )}
 

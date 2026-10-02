@@ -7,8 +7,9 @@
  * agentWss.handleUpgrade and answered with a plain HTTP status
  * (400/401/403/429/503). Mirrors Obliance's pre-upgrade verdict + rejectUpgrade.
  *
- * Later lots edit this file rather than index.ts: B3-4 (clientIp) edits
- * checkAgentUpgrade, D6 (maxPayload) the WebSocketServer construction below.
+ * Later lots edit this file rather than index.ts: D6 (maxPayload) edits the
+ * WebSocketServer construction below. The client address comes from
+ * utils/clientIp (right-most untrusted X-Forwarded-For hop).
  */
 import type http from 'http';
 import { STATUS_CODES } from 'http';
@@ -18,6 +19,7 @@ import { WebSocketServer } from 'ws';
 import type { WebSocket } from 'ws';
 import { db } from '../db';
 import { logger } from '../utils/logger';
+import { clientIp as requestClientIp } from '../utils/clientIp';
 import { isAgentApiKeyFormat, isDeviceUuidFormat } from '../utils/agentIdentity';
 import { agentService, warnBindingRefused, AGENT_MAX_PENDING_PER_KEY } from './agent.service';
 import { obliguardHub } from './obliguardHub.service';
@@ -74,11 +76,7 @@ export async function checkAgentUpgrade(request: IncomingMessage): Promise<Agent
     return { ok: false, status: 429, reason: 'Enrolment deferred: pending device cap reached' };
   }
 
-  // B3-4 replaces this with utils/clientIp
-  const clientIp =
-    (request.headers['x-forwarded-for'] as string | undefined)?.split(',')[0].trim() ??
-    request.socket.remoteAddress ??
-    '';
+  const clientIp = requestClientIp(request);
 
   return { ok: true, apiKeyId: keyRow.id, tenantId: keyRow.tenant_id, deviceUuid: devUuid, clientIp, rowless: !v.device };
 }

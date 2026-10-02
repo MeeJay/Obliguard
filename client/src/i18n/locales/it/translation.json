@@ -162,7 +162,6 @@
     "stepLanguage": "Lingua",
     "stepProfile": "Profilo",
     "stepAlerts": "Avvisi",
-    "stepPassword": "Password",
     "stepSecurity": "Sicurezza",
     "completing": "Completamento…",
     "complete": "Termina configurazione",
@@ -193,21 +192,6 @@
       "topCenter": "In alto al centro",
       "topCenterDesc": "Solo l'ultimo avviso, si chiude automaticamente dopo 10 secondi.",
       "previewAlt": "Anteprima posizione avviso"
-    },
-    "password": {
-      "title": "Imposta una password",
-      "subtitleRequired": "Il tuo account è stato creato tramite SSO e non ha ancora una password. Impostane una per poter accedere direttamente.",
-      "subtitleOptional": "Hai già una password. Lascia i campi vuoti per mantenere quella attuale.",
-      "label": "Password",
-      "newLabel": "Nuova password",
-      "confirmLabel": "Conferma password",
-      "placeholder": "Almeno 8 caratteri",
-      "optionalPlaceholder": "Lascia vuoto per mantenere quella attuale",
-      "confirmPlaceholder": "Ripeti la password",
-      "tooShort": "La password deve contenere almeno 8 caratteri.",
-      "mismatch": "Le password non corrispondono.",
-      "required": "Una password è obbligatoria per il tuo account.",
-      "failed": "Impossibile impostare la password. Riprova."
     },
     "security": {
       "title": "Autenticazione a due fattori",

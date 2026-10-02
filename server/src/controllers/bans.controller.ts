@@ -6,6 +6,7 @@ import { db } from '../db';
 import { isMasterTenant } from '@obliview/shared';
 import { parsePaging } from '../utils/pagination';
 import { parseBanTarget } from '../utils/ipValidation';
+import { isInetLiteral } from '../services/whitelist.service';
 import { logger } from '../utils/logger';
 
 export async function getBanById(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -22,8 +23,9 @@ export async function wipeAllBans(req: Request, res: Response, next: NextFunctio
   try {
     // Platform-wide reset: platform admin (route) AND the Default tenant.
     if (!isMasterTenant(req.tenantId)) throw new AppError(403, 'Wipe is only available from the Default tenant');
-    // Mark all active bans as inactive (not delete) so agents receive the "remove" delta
-    const count = await db('ip_bans').where({ is_active: true }).update({ is_active: false });
+    // Deactivate (not delete) so agents receive the "remove" delta; lifted_at
+    // keeps the BanEngine from re-minting them from the same failures.
+    const count = await banService.wipeAll({ userId: req.session?.userId ?? null, tenantId: req.tenantId });
     res.json({ success: true, message: `Lifted ${count} active bans` });
   } catch (err) { next(err); }
 }
@@ -128,21 +130,39 @@ export async function bulkWhitelist(req: Request, res: Response, next: NextFunct
     // the Default/master tenant whitelists globally, any other tenant locally.
     const scope = isMasterTenant(req.tenantId) ? 'global' : 'tenant';
     const tenantId = scope === 'global' ? null : req.tenantId;
+    if (ips.length > 1000) throw new AppError(400, 'At most 1000 ips per request');
     let created = 0;
-    for (const ip of ips) {
-      const existing = await db('ip_whitelist').where({ ip }).first();
-      if (existing) continue;
-      await db('ip_whitelist').insert({
-        ip: db.raw('?::cidr', [ip]),
-        label: label || null,
-        scope,
-        scope_id: null,
-        created_by: req.session?.userId,
-        tenant_id: tenantId,
-      });
-      created++;
+    let invalid = 0;
+    for (const raw of ips) {
+      if (typeof raw !== 'string' || !isInetLiteral(raw)) { invalid++; continue; }
+      const ip = raw.trim();
+      // Dedupe within the operating tenant's own scope only: another tenant's
+      // local entry for the same address must not block this one (W1-2).
+      try {
+        const existing = await db('ip_whitelist')
+          .whereRaw('ip = ?::cidr', [ip])
+          .where({ scope })
+          .whereNull('scope_id')
+          .where((q) => { if (tenantId === null) q.whereNull('tenant_id'); else q.where('tenant_id', tenantId); })
+          .first('id');
+        if (existing) continue;
+        await db('ip_whitelist').insert({
+          ip: db.raw('?::cidr', [ip]),
+          label: label || null,
+          scope,
+          scope_id: null,
+          created_by: req.session?.userId,
+          tenant_id: tenantId,
+        });
+        created++;
+      } catch (err) {
+        const code = (err as { code?: string }).code;
+        if (code === '23505') continue;        // concurrent insert of the same entry
+        if (code === '22P02') { invalid++; continue; } // host bits set, e.g. 10.0.0.1/8
+        throw err;
+      }
     }
-    res.json({ success: true, created });
+    res.json({ success: true, created, ...(invalid > 0 ? { invalid } : {}) });
   } catch (err) { next(err); }
 }
 

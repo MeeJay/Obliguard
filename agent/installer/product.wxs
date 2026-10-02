@@ -12,6 +12,11 @@
 
   Install command:
     msiexec /i obliguard-agent.msi SERVERURL="https://..." APIKEY="your-key" /quiet
+
+  Self-signed server certificate (not in the Windows trust store): add
+    TLS_INSECURE=1   skip certificate verification on every server connection
+  TLS_INSECURE=0 turns verification back on; leaving it out keeps the value
+  already stored in config.json (silent self-updates never pass it).
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <Package Name="Obliguard Agent"
@@ -26,6 +31,8 @@
     <!-- Properties passed via: msiexec /i ... SERVERURL="..." APIKEY="..." -->
     <Property Id="SERVERURL" Secure="yes" />
     <Property Id="APIKEY" Secure="yes" />
+    <!-- Optional: 1 = tlsInsecureSkipVerify, 0 = verify; empty = keep config.json -->
+    <Property Id="TLS_INSECURE" Secure="yes" />
 
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="ObliguardAgent">
@@ -36,6 +43,8 @@
           so the MSI Wait="yes" (default) resolves normally without hanging.
           The url and key flags are passed as service arguments; on first run the
           agent writes config.json and from then on reads that file directly.
+          tls-insecure is empty unless TLS_INSECURE is given, which leaves the
+          value persisted in config.json unchanged.
         -->
         <Component Id="AgentExe" Guid="A1B2C3D4-E5F6-7890-ABCD-EF1234560001">
           <!--
@@ -55,7 +64,16 @@
                           Type="ownProcess"
                           Account="LocalSystem"
                           ErrorControl="normal"
-                          Arguments='--url "[SERVERURL]" --key "[APIKEY]"' />
+                          Arguments='--url "[SERVERURL]" --key "[APIKEY]" --tls-insecure=[TLS_INSECURE]' />
+          <!--
+            SCM recovery actions (restart, restart, restart; reset after 1 day)
+            are applied by the agent itself at every service start
+            (service_windows.go ensureRecoveryActions): the MSI
+            ServiceConfigFailureActions table is documented as unreliable
+            (WIX1149) and util:ServiceConfig needs the WixToolset.Util
+            extension in the build. A stop requested through the SCM
+            (self-update, restart_windows.go) is not a failure.
+          -->
           <ServiceControl Id="AgentSvcStart" Name="ObliguardAgent" Start="install" />
           <ServiceControl Id="AgentSvcStop"  Name="ObliguardAgent" Stop="both" Remove="uninstall" Wait="yes" />
         </Component>

@@ -94,7 +94,12 @@
     "workspaces": "Workspaces",
     "signOut": "Se déconnecter",
     "pinSidebar": "Épingler la barre latérale",
-    "floatSidebar": "Barre latérale flottante"
+    "floatSidebar": "Barre latérale flottante",
+    "addAgent": "Ajouter un agent",
+    "collapseSidebar": "Réduire la barre latérale",
+    "expandSidebar": "Déployer la barre latérale",
+    "liveEvents": "Événements en direct",
+    "searchAgents": "Rechercher des agents…"
   },
   "login": {
     "title": "Tableau de bord de surveillance",
@@ -126,7 +131,10 @@
     "ssoChecking": "Vérification de l'authentification...",
     "ssoRedirecting": "Redirection vers la page de connexion...",
     "clientVersion": "client v{{version}}",
-    "serverVersion": "serveur v{{version}}"
+    "serverVersion": "serveur v{{version}}",
+    "accountDisabled": "Votre compte est désactivé sur ce serveur. Demandez à un administrateur de le réactiver.",
+    "signInWithSso": "Se connecter avec l'SSO Obligate",
+    "ssoFailed": "L'authentification SSO a échoué. Essayez la connexion locale."
   },
   "forgotPassword": {
     "title": "Réinitialiser votre mot de passe",
@@ -163,7 +171,6 @@
     "stepLanguage": "Langue",
     "stepProfile": "Profil",
     "stepAlerts": "Alertes",
-    "stepPassword": "Mot de passe",
     "stepSecurity": "Sécurité",
     "completing": "Finalisation…",
     "complete": "Terminer la configuration",
@@ -194,21 +201,6 @@
       "topCenter": "En haut au centre",
       "topCenterDesc": "Seulement la dernière alerte, disparition automatique après 10 secondes.",
       "previewAlt": "Aperçu de la position des alertes"
-    },
-    "password": {
-      "title": "Définir un mot de passe",
-      "subtitleRequired": "Votre compte a été créé via SSO et n'a pas encore de mot de passe. Définissez-en un pour pouvoir vous connecter directement.",
-      "subtitleOptional": "Vous avez déjà un mot de passe. Laissez les champs vides pour conserver l'actuel.",
-      "label": "Mot de passe",
-      "newLabel": "Nouveau mot de passe",
-      "confirmLabel": "Confirmer le mot de passe",
-      "placeholder": "Au moins 8 caractères",
-      "optionalPlaceholder": "Laisser vide pour conserver l'actuel",
-      "confirmPlaceholder": "Répétez votre mot de passe",
-      "tooShort": "Le mot de passe doit contenir au moins 8 caractères.",
-      "mismatch": "Les mots de passe ne correspondent pas.",
-      "required": "Un mot de passe est requis pour votre compte.",
-      "failed": "Échec de la définition du mot de passe. Veuillez réessayer."
     },
     "security": {
       "title": "Authentification à deux facteurs",
@@ -254,7 +246,38 @@
     "selectedCount_one": "{{count}} moniteur sélectionné",
     "selectedCount_other": "{{count}} moniteurs sélectionnés",
     "selectedCountAgent_one": "{{count}} agent sélectionné",
-    "selectedCountAgent_other": "{{count}} agents sélectionnés"
+    "selectedCountAgent_other": "{{count}} agents sélectionnés",
+    "activeBans": "Blocages actifs",
+    "agents": "Agents",
+    "agentsConnected": "Agents connectés",
+    "agentsEvaluateOnly": "{{count}} en évaluation seule",
+    "agentsOnlineCount": "{{online}}/{{total}} en ligne",
+    "agentsOutdated": "{{count}} obsolète(s)",
+    "attacks24h": "Attaques (24 h)",
+    "bans24h": "blocages 24 h",
+    "bansTodaySplit": "+{{auto}} auto · +{{manual}} manuels aujourd'hui",
+    "colBannedAt": "Bloqué le",
+    "colCountry": "Pays",
+    "colFailures": "Échecs",
+    "colLastSeen": "Vu en dernier",
+    "colReason": "Raison",
+    "colScope": "Portée",
+    "colType": "Type",
+    "events24h": "événements 24 h",
+    "failuresTodaySub": "{{failures}} échecs / {{events}} événements aujourd'hui",
+    "hostileIps24h": "IP hostiles (24 h)",
+    "hostileIpsTodaySub": "{{count}} aujourd'hui",
+    "lastSeen": "vu en dernier",
+    "lift": "Lever",
+    "liftConfirm": "Lever le blocage de {{ip}} ?",
+    "liftFailed": "Échec de la levée du blocage",
+    "lifted": "Blocage de {{ip}} levé",
+    "noAgents": "Aucun agent enregistré pour le moment",
+    "noBans": "Aucun blocage actif",
+    "noIpData": "Aucune donnée de réputation IP",
+    "recentBans": "Blocages récents",
+    "topIps": "Top des IP par nombre d'échecs",
+    "viewAll": "Tout voir"
   },
   "monitors": {
     "new": "Ajouter un moniteur",
@@ -482,7 +505,8 @@
       "temperatures": "Températures",
       "pauseAll": "Tout mettre en pause",
       "resumeAll": "Tout reprendre",
-      "clearData": "Effacer les données"
+      "clearData": "Effacer les données",
+      "suspended": "Suspendu"
     }
   },
   "notifications": {
@@ -514,7 +538,10 @@
     "selectTenant": "— Sélectionnez un espace de travail —",
     "grantAccess": "Accorder l'accès",
     "removeTenantAccess": "Retirer l'accès à l'espace de travail",
-    "failedTenantAssign": "Échec de la mise à jour de l'accès à l'espace de travail"
+    "failedTenantAssign": "Échec de la mise à jour de l'accès à l'espace de travail",
+    "viewChannel": "Canal (lecture seule)",
+    "readOnlyHint": "Ce canal est partagé avec cet espace de travail par son propriétaire. Il ne peut pas être modifié ici et ses secrets sont masqués.",
+    "readOnlyShared": "Lecture seule"
   },
   "settings": {
     "obligate": {
@@ -648,7 +675,8 @@
       "enterCode": "Saisissez le code envoyé à {{email}}",
       "emailOtpEnabled": "OTP par e-mail activé",
       "invalidCode": "Code invalide"
-    }
+    },
+    "emailCurrentPassword": "Mot de passe actuel (requis pour changer l'adresse e-mail)"
   },
   "users": {
     "tabUsers": "Utilisateurs",
@@ -701,7 +729,12 @@
       "failedAddPermission": "Échec de l'ajout de la permission",
       "failedUpdatePermission": "Échec de la mise à jour de la permission",
       "failedRemovePermission": "Échec de la suppression de la permission"
-    }
+    },
+    "confirmReset2fa": "Réinitialiser l'authentification à deux facteurs de {{username}} ? Ses codes TOTP et e-mail sont supprimés et toutes ses sessions sont fermées.",
+    "reset2fa": "Réinitialiser la 2FA",
+    "reset2faDone": "Authentification à deux facteurs réinitialisée",
+    "reset2faFailed": "Échec de la réinitialisation de l'authentification à deux facteurs",
+    "tabPermissions": "Permissions"
   },
   "agents": {
     "foreignReadOnly": "Cet agent appartient à un autre tenant. Il est en lecture seule ici : basculez sur son tenant pour le modifier.",
@@ -964,13 +997,15 @@
     "promoteConfirm": "Promouvoir le ban de {{ip}} en ban global ? Il sera appliqué sur tous les agents de tous les tenants et sa raison deviendra visible de tous les tenants.",
     "promoted": "{{ip}} est maintenant banni globalement",
     "dangerZoneDefaultOnly": "Passez sur le tenant Default pour utiliser la zone de danger : les effacements s'appliquent à tous les tenants."
-  },  "header": {
+  },
+  "header": {
     "signedInAs": "Connecté en tant que",
     "disableAlerts": "Désactiver les alertes en direct",
     "enableAlerts": "Activer les alertes en direct",
     "socketConnected": "En direct — connecté au serveur",
     "socketReconnecting": "Reconnexion au serveur…",
-    "socketDisconnected": "Déconnecté du serveur — Cliquez pour recharger"
+    "socketDisconnected": "Déconnecté du serveur — Cliquez pour recharger",
+    "suspiciousIps": "IP suspectes"
   },
   "tenant": {
     "pageTitle": "Espaces de travail",
@@ -1003,7 +1038,8 @@
     "clearFavourite": "Espace favori (cliquer pour retirer)",
     "favouriteHint": "L'espace favori s'ouvre à la connexion",
     "favouriteLabel": "Espace de travail favori",
-    "noFavourite": "Aucun (premier espace)"
+    "noFavourite": "Aucun (premier espace)",
+    "label": "Tenant"
   },
   "evaluateOnly": {
     "badge": "Évaluation",
@@ -1033,7 +1069,8 @@
       "group": "groupe",
       "global": "global",
       "default": "défaut",
-      "unresolved": "indisponible"
+      "unresolved": "indisponible",
+      "tenant": "politique du tenant"
     },
     "frozenBy": "Gelé par : {{source}}",
     "frozenBadge": "Mises à jour gelées",
@@ -1067,5 +1104,10 @@
       "unknown": "{{count}} inconnue(s)"
     },
     "dashboardOutdated": "{{count}} agent(s) en retard sur v{{version}}"
+  },
+  "liveEvents": {
+    "banFailed": "Échec du blocage de {{ip}}",
+    "whitelistFailed": "Échec de l'ajout de {{ip}} à la liste blanche",
+    "whitelisted": "{{ip}} ajoutée à la liste blanche"
   }
 }

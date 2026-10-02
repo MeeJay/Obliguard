@@ -1,4 +1,5 @@
-import type { NotificationPlugin, NotificationPayload } from '../types';
+import type { NotificationPlugin } from '../types';
+import type { IpsNotificationPayload } from '../../services/notification.service';
 import { statusIcon } from '../statusIcons';
 
 export const freemobilePlugin: NotificationPlugin = {
@@ -10,10 +11,12 @@ export const freemobilePlugin: NotificationPlugin = {
     { key: 'apiKey', label: 'API Key', type: 'password', required: true },
   ],
 
-  async send(config, payload) {
+  async send(config, payload: IpsNotificationPayload) {
     const icon = statusIcon(payload.newStatus);
-    const prefix = payload.appName || 'Obliview';
-    const msg = `[${prefix}] ${icon} ${payload.monitorName}: ${payload.oldStatus} → ${payload.newStatus}${payload.message ? ` - ${payload.message}` : ''}`;
+    const prefix = payload.appName || 'Obliguard';
+    const msg = payload.kind
+      ? `[${prefix}] ${icon} ${payload.message ?? payload.title ?? payload.monitorName}`
+      : `[${prefix}] ${icon} ${payload.monitorName}: ${payload.oldStatus} → ${payload.newStatus}${payload.message ? ` - ${payload.message}` : ''}`;
 
     const params = new URLSearchParams({
       user: String(config.userId),
@@ -28,12 +31,15 @@ export const freemobilePlugin: NotificationPlugin = {
   },
 
   async sendTest(config) {
-    await this.send(config, {
-      monitorName: 'Test Monitor',
+    const payload: IpsNotificationPayload = {
+      monitorName: 'Obliguard',
       oldStatus: 'up',
-      newStatus: 'down',
-      message: 'Test from Obliview',
+      newStatus: 'up',
+      kind: 'test',
+      title: 'Test notification',
+      message: 'Test from Obliguard',
       timestamp: new Date().toISOString(),
-    });
+    };
+    await this.send(config, payload);
   },
 };

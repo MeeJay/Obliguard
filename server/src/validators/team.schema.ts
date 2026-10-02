@@ -16,10 +16,13 @@ export const setTeamMembersSchema = z.object({
   userIds: z.array(z.number().int().positive()),
 });
 
+/** Team permission scopes (matches PermissionScope in @obliview/shared). */
+export const TEAM_PERMISSION_SCOPES = ['group', 'agent'] as const;
+
 export const setTeamPermissionsSchema = z.object({
   permissions: z.array(
     z.object({
-      scope: z.enum(['group', 'monitor']),
+      scope: z.enum(TEAM_PERMISSION_SCOPES),
       scopeId: z.number().int().positive(),
       level: z.enum(['ro', 'rw']),
     }),

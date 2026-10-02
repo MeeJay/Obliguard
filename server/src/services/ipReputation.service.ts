@@ -2,6 +2,7 @@ import { db } from '../db';
 import type { IpReputation, IpEvent, IpStatus } from '@obliview/shared';
 import { isMasterTenant } from '@obliview/shared';
 import { seesAllBans, canSeeBanAuthor } from './banVisibility';
+import { parseIpSearch, ipSearchSql } from '../utils/pagination';
 
 /** Per-IP totals computed from ONE tenant's own ip_events (restricted callers). */
 interface TenantAgg {
@@ -139,6 +140,69 @@ function rowToEvent(row: IpEventRow): IpEvent {
     tenantId: row.tenant_id,
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
   };
+}
+
+// ── List sorting / search ────────────────────────────────────────────────────
+
+/** sortBy keys accepted by GET /ip-reputation (bannedAt only applies to status=banned). */
+export const REPUTATION_SORT_KEYS = ['lastSeen', 'failures', 'agents', 'country', 'firstSeen', 'bannedAt'] as const;
+export type ReputationSortKey = typeof REPUTATION_SORT_KEYS[number];
+
+/**
+ * ORDER BY clause for the list (whitelisted keys only, NULLS LAST both ways,
+ * the ip — and the ban id on the banned list — as a stable tie-breaker).
+ * Restricted callers see totals computed from their own ip_events, so they are
+ * also sorted on those (correlated subqueries on idx_ip_events_ip).
+ */
+function reputationOrderBy(
+  key: ReputationSortKey,
+  order: 'asc' | 'desc',
+  o: { banned: boolean; tenantOnly: number | null },
+): { sql: string; bindings: number[] } {
+  const ipCol = o.banned ? 'b.ip' : 'r.ip';
+  const tail = o.banned ? `, ${ipCol} ASC, b.id ASC` : `, ${ipCol} ASC`;
+  const tenantAgg = (agg: string, extra = '') =>
+    `(SELECT ${agg} FROM ip_events se WHERE se.ip = ${ipCol} AND se.tenant_id = ?${extra})`;
+  const num = (col: string) => (o.banned ? `COALESCE(${col}, 0)` : col);
+
+  let expr: string;
+  const bindings: number[] = [];
+  const t = o.tenantOnly;
+  // No ban column on the reputation list: bannedAt falls back to the default.
+  switch (key === 'bannedAt' && !o.banned ? 'lastSeen' : key) {
+    case 'failures':
+      if (t != null) { expr = tenantAgg('count(*)', " AND se.event_type = 'auth_failure'"); bindings.push(t); }
+      else expr = num('r.total_failures');
+      break;
+    case 'agents':
+      if (t != null) { expr = tenantAgg('count(DISTINCT se.device_id)'); bindings.push(t); }
+      else expr = num('r.affected_agents_count');
+      break;
+    case 'country':
+      expr = 'r.geo_country_code';
+      break;
+    case 'firstSeen':
+      if (t != null) { expr = tenantAgg('min(se.timestamp)'); bindings.push(t); }
+      else expr = 'r.first_seen';
+      break;
+    case 'bannedAt':
+      expr = 'b.banned_at';
+      break;
+    case 'lastSeen':
+    default:
+      if (t != null) { expr = tenantAgg('max(se.timestamp)'); bindings.push(t); }
+      else expr = 'r.last_seen';
+  }
+  return { sql: `${expr} ${order} NULLS LAST${tail}`, bindings };
+}
+
+/** Search filter on the ban list: an address finds the bans covering it, a network the bans inside it. */
+function banSearchSql(raw: string): { sql: string; bindings: string[] } {
+  const s = parseIpSearch(raw);
+  const net = 'set_masklen(b.ip, COALESCE(b.cidr_prefix, masklen(b.ip)))';
+  if (s.kind === 'exact') return { sql: `?::inet <<= ${net}`, bindings: [s.value] };
+  if (s.kind === 'cidr') return { sql: `${net} <<= ?::inet`, bindings: [s.value] };
+  return ipSearchSql('b.ip', s);
 }
 
 // ── Service ──────────────────────────────────────────────────────────────────
@@ -414,12 +478,18 @@ class IpReputationService {
     search?: string;
     limit?: number;
     offset?: number;
+    /** Whitelisted key; omitted = lastSeen (bannedAt on the banned list). */
+    sortBy?: ReputationSortKey;
+    sortOrder?: 'asc' | 'desc';
   }): Promise<{ data: IpReputation[]; total: number }> {
-    const limit  = filters.limit  ?? 50;
-    const offset = filters.offset ?? 0;
+    // Bounded even when called without the controller's parsing.
+    const limit  = Math.min(Math.max(filters.limit ?? 50, 1), 500);
+    const offset = Math.max(filters.offset ?? 0, 0);
     const tenantId = filters.tenantId;
     const isAdmin  = filters.isAdmin ?? false;
     const restrict = !seesAllBans(tenantId, isAdmin);
+    const sortOrder = filters.sortOrder ?? 'desc';
+    const tenantOnly = restrict && tenantId != null ? tenantId : null;
 
     // ── "Banned" uses ip_bans as the driving table ──────────────────────────
     // This guarantees IPs that are banned but have no reputation row still appear.
@@ -469,13 +539,16 @@ class IpReputationService {
       }
 
       if (filters.search) {
-        q.whereRaw("b.ip::text ILIKE ?", [`%${filters.search}%`]);
+        const s = banSearchSql(filters.search);
+        q.whereRaw(s.sql, s.bindings);
       }
 
       const countResult = await q.clone().clearSelect().count('b.id as count').first() as { count: string } | undefined;
       const total = Number(countResult?.count ?? 0);
 
-      const rows = await q.orderBy('b.banned_at', 'desc').limit(limit).offset(offset) as Array<
+      // Historical default: newest ban first.
+      const order = reputationOrderBy(filters.sortBy ?? 'bannedAt', sortOrder, { banned: true, tenantOnly });
+      const rows = await q.orderByRaw(order.sql, order.bindings).limit(limit).offset(offset) as Array<
         IpReputationRow & {
           active_ban_id: number | null;
           active_ban_scope: string | null;
@@ -565,8 +638,9 @@ class IpReputationService {
       );
     }
 
-    if (filters.search) {
-      baseQuery.whereRaw('r.ip::text ILIKE ?', [`%${filters.search}%`]);
+    const search = filters.search ? ipSearchSql('r.ip', parseIpSearch(filters.search)) : null;
+    if (search) {
+      baseQuery.whereRaw(search.sql, search.bindings);
     }
 
     if (filters.status) {
@@ -593,8 +667,8 @@ class IpReputationService {
       );
     }
 
-    if (filters.search) {
-      countQuery.whereRaw('r.ip::text ILIKE ?', [`%${filters.search}%`]);
+    if (search) {
+      countQuery.whereRaw(search.sql, search.bindings);
     }
 
     if (filters.status) {
@@ -604,8 +678,9 @@ class IpReputationService {
     const [countResult] = await countQuery;
     const total = Number(countResult?.count ?? 0);
 
+    const order = reputationOrderBy(filters.sortBy ?? 'lastSeen', sortOrder, { banned: false, tenantOnly });
     const rows = await baseQuery
-      .orderBy('r.last_seen', 'desc')
+      .orderByRaw(order.sql, order.bindings)
       .limit(limit)
       .offset(offset);
 

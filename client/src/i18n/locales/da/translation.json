@@ -162,7 +162,6 @@
     "stepLanguage": "Sprog",
     "stepProfile": "Profil",
     "stepAlerts": "Advarsler",
-    "stepPassword": "Adgangskode",
     "stepSecurity": "Sikkerhed",
     "completing": "Afslutter…",
     "complete": "Afslut opsætning",
@@ -193,21 +192,6 @@
       "topCenter": "Top center",
       "topCenterDesc": "Seneste advarsel kun, auto-fjernes efter 10 sekunder.",
       "previewAlt": "Forhåndsvisning af advarselposition"
-    },
-    "password": {
-      "title": "Indstil en adgangskode",
-      "subtitleRequired": "Din konto blev oprettet via SSO og har ingen adgangskode endnu. Indstil en for at kunne logge ind direkte.",
-      "subtitleOptional": "Du har allerede en adgangskode. Lad felterne være tomme for at beholde din nuværende.",
-      "label": "Adgangskode",
-      "newLabel": "Ny adgangskode",
-      "confirmLabel": "Bekræft adgangskode",
-      "placeholder": "Mindst 8 tegn",
-      "optionalPlaceholder": "Lad være tom for at beholde nuværende",
-      "confirmPlaceholder": "Gentag din adgangskode",
-      "tooShort": "Adgangskode skal være mindst 8 tegn.",
-      "mismatch": "Adgangskoderne stemmer ikke overens.",
-      "required": "En adgangskode er påkrævet for din konto.",
-      "failed": "Kunne ikke indstille adgangskode. Prøv igen."
     },
     "security": {
       "title": "Tofaktorgodkendelse",

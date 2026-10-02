@@ -1,4 +1,5 @@
-import type { NotificationPlugin, NotificationPayload } from '../types';
+import type { NotificationPlugin } from '../types';
+import type { IpsNotificationPayload } from '../../services/notification.service';
 
 export const webhookPlugin: NotificationPlugin = {
   type: 'webhook',
@@ -9,7 +10,10 @@ export const webhookPlugin: NotificationPlugin = {
     { key: 'secret', label: 'Secret Header (optional)', type: 'password', placeholder: 'Bearer token or secret' },
   ],
 
-  async send(config, payload) {
+  // The JSON body is the whole payload: legacy fields (monitorName,
+  // oldStatus, newStatus, message) plus the IPS fields (kind, title, ip,
+  // service, failureCount, username, agentName, tenantName, url).
+  async send(config, payload: IpsNotificationPayload) {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (config.secret) headers['Authorization'] = String(config.secret);
 
@@ -23,12 +27,15 @@ export const webhookPlugin: NotificationPlugin = {
   },
 
   async sendTest(config) {
-    await this.send(config, {
-      monitorName: 'Test Monitor',
+    const payload: IpsNotificationPayload = {
+      monitorName: 'Obliguard',
       oldStatus: 'up',
-      newStatus: 'down',
-      message: 'This is a test notification from Obliview',
+      newStatus: 'up',
+      kind: 'test',
+      title: 'Test notification',
+      message: 'This is a test notification from Obliguard',
       timestamp: new Date().toISOString(),
-    });
+    };
+    await this.send(config, payload);
   },
 };

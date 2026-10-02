@@ -78,7 +78,9 @@ type pushResponse struct {
 	Command    string                        `json:"command,omitempty"`
 }
 
-var httpClient = &http.Client{Timeout: 30 * time.Second}
+// pushTimeout bounds the legacy HTTP push (client built per call so it follows
+// the TLS policy installed by setupConfig, tlsconfig.go).
+const pushTimeout = 30 * time.Second
 
 func push(cfg *Config, lw *LogWatcher, fw FirewallManager) {
 	// Collect detected services
@@ -122,9 +124,9 @@ func push(cfg *Config, lw *LogWatcher, fw FirewallManager) {
 	req.Header.Set("X-API-Key", cfg.APIKey)
 	req.Header.Set("X-Device-UUID", cfg.DeviceUUID)
 
-	resp, err := httpClient.Do(req)
+	resp, err := newHTTPClient(pushTimeout).Do(req)
 	if err != nil {
-		log.Printf("Push error: %v", err)
+		log.Printf("Push error: %s", tlsHint(err))
 		applyBackoff(cfg)
 		return
 	}
@@ -207,9 +209,9 @@ func push(cfg *Config, lw *LogWatcher, fw FirewallManager) {
 			}
 		}
 
-		// Piggy-backed version check
+		// Piggy-backed version check (background, behind the in-progress guard)
 		if result.LatestVersion != "" {
-			applyUpdateIfNewer(cfg, result.LatestVersion)
+			startUpdateIfNewer(cfg, result.LatestVersion)
 		}
 
 	case 202:

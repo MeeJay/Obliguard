@@ -162,7 +162,6 @@
     "stepLanguage": "Jazyk",
     "stepProfile": "Profil",
     "stepAlerts": "Upozornění",
-    "stepPassword": "Heslo",
     "stepSecurity": "Zabezpečení",
     "completing": "Dokončování…",
     "complete": "Dokončit nastavení",
@@ -193,21 +192,6 @@
       "topCenter": "Nahoře uprostřed",
       "topCenterDesc": "Pouze nejnovější upozornění, automaticky skryto po 10 sekundách.",
       "previewAlt": "Náhled pozice upozornění"
-    },
-    "password": {
-      "title": "Nastavit heslo",
-      "subtitleRequired": "Váš účet byl vytvořen přes SSO a zatím nemá heslo. Nastavte si jedno, abyste se mohli přihlásit přímo.",
-      "subtitleOptional": "Již máte heslo. Nechte pole prázdná, abyste si zachovali aktuální.",
-      "label": "Heslo",
-      "newLabel": "Nové heslo",
-      "confirmLabel": "Potvrzení hesla",
-      "placeholder": "Nejméně 8 znaků",
-      "optionalPlaceholder": "Nechte prázdné, abyste si zachovali aktuální",
-      "confirmPlaceholder": "Zopakujte heslo",
-      "tooShort": "Heslo musí mít alespoň 8 znaků.",
-      "mismatch": "Hesla se neshodují.",
-      "required": "Heslo pro váš účet je povinné.",
-      "failed": "Nastavení hesla se nezdařilo. Zkuste to znovu."
     },
     "security": {
       "title": "Dvoufaktorové ověření",

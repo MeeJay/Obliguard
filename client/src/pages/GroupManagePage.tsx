@@ -1,5 +1,5 @@
 import { useState, useEffect, type FormEvent } from 'react';
-import { Plus, Pencil, Trash2, FolderTree, GripVertical, RotateCcw, Bell, Server } from 'lucide-react';
+import { Plus, Pencil, Trash2, FolderTree, GripVertical, Server } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import {
   DndContext,
@@ -18,9 +18,7 @@ import { useGroupStore } from '@/store/groupStore';
 import { Button } from '@/components/common/Button';
 import { Input } from '@/components/common/Input';
 import { GroupPicker } from '@/components/common/GroupPicker';
-import { SettingsPanel } from '@/components/settings/SettingsPanel';
 import { NotificationBindingsPanel } from '@/components/notifications/NotificationBindingsPanel';
-import { MaintenanceWindowList } from '@/components/maintenance/MaintenanceWindowList';
 import { cn } from '@/utils/cn';
 import { anonHostname } from '@/utils/anonymize';
 import toast from 'react-hot-toast';
@@ -30,7 +28,6 @@ interface GroupFormData {
   description: string;
   parentId: number | null;
   isGeneral: boolean;
-  groupNotifications: boolean;
   kind: 'agent';
 }
 
@@ -39,7 +36,6 @@ const emptyForm: GroupFormData = {
   description: '',
   parentId: null,
   isGeneral: false,
-  groupNotifications: false,
   kind: 'agent',
 };
 
@@ -121,7 +117,6 @@ export function GroupManagePage() {
       description: group.description || '',
       parentId: group.parentId,
       isGeneral: group.isGeneral,
-      groupNotifications: group.groupNotifications,
       kind: group.kind,
     });
     setShowForm(true);
@@ -136,7 +131,6 @@ export function GroupManagePage() {
           name: form.name,
           description: form.description || null,
           isGeneral: form.isGeneral,
-          groupNotifications: form.groupNotifications,
         });
         toast.success(t('groups.updated'));
       } else {
@@ -145,7 +139,6 @@ export function GroupManagePage() {
           description: form.description || null,
           parentId: form.parentId,
           isGeneral: form.isGeneral,
-          groupNotifications: form.groupNotifications,
           kind: form.kind,
         });
         toast.success(t('groups.created'));
@@ -159,18 +152,6 @@ export function GroupManagePage() {
       toast.error(editingId ? t('groups.failedUpdate') : t('groups.failedCreate'));
     } finally {
       setSaving(false);
-    }
-  };
-
-  const handleClearHeartbeats = async (id: number, name: string) => {
-    if (!confirm(t('groups.confirmClear', { name }))) {
-      return;
-    }
-    try {
-      const result = await groupsApi.clearHeartbeats(id);
-      toast.success(t('groups.cleared', { heartbeats: result.deleted, monitors: result.monitorCount }));
-    } catch {
-      toast.error(t('groups.failedClear'));
     }
   };
 
@@ -360,28 +341,6 @@ export function GroupManagePage() {
                     {t('groups.form.isGeneral')}
                   </label>
                 </div>
-                <div className="space-y-1">
-                  <div className="flex items-center gap-2">
-                    <div className="relative h-4 w-4 shrink-0">
-                      <input
-                        type="checkbox"
-                        id="group-notifications"
-                        checked={form.groupNotifications}
-                        onChange={(e) => setForm({ ...form, groupNotifications: e.target.checked })}
-                        className="peer appearance-none h-4 w-4 rounded border cursor-pointer transition-colors bg-bg-tertiary border-border checked:bg-accent checked:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30"
-                      />
-                      <svg className="pointer-events-none absolute top-0 left-0 hidden h-4 w-4 text-white peer-checked:block" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M2.5 8L6 11.5L13.5 4.5" />
-                      </svg>
-                    </div>
-                    <label htmlFor="group-notifications" className="text-sm text-text-secondary">
-                      {t('groups.form.groupNotifications')}
-                    </label>
-                  </div>
-                  <p className="text-xs text-text-muted ml-6">
-                    {t('groups.form.groupNotificationsDesc')}
-                  </p>
-                </div>
               </>
             )}
             <div className="flex items-center gap-3">
@@ -404,17 +363,6 @@ export function GroupManagePage() {
         </div>
       )}
 
-      {/* Group settings panel (when editing an existing group) */}
-      {showForm && editingId && (
-        <div className="mb-6">
-          <SettingsPanel
-            scope="group"
-            scopeId={editingId}
-            title={`Settings for "${form.name}"`}
-          />
-        </div>
-      )}
-
       {/* Notification bindings (when editing an existing group) */}
       {showForm && editingId && (
         <div className="mb-6">
@@ -422,21 +370,6 @@ export function GroupManagePage() {
             scope="group"
             scopeId={editingId}
             title={`Notifications for "${form.name}"`}
-          />
-        </div>
-      )}
-
-      {/* Maintenance Windows (when editing an existing group) */}
-      {showForm && editingId && (
-        <div className="mb-6 rounded-lg border border-border bg-bg-secondary p-4">
-          <MaintenanceWindowList
-            scopeType="group"
-            scopeId={editingId}
-            scopeOptions={[{ id: editingId, name: form.name, type: 'group' }]}
-            channels={[]}
-            defaultScopeType="group"
-            defaultScopeId={editingId}
-            title={`Maintenance for "${form.name}"`}
           />
         </div>
       )}
@@ -511,7 +444,6 @@ export function GroupManagePage() {
                       depth={flatNode.depth}
                       openCreate={openCreate}
                       openEdit={openEdit}
-                      handleClearHeartbeats={handleClearHeartbeats}
                       handleDelete={handleDelete}
                       draggedId={draggingNode?.id ?? null}
                     />
@@ -561,7 +493,6 @@ function DraggableGroupRow({
   depth,
   openCreate,
   openEdit,
-  handleClearHeartbeats,
   handleDelete,
   draggedId,
 }: {
@@ -569,7 +500,6 @@ function DraggableGroupRow({
   depth: number;
   openCreate: (parentId: number | null) => void;
   openEdit: (group: MonitorGroup) => void;
-  handleClearHeartbeats: (id: number, name: string) => void;
   handleDelete: (id: number, name: string) => void;
   draggedId: number | null;
 }) {
@@ -621,12 +551,6 @@ function DraggableGroupRow({
           {t('groups.generalBadge')}
         </span>
       )}
-      {node.groupNotifications && (
-        <span className="inline-flex items-center gap-0.5 rounded-full bg-yellow-500/10 px-2 py-0.5 text-[10px] font-medium text-yellow-500">
-          <Bell size={10} />
-          {t('groups.groupedBadge')}
-        </span>
-      )}
       <button
         onClick={() => openCreate(node.id)}
         className="p-1 text-text-muted hover:text-accent opacity-0 group-hover:opacity-100"
@@ -640,13 +564,6 @@ function DraggableGroupRow({
         title={t('common.edit')}
       >
         <Pencil size={14} />
-      </button>
-      <button
-        onClick={() => handleClearHeartbeats(node.id, node.name)}
-        className="p-1 text-text-muted hover:text-yellow-500 opacity-0 group-hover:opacity-100"
-        title="Clear heartbeats"
-      >
-        <RotateCcw size={14} />
       </button>
       <button
         onClick={() => handleDelete(node.id, node.name)}

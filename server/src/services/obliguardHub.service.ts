@@ -1,7 +1,9 @@
 import type { WebSocket } from 'ws';
 import { db } from '../db';
 import { logger } from '../utils/logger';
-import { agentService, getAgentServiceIO } from './agent.service';
+import { agentService, getAgentServiceIO, markAgentOffline, recordUpdateOffer } from './agent.service';
+import { parseUpdateStatusFrame } from '../utils/agentUpdate';
+import { emitToTenantAudience } from '../utils/socketRooms';
 import { SOCKET_EVENTS } from '@obliview/shared';
 import type { AgentIpEvent, ObliguardPushBody } from '@obliview/shared';
 
@@ -24,6 +26,10 @@ export interface ObliguardConn {
   deadline: ReturnType<typeof setTimeout> | null;
   /** Registered with no agent_devices row yet (counted against the per-key pending cap). */
   rowless: boolean;
+  /** Registration time (ms): a heartbeat on a newer channel than an update phase is a reconnection. */
+  connectedAt: number;
+  /** Heartbeats and update_status frames of this channel are handled one at a time, in order. */
+  queue: Promise<void>;
 }
 
 /** Command pushed from server → agent on the WS channel */
@@ -116,6 +122,7 @@ export class ObliguardHubService {
     const conn: ObliguardConn = {
       ws, deviceUuid, deviceId: null, tenantId, apiKeyId, clientIp,
       closing: false, seenHeartbeat: false, deadline: null, rowless: opts.rowless === true,
+      connectedAt: Date.now(), queue: Promise.resolve(),
     };
     this.byDevice.set(deviceUuid, conn);
 
@@ -126,7 +133,10 @@ export class ObliguardHubService {
       try {
         const msg = JSON.parse(data.toString());
         switch (msg.type) {
-          case 'heartbeat': await this._handleHeartbeat(conn, msg); break;
+          // Serialised per channel: an offer is counted (after its frame was
+          // written) before the next heartbeat of the same agent is evaluated.
+          case 'heartbeat':     await this._enqueue(conn, () => this._handleHeartbeat(conn, msg)); break;
+          case 'update_status': await this._enqueue(conn, () => this._handleUpdateStatus(conn, msg)); break;
           case 'events':    await this._handleEventsFlush(conn, msg); break;
           case 'firewall_response': this._resolveFirewallResponse(conn, msg); break;
           default:          break; // unknown message type — ignore
@@ -143,6 +153,8 @@ export class ObliguardHubService {
 
     // Drain a queued 'uninstall' on connect (other commands wait for the heartbeat)
     await this._drainPendingCommand(conn);
+    // Presence: last_online_at (W2-1).
+    await agentService.markChannelOnline(deviceUuid, tenantId);
 
     logger.info({ deviceUuid, tenantId }, 'Obliguard agent command channel connected');
     return true;
@@ -168,7 +180,7 @@ export class ObliguardHubService {
       // Start an offline grace timer based on the device's resolved settings.
       // If the agent reconnects before the timer fires, register() cancels it.
       if (deviceId) {
-        this._startOfflineTimer(deviceUuid, deviceId);
+        this._startOfflineTimer(deviceUuid, deviceId, existing.tenantId);
       }
     }
   }
@@ -229,7 +241,7 @@ export class ObliguardHubService {
    * resolved from the device's settings (group → global → defaults).
    * This absorbs brief WS reconnections without flashing the UI red.
    */
-  private async _startOfflineTimer(deviceUuid: string, deviceId: number): Promise<void> {
+  private async _startOfflineTimer(deviceUuid: string, deviceId: number, tenantId: number): Promise<void> {
     // Resolve the device's effective settings for the grace period
     let delaySec = 60 * 2; // fallback: 2 minutes
     try {
@@ -245,15 +257,16 @@ export class ObliguardHubService {
       this.offlineTimers.delete(deviceUuid);
       // Only emit if the agent hasn't reconnected
       if (!this.isConnected(deviceUuid)) {
-        const io = getAgentServiceIO();
-        if (io) {
-          logger.info({ deviceUuid, deviceId }, 'Obliguard agent offline grace period expired');
-          io.to('role:admin').emit(SOCKET_EVENTS.AGENT_STATUS_CHANGED, {
-            deviceId,
-            status: 'down',
-            wsConnected: false,
-          });
-        }
+        // The next heartbeat is an offline → online transition again.
+        markAgentOffline(deviceId);
+        void agentService.markChannelOffline(deviceId, tenantId);
+        logger.info({ deviceUuid, deviceId }, 'Obliguard agent offline grace period expired');
+        // The owning tenant's members and the Default god view.
+        emitToTenantAudience(getAgentServiceIO(), tenantId, SOCKET_EVENTS.AGENT_STATUS_CHANGED, {
+          deviceId,
+          status: 'down',
+          wsConnected: false,
+        });
       }
     }, delaySec * 1000);
 
@@ -285,9 +298,7 @@ export class ObliguardHubService {
         .where({ id: row.id, pending_command: 'uninstall' })
         .update({ pending_command: null, uninstall_commanded_at: new Date(), updated_at: new Date() });
 
-      if (n === 1 && conn.ws.readyState === 1 && !conn.closing) {
-        conn.ws.send(JSON.stringify({ type: 'config', command: 'uninstall' }));
-      }
+      if (n === 1) this._send(conn, { type: 'config', command: 'uninstall' });
     } catch (e) {
       logger.error(e, 'obliguardHub: failed to drain pending command');
     }
@@ -311,6 +322,8 @@ export class ObliguardHubService {
         firewallName:   msg.firewallName   ?? '',
         logSamples:     msg.logSamples     ?? {},
         lanIPs:         msg.lanIPs         ?? [],
+        // W2-1: optional; sanitised by handlePush (absent = stored list kept).
+        capabilities:   msg.capabilities,
       };
 
       const response = await agentService.handlePush(
@@ -319,6 +332,7 @@ export class ObliguardHubService {
         conn.deviceUuid,
         conn.clientIp,
         body,
+        { deferOfferRecord: true, connectedAt: conn.connectedAt },
       );
       // The row exists now (or enrolment was deferred and the socket closes below).
       conn.rowless = false;
@@ -368,12 +382,54 @@ export class ObliguardHubService {
         configMsg.command = response.command;
       }
 
-      if (conn.ws.readyState === 1 && !conn.closing) {
-        conn.ws.send(JSON.stringify(configMsg));
+      // The offer is counted only once its frame was actually written (W2-1).
+      if (this._send(conn, configMsg) && response.latestVersion && conn.deviceId) {
+        await recordUpdateOffer(conn.deviceId, response.latestVersion);
       }
     } catch (e) {
       logger.error(e, 'obliguardHub: heartbeat handling failed');
     }
+  }
+
+  /** Run `fn` after the previous queued frame of this channel (errors are contained). */
+  private _enqueue(conn: ObliguardConn, fn: () => Promise<void>): Promise<void> {
+    const next = conn.queue.then(fn, fn).catch((e) => { logger.error(e, 'obliguardHub: frame handling failed'); });
+    conn.queue = next;
+    return next;
+  }
+
+  /** Write a frame on a live, non-closing channel. False when nothing was written. */
+  private _send(conn: ObliguardConn, frame: unknown): boolean {
+    if (conn.closing || conn.ws.readyState !== 1) return false;
+    try {
+      conn.ws.send(JSON.stringify(frame));
+      return true;
+    } catch (e) {
+      logger.warn({ err: e, deviceUuid: conn.deviceUuid }, 'obliguardHub: frame write failed');
+      return false;
+    }
+  }
+
+  /**
+   * Handle `{ type: "update_status", targetVersion, phase, error? }` (W2-1):
+   * progress of a self-update, same envelope as the events frame. Approved
+   * devices only (conn.deviceId is set for them); unknown phases and
+   * malformed frames are ignored.
+   */
+  private async _handleUpdateStatus(conn: ObliguardConn, msg: unknown): Promise<void> {
+    const st = parseUpdateStatusFrame(msg);
+    if (!st) return;
+    // A restarted agent may report (e.g. a failed install) before its first
+    // heartbeat on this channel: resolve the approved row already bound to this
+    // channel's key (any re-binding is left to the heartbeat's A5 check).
+    if (!conn.deviceId && !conn.rowless) {
+      const row = await db('agent_devices')
+        .where({ uuid: conn.deviceUuid, tenant_id: conn.tenantId, api_key_id: conn.apiKeyId, status: 'approved' })
+        .first('id') as { id: number } | undefined;
+      if (row) conn.deviceId = row.id;
+    }
+    if (!conn.deviceId) return;
+    await agentService.applyUpdateStatus(conn.deviceId, conn.tenantId, st);
   }
 
   /**

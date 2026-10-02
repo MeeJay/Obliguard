@@ -1,5 +1,5 @@
 import type { Request, Response, NextFunction } from 'express';
-import { authService, SsoOnlyError } from '../services/auth.service';
+import { authService } from '../services/auth.service';
 import { appConfigService } from '../services/appConfig.service';
 import { twoFactorService } from '../services/twoFactor.service';
 import { permissionService } from '../services/permission.service';
@@ -28,22 +28,10 @@ export const authController = {
   async login(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const { username, password } = req.body as LoginInput;
-      let user;
-      try {
-        user = await authService.authenticate(username, password);
-      } catch (authErr) {
-        if (authErr instanceof SsoOnlyError) {
-          // Return 401 with a special code so the client can show the SSO redirect hint
-          res.status(401).json({
-            success: false,
-            error: 'Ce compte utilise la connexion SSO.',
-            code: 'SSO_ONLY',
-            foreignSource: authErr.foreignSource,
-          });
-          return;
-        }
-        throw authErr;
-      }
+      // Unknown, disabled, password-less and Obligate (SSO-only) accounts all
+      // get the same generic answer as a wrong password (no SSO_ONLY hint:
+      // owner decision, the login page always offers SSO when configured).
+      const user = await authService.authenticate(username, password);
 
       if (!user) {
         throw new AppError(401, 'Invalid username or password');

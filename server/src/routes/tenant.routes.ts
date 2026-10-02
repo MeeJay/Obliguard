@@ -21,6 +21,17 @@ function parseRole(v: unknown): 'admin' | 'member' {
   throw new AppError(400, "role must be 'admin' or 'member'");
 }
 
+/** A unique violation (duplicate slug / name) is a 409, not a 500 (BROKEN-5). */
+function mapUniqueViolation(err: unknown): unknown {
+  const pg = err as { code?: string; constraint?: string } | null;
+  if (pg?.code === '23505') {
+    return /slug/.test(pg.constraint ?? '')
+      ? new AppError(409, 'A tenant with this slug already exists', 'tenantSlugTaken')
+      : new AppError(409, 'This tenant already exists', 'tenantConflict');
+  }
+  return err;
+}
+
 async function assertUserExists(id: number): Promise<void> {
   if (!(await db('users').where({ id }).first('id'))) throw new AppError(404, 'User not found');
 }
@@ -110,7 +121,7 @@ router.post('/', requireRole('admin'), async (req, res, next) => {
     invalidateTenant(tenant.id);
     res.status(201).json({ success: true, data: tenant });
   } catch (err) {
-    next(err);
+    next(mapUniqueViolation(err));
   }
 });
 
@@ -142,7 +153,7 @@ router.put('/:id', requireRole('admin'), async (req, res, next) => {
     if (!tenant) throw new AppError(404, 'Tenant not found');
     res.json({ success: true, data: tenant });
   } catch (err) {
-    next(err);
+    next(mapUniqueViolation(err));
   }
 });
 

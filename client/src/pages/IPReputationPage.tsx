@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useSearchParams } from 'react-router-dom';
 import {
   Search,
   Shield,
@@ -52,6 +53,11 @@ const PAGE_SIZE = 25;
 // ── Page tabs ──────────────────────────────────────────────────────────────────
 
 type PageTab = 'local' | 'remote';
+
+/** ?tab= value → page tab ('activity' is an alias of the local tab). */
+function parsePageTab(v: string | null): PageTab {
+  return v === 'remote' ? 'remote' : 'local';
+}
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -270,18 +276,13 @@ function IPDetailDrawer({ ip, onClose, onBan, onWhitelist, onLiftBan, onPromote,
   useEffect(() => {
     setWhitelistInfo(null);
     if (ip.status !== 'whitelisted') return;
-    apiClient.get<{ data: { id: number; ip: string; label?: string; created_by?: number; scope?: string }[] }>('/whitelist')
-      .then(async res => {
-        const entry = (res.data?.data ?? []).find(w => w.ip === ip.ip || w.ip === ip.ip + '/32');
+    // ?ip= returns every visible entry covering the address (CIDR ranges included),
+    // with the creator's username joined server-side.
+    apiClient.get<{ data: { id: number; ip: string; label?: string | null; createdByUsername?: string | null; scope?: string }[] }>('/whitelist', { params: { ip: ip.ip } })
+      .then(res => {
+        const entry = (res.data?.data ?? [])[0];
         if (!entry) return;
-        let createdByUsername: string | null = null;
-        if (entry.created_by) {
-          try {
-            const userRes = await apiClient.get<{ data: { username?: string; displayName?: string } }>(`/users/${entry.created_by}`);
-            createdByUsername = userRes.data?.data?.displayName || userRes.data?.data?.username || null;
-          } catch { /* ignore */ }
-        }
-        setWhitelistInfo({ createdByUsername, label: entry.label ?? null });
+        setWhitelistInfo({ createdByUsername: entry.createdByUsername ?? null, label: entry.label ?? null });
       })
       .catch(() => {});
   }, [ip.status, ip.ip]);
@@ -746,6 +747,11 @@ function IPDetailDrawer({ ip, onClose, onBan, onWhitelist, onLiftBan, onPromote,
 
 // ── Activity tab ───────────────────────────────────────────────────────────────
 
+/** ?status= value → status filter (unknown values → 'all'). */
+function parseStatusFilter(v: string | null): StatusFilter {
+  return v === 'banned' || v === 'suspicious' || v === 'whitelisted' || v === 'clean' ? v : 'all';
+}
+
 const STATUS_FILTERS: { key: StatusFilter; label: string }[] = [
   { key: 'all', label: 'All' },
   { key: 'banned', label: 'Banned' },
@@ -778,9 +784,14 @@ function ActivityTab({ isAdmin }: ActivityTabProps) {
   const [rows, setRows] = useState<IpReputation[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
-  const [search, setSearch] = useState('');
-  const [debouncedSearch, setDebouncedSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+  // Deep links: ?search= (NetMap, dashboard) and ?status= (/bans, /whitelist,
+  // header chips) seed the filters; the filters are written back (replace).
+  const [searchParams, setSearchParams] = useSearchParams();
+  const urlSearch = searchParams.get('search') ?? '';
+  const urlStatus = parseStatusFilter(searchParams.get('status'));
+  const [search, setSearch] = useState(urlSearch);
+  const [debouncedSearch, setDebouncedSearch] = useState(urlSearch);
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>(urlStatus);
   const [page, setPage] = useState(0);
   const [selectedIp, setSelectedIp] = useState<IpReputation | null>(null);
   const [selectedBanId, setSelectedBanId] = useState<number | null>(null);
@@ -800,6 +811,32 @@ function ActivityTab({ isAdmin }: ActivityTabProps) {
     const timer = setTimeout(() => setDebouncedSearch(search), 300);
     return () => clearTimeout(timer);
   }, [search]);
+
+  // URL → state: a navigation to a new query (header chip, NetMap link) while
+  // the page is already open.
+  // The search is only replaced when the URL differs from what this page wrote
+  // itself (else a pause while typing would trim the text being typed).
+  const debouncedSearchRef = useRef(debouncedSearch);
+  debouncedSearchRef.current = debouncedSearch;
+  useEffect(() => { setStatusFilter(urlStatus); }, [urlStatus]);
+  useEffect(() => {
+    if (urlSearch === debouncedSearchRef.current.trim()) return;
+    setSearch(urlSearch);
+    setDebouncedSearch(urlSearch);
+  }, [urlSearch]);
+
+  // State → URL (replace, no history entry). Reads the params through a ref so
+  // a URL change never writes the previous filters back over it.
+  const searchParamsRef = useRef(searchParams);
+  searchParamsRef.current = searchParams;
+  useEffect(() => {
+    const cur = searchParamsRef.current;
+    const next = new URLSearchParams(cur);
+    if (statusFilter === 'all') next.delete('status'); else next.set('status', statusFilter);
+    const q = debouncedSearch.trim();
+    if (q) next.set('search', q); else next.delete('search');
+    if (next.toString() !== cur.toString()) setSearchParams(next, { replace: true });
+  }, [statusFilter, debouncedSearch, setSearchParams]);
 
   // Reset page on filter/search change
   useEffect(() => {
@@ -2464,8 +2501,13 @@ function RemoteTab() {
 
   const toggleIp = async (id: number, enabled: boolean) => {
     const { remoteBlocklistApi } = await import('../api/remoteBlocklist.api');
-    await remoteBlocklistApi.toggleIp(id, enabled);
-    setIps(prev => prev.map(ip => ip.id === id ? { ...ip, enabled } : ip));
+    try {
+      await remoteBlocklistApi.toggleIp(id, enabled);
+      setIps(prev => prev.map(ip => ip.id === id ? { ...ip, enabled } : ip));
+    } catch (err) {
+      // Only a platform admin operating the Default tenant may change remote lists (403 otherwise).
+      toast.error((err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'Failed to update remote IP');
+    }
   };
 
   const totalPages = Math.ceil(total / PAGE_SIZE);
@@ -2602,7 +2644,14 @@ export function IPReputationPage() {
   const { user } = useAuthStore();
   const isAdmin = user?.role === 'admin';
 
-  const [activeTab, setActiveTab] = useState<PageTab>('local');
+  // ?tab= selects the tab (deep link); switching tabs updates it (replace).
+  const [searchParams, setSearchParams] = useSearchParams();
+  const activeTab = parsePageTab(searchParams.get('tab'));
+  const setActiveTab = (tab: PageTab) => {
+    const next = new URLSearchParams(searchParams);
+    if (tab === 'local') next.delete('tab'); else next.set('tab', tab);
+    setSearchParams(next, { replace: true });
+  };
 
   return (
     <div className="p-6">

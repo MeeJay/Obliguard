@@ -28,9 +28,10 @@ export interface UpdatePolicyAdapter {
   /** Make the server advertise `v` as the released agent version (C17: __setServedAgentVersionForTest). */
   setReleasedVersion(v: string): void;
   /**
-   * DB-level reset owned by C17: global policy 'auto', no group or device
-   * override, no pending update-now; then C17's in-memory update state
-   * (__resetAgentUpdateStateForTest) and the served-version override are
+   * DB-level reset owned by C17: global policy 'auto', no tenant, group or
+   * device override, no pending update-now, no update attempt (W2-1); then
+   * C17's in-memory update state (__resetAgentUpdateStateForTest) and the
+   * served-version override are
    * re-applied. Used in beforeEach, so no hook depends on an HTTP actor that
    * C17 may legitimately refuse.
    */
@@ -78,6 +79,9 @@ const updatePolicyAdapter: UpdatePolicyAdapter = {
     await db('agent_devices').update({
       update_policy: null, update_requested_at: null, update_requested_version: null, update_requested_by: null,
     });
+    // W2-1: persisted update attempts and the tenant level of the policy.
+    await db('agent_update_attempts').del();
+    await db('tenants').update({ agent_update_policy: null });
     // In-memory state (offers, caches, clock), then the served override again.
     __resetAgentUpdateStateForTest();
     clockOffsetMs = 0;

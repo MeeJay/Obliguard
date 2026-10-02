@@ -5,11 +5,11 @@ import {
   Trash2,
   Key,
   Shield,
+  ShieldOff,
   UserIcon,
   UserX,
   Users,
   FolderOpen,
-  Monitor,
   Check,
   ChevronRight,
   ChevronDown,
@@ -26,11 +26,9 @@ import type {
   PermissionScope,
   UserTenantAssignment,
 } from '@obliview/shared';
-import type { Monitor as MonitorType } from '@/store/monitorStore';
 import { usersApi } from '@/api/users.api';
 import { teamsApi } from '@/api/teams.api';
 import { groupsApi } from '@/api/groups.api';
-import { monitorsApi } from '@/api/monitors.api';
 import { useAuthStore } from '@/store/authStore';
 import { Button } from '@/components/common/Button';
 import { Input } from '@/components/common/Input';
@@ -53,7 +51,6 @@ export function AdminUsersPage() {
   const [users, setUsers] = useState<User[]>([]);
   const [teams, setTeams] = useState<UserTeam[]>([]);
   const [tree, setTree] = useState<GroupTreeNode[]>([]);
-  const [monitors, setMonitors] = useState<MonitorType[]>([]);
 
   // User form
   const [userFormMode, setUserFormMode] = useState<UserFormMode>(null);
@@ -70,7 +67,6 @@ export function AdminUsersPage() {
   const [formTeamName, setFormTeamName] = useState('');
   const [formTeamDesc, setFormTeamDesc] = useState('');
   const [formCanCreate, setFormCanCreate] = useState(false);
-  const [formTeamTenantId, setFormTeamTenantId] = useState<number | ''>('');
 
   // Selected team for right panel
   const [selectedTeamId, setSelectedTeamId] = useState<number | null>(null);
@@ -90,16 +86,14 @@ export function AdminUsersPage() {
 
   const load = async () => {
     try {
-      const [u, t, tr, m] = await Promise.all([
+      const [u, t, tr] = await Promise.all([
         usersApi.list(),
         isPlatformAdmin ? teamsApi.listAll() : teamsApi.list(),
         groupsApi.tree(),
-        monitorsApi.list(),
       ]);
       setUsers(u);
       setTeams(t);
       setTree(tr);
-      setMonitors(m);
     } catch {
       toast.error('Failed to load data');
     }
@@ -203,6 +197,20 @@ export function AdminUsersPage() {
     }
   };
 
+  // Lost authenticator: removes every second factor and signs the user out.
+  const handleResetTwoFactor = async (user: User) => {
+    if (!window.confirm(t('users.confirmReset2fa', {
+      username: user.username,
+      defaultValue: 'Reset the two-factor authentication of {{username}}? Their TOTP and e-mail codes are removed and they are signed out everywhere.',
+    }))) return;
+    try {
+      await usersApi.resetTwoFactor(user.id);
+      toast.success(t('users.reset2faDone', 'Two-factor authentication reset'));
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error || t('users.reset2faFailed', 'Failed to reset two-factor authentication'));
+    }
+  };
+
   const handleDeleteUser = async (user: User) => {
     if (!confirm(t('users.confirmDelete', { username: user.username }))) return;
     try {
@@ -232,22 +240,18 @@ export function AdminUsersPage() {
     setFormTeamName('');
     setFormTeamDesc('');
     setFormCanCreate(false);
-    setFormTeamTenantId('');
   };
 
   const handleCreateTeam = async (e: FormEvent) => {
     e.preventDefault();
     setSaving(true);
     try {
-      const baseData = {
+      // Teams are always created in the operating tenant (the server ignores any tenantId).
+      const team = await teamsApi.create({
         name: formTeamName,
         description: formTeamDesc || null,
         canCreate: formCanCreate,
-      };
-      const createPayload = (isPlatformAdmin && formTeamTenantId !== '')
-        ? { ...baseData, tenantId: Number(formTeamTenantId) }
-        : baseData;
-      const team = await teamsApi.create(createPayload as unknown as Parameters<typeof teamsApi.create>[0]);
+      });
       toast.success(t('users.teams.created'));
       resetTeamForm();
       load();
@@ -414,7 +418,6 @@ export function AdminUsersPage() {
 
   // Build sets for quick lookup
   const assignedGroupIds = new Set(teamPermissions.filter((p) => p.scope === 'group').map((p) => p.scopeId));
-  const assignedMonitorIds = new Set<number>(); // monitors removed from Obliguard
 
   // Collect all descendant group IDs covered by a group permission (implicit coverage)
   const coveredGroupIds = new Set<number>();
@@ -428,32 +431,12 @@ export function AdminUsersPage() {
         coveredByGroupId.set(node.id, coveredBy);
       }
       collectDescendants(node.children, effectiveCover);
-      if (effectiveCover) {
-        for (const m of monitors.filter((mon) => mon.groupId === node.id)) {
-          if (!assignedMonitorIds.has(m.id)) {
-            coveredByGroupId.set(-m.id, effectiveCover);
-          }
-        }
-      }
     }
   };
   collectDescendants(tree, null);
 
-  // Merge monitors into tree nodes for display
-  const monitorsByGroup = new Map<number, MonitorType[]>();
-  const ungroupedMonitors: MonitorType[] = [];
-  for (const m of monitors) {
-    if (m.groupId) {
-      if (!monitorsByGroup.has(m.groupId)) monitorsByGroup.set(m.groupId, []);
-      monitorsByGroup.get(m.groupId)!.push(m);
-    } else {
-      ungroupedMonitors.push(m);
-    }
-  }
-
-  // Get permission for a group/monitor
+  // Get the team permission on a group (the tree shows groups only)
   const getGroupPerm = (groupId: number) => teamPermissions.find((p) => p.scope === 'group' && p.scopeId === groupId);
-  const getMonitorPerm = (_monitorId: number): TeamPermission | undefined => undefined; // monitors removed from Obliguard
 
   return (
     <>
@@ -581,6 +564,10 @@ export function AdminUsersPage() {
                             <Key size={13} />
                           </button>
                         )}
+                        <button onClick={() => handleResetTwoFactor(user)}
+                          className="shrink-0 p-1 text-text-muted hover:text-status-down opacity-0 group-hover:opacity-100" title={t('users.reset2fa', 'Reset 2FA')}>
+                          <ShieldOff size={13} />
+                        </button>
                         <button onClick={() => handleToggleActive(user)}
                           className="shrink-0 p-1 text-text-muted hover:text-text-primary opacity-0 group-hover:opacity-100" title={user.isActive ? t('common.disable') : t('common.enable')}>
                           {user.isActive ? <UserX size={13} /> : <UserIcon size={13} />}
@@ -624,12 +611,6 @@ export function AdminUsersPage() {
                 <h2 className="text-lg font-semibold text-text-primary">{t('users.tabTeams')}</h2>
                 <Button size="sm" onClick={() => {
                   resetTeamForm();
-                  // Default tenant to current filter if set
-                  if (isPlatformAdmin && teamTenantFilter !== 'all') {
-                    setFormTeamTenantId(teamTenantFilter as number);
-                  } else if (isPlatformAdmin && teamTenants.length > 0) {
-                    setFormTeamTenantId(teamTenants[0].id);
-                  }
                   setTeamFormMode('create');
                 }}>
                   <Plus size={14} className="mr-1" />{t('common.new')}
@@ -685,25 +666,6 @@ export function AdminUsersPage() {
                       </div>
                       {t('users.teams.canCreate')}
                     </label>
-                    {/* Tenant selector — platform admin only, create mode only */}
-                    {isPlatformAdmin && teamFormMode === 'create' && teamTenants.length > 0 && (
-                      <div className="space-y-1">
-                        <label className="block text-sm font-medium text-text-secondary">
-                          <Building2 size={12} className="inline mr-1" />Tenant
-                        </label>
-                        <select
-                          value={formTeamTenantId}
-                          onChange={(e) => setFormTeamTenantId(e.target.value ? Number(e.target.value) : '')}
-                          className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
-                          required
-                        >
-                          <option value="">— Select tenant —</option>
-                          {teamTenants.map((tenant) => (
-                            <option key={tenant.id} value={tenant.id}>{tenant.name}</option>
-                          ))}
-                        </select>
-                      </div>
-                    )}
                     <div className="flex gap-2">
                       <Button type="submit" size="sm" loading={saving}>{teamFormMode === 'create' ? t('common.create') : t('common.save')}</Button>
                       <Button type="button" size="sm" variant="secondary" onClick={resetTeamForm}>{t('common.cancel')}</Button>
@@ -831,7 +793,7 @@ export function AdminUsersPage() {
               {/* Permissions panel — Hierarchical tree */}
               {rightTab === 'permissions' && (
                 <div className="rounded-lg border border-border bg-bg-secondary max-h-[70vh] overflow-y-auto">
-                  {tree.length === 0 && ungroupedMonitors.length === 0 ? (
+                  {tree.length === 0 ? (
                     <p className="p-4 text-sm text-text-muted text-center">{t('users.teams.noResources')}</p>
                   ) : (
                     <div className="py-1">
@@ -840,9 +802,7 @@ export function AdminUsersPage() {
                           key={node.id}
                           node={node}
                           depth={0}
-                          monitorsByGroup={monitorsByGroup}
                           getGroupPerm={getGroupPerm}
-                          getMonitorPerm={getMonitorPerm}
                           assignedGroupIds={assignedGroupIds}
                           coveredGroupIds={coveredGroupIds}
                           coveredByGroupId={coveredByGroupId}
@@ -851,22 +811,6 @@ export function AdminUsersPage() {
                           togglePermissionLevel={togglePermissionLevel}
                         />
                       ))}
-                      {/* Ungrouped monitors */}
-                      {ungroupedMonitors.map((m) => {
-                        const perm = getMonitorPerm(m.id);
-                        return (
-                          <PermMonitorRow
-                            key={m.id}
-                            monitor={m}
-                            depth={0}
-                            perm={perm}
-                            isCovered={false}
-                            addPermission={addPermission}
-                            removePermission={removePermission}
-                            togglePermissionLevel={togglePermissionLevel}
-                          />
-                        );
-                      })}
                     </div>
                   )}
                 </div>
@@ -1010,9 +954,7 @@ export function AdminUsersPage() {
 interface PermTreeNodeProps {
   node: GroupTreeNode;
   depth: number;
-  monitorsByGroup: Map<number, MonitorType[]>;
   getGroupPerm: (groupId: number) => TeamPermission | undefined;
-  getMonitorPerm: (monitorId: number) => TeamPermission | undefined;
   assignedGroupIds: Set<number>;
   coveredGroupIds: Set<number>;
   coveredByGroupId: Map<number, number>;
@@ -1024,9 +966,7 @@ interface PermTreeNodeProps {
 function PermTreeNode({
   node,
   depth,
-  monitorsByGroup,
   getGroupPerm,
-  getMonitorPerm,
   assignedGroupIds,
   coveredGroupIds,
   coveredByGroupId,
@@ -1038,7 +978,7 @@ function PermTreeNode({
   const [expanded, setExpanded] = useState(true);
   const perm = getGroupPerm(node.id);
   const isCovered = coveredGroupIds.has(node.id);
-  const hasChildren = node.children.length > 0 || (monitorsByGroup.get(node.id)?.length ?? 0) > 0;
+  const hasChildren = node.children.length > 0;
 
   return (
     <div>
@@ -1100,7 +1040,7 @@ function PermTreeNode({
         )}
       </div>
 
-      {/* Children (groups + monitors) */}
+      {/* Child groups */}
       {expanded && (
         <>
           {node.children.map((child) => (
@@ -1108,9 +1048,7 @@ function PermTreeNode({
               key={child.id}
               node={child}
               depth={depth + 1}
-              monitorsByGroup={monitorsByGroup}
               getGroupPerm={getGroupPerm}
-              getMonitorPerm={getMonitorPerm}
               assignedGroupIds={assignedGroupIds}
               coveredGroupIds={coveredGroupIds}
               coveredByGroupId={coveredByGroupId}
@@ -1119,82 +1057,6 @@ function PermTreeNode({
               togglePermissionLevel={togglePermissionLevel}
             />
           ))}
-          {(monitorsByGroup.get(node.id) ?? []).map((m) => {
-            const mPerm = getMonitorPerm(m.id);
-            const mCovered = !mPerm && (assignedGroupIds.has(node.id) || coveredGroupIds.has(node.id));
-            return (
-              <PermMonitorRow
-                key={m.id}
-                monitor={m}
-                depth={depth + 1}
-                perm={mPerm}
-                isCovered={mCovered}
-                addPermission={addPermission}
-                removePermission={removePermission}
-                togglePermissionLevel={togglePermissionLevel}
-              />
-            );
-          })}
-        </>
-      )}
-    </div>
-  );
-}
-
-interface PermMonitorRowProps {
-  monitor: MonitorType;
-  depth: number;
-  perm: TeamPermission | undefined;
-  isCovered: boolean;
-  addPermission: (scope: PermissionScope, scopeId: number, level: PermissionLevel) => Promise<void>;
-  removePermission: (permId: number) => Promise<void>;
-  togglePermissionLevel: (perm: TeamPermission) => Promise<void>;
-}
-
-function PermMonitorRow({
-  monitor,
-  depth,
-  perm,
-  isCovered,
-  addPermission: _addPermission,
-  removePermission,
-  togglePermissionLevel,
-}: PermMonitorRowProps) {
-  const { t } = useTranslation();
-  return (
-    <div
-      className={`flex items-center gap-1.5 px-2 py-1.5 hover:bg-bg-hover transition-colors ${
-        perm ? 'bg-accent/5' : ''
-      }`}
-      style={{ paddingLeft: `${depth * 20 + 28}px` }}
-    >
-      <Monitor size={13} className={`shrink-0 ${perm ? 'text-accent' : isCovered ? 'text-accent/40' : 'text-text-muted'}`} />
-      <span className={`flex-1 text-sm truncate ${perm ? 'text-text-primary font-medium' : isCovered ? 'text-text-muted' : 'text-text-primary'}`}>
-        {monitor.name}
-      </span>
-
-      {perm ? (
-        <>
-          <button
-            onClick={() => togglePermissionLevel(perm)}
-            className={`px-2 py-0.5 rounded text-[11px] font-medium transition-colors shrink-0 ${
-              perm.level === 'rw'
-                ? 'bg-accent/10 text-accent hover:bg-accent/20'
-                : 'bg-bg-tertiary text-text-muted hover:bg-bg-hover'
-            }`}
-            title="Click to toggle RO/RW"
-          >
-            {perm.level === 'rw' ? <><Pencil size={10} className="inline mr-0.5" />{t('users.teams.rwLabel')}</> : <><Eye size={10} className="inline mr-0.5" />{t('users.teams.roLabel')}</>}
-          </button>
-          <button onClick={() => removePermission(perm.id)} className="p-0.5 text-text-muted hover:text-status-down shrink-0">
-            <Trash2 size={11} />
-          </button>
-        </>
-      ) : isCovered ? (
-        <span className="text-[10px] text-text-muted italic shrink-0">{t('users.teams.inherited')}</span>
-      ) : (
-        <>
-          {/* Monitor-level permissions removed from Obliguard */}
         </>
       )}
     </div>

@@ -1,6 +1,7 @@
 import { db } from '../db';
 import nodemailer from 'nodemailer';
 import type { SmtpServer } from '@obliview/shared';
+import { isMasterTenant } from '@obliview/shared';
 
 interface SmtpServerRow {
   id: number;
@@ -33,7 +34,10 @@ function rowToServer(row: SmtpServerRow): SmtpServer {
 export const smtpServerService = {
   async list(tenantId?: number): Promise<SmtpServer[]> {
     const query = db<SmtpServerRow>('smtp_servers').orderBy('name');
-    if (tenantId !== undefined) {
+    if (tenantId !== undefined && isMasterTenant(tenantId)) {
+      // Legacy rows without a tenant belong to the Default tenant.
+      query.where(function () { this.where({ tenant_id: tenantId }).orWhereNull('tenant_id'); });
+    } else if (tenantId !== undefined) {
       query.where({ tenant_id: tenantId });
     } else {
       query.whereNull('tenant_id');
@@ -45,6 +49,19 @@ export const smtpServerService = {
   async getById(id: number): Promise<SmtpServerRow | null> {
     const row = await db<SmtpServerRow>('smtp_servers').where({ id }).first();
     return row || null;
+  },
+
+  /**
+   * The server row when `tenantId` may manage it, else null (callers answer
+   * 404 so foreign ids do not leak). The Default tenant owns every server,
+   * including legacy rows without a tenant.
+   */
+  async getOwned(id: number, tenantId: number): Promise<SmtpServerRow | null> {
+    if (!Number.isInteger(id) || id <= 0) return null;
+    const row = await this.getById(id);
+    if (!row) return null;
+    if (isMasterTenant(tenantId) || row.tenant_id === tenantId) return row;
+    return null;
   },
 
   async create(data: {

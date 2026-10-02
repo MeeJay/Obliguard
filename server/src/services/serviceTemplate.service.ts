@@ -1,4 +1,5 @@
 import { db } from '../db';
+import { AppError } from '../middleware/errorHandler';
 import type {
   ServiceTemplate,
   ServiceTemplateAssignment,
@@ -217,11 +218,11 @@ class ServiceTemplateService {
     tenantId: number,
   ): Promise<ServiceTemplate> {
     const existing = await db<ServiceTemplateRow>('service_templates').where({ id }).first();
-    if (!existing) throw new Error('Service template not found');
+    if (!existing) throw new AppError(404, 'Service template not found');
 
     // Tenant access control: non-null tenant_id must match caller's tenant
     if (existing.tenant_id !== null && existing.tenant_id !== tenantId) {
-      throw new Error('Service template not found');
+      throw new AppError(404, 'Service template not found');
     }
 
     const updates: Partial<ServiceTemplateRow> = {
@@ -238,7 +239,7 @@ class ServiceTemplateService {
     // customRegex only allowed on non-builtin templates
     if (data.customRegex !== undefined) {
       if (existing.is_builtin) {
-        throw new Error('Cannot set custom regex on a built-in template');
+        throw new AppError(400, 'Cannot set custom regex on a built-in template');
       }
       updates.custom_regex = data.customRegex;
     }
@@ -258,14 +259,14 @@ class ServiceTemplateService {
    */
   async delete(id: number, tenantId: number): Promise<void> {
     const existing = await db<ServiceTemplateRow>('service_templates').where({ id }).first();
-    if (!existing) throw new Error('Service template not found');
+    if (!existing) throw new AppError(404, 'Service template not found');
 
     if (existing.is_builtin) {
-      throw new Error('Cannot delete a built-in service template');
+      throw new AppError(400, 'Cannot delete a built-in service template');
     }
 
     if (existing.tenant_id !== null && existing.tenant_id !== tenantId) {
-      throw new Error('Service template not found');
+      throw new AppError(404, 'Service template not found');
     }
 
     // Remove assignments first (FK constraint)
@@ -287,7 +288,7 @@ class ServiceTemplateService {
     const template = await db<ServiceTemplateRow>('service_templates')
       .where({ id: templateId })
       .first();
-    if (!template) throw new Error('Service template not found');
+    if (!template) throw new AppError(404, 'Service template not found');
 
     const existing = await db<ServiceTemplateAssignmentRow>('service_template_assignments')
       .where({ template_id: templateId, scope, scope_id: scopeId })
@@ -341,7 +342,7 @@ class ServiceTemplateService {
       .where({ template_id: templateId, scope, scope_id: scopeId })
       .del();
 
-    if (!deleted) throw new Error('Service template assignment not found');
+    if (!deleted) throw new AppError(404, 'Service template assignment not found');
   }
 
   /**
@@ -616,7 +617,7 @@ class ServiceTemplateService {
     const template = await db<ServiceTemplateRow>('service_templates')
       .where({ id: templateId })
       .first();
-    if (!template) throw new Error('Service template not found');
+    if (!template) throw new AppError(404, 'Service template not found');
 
     const existing = await db<ServiceTemplateAssignmentRow>('service_template_assignments')
       .where({ template_id: templateId, scope: 'agent', scope_id: deviceId })

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
   Pencil, Trash2, ArrowLeft, FolderOpen,
@@ -11,13 +11,18 @@ import { anonHostname } from '@/utils/anonymize';
 import { useGroupStore } from '@/store/groupStore';
 import { useAuthStore } from '@/store/authStore';
 import { useTenantStore } from '@/store/tenantStore';
-import { agentUpdateErrorMessage } from '@/utils/agentUpdate';
+import { useAgentDevices, useAgentDevicesLoaded } from '@/store/agentStore';
+import { SOCKET_RESYNC_EVENT } from '@/hooks/useSocket';
+import {
+  agentUpdateErrorMessage, ancestorUpdatePolicyChain, findGroupInTree, resolveUpdatePolicyView, updatePolicySourceLabel,
+} from '@/utils/agentUpdate';
 import { groupsApi } from '@/api/groups.api';
 import { agentApi } from '@/api/agent.api';
 import { serviceTemplatesApi } from '@/api/serviceTemplates.api';
 import type {
-  MonitorGroup, AgentDevice, AgentGroupConfig,
+  MonitorGroup, AgentDevice, AgentGroupConfig, GroupTreeNode,
   NotificationTypeConfig, ServiceTemplate, ServiceType, ServiceTemplateMode,
+  AgentTenantUpdatePolicyInfo,
 } from '@obliview/shared';
 import { CAPABILITIES } from '@obliview/shared';
 import { Button } from '@/components/common/Button';
@@ -59,6 +64,36 @@ function AgentGroupSettingsPanel({ group, onUpdate, readOnly = false }: {
 
   const isOverridingInterval = cfg.pushIntervalSeconds !== null;
   const isOverridingMaxMissed = cfg.maxMissedPushes !== null;
+
+  // ── Update policy inherited from above (global -> tenant -> ancestor groups) ──
+  // Tenant level of the operating tenant; another tenant's group (read-only)
+  // cannot be resolved from here, so its "Inherit" option stays bare.
+  const currentTenantId = useTenantStore(s => s.currentTenantId);
+  const tenantName = useTenantStore(s => s.tenants.find(tn => tn.id === (group.tenantId ?? s.currentTenantId))?.name ?? null);
+  const groupTree = useGroupStore(s => s.tree);
+  const [tenantPolicy, setTenantPolicy] = useState<AgentTenantUpdatePolicyInfo | null>(null);
+  useEffect(() => {
+    if (readOnly) { setTenantPolicy(null); return; }
+    let cancelled = false;
+    agentApi.getTenantUpdatePolicy()
+      .then(i => { if (!cancelled) setTenantPolicy(i); })
+      .catch(() => { if (!cancelled) setTenantPolicy(null); });
+    return () => { cancelled = true; };
+  }, [readOnly, currentTenantId]);
+  const inheritedPolicy = useMemo(() => {
+    if (!tenantPolicy) return null;
+    const chain = ancestorUpdatePolicyChain(groupTree, group);
+    if (chain === null) return null;
+    return resolveUpdatePolicyView(
+      null, chain, tenantPolicy.updatePolicy, tenantPolicy.globalPolicyIsDefault ? null : tenantPolicy.globalPolicy,
+    );
+  }, [tenantPolicy, groupTree, group]);
+  const inheritedSourceText = inheritedPolicy
+    ? updatePolicySourceLabel(inheritedPolicy.source, t, {
+        tenantName,
+        groupName: inheritedPolicy.sourceGroupId != null ? (findGroupInTree(groupTree, inheritedPolicy.sourceGroupId)?.name ?? null) : null,
+      })
+    : null;
 
   async function toggleEvaluateOnly() {
     setSavingEval(true);
@@ -262,6 +297,11 @@ function AgentGroupSettingsPanel({ group, onUpdate, readOnly = false }: {
             <p className="text-xs text-text-muted mt-0.5">
               {t('agentUpdate.groupPolicyDesc', "Update policy of this group's agents and sub-groups. 'Off' freezes them whatever is set below.")}
             </p>
+            {inheritedPolicy?.policy === 'off' && inheritedSourceText && (
+              <p className="text-[11px] text-amber-400 mt-0.5">
+                {t('agentUpdate.frozenBy', { defaultValue: 'Frozen by {{source}}', source: inheritedSourceText })}
+              </p>
+            )}
           </div>
           <select
             value={cfg.updatePolicy ?? 'inherit'}
@@ -272,7 +312,11 @@ function AgentGroupSettingsPanel({ group, onUpdate, readOnly = false }: {
             disabled={savingPolicy}
             className="shrink-0 rounded-md border border-border bg-bg-tertiary px-2 py-1 text-sm text-text-primary focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50"
           >
-            <option value="inherit">{t('agentUpdate.policy.inherit', 'Inherit')}</option>
+            <option value="inherit">
+              {inheritedPolicy && inheritedSourceText
+                ? `${t('agentUpdate.policy.inherit', 'Inherit')} (${t(`agentUpdate.policy.${inheritedPolicy.policy}`, inheritedPolicy.policy)} — ${inheritedSourceText})`
+                : t('agentUpdate.policy.inherit', 'Inherit')}
+            </option>
             <option value="auto">{t('agentUpdate.policy.auto', 'Automatic')}</option>
             <option value="manual">{t('agentUpdate.policy.manual', 'Manual')}</option>
             <option value="off">{t('agentUpdate.policy.off', 'Off (frozen)')}</option>
@@ -584,6 +628,43 @@ function GroupTemplatesPanel({ groupId }: { groupId: number }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Live agent status
+// ─────────────────────────────────────────────────────────────────────────────
+
+type AgentLiveState = 'online' | 'offline' | 'suspended' | 'pending';
+
+/** Operational state shown for an agent (not its approval status). */
+function agentLiveState(d: AgentDevice): AgentLiveState {
+  if (d.status === 'suspended') return 'suspended';
+  if (d.status === 'pending') return 'pending';
+  return d.wsConnected ? 'online' : 'offline';
+}
+
+const LIVE_STATE_CLASSES: Record<AgentLiveState, string> = {
+  online:    'bg-green-500/10 text-green-400',
+  offline:   'bg-red-500/10 text-red-400',
+  suspended: 'bg-gray-500/10 text-gray-400',
+  pending:   'bg-yellow-500/10 text-yellow-400',
+};
+
+/** Ids of `groupId` and all its descendants in the tree (just the id when absent). */
+function subtreeIds(tree: GroupTreeNode[], groupId: number): Set<number> {
+  const find = (nodes: GroupTreeNode[]): GroupTreeNode | null => {
+    for (const n of nodes) {
+      if (n.id === groupId) return n;
+      const hit = find(n.children);
+      if (hit) return hit;
+    }
+    return null;
+  };
+  const ids = new Set<number>([groupId]);
+  const collect = (n: GroupTreeNode) => { ids.add(n.id); n.children.forEach(collect); };
+  const root = find(tree);
+  if (root) collect(root);
+  return ids;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main GroupDetailPage
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -599,8 +680,13 @@ export function GroupDetailPage() {
   const canWrite = canWriteGroup(groupId);
 
   const [group, setGroup] = useState<MonitorGroup | null>(storeGroup ?? null);
-  const [devices, setDevices] = useState<AgentDevice[]>([]);
+  const [deviceRows, setDeviceRows] = useState<AgentDevice[]>([]);
   const [loading, setLoading] = useState(true);
+  const tree = useGroupStore(s => s.tree);
+  // Live rows of the shared agent store (socket deltas + poll) win over the
+  // page's snapshot, so presence and status stay current.
+  const liveDevices = useAgentDevices();
+  const liveLoaded = useAgentDevicesLoaded();
 
   const isAgentGroup = group?.kind === 'agent';
   // Agent updates (C17-1): writes follow the operating tenant; "Update outdated
@@ -629,24 +715,52 @@ export function GroupDetailPage() {
     }
   };
 
-  // Fetch group + agent devices on mount
-  useEffect(() => {
-    async function loadData() {
-      try {
-        const g = await groupsApi.getById(groupId);
-        setGroup(g);
+  // Fetch group + agent devices (whole sub-tree, every status but refused)
+  const loadData = useCallback(async () => {
+    try {
+      const g = await groupsApi.getById(groupId);
+      setGroup(g);
 
-        if (g.kind === 'agent') {
-          const all = await agentApi.listDevices('approved');
-          setDevices(all.filter(d => d.groupId === groupId));
-        }
-      } catch {
-        // group may come from store
+      if (g.kind === 'agent') {
+        const rows = await agentApi.listDevices({ groupId, recursive: true });
+        setDeviceRows(rows.filter(d => d.status !== 'refused'));
       }
-      setLoading(false);
+    } catch {
+      // group may come from store
     }
-    loadData();
+    setLoading(false);
   }, [groupId]);
+
+  useEffect(() => { void loadData(); }, [loadData]);
+
+  // Socket reconnected: events emitted meanwhile are lost — reload.
+  useEffect(() => {
+    const onResync = () => { void loadData(); };
+    window.addEventListener(SOCKET_RESYNC_EVENT, onResync);
+    return () => window.removeEventListener(SOCKET_RESYNC_EVENT, onResync);
+  }, [loadData]);
+
+  // A device that leaves the store (AGENT_DEVICE_DELETED, uninstall) leaves
+  // the page snapshot too, instead of lingering until the next reload.
+  const prevLiveIdsRef = useRef<Set<number>>(new Set());
+  useEffect(() => {
+    const ids = new Set(liveDevices.map(d => d.id));
+    const gone = [...prevLiveIdsRef.current].filter(id => !ids.has(id));
+    prevLiveIdsRef.current = ids;
+    // Rows of another user / tenant not loaded yet: not a deletion.
+    if (gone.length > 0 && liveLoaded) {
+      setDeviceRows(prev => prev.filter(d => !gone.includes(d.id)));
+    }
+  }, [liveDevices, liveLoaded]);
+
+  const devices = useMemo(() => {
+    // Client-side sub-tree guard (also covers a server ignoring ?groupId).
+    const ids = subtreeIds(tree, groupId);
+    const liveById = new Map(liveDevices.map(d => [d.id, d]));
+    return deviceRows
+      .map(d => liveById.get(d.id) ?? d)
+      .filter(d => d.status !== 'refused' && d.groupId != null && ids.has(d.groupId));
+  }, [deviceRows, liveDevices, tree, groupId]);
 
   if (loading && !group) {
     return (
@@ -681,8 +795,14 @@ export function GroupDetailPage() {
     }
   };
 
-  // Agent device stats
-  const onlineCount = devices.filter(d => d.status === 'approved').length;
+  // Agent device stats: connected approved agents (live presence)
+  const onlineCount = devices.filter(d => agentLiveState(d) === 'online').length;
+  const liveStateLabel = (s: AgentLiveState): string => ({
+    online: t('groups.detail.online'),
+    offline: t('groups.detail.offline'),
+    pending: t('groups.detail.pending'),
+    suspended: t('groups.detail.suspended', { defaultValue: 'Suspended' }),
+  })[s];
 
   return (
     <div className="p-6">
@@ -782,11 +902,14 @@ export function GroupDetailPage() {
                 to={`/agents/${device.id}`}
                 className="flex items-center gap-3 px-4 py-2.5 hover:bg-bg-hover transition-colors"
               >
-                <span className={cn(
-                  'inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold',
-                  device.status === 'approved' ? 'bg-green-500/10 text-green-400' : 'bg-gray-500/10 text-gray-400',
-                )}>
-                  {device.status.toUpperCase()}
+                <span
+                  data-status={agentLiveState(device)}
+                  className={cn(
+                    'inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase',
+                    LIVE_STATE_CLASSES[agentLiveState(device)],
+                  )}
+                >
+                  {liveStateLabel(agentLiveState(device))}
                 </span>
                 <span className="flex-1 text-sm text-text-primary truncate">
                   {anonHostname(device.name ?? device.hostname)}

@@ -9,7 +9,6 @@ import { useAuthStore } from '@/store/authStore';
 import { Button } from '@/components/common/Button';
 import { Input } from '@/components/common/Input';
 import { GroupPicker } from '@/components/common/GroupPicker';
-import { SettingsPanel } from '@/components/settings/SettingsPanel';
 import { NotificationBindingsPanel } from '@/components/notifications/NotificationBindingsPanel';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { cn } from '@/utils/cn';
@@ -29,7 +28,6 @@ interface GroupFormData {
   name: string;
   description: string;
   isGeneral: boolean;
-  groupNotifications: boolean;
 }
 
 export function GroupEditPage() {
@@ -48,7 +46,6 @@ export function GroupEditPage() {
     name: group?.name ?? '',
     description: group?.description ?? '',
     isGeneral: group?.isGeneral ?? false,
-    groupNotifications: group?.groupNotifications ?? false,
   });
 
   // Position state (admin only)
@@ -83,7 +80,6 @@ export function GroupEditPage() {
             name: g.name,
             description: g.description ?? '',
             isGeneral: g.isGeneral,
-            groupNotifications: g.groupNotifications,
           });
         })
         .catch(() => toast.error(t('groups.failedUpdate')))
@@ -118,7 +114,6 @@ export function GroupEditPage() {
         name: form.name,
         description: form.description || null,
         isGeneral: form.isGeneral,
-        groupNotifications: form.groupNotifications,
       });
       toast.success(t('groups.updated'));
       fetchGroups();
@@ -233,28 +228,6 @@ export function GroupEditPage() {
               {t('groups.form.isGeneral')}
             </label>
           </div>
-          <div className="space-y-1">
-            <div className="flex items-center gap-2">
-              <div className="relative h-4 w-4 shrink-0">
-                <input
-                  type="checkbox"
-                  id="group-notifications"
-                  checked={form.groupNotifications}
-                  onChange={(e) => setForm({ ...form, groupNotifications: e.target.checked })}
-                  className="peer appearance-none h-4 w-4 rounded border cursor-pointer transition-colors bg-bg-tertiary border-border checked:bg-accent checked:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30"
-                />
-                <svg className="pointer-events-none absolute top-0 left-0 hidden h-4 w-4 text-white peer-checked:block" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M2.5 8L6 11.5L13.5 4.5" />
-                </svg>
-              </div>
-              <label htmlFor="group-notifications" className="text-sm text-text-secondary">
-                {t('groups.form.groupNotifications')}
-              </label>
-            </div>
-            <p className="text-xs text-text-muted ml-6">
-              {t('groups.form.groupNotificationsDesc')}
-            </p>
-          </div>
           <div className="flex items-center gap-3 pt-2">
             <Button type="submit" loading={saving}>{t('groups.save')}</Button>
             <Button type="button" variant="secondary" onClick={() => navigate(`/group/${groupId}`)}>
@@ -270,15 +243,6 @@ export function GroupEditPage() {
           scope="group"
           scopeId={groupId}
           title={t('monitors.sectionNotifications')}
-        />
-      </div>
-
-      {/* Monitor Settings */}
-      <div className="mb-6">
-        <SettingsPanel
-          scope="group"
-          scopeId={groupId}
-          title={t('monitors.sectionSettings')}
         />
       </div>
 

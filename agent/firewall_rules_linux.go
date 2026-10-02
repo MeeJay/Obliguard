@@ -42,47 +42,28 @@ func (m *NftRuleManager) ListRules() ([]FwRule, error) {
 	return parseNftRuleset(string(out)), nil
 }
 
+// AddRule receives a validated request (validateFwAddRequest); nftAddArgs
+// builds the argv. Try the inet filter table first, then the single-family one.
 func (m *NftRuleManager) AddRule(req FwAddRequest) error {
-	table := "filter"
-	chain := "input"
-	if req.Direction == "out" {
-		chain = "output"
+	fallback := "ip"
+	if fwIPFamily(req.RemoteIP) == 6 {
+		fallback = "ip6"
 	}
-	action := "drop"
-	if req.Action == "allow" {
-		action = "accept"
-	}
-	var ruleExpr string
-	if req.Protocol != "" && req.Protocol != "any" {
-		ruleExpr = req.Protocol + " "
-		if req.LocalPort != "" && req.LocalPort != "any" {
-			ruleExpr += "dport " + req.LocalPort + " "
-		}
-	}
-	if req.RemoteIP != "" && req.RemoteIP != "any" {
-		ruleExpr = "ip saddr " + req.RemoteIP + " " + ruleExpr
-	}
-	ruleExpr += action
-
-	// Try inet family first, then ip family
-	cmd := fmt.Sprintf("add rule inet %s %s %s comment \"obliguard-custom\"", table, chain, ruleExpr)
-	if err := exec.Command("nft", strings.Fields(cmd)...).Run(); err != nil {
-		cmd = fmt.Sprintf("add rule ip %s %s %s comment \"obliguard-custom\"", table, chain, ruleExpr)
-		if err2 := exec.Command("nft", strings.Fields(cmd)...).Run(); err2 != nil {
-			return fmt.Errorf("nft add rule: %w", err2)
+	if err := exec.Command("nft", nftAddArgs(req, "inet")...).Run(); err != nil {
+		if out, err2 := exec.Command("nft", nftAddArgs(req, fallback)...).CombinedOutput(); err2 != nil {
+			return fmt.Errorf("nft add rule: %s — %w", strings.TrimSpace(string(out)), err2)
 		}
 	}
 	return nil
 }
 
 func (m *NftRuleManager) DeleteRule(ruleID string) error {
-	// ruleID format: "family:table:chain:handle"
-	parts := strings.SplitN(ruleID, ":", 4)
-	if len(parts) != 4 {
-		return fmt.Errorf("invalid nft rule ID: %s", ruleID)
+	// ruleID format: "family:table:chain:handle", each part re-validated.
+	args, err := nftDeleteArgs(ruleID)
+	if err != nil {
+		return err
 	}
-	cmd := fmt.Sprintf("delete rule %s %s %s handle %s", parts[0], parts[1], parts[2], parts[3])
-	if out, err := exec.Command("nft", strings.Fields(cmd)...).CombinedOutput(); err != nil {
+	if out, err := exec.Command("nft", args...).CombinedOutput(); err != nil {
 		return fmt.Errorf("nft delete: %s — %w", strings.TrimSpace(string(out)), err)
 	}
 	return nil
@@ -240,34 +221,30 @@ func (m *FirewalldRuleManager) ListRules() ([]FwRule, error) {
 	return rules, nil
 }
 
+// AddRule receives a validated request; firewalldAddCommands builds the
+// --add-port / --add-rich-rule argv (the whole rich rule is one element).
+// A permanent change only applies after --reload.
 func (m *FirewalldRuleManager) AddRule(req FwAddRequest) error {
-	if req.LocalPort != "" && req.LocalPort != "any" && req.Action == "allow" {
-		proto := req.Protocol
-		if proto == "" || proto == "any" {
-			proto = "tcp"
-		}
-		return exec.Command("firewall-cmd", "--permanent", "--add-port="+req.LocalPort+"/"+proto).Run()
-	}
-	// Rich rule for block or IP-based rules
-	ruleStr := "rule family=ipv4"
-	if req.RemoteIP != "" && req.RemoteIP != "any" {
-		ruleStr += " source address=" + req.RemoteIP
-	}
-	action := "accept"
-	if req.Action == "block" {
-		action = "drop"
-	}
-	ruleStr += " " + action
-	if err := exec.Command("firewall-cmd", "--permanent", "--add-rich-rule="+ruleStr).Run(); err != nil {
+	cmds, err := firewalldAddCommands(req)
+	if err != nil {
 		return err
+	}
+	for _, args := range cmds {
+		if out, err := exec.Command("firewall-cmd", args...).CombinedOutput(); err != nil {
+			return fmt.Errorf("firewall-cmd: %s — %w", strings.TrimSpace(string(out)), err)
+		}
 	}
 	return exec.Command("firewall-cmd", "--reload").Run()
 }
 
 func (m *FirewalldRuleManager) DeleteRule(ruleID string) error {
 	if strings.HasPrefix(ruleID, "port:") {
-		port := strings.TrimPrefix(ruleID, "port:")
-		exec.Command("firewall-cmd", "--permanent", "--remove-port="+port).Run()
+		args, err := firewalldDeletePortArgs(ruleID)
+		if err != nil {
+			return err
+		}
+		// The port may exist in the runtime config only: the reload drops it anyway.
+		_ = exec.Command("firewall-cmd", args...).Run()
 		return exec.Command("firewall-cmd", "--reload").Run()
 	}
 	// Rich rule — the ID contains the index, we need to re-list and match
@@ -335,28 +312,25 @@ func (m *UfwRuleManager) ListRules() ([]FwRule, error) {
 	return rules, nil
 }
 
+// AddRule receives a validated request; ufwAddArgs uses the full
+// "from ... to ..." syntax so a remote IP keeps the port and protocol.
 func (m *UfwRuleManager) AddRule(req FwAddRequest) error {
-	action := "allow"
-	if req.Action == "block" {
-		action = "deny"
+	args, err := ufwAddArgs(req)
+	if err != nil {
+		return err
 	}
-	if req.RemoteIP != "" && req.RemoteIP != "any" {
-		return exec.Command("ufw", action, "from", req.RemoteIP).Run()
+	if out, err := exec.Command("ufw", args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("ufw: %s — %w", strings.TrimSpace(string(out)), err)
 	}
-	port := req.LocalPort
-	if port == "" || port == "any" {
-		return fmt.Errorf("ufw requires a port or IP")
-	}
-	proto := req.Protocol
-	if proto != "" && proto != "any" {
-		port += "/" + proto
-	}
-	return exec.Command("ufw", action, port).Run()
+	return nil
 }
 
 func (m *UfwRuleManager) DeleteRule(ruleID string) error {
-	num := strings.TrimPrefix(ruleID, "ufw:")
-	return exec.Command("ufw", "--force", "delete", num).Run()
+	args, err := ufwDeleteArgs(ruleID)
+	if err != nil {
+		return err
+	}
+	return exec.Command("ufw", args...).Run()
 }
 
 func (m *UfwRuleManager) ToggleRule(_ string, _ bool) error {
@@ -429,36 +403,22 @@ func (m *IptablesRuleManager) ListRules() ([]FwRule, error) {
 	return rules, nil
 }
 
+// AddRule receives a validated request; an IPv6 remote goes to ip6tables.
 func (m *IptablesRuleManager) AddRule(req FwAddRequest) error {
-	chain := "INPUT"
-	if req.Direction == "out" {
-		chain = "OUTPUT"
+	bin, args := iptablesAddCommand(req)
+	if out, err := exec.Command(bin, args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("%s: %s — %w", bin, strings.TrimSpace(string(out)), err)
 	}
-	target := "ACCEPT"
-	if req.Action == "block" {
-		target = "DROP"
-	}
-	args := []string{"-A", chain}
-	if req.Protocol != "" && req.Protocol != "any" {
-		args = append(args, "-p", req.Protocol)
-	}
-	if req.LocalPort != "" && req.LocalPort != "any" {
-		args = append(args, "--dport", req.LocalPort)
-	}
-	if req.RemoteIP != "" && req.RemoteIP != "any" {
-		args = append(args, "-s", req.RemoteIP)
-	}
-	args = append(args, "-j", target)
-	return exec.Command("iptables", args...).Run()
+	return nil
 }
 
 func (m *IptablesRuleManager) DeleteRule(ruleID string) error {
-	// Format: "ipt:CHAIN:NUM"
-	parts := strings.SplitN(strings.TrimPrefix(ruleID, "ipt:"), ":", 2)
-	if len(parts) != 2 {
-		return fmt.Errorf("invalid iptables rule ID: %s", ruleID)
+	// Format: "ipt:INPUT|OUTPUT:NUM"
+	args, err := iptablesDeleteArgs(ruleID)
+	if err != nil {
+		return err
 	}
-	return exec.Command("iptables", "-D", parts[0], parts[1]).Run()
+	return exec.Command("iptables", args...).Run()
 }
 
 func (m *IptablesRuleManager) ToggleRule(_ string, _ bool) error {

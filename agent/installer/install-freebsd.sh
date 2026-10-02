@@ -2,6 +2,8 @@
 # Obliguard Agent Installer for FreeBSD / OPNsense
 # Usage: curl -fsSL "https://your-server/api/agent/installer/freebsd?key=<apikey>" | sh
 # Or:    sh install-freebsd.sh --url https://your-server --key <apikey>
+# Self-signed server certificate: download with fetch --no-verify-peer (or
+# curl -k), then TLS_INSECURE=1 sh ...  or: sh install-freebsd.sh ... --tls-insecure
 
 set -e
 
@@ -14,6 +16,7 @@ SERVICE_NAME="obliguard_agent"
 RC_SCRIPT="/usr/local/etc/rc.d/${SERVICE_NAME}"
 LOG_FILE="/var/log/obliguard-agent.log"
 PF_TABLE="obliguard_blocklist"
+TLS_INSECURE="${TLS_INSECURE:-0}"
 
 # Parse args (override injected values)
 for i in "$@"; do
@@ -22,8 +25,19 @@ for i in "$@"; do
     --key=*) API_KEY="${i#*=}" ;;
     --url) SERVER_URL="$2"; shift ;;
     --key) API_KEY="$2"; shift ;;
+    --tls-insecure) TLS_INSECURE=1 ;;
+    --tls-insecure=*) TLS_INSECURE="${i#*=}" ;;
   esac
 done
+
+# TLS: verify the server certificate (default). TLS_INSECURE=1 (environment)
+# or --tls-insecure skips verification on every agent connection, for a
+# self-signed certificate absent from the system trust store; it is written to
+# config.json as tlsInsecureSkipVerify.
+case "$TLS_INSECURE" in
+  1|true|yes|on) TLS_INSECURE_JSON=true; DL_INSECURE="-k"; FETCH_INSECURE="--no-verify-peer --no-verify-hostname" ;;
+  *)             TLS_INSECURE_JSON=false; DL_INSECURE=""; FETCH_INSECURE="" ;;
+esac
 
 if [ -z "$SERVER_URL" ] || [ "$SERVER_URL" = "__SERVER_URL__" ]; then
   echo "Error: --url is required"; exit 1
@@ -37,6 +51,9 @@ echo " Obliguard Agent Installer"
 echo " FreeBSD / OPNsense"
 echo "=============================="
 echo "Server URL : $SERVER_URL"
+if [ "$TLS_INSECURE_JSON" = "true" ]; then
+  echo "TLS        : certificate verification DISABLED (TLS_INSECURE=1)"
+fi
 echo ""
 
 # ── 1. Detect architecture ──────────────────────────────────────────────────
@@ -55,9 +72,9 @@ echo "[1/6] Architecture: $ARCH"
 # ── 2. Download binary ──────────────────────────────────────────────────────
 
 echo "[2/6] Downloading agent binary..."
-fetch -q -o "${INSTALL_DIR}/${BINARY_NAME}" \
+fetch -q $FETCH_INSECURE -o "${INSTALL_DIR}/${BINARY_NAME}" \
   "${SERVER_URL}/api/agent/download/obliguard-agent-${BINARY_SUFFIX}" 2>/dev/null || \
-  curl -fsSL "${SERVER_URL}/api/agent/download/obliguard-agent-${BINARY_SUFFIX}" \
+  curl -fsSL $DL_INSECURE "${SERVER_URL}/api/agent/download/obliguard-agent-${BINARY_SUFFIX}" \
     -o "${INSTALL_DIR}/${BINARY_NAME}"
 chmod +x "${INSTALL_DIR}/${BINARY_NAME}"
 
@@ -77,9 +94,11 @@ cat > "$CONFIG_DIR/config.json" <<EOF
   "apiKey": "$API_KEY",
   "deviceUuid": "$DEVICE_UUID",
   "checkIntervalSeconds": 60,
-  "agentVersion": "1.0.0"
+  "agentVersion": "1.0.0",
+  "tlsInsecureSkipVerify": $TLS_INSECURE_JSON
 }
 EOF
+chmod 600 "$CONFIG_DIR/config.json"
 
 # ── 4. Install rc.d service ─────────────────────────────────────────────────
 

@@ -7,7 +7,8 @@
  *
  * Imposed migration numbers (owner answers, wave 1): A1 = 026, C17 = 027,
  * A4 = 028, D4 = 029. A lot that lands under another number updates these
- * constants in its landing commit.
+ * constants in its landing commit. A4 landed as 029 (W1-2); D4 landed as 032
+ * (W3-1, 032_ban_lifecycle).
  */
 import { describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -16,8 +17,8 @@ import knex from 'knex';
 import type { Knex } from 'knex';
 import { lotIt } from '../lots';
 
-const A4_MIGRATION = 28;
-const D4_MIGRATION = 29;
+const A4_MIGRATION = 29;
+const D4_MIGRATION = 32;
 const MIG_DIR = path.resolve(__dirname, '..', '..', 'src', 'db', 'migrations');
 const MIG_CFG = { directory: MIG_DIR, loadExtensions: ['.ts'] };
 
@@ -66,7 +67,7 @@ describe('14 migration data', () => {
     await admin.destroy();
   });
 
-  lotIt('UNTRACKED', '14.1 a fresh install can create its first tenant', async () => {
+  lotIt('W1-2', '14.1 a fresh install can create its first tenant', async () => {
     const k = open(DB_URL);
     await k.migrate.latest(MIG_CFG);
     const [row] = await k('tenants').insert({ name: 'Fresh', slug: 'fresh' }).returning('id') as Array<{ id: number }>;

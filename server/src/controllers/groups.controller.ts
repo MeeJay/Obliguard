@@ -2,18 +2,35 @@ import type { Request, Response, NextFunction } from 'express';
 import { groupService } from '../services/group.service';
 import { permissionService } from '../services/permission.service';
 import { teamService } from '../services/team.service';
-import { groupNotificationService } from '../services/groupNotification.service';
 import { AppError } from '../middleware/errorHandler';
 import type { CreateGroupInput, UpdateGroupInput, MoveGroupInput } from '../validators/group.schema';
 import { deviceAccessVerdict } from '../utils/tenantWriteRules';
 import { isAgentUpdatePolicy } from '../utils/agentUpdate';
-import { invalidateAgentUpdatePolicyCache } from '../services/agent.service';
+import { agentService, invalidateAgentUpdatePolicyCache } from '../services/agent.service';
 import { logger } from '../utils/logger';
-import type { AgentGroupConfig } from '@obliview/shared';
+import { emitToTenantAudience } from '../utils/socketRooms';
+import type { AgentGroupConfig, MonitorGroup } from '@obliview/shared';
 import { MASTER_TENANT_ID } from '@obliview/shared';
 
 /** Keys accepted in PATCH /groups/:id/agent-config (agentGroupConfig). */
-const AGENT_GROUP_CONFIG_KEYS = ['pushIntervalSeconds', 'heartbeatMonitoring', 'maxMissedPushes', 'notificationTypes', 'updatePolicy'] as const;
+const AGENT_GROUP_CONFIG_KEYS = ['pushIntervalSeconds', 'maxMissedPushes', 'notificationTypes', 'updatePolicy'] as const;
+
+const FOREIGN_GROUP_READ_ONLY = 'This group belongs to another tenant: read-only from the Default tenant';
+
+/**
+ * Load a group bound to the operating tenant (owner model, A5): reads may
+ * cross tenants from the Default tenant (god view); writes follow the
+ * operating tenant, platform role included: 403 from Default, 404 elsewhere.
+ */
+async function loadGroup(id: number, tenantId: number, mode: 'read' | 'write'): Promise<MonitorGroup> {
+  if (isNaN(id)) throw new AppError(400, 'Invalid group ID');
+  const group = await groupService.getById(id);
+  if (!group) throw new AppError(404, 'Group not found');
+  const verdict = deviceAccessVerdict(group.tenantId ?? MASTER_TENANT_ID, tenantId, mode);
+  if (verdict === 'forbidden') throw new AppError(403, FOREIGN_GROUP_READ_ONLY);
+  if (verdict !== 'ok') throw new AppError(404, 'Group not found');
+  return group;
+}
 
 export const groupsController = {
   async list(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -26,7 +43,7 @@ export const groupsController = {
         return;
       }
 
-      const visibleIds = await permissionService.getVisibleGroupIds(req.session.userId!, false);
+      const visibleIds = await permissionService.getVisibleGroupIds(req.session.userId!, false, req.tenantId);
       if (visibleIds === 'all') {
         res.json({ success: true, data: allGroups });
         return;
@@ -50,7 +67,7 @@ export const groupsController = {
         return;
       }
 
-      const visibleIds = await permissionService.getVisibleGroupIds(req.session.userId!, false);
+      const visibleIds = await permissionService.getVisibleGroupIds(req.session.userId!, false, req.tenantId);
       if (visibleIds === 'all') {
         res.json({ success: true, data: tree });
         return;
@@ -72,12 +89,11 @@ export const groupsController = {
   async getById(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const id = parseInt(req.params.id, 10);
-      const group = await groupService.getById(id);
-      if (!group) throw new AppError(404, 'Group not found');
+      const group = await loadGroup(id, req.tenantId, 'read');
 
       const isAdmin = req.session.role === 'admin';
       if (!isAdmin) {
-        const canRead = await permissionService.canReadGroup(req.session.userId!, id, false);
+        const canRead = await permissionService.canReadGroup(req.session.userId!, id, false, req.tenantId);
         if (!canRead) throw new AppError(403, 'Access denied');
       }
 
@@ -89,31 +105,33 @@ export const groupsController = {
 
   async create(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const data = req.body as CreateGroupInput;
+      // Obliview leftovers accepted from old clients: groupNotifications is
+      // ignored, and every group is an agent group (no 'monitor' kind).
+      const { groupNotifications: _ignored, kind: _kind, ...rest } = req.body as CreateGroupInput;
+      const data = { ...rest, kind: 'agent' as const };
 
-      // Validate parent exists if specified
+      // The parent must exist in the operating tenant (no Default bypass).
       if (data.parentId) {
         const parent = await groupService.getById(data.parentId);
-        if (!parent) throw new AppError(400, 'Parent group not found');
+        const verdict = parent ? deviceAccessVerdict(parent.tenantId ?? MASTER_TENANT_ID, req.tenantId, 'write') : 'not-found';
+        if (verdict === 'forbidden') throw new AppError(403, FOREIGN_GROUP_READ_ONLY);
+        if (verdict !== 'ok') throw new AppError(400, 'Parent group not found');
       }
 
       const group = await groupService.create(data, req.tenantId);
 
-      // Auto-assign RW to creator's teams that have canCreate
+      // Auto-assign RW to the creator's teams of this tenant that have canCreate
       if (req.session.role !== 'admin') {
         const userTeams = await teamService.getUserTeams(req.session.userId!);
         for (const team of userTeams) {
-          if (team.canCreate) {
+          if (team.canCreate && Number(team.tenantId) === Number(group.tenantId)) {
             await teamService.addPermission(team.id, 'group', group.id, 'rw');
           }
         }
       }
 
-      // Broadcast via Socket.io
-      const io = req.app.get('io');
-      if (io) {
-        io.to('role:admin').emit('group:created', { group });
-      }
+      // Broadcast via Socket.io (owning tenant + Default)
+      emitToTenantAudience(req.app.get('io'), group.tenantId ?? req.tenantId, 'group:created', { group });
 
       res.status(201).json({ success: true, data: group });
     } catch (err) {
@@ -124,19 +142,14 @@ export const groupsController = {
   async update(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const id = parseInt(req.params.id, 10);
-      const data = req.body as UpdateGroupInput;
+      await loadGroup(id, req.tenantId, 'write');
+      // groupNotifications is an Obliview leftover: accepted from old clients, ignored.
+      const { groupNotifications: _ignored, ...data } = req.body as UpdateGroupInput;
       const group = await groupService.update(id, data);
 
       if (!group) throw new AppError(404, 'Group not found');
 
-      if (data.groupNotifications !== undefined) {
-        groupNotificationService.removeGroup(id);
-      }
-
-      const io = req.app.get('io');
-      if (io) {
-        io.to('role:admin').emit('group:updated', { group });
-      }
+      emitToTenantAudience(req.app.get('io'), group.tenantId ?? req.tenantId, 'group:updated', { group });
 
       res.json({ success: true, data: group });
     } catch (err) {
@@ -149,20 +162,21 @@ export const groupsController = {
       const id = parseInt(req.params.id, 10);
       const { newParentId } = req.body as MoveGroupInput;
 
+      // Both the group and its new parent belong to the operating tenant.
+      await loadGroup(id, req.tenantId, 'write');
+      if (newParentId !== null) await loadGroup(newParentId, req.tenantId, 'write');
+
       // Also check write permission on target parent if non-admin
       const isAdmin = req.session.role === 'admin';
       if (!isAdmin && newParentId !== null) {
-        const canWriteTarget = await permissionService.canWriteGroup(req.session.userId!, newParentId, false);
+        const canWriteTarget = await permissionService.canWriteGroup(req.session.userId!, newParentId, false, req.tenantId);
         if (!canWriteTarget) throw new AppError(403, 'No write permission on target group');
       }
 
       const group = await groupService.move(id, newParentId);
       if (!group) throw new AppError(404, 'Group not found');
 
-      const io = req.app.get('io');
-      if (io) {
-        io.to('role:admin').emit('group:moved', { group });
-      }
+      emitToTenantAudience(req.app.get('io'), group.tenantId ?? req.tenantId, 'group:moved', { group });
 
       res.json({ success: true, data: group });
     } catch (err: unknown) {
@@ -177,16 +191,13 @@ export const groupsController = {
   async delete(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const id = parseInt(req.params.id, 10);
-
-      groupNotificationService.removeGroup(id);
+      // Owning tenant, read before the row is gone (audience of the emit).
+      const owner = await loadGroup(id, req.tenantId, 'write');
 
       const deleted = await groupService.delete(id);
       if (!deleted) throw new AppError(404, 'Group not found');
 
-      const io = req.app.get('io');
-      if (io) {
-        io.to('role:admin').emit('group:deleted', { groupId: id });
-      }
+      emitToTenantAudience(req.app.get('io'), owner?.tenantId ?? req.tenantId, 'group:deleted', { groupId: id });
 
       res.json({ success: true, message: 'Group deleted' });
     } catch (err) {
@@ -194,65 +205,29 @@ export const groupsController = {
     }
   },
 
-  /** Stub: no monitors/heartbeats in Obliguard */
-  async stats(_req: Request, res: Response, next: NextFunction): Promise<void> {
-    try {
-      res.json({ success: true, data: {} });
-    } catch (err) {
-      next(err);
-    }
-  },
-
-  /** Stub: no monitors/heartbeats in Obliguard */
-  async clearHeartbeats(_req: Request, res: Response, next: NextFunction): Promise<void> {
-    try {
-      res.json({ success: true, data: { deleted: 0, monitorCount: 0 } });
-    } catch (err) {
-      next(err);
-    }
-  },
-
   async reorder(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const items = req.body.items as { id: number; sortOrder: number }[];
+      const items = req.body?.items as { id: number; sortOrder: number }[];
       if (!Array.isArray(items) || items.length === 0) {
         throw new AppError(400, 'items array is required');
       }
-      await groupService.reorder(items);
-
-      const io = req.app.get('io');
-      if (io) {
-        io.to('role:admin').emit('group:reordered', { items });
+      if (!items.every((i) => i && Number.isInteger(i.id) && Number.isInteger(i.sortOrder))) {
+        throw new AppError(400, 'Each item needs an integer id and sortOrder');
       }
+      // Every reordered group belongs to the operating tenant (no Default bypass).
+      const owners = await groupService.getTenantIds(items.map((i) => i.id));
+      for (const item of items) {
+        const owner = owners.get(item.id);
+        const verdict = owner === undefined ? 'not-found' : deviceAccessVerdict(owner, req.tenantId, 'write');
+        if (verdict === 'forbidden') throw new AppError(403, FOREIGN_GROUP_READ_ONLY);
+        if (verdict !== 'ok') throw new AppError(404, 'Group not found');
+      }
+      await groupService.reorder(items, req.tenantId);
+
+      // Reordering is tenant-local (drag-and-drop of the operating tenant).
+      emitToTenantAudience(req.app.get('io'), req.tenantId, 'group:reordered', { items });
 
       res.json({ success: true, message: 'Groups reordered' });
-    } catch (err) {
-      next(err);
-    }
-  },
-
-  /** Stub: no monitors in Obliguard */
-  async getMonitors(_req: Request, res: Response, next: NextFunction): Promise<void> {
-    try {
-      res.json({ success: true, data: [] });
-    } catch (err) {
-      next(err);
-    }
-  },
-
-  /** Stub: no heartbeats in Obliguard */
-  async heartbeats(_req: Request, res: Response, next: NextFunction): Promise<void> {
-    try {
-      res.json({ success: true, data: [] });
-    } catch (err) {
-      next(err);
-    }
-  },
-
-  /** Stub: no heartbeat stats in Obliguard */
-  async groupDetailStats(_req: Request, res: Response, next: NextFunction): Promise<void> {
-    try {
-      res.json({ success: true, data: { total: 0, up: 0, uptimePct: 100 } });
     } catch (err) {
       next(err);
     }
@@ -264,13 +239,9 @@ export const groupsController = {
       const groupId = parseInt(req.params.id, 10);
       if (req.session.role !== 'admin') throw new AppError(403, 'Admin only');
 
-      const group = await groupService.getById(groupId);
-      if (!group) throw new AppError(404, 'Group not found');
       // Operating tenant only, no platform-admin bypass (C17-1): read-only
       // from the Default tenant (403), invisible elsewhere (404).
-      const verdict = deviceAccessVerdict(group.tenantId ?? MASTER_TENANT_ID, req.tenantId, 'write');
-      if (verdict === 'forbidden') throw new AppError(403, 'This group belongs to another tenant: read-only from the Default tenant');
-      if (verdict !== 'ok') throw new AppError(404, 'Group not found');
+      const group = await loadGroup(groupId, req.tenantId, 'write');
       if (group.kind !== 'agent') throw new AppError(400, 'Not an agent group');
 
       const { agentGroupConfig, agentThresholds } = req.body as {
@@ -301,6 +272,7 @@ export const groupsController = {
         updated = (await groupService.updateAgentGroupConfig(groupId, clean)) ?? updated;
         invalidateAgentUpdatePolicyCache();
         if ('updatePolicy' in clean) {
+          if (clean.updatePolicy === 'off') await agentService.cancelOpenAttemptsForGroup(groupId);
           logger.info({
             event: 'agent_update_group_policy', userId: req.session.userId, tenantId: req.tenantId, groupId, to: clean.updatePolicy ?? null,
           }, 'Group agent update policy changed');

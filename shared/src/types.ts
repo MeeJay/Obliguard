@@ -1,5 +1,7 @@
-import type { UserRole } from './monitorTypes';
 import type { SettingsKey } from './settingsDefaults';
+
+export const USER_ROLES = ['admin', 'user'] as const;
+export type UserRole = (typeof USER_ROLES)[number];
 
 // ============================================
 // User types
@@ -67,7 +69,8 @@ export interface MonitorGroup {
   parentId: number | null;
   sortOrder: number;
   isGeneral: boolean;
-  groupNotifications: boolean;
+  /** @deprecated Obliview leftover, ignored by the server (group notifications removed). */
+  groupNotifications?: boolean;
   /**
    * Evaluate-only (dry-run) mode. When true, this group and all its descendant
    * groups + agents observe events but never create or enforce auto-bans.
@@ -98,8 +101,39 @@ export interface NotificationChannel {
   createdBy: number | null;
   tenantId?: number;
   isShared?: boolean;
+  /**
+   * True when the caller does not own the channel (shared to its tenant):
+   * secrets in `config` are masked with NOTIFICATION_REDACTED and the
+   * channel cannot be edited, deleted, re-shared or bound globally.
+   */
+  readOnly?: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+/** Placeholder sent instead of a secret config value of a read-only channel. */
+export const NOTIFICATION_REDACTED = '__REDACTED__';
+
+/** IPS event a notification describes. */
+export type NotificationKind = 'threat' | 'attack' | 'ban' | 'down' | 'up' | 'test';
+
+/**
+ * IPS fields carried by a notification payload, next to the legacy
+ * monitorName/oldStatus/newStatus fields. Plugins render `title` and
+ * `message` when present; the other fields are structured data (webhook
+ * consumers get them as-is). ip/service/username come from agent logs and
+ * are attacker-controlled: plugins must escape them for their markup.
+ */
+export interface NotificationEventFields {
+  kind?: NotificationKind;
+  title?: string;
+  ip?: string;
+  service?: string;
+  failureCount?: number;
+  username?: string;
+  agentName?: string;
+  tenantName?: string;
+  url?: string;
 }
 
 export type OverrideMode = 'merge' | 'replace' | 'exclude';
@@ -142,71 +176,6 @@ export interface SettingValue {
 export type ResolvedSettings = Record<SettingsKey, SettingValue>;
 
 // ============================================
-// Maintenance Window types
-// ============================================
-export type MaintenanceScopeType = 'global' | 'group' | 'agent';
-export type MaintenanceScheduleType = 'one_time' | 'recurring';
-export type MaintenanceRecurrenceType = 'daily' | 'weekly';
-
-export interface MaintenanceWindow {
-  id: number;
-  name: string;
-  scopeType: MaintenanceScopeType;
-  scopeId: number | null;
-  isOverride: boolean;
-  scheduleType: MaintenanceScheduleType;
-  startAt: string | null;
-  endAt: string | null;
-  startTime: string | null;
-  endTime: string | null;
-  recurrenceType: MaintenanceRecurrenceType | null;
-  daysOfWeek: number[] | null;
-  timezone: string;
-  notifyChannelIds: number[];
-  lastNotifiedStartAt: string | null;
-  lastNotifiedEndAt: string | null;
-  active: boolean;
-  createdAt: string;
-  isActiveNow?: boolean;
-  scopeName?: string;
-  source?: 'local' | 'group' | 'global';
-  sourceId?: number | null;
-  sourceName?: string;
-  isDisabledHere?: boolean;
-  canEdit?: boolean;
-  canDelete?: boolean;
-  canDisable?: boolean;
-  canEnable?: boolean;
-}
-
-export interface MaintenanceWindowDisable {
-  id: number;
-  windowId: number;
-  scopeType: 'group' | 'agent';
-  scopeId: number;
-  createdAt: string;
-}
-
-export interface CreateMaintenanceWindowRequest {
-  name: string;
-  scopeType: MaintenanceScopeType;
-  scopeId?: number | null;
-  isOverride?: boolean;
-  scheduleType: MaintenanceScheduleType;
-  startAt?: string | null;
-  endAt?: string | null;
-  startTime?: string | null;
-  endTime?: string | null;
-  recurrenceType?: MaintenanceRecurrenceType | null;
-  daysOfWeek?: number[] | null;
-  timezone?: string;
-  notifyChannelIds?: number[];
-  active?: boolean;
-}
-
-export type UpdateMaintenanceWindowRequest = Partial<CreateMaintenanceWindowRequest>;
-
-// ============================================
 // API types
 // ============================================
 export interface ApiResponse<T = unknown> {
@@ -228,6 +197,7 @@ export interface CreateGroupRequest {
   parentId?: number | null;
   sortOrder?: number;
   isGeneral?: boolean;
+  /** @deprecated Ignored by the server (group notifications removed). */
   groupNotifications?: boolean;
   kind?: 'agent';
 }
@@ -238,6 +208,7 @@ export interface UpdateGroupRequest {
   parentId?: number | null;
   sortOrder?: number;
   isGeneral?: boolean;
+  /** @deprecated Ignored by the server (group notifications removed). */
   groupNotifications?: boolean;
   evaluateOnly?: boolean;
 }
@@ -316,8 +287,53 @@ export type AgentUpdatePolicy = 'auto' | 'manual' | 'off';
 export const AGENT_UPDATE_POLICIES: readonly AgentUpdatePolicy[] = ['auto', 'manual', 'off'];
 /** Built-in default when no level sets a policy. */
 export const DEFAULT_AGENT_UPDATE_POLICY: AgentUpdatePolicy = 'manual';
-/** Where the resolved policy comes from ('unresolved' = group lookup failed, fails closed to 'off'). */
-export type AgentUpdatePolicySource = 'agent' | 'group' | 'global' | 'default' | 'unresolved';
+/** Where the resolved policy comes from ('unresolved' = group or tenant lookup failed, fails closed to 'off'). */
+export type AgentUpdatePolicySource = 'agent' | 'group' | 'tenant' | 'global' | 'default' | 'unresolved';
+
+/**
+ * Phase of an agent update attempt (agent_update_attempts.phase, W2-1).
+ * 'offered': latestVersion was written in a config frame; the next phases are
+ * reported by the agent (update_status frame) or inferred by the server.
+ */
+export type AgentUpdatePhase =
+  | 'offered' | 'downloading' | 'verifying' | 'installing' | 'restarting'
+  | 'succeeded' | 'failed' | 'cancelled';
+export const AGENT_UPDATE_PHASES: readonly AgentUpdatePhase[] = [
+  'offered', 'downloading', 'verifying', 'installing', 'restarting', 'succeeded', 'failed', 'cancelled',
+];
+/** Phases an agent may report in an update_status frame (anything else is ignored). */
+export const AGENT_REPORTED_UPDATE_PHASES: readonly AgentUpdatePhase[] = [
+  'downloading', 'verifying', 'installing', 'restarting', 'failed',
+];
+
+/** The latest update attempt of a device (AgentDevice.update). */
+export interface AgentUpdateAttemptInfo {
+  targetVersion: string;
+  phase: AgentUpdatePhase;
+  /** Config frames that carried latestVersion for this target (capped at 3). */
+  attempts: number;
+  /** 'no_progress' | 'timeout' | 'reverted_or_failed' | an agent-reported error. */
+  lastError: string | null;
+  updatedAt: string;
+}
+
+/** Agent → server WS frame reporting the progress of a self-update. */
+export interface AgentUpdateStatusFrame {
+  type: 'update_status';
+  targetVersion: string;
+  phase: 'downloading' | 'verifying' | 'installing' | 'restarting' | 'failed';
+  error?: string;
+}
+
+/** Tenant level of the update policy (GET/PATCH /agent/update-policy/tenant). */
+export interface AgentTenantUpdatePolicyInfo {
+  tenantId: number;
+  /** The tenant's explicit policy; null = inherit the global one. */
+  updatePolicy: AgentUpdatePolicy | null;
+  /** Effective global policy (built-in 'manual' when unset). */
+  globalPolicy: AgentUpdatePolicy;
+  globalPolicyIsDefault: boolean;
+}
 
 export interface AgentUpdateRequestResult {
   requested: number;
@@ -335,6 +351,12 @@ export interface AgentVersionDistribution {
   policies: Record<AgentUpdatePolicy, number>;
   globalPolicy: AgentUpdatePolicy;
   globalPolicyIsDefault: boolean;
+  /** Explicit policy of the operating tenant; null = inherits the global one. */
+  tenantPolicy: AgentUpdatePolicy | null;
+  /** os-arch artifacts whose build does not match the served version (nothing is advertised to them). */
+  missingBuilds: string[];
+  /** Approved agents whose latest update attempt failed. */
+  updateFailed: number;
   versions: Array<{ version: string; count: number; isLatest: boolean; outdated: boolean }>;
 }
 
@@ -578,6 +600,13 @@ export interface AgentDisplayConfig {
   };
 }
 
+/**
+ * Live agent status carried by AGENT_STATUS_CHANGED (sidebar / list dots):
+ * 'up' and 'down' follow the WS channel, 'updating' a self-update in progress.
+ * 'alert' and 'inactive' are kept for older emitters.
+ */
+export type AgentLiveStatus = 'up' | 'down' | 'alert' | 'inactive' | 'updating';
+
 export interface AgentDevice {
   id: number;
   uuid: string;
@@ -594,7 +623,11 @@ export interface AgentDevice {
   agentVersion: string | null;
   apiKeyId: number | null;
   status: 'pending' | 'approved' | 'refused' | 'suspended';
-  heartbeatMonitoring: boolean;
+  /**
+   * @deprecated Obliview leftover: no longer returned nor accepted by the
+   * server (offline alerts follow the 'down' notification type).
+   */
+  heartbeatMonitoring?: boolean;
   checkIntervalSeconds: number;
   /** Raw device-level value. null = not set at device level = inherit from group/global. */
   maxMissedPushes: number | null;
@@ -607,7 +640,8 @@ export interface AgentDevice {
   overrideGroupSettings: boolean;
   resolvedSettings: {
     checkIntervalSeconds: number;
-    heartbeatMonitoring: boolean;
+    /** @deprecated No longer returned by the server. */
+    heartbeatMonitoring?: boolean;
     maxMissedPushes: number;
   };
   groupSettings: AgentGroupConfig | null;
@@ -616,7 +650,6 @@ export interface AgentDevice {
   pendingCommand?: string | null;
   uninstallCommandedAt?: string | null;
   updatingSince?: string | null;
-  inMaintenance?: boolean;
   notificationTypes?: NotificationTypeConfig | null;
   resolvedNotificationTypes?: {
     global: boolean;
@@ -678,6 +711,29 @@ export interface AgentDevice {
   updateRequestedVersion?: string | null;
   /** True while a live request will be offered at the next heartbeat. */
   updatePending?: boolean;
+  // ── Presence and update lifecycle (W2-1) ──
+  /** Last heartbeat / events frame / push (60 s resolution). Never moved by admin edits. */
+  lastSeenAt?: string | null;
+  /** Last WS command-channel registration. */
+  lastOnlineAt?: string | null;
+  /** Last time the offline grace period expired. */
+  lastOfflineAt?: string | null;
+  /** Capabilities reported in the heartbeat (e.g. 'tls_unverified'). */
+  capabilities?: string[];
+  /** Latest update attempt, or null when none was ever recorded. */
+  update?: AgentUpdateAttemptInfo | null;
+}
+
+/** Socket payload of AGENT_DEVICE_UPDATED: only the changed fields. */
+export interface AgentDeviceUpdatedEvent {
+  deviceId: number;
+  patch: Partial<AgentDevice>;
+}
+
+/** Socket payload of 'agent:deviceCreated' (a new pending enrolment, tenant admins only). */
+export interface AgentDeviceCreatedEvent {
+  deviceId: number;
+  device: AgentDevice;
 }
 
 // ============================================
@@ -862,104 +918,6 @@ export interface M365EnrolmentVerification {
   /** Permissions the module needs and that are still missing. */
   missingScopes: string[];
   error?: string;
-}
-
-// ============================================
-// Remediation types
-// ============================================
-export type RemediationActionType = 'webhook' | 'n8n' | 'script' | 'docker_restart' | 'ssh';
-export type RemediationTrigger   = 'down' | 'up' | 'both';
-export type RemediationRunStatus = 'success' | 'failed' | 'timeout' | 'cooldown_skip';
-export type OverrideModeR        = 'merge' | 'replace' | 'exclude';
-
-export interface WebhookRemediationConfig {
-  platform?: 'n8n' | 'make' | 'zapier' | null;
-  url: string;
-  method?: 'GET' | 'POST' | 'PUT' | 'PATCH';
-  headers?: Record<string, string>;
-  bodyExtra?: Record<string, unknown>;
-  timeoutMs?: number;
-}
-
-export interface ScriptRemediationConfig {
-  script: string;
-  shell?: string;
-  timeoutMs?: number;
-}
-
-export interface DockerRestartRemediationConfig {
-  containerName: string;
-  socketPath?: string;
-}
-
-export interface SshRemediationConfig {
-  host: string;
-  port?: number;
-  username: string;
-  authType: 'password' | 'key';
-  credentialEnc?: string;
-  command: string;
-  timeoutMs?: number;
-}
-
-export interface RemediationAction {
-  id: number;
-  name: string;
-  type: RemediationActionType;
-  config: WebhookRemediationConfig | ScriptRemediationConfig | DockerRestartRemediationConfig | SshRemediationConfig;
-  enabled: boolean;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface RemediationBinding {
-  id: number;
-  actionId: number;
-  scope: 'global' | 'group' | 'agent';
-  scopeId: number | null;
-  overrideMode: OverrideModeR;
-  triggerOn: RemediationTrigger;
-  cooldownSeconds: number;
-}
-
-export interface ResolvedRemediationBinding extends RemediationBinding {
-  action: RemediationAction;
-  inheritedFrom?: 'global' | 'group';
-}
-
-export interface RemediationRun {
-  id: number;
-  actionId: number;
-  agentDeviceId: number;
-  triggeredBy: 'down' | 'up';
-  status: RemediationRunStatus;
-  output: string | null;
-  error: string | null;
-  durationMs: number | null;
-  triggeredAt: string;
-  actionName?: string;
-}
-
-export interface CreateRemediationActionRequest {
-  name: string;
-  type: RemediationActionType;
-  config: Record<string, unknown>;
-  enabled?: boolean;
-}
-
-export interface UpdateRemediationActionRequest {
-  name?: string;
-  config?: Record<string, unknown>;
-  enabled?: boolean;
-}
-
-export interface AddRemediationBindingRequest {
-  actionId: number;
-  scope: 'global' | 'group' | 'agent';
-  scopeId?: number | null;
-  overrideMode?: OverrideModeR;
-  triggerOn?: RemediationTrigger;
-  cooldownSeconds?: number;
 }
 
 // ============================================
@@ -1261,6 +1219,8 @@ export interface IpWhitelist {
   scopeId: number | null;
   tenantId: number | null;
   createdBy: number | null;
+  /** Username of the creator (LEFT JOIN users); null when unknown or deleted. */
+  createdByUsername?: string | null;
   createdAt: string;
   /** Computed per operating tenant by the server (whitelist delete rule). */
   canDelete?: boolean;
@@ -1415,6 +1375,11 @@ export interface ObliguardPushBody {
    * Key = log file path, value = last N lines.
    */
   logSamples?: Record<string, string[]>;
+  /**
+   * Capabilities of this agent build (heartbeat, optional; W2-1). Stored as
+   * reported: at most 32 entries of at most 32 characters.
+   */
+  capabilities?: string[];
 }
 
 /** Per-service config sent back to the agent */

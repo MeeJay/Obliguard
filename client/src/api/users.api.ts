@@ -33,6 +33,11 @@ export const usersApi = {
     await apiClient.put(`/users/${id}/password`, { password });
   },
 
+  /** Admin reset of every second factor (TOTP + e-mail OTP) of another user. */
+  async resetTwoFactor(id: number): Promise<void> {
+    await apiClient.delete(`/users/${id}/2fa`);
+  },
+
   async delete(id: number): Promise<void> {
     await apiClient.delete(`/users/${id}`);
   },
