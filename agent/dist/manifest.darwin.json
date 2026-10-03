@@ -1,0 +1,9 @@
+{
+  "version": "1.8.59",
+  "artifacts": {
+    "obliguard-agent-darwin-amd64": {"sha256": "543c64b19df78026fdbb2823d00f9d0feea9539ad519b9d7b2c4492e88c16a57", "size": 7233728, "version": "1.8.59"},
+    "obliguard-agent-darwin-arm64": {"sha256": "998e0c028b690af9afa5047b7355ca2d5426b38c9a88c45900a7613db97a4a1a", "size": 6728450, "version": "1.8.59"},
+    "obliguard-agent.exe": {"sha256":"60f75c9fb5b99721933eb3320493f3252881ba3bde2e2ae2e4d4009b6447e1a6","size":7822208,"version":"1.8.59"},
+    "obliguard-agent.msi": {"sha256":"5356143862c3692d6530813416e2ada1e3a3fe785c32e949c146ee6b9d3b4bb8","size":2732032,"version":"1.8.59"}
+  }
+}

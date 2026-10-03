@@ -1,0 +1,10 @@
+{
+  "version": "1.8.59",
+  "artifacts": {
+    "obliguard-agent.exe": {"sha256":"60f75c9fb5b99721933eb3320493f3252881ba3bde2e2ae2e4d4009b6447e1a6","size":7822208,"version":"1.8.59"},
+    "obliguard-agent-freebsd-amd64": {"sha256": "e8de3a09e6740f9ab7a20e850d838483aa6b0ba9b5d0913f75af71576ded4bb1", "size": 5927074, "version": "1.8.59"},
+    "obliguard-agent-linux-amd64": {"sha256": "9a643745562e7afa40fb478818c0b124d5a010838c7c143935ff2496f5c6acd8", "size": 6082712, "version": "1.8.59"},
+    "obliguard-agent-linux-arm64": {"sha256": "ba95f9b73a8987dd8958892032771c56e5d9c999b280e7bb15506690fc4cc7eb", "size": 5832856, "version": "1.8.59"},
+    "obliguard-agent.msi": {"sha256":"5356143862c3692d6530813416e2ada1e3a3fe785c32e949c146ee6b9d3b4bb8","size":2732032,"version":"1.8.59"}
+  }
+}
