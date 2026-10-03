@@ -252,15 +252,110 @@
   background-color: rgb(94 106 130);
 }
 
-/* ─────────────────────────────────────────────────────────────────────────────
-   Utility — hide scrollbar
-   ───────────────────────────────────────────────────────────────────────────── */
-.scrollbar-none {
-  scrollbar-width: none;
-  -ms-overflow-style: none;
+/* Accent used as TEXT (parity with Obliance index.css, where the Dim theme
+   remaps it). --c-accent-as-text is the colour of accent-coloured text,
+   links and icons; fills, borders and rings keep --c-accent. Operator,
+   Daylight and the legacy themes use the accent itself. On Obli Dim the
+   amber #f5a623 is 4.96:1 on cards but only 4.26:1 on the bg-tertiary pills
+   and inputs, so text takes the Obliguard highlight #ffb84a (= --c-accent-
+   hover: 5.85:1 on cards, 5.02:1 on tertiary). The accent tokens themselves
+   stay verbatim from Operator. These remaps have the same specificity as
+   hover:text-* variants and come after them, so on Dim an element combining
+   text-accent with hover:text-<other colour> keeps the accent on hover: add
+   an explicit override here if a page ever needs that (none does today). */
+:root {
+  --c-accent-as-text:        var(--c-accent);
 }
-.scrollbar-none::-webkit-scrollbar {
-  display: none;
+[data-theme="obli-dim"] {
+  --c-accent-as-text:        255 184 74;    /* #ffb84a = --c-accent-hover */
+}
+[data-theme="obli-dim"] .text-accent,
+[data-theme="obli-dim"] .text-primary,
+[data-theme="obli-dim"] .hover\:text-accent:hover,
+[data-theme="obli-dim"] .group:hover .group-hover\:text-accent,
+[data-theme="obli-dim"] .group:hover .group-hover\:text-primary {
+  color: rgb(var(--c-accent-as-text));
+}
+[data-theme="obli-dim"] .text-accent\/80,
+[data-theme="obli-dim"] .text-primary\/80 { color: rgb(var(--c-accent-as-text) / 0.8); }
+[data-theme="obli-dim"] .text-accent\/70,
+[data-theme="obli-dim"] .hover\:text-accent\/70:hover { color: rgb(var(--c-accent-as-text) / 0.7); }
+[data-theme="obli-dim"] .text-accent\/40 { color: rgb(var(--c-accent-as-text) / 0.4); }
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Mobile + utilities layer (parity with Obliance index.css)
+   ───────────────────────────────────────────────────────────────────────────── */
+
+/* Safe-area insets (notch, gesture bar). Non-zero only when the viewport meta
+   has viewport-fit=cover (index.html) on a device that has insets.
+   Use them as `pt-[var(--safe-top)]` or through the .p*-safe utilities. */
+:root {
+  --safe-top:    env(safe-area-inset-top, 0px);
+  --safe-right:  env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left:   env(safe-area-inset-left, 0px);
+}
+
+@layer base {
+  html {
+    /* No grey flash on tap (mobile browsers only). */
+    -webkit-tap-highlight-color: transparent;
+    /* Stop mobile browsers from inflating font sizes in landscape. */
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+
+  html,
+  body {
+    /* No pull-to-refresh / scroll chaining out of the app shell (mobile
+       drawer, W14-2). */
+    overscroll-behavior-y: contain;
+  }
+}
+
+/* Phones with a touch screen: 16px form fields (prevents focus-zoom on
+   WebKit and keeps text readable). !important is required because the
+   text-xs / text-sm utilities on the fields would otherwise win.
+   Opt out with the `keep-font-size` class (e.g. dense code editors). */
+@media (pointer: coarse) and (max-width: 767px) {
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):not([type="file"]):not(.keep-font-size),
+  select:not(.keep-font-size),
+  textarea:not(.keep-font-size) {
+    font-size: 16px !important;
+  }
+}
+
+@layer utilities {
+  /* Safe-area padding helpers (work with variants: `sm:pb-safe`, ...). */
+  .pt-safe { padding-top: var(--safe-top); }
+  .pr-safe { padding-right: var(--safe-right); }
+  .pb-safe { padding-bottom: var(--safe-bottom); }
+  .pl-safe { padding-left: var(--safe-left); }
+  .px-safe { padding-left: var(--safe-left); padding-right: var(--safe-right); }
+  .py-safe { padding-top: var(--safe-top); padding-bottom: var(--safe-bottom); }
+
+  /* Scrollable strip without a visible scrollbar (SegmentedTabs, chip rows). */
+  .scrollbar-none { scrollbar-width: none; -ms-overflow-style: none; }
+  .scrollbar-none::-webkit-scrollbar { display: none; }
+
+  /* Surfaces that take raw pointer input (NetMap canvases): no browser
+     pan/zoom, no text selection, no long-press callout. */
+  .touch-none-canvas {
+    touch-action: none;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+  }
+}
+
+/* TableScroll `stickyFirstCol` — the first cell of every row stays visible
+   while the table scrolls horizontally. Background is overridable per table
+   with the --table-sticky-bg custom property (defaults to the card colour). */
+.table-sticky-first tr > :first-child {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background-color: var(--table-sticky-bg, rgb(var(--c-bg-secondary)));
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────

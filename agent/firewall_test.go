@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -661,6 +662,35 @@ func TestIptablesIpsetMigrationRollback(t *testing.T) {
 	mustHaveLine(t, lines, "ipset destroy obliguard_mig")
 }
 
+func TestIptablesIpsetMigrationRenameFallback(t *testing.T) {
+	types := map[string]string{"obliguard": "hash:ip"}
+	base := ipsetHandler(types, map[string]string{"obliguard": "5.6.7.8\n"}, nil)
+	r := &fakeRunner{handle: func(c fakeCall) (string, error) {
+		if c.line() == "ipset create obliguard hash:net maxelem 1048576" {
+			return "", errors.New("Kernel error received: Cannot allocate memory")
+		}
+		if c.line() == "ipset rename obliguard_mig obliguard" {
+			types["obliguard"] = types["obliguard_mig"]
+			delete(types, "obliguard_mig")
+			return "", nil
+		}
+		return base(c)
+	}}
+	useFakeRunner(t, r)
+	fw := &IptablesFirewall{}
+	if !fw.SupportsCIDR() {
+		t.Fatal("the renamed hash:net set should enable CIDR")
+	}
+	lines := r.lines()
+	mustHaveLine(t, lines, "ipset rename obliguard_mig obliguard")
+	if indexOfLine(lines, "ipset destroy obliguard_mig") > indexOfLine(lines, "ipset rename obliguard_mig obliguard") {
+		t.Fatal("the renamed set must not be destroyed")
+	}
+	if types["obliguard"] != "hash:net" {
+		t.Fatalf("obliguard type = %q", types["obliguard"])
+	}
+}
+
 func TestIptablesNoIpsetCIDR(t *testing.T) {
 	r := &fakeRunner{missing: map[string]bool{"ipset": true}, handle: func(c fakeCall) (string, error) {
 		if c.line() == "iptables -L OBLIGUARD -n" {
@@ -708,41 +738,130 @@ func TestUFWCIDR(t *testing.T) {
 
 // ── firewalld ─────────────────────────────────────────────────────────────────
 
-func TestFirewalldCIDR(t *testing.T) {
-	var mu sync.Mutex
-	files := map[string]string{} // ipset → entries passed through --add-entries-from-file
-	runtime := map[string]string{
-		"obliguard":     "5.6.7.8\n",
-		"obliguard_net": "1.2.3.0/24\n",
+// fwdSim emulates firewall-cmd with obliguard (hash:ip) and obliguard_net
+// (hash:net) ipsets, runtime and permanent. Like firewalld >= 1.2 it refuses a
+// hash:net entry that overlaps an existing one (INVALID_ENTRY), which also
+// fails a whole --add-entries-from-file batch.
+type fwdSim struct {
+	mu      sync.Mutex
+	runtime map[string]map[string]netip.Prefix
+	perm    map[string]map[string]netip.Prefix
+	files   map[string]string // ipset → entries passed through --add-entries-from-file
+	refused int
+}
+
+func newFwdSim(hosts, nets []string) *fwdSim {
+	s := &fwdSim{
+		runtime: map[string]map[string]netip.Prefix{"obliguard": {}, "obliguard_net": {}},
+		perm:    map[string]map[string]netip.Prefix{"obliguard": {}, "obliguard_net": {}},
+		files:   map[string]string{},
 	}
-	r := &fakeRunner{handle: func(c fakeCall) (string, error) {
-		l := c.line()
-		switch {
-		case strings.HasSuffix(l, "--get-ipsets"):
-			return "obliguard obliguard_net\n", nil
-		case strings.HasSuffix(l, "--list-rich-rules"):
-			return "rule family=\"ipv4\" source ipset=\"obliguard\" drop\nrule family=\"ipv4\" destination ipset=\"obliguard\" drop\nrule family=\"ipv4\" source ipset=\"obliguard_net\" drop\nrule family=\"ipv4\" destination ipset=\"obliguard_net\" drop\n", nil
-		case l == "firewall-cmd --help":
-			return "  --add-entries-from-file=<filename>\n", nil
-		case strings.HasSuffix(l, "--get-entries"):
-			return runtime[strings.TrimPrefix(c.args[0], "--ipset=")], nil
+	for _, h := range hosts {
+		k, p, _ := canonicalBanEntry(h)
+		s.runtime["obliguard"][k], s.perm["obliguard"][k] = p, p
+	}
+	for _, n := range nets {
+		k, p, _ := canonicalBanEntry(n)
+		s.runtime["obliguard_net"][k], s.perm["obliguard_net"][k] = p, p
+	}
+	return s
+}
+
+// add inserts entries into one set, all or nothing (as a batch).
+func (s *fwdSim) add(set map[string]netip.Prefix, isNet bool, entries []string) error {
+	staged := make(map[string]netip.Prefix)
+	for _, e := range entries {
+		k, p, err := canonicalBanEntry(e)
+		if err != nil {
+			return err
 		}
-		for _, a := range c.args {
-			if strings.HasPrefix(a, "--add-entries-from-file=") {
-				data, _ := os.ReadFile(strings.TrimPrefix(a, "--add-entries-from-file="))
-				mu.Lock()
-				set := ""
-				for _, b := range c.args {
-					if strings.HasPrefix(b, "--ipset=") {
-						set = strings.TrimPrefix(b, "--ipset=")
-					}
+		if _, dup := set[k]; dup {
+			continue
+		}
+		if isNet {
+			for ek, ep := range set {
+				if ep.Overlaps(p) {
+					s.refused++
+					return fmt.Errorf("INVALID_ENTRY: Entry '%s' overlaps with existing entry '%s'", k, ek)
 				}
-				files[set] += string(data)
-				mu.Unlock()
+			}
+			for ek, ep := range staged {
+				if ep.Overlaps(p) {
+					s.refused++
+					return fmt.Errorf("INVALID_ENTRY: Entry '%s' overlaps with existing entry '%s'", k, ek)
+				}
 			}
 		}
+		staged[k] = p
+	}
+	for k, p := range staged {
+		set[k] = p
+	}
+	return nil
+}
+
+func (s *fwdSim) handle(c fakeCall) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	l := c.line()
+	switch {
+	case strings.HasSuffix(l, "--get-ipsets"):
+		return "obliguard obliguard_net\n", nil
+	case strings.HasSuffix(l, "--list-rich-rules"):
+		return "rule family=\"ipv4\" source ipset=\"obliguard\" drop\nrule family=\"ipv4\" destination ipset=\"obliguard\" drop\nrule family=\"ipv4\" source ipset=\"obliguard_net\" drop\nrule family=\"ipv4\" destination ipset=\"obliguard_net\" drop\n", nil
+	case l == "firewall-cmd --help":
+		return "  --add-entries-from-file=<filename>\n", nil
+	}
+	sets, setName := s.runtime, ""
+	for _, a := range c.args {
+		if a == "--permanent" {
+			sets = s.perm
+		}
+		if strings.HasPrefix(a, "--ipset=") {
+			setName = strings.TrimPrefix(a, "--ipset=")
+		}
+	}
+	set := sets[setName]
+	if set == nil {
 		return "", nil
-	}}
+	}
+	isNet := setName == "obliguard_net"
+	for _, a := range c.args {
+		switch {
+		case a == "--get-entries":
+			keys := make([]string, 0, len(set))
+			for k := range set {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			return strings.Join(keys, "\n") + "\n", nil
+		case strings.HasPrefix(a, "--add-entries-from-file="):
+			data, _ := os.ReadFile(strings.TrimPrefix(a, "--add-entries-from-file="))
+			s.files[setName] += string(data)
+			return "", s.add(set, isNet, strings.Fields(string(data)))
+		case strings.HasPrefix(a, "--add-entry="):
+			return "", s.add(set, isNet, []string{strings.TrimPrefix(a, "--add-entry=")})
+		case strings.HasPrefix(a, "--remove-entry="):
+			k, _, _ := canonicalBanEntry(strings.TrimPrefix(a, "--remove-entry="))
+			if _, ok := set[k]; !ok {
+				return "", errors.New("NOT_ENABLED")
+			}
+			delete(set, k)
+			return "", nil
+		}
+	}
+	return "", nil
+}
+
+func (s *fwdSim) keys(sets map[string]map[string]netip.Prefix, name string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return sorted(keysOf(sets[name]))
+}
+
+func TestFirewalldCIDR(t *testing.T) {
+	sim := newFwdSim(nil, []string{"9.9.0.0/16"})
+	r := &fakeRunner{handle: sim.handle}
 	useFakeRunner(t, r)
 	fw := &FirewalldFirewall{}
 	if err := fw.BanIP("1.2.3.0/24"); err != nil {
@@ -758,11 +877,67 @@ func TestFirewalldCIDR(t *testing.T) {
 	mustHaveLine(t, lines, "firewall-cmd --ipset=obliguard_net --remove-entry=9.9.0.0/16")
 	mustHaveLine(t, lines, "firewall-cmd --permanent --ipset=obliguard_net --remove-entry=9.9.0.0/16")
 	// runtime + permanent, each set gets its own entries
-	if files["obliguard_net"] != "1.2.3.0/24\n1.2.3.0/24\n" || files["obliguard"] != "5.6.7.8\n5.6.7.8\n" {
-		t.Fatalf("entries files = %q", files)
+	if sim.files["obliguard_net"] != "1.2.3.0/24\n1.2.3.0/24\n" || sim.files["obliguard"] != "5.6.7.8\n5.6.7.8\n" {
+		t.Fatalf("entries files = %q", sim.files)
 	}
 	got, _ := fw.GetBannedIPs()
 	if want := []string{"5.6.7.8", "1.2.3.0/24"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("GetBannedIPs = %v want %v", got, want)
+	}
+}
+
+func TestFirewalldOverlappingNetworks(t *testing.T) {
+	sim := newFwdSim(nil, []string{"1.2.0.0/16"})
+	r := &fakeRunner{handle: sim.handle}
+	useFakeRunner(t, r)
+	fw := &FirewalldFirewall{}
+
+	// A network inside a banned network is not inserted, but reported.
+	fw.BanIP("1.2.3.0/24")
+	// Two overlapping networks in one delta: only the wider one is inserted.
+	fw.BanIP("5.0.1.0/24")
+	fw.BanIP("5.0.0.0/16")
+	fw.Flush()
+	if sim.refused != 0 {
+		t.Fatalf("firewalld refused %d overlapping batch(es)", sim.refused)
+	}
+	want := []string{"1.2.0.0/16", "5.0.0.0/16"}
+	if got := sim.keys(sim.runtime, "obliguard_net"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("runtime net set = %v want %v", got, want)
+	}
+	if got := sim.keys(sim.perm, "obliguard_net"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("permanent net set = %v want %v", got, want)
+	}
+	got, _ := fw.GetBannedIPs()
+	if want := []string{"1.2.0.0/16", "1.2.3.0/24", "5.0.0.0/16", "5.0.1.0/24"}; !reflect.DeepEqual(sorted(got), want) {
+		t.Fatalf("GetBannedIPs = %v want %v", got, want)
+	}
+
+	// A wider network retires the narrower one it contains.
+	fw.BanIP("7.7.7.0/24")
+	fw.Flush()
+	fw.BanIP("7.7.0.0/16")
+	fw.Flush()
+	if sim.refused != 0 {
+		t.Fatalf("firewalld refused %d overlapping batch(es)", sim.refused)
+	}
+	want = []string{"1.2.0.0/16", "5.0.0.0/16", "7.7.0.0/16"}
+	if got := sim.keys(sim.runtime, "obliguard_net"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("runtime net set = %v want %v", got, want)
+	}
+
+	// Lifting the covering network re-inserts what it was hiding.
+	fw.UnbanIP("1.2.0.0/16")
+	fw.Flush()
+	want = []string{"1.2.3.0/24", "5.0.0.0/16", "7.7.0.0/16"}
+	if got := sim.keys(sim.runtime, "obliguard_net"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("runtime net set = %v want %v", got, want)
+	}
+	if got := sim.keys(sim.perm, "obliguard_net"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("permanent net set = %v want %v", got, want)
+	}
+	got, _ = fw.GetBannedIPs()
+	if want := []string{"1.2.3.0/24", "5.0.0.0/16", "5.0.1.0/24", "7.7.0.0/16", "7.7.7.0/24"}; !reflect.DeepEqual(sorted(got), want) {
 		t.Fatalf("GetBannedIPs = %v want %v", got, want)
 	}
 }
@@ -851,11 +1026,51 @@ func TestNetshCIDR(t *testing.T) {
 	}
 }
 
+func TestNetshLegacyCleanupKeepsGroupedRules(t *testing.T) {
+	r := &fakeRunner{handle: func(c fakeCall) (string, error) {
+		if strings.HasPrefix(c.line(), "netsh advfirewall firewall show rule") {
+			return "Rule Name:   Obliguard-Block-in-1\nRule Name:   Obliguard-Block-in-2\nRule Name:   Obliguard-Block-1-2-3-4-in\n", nil
+		}
+		return "", nil
+	}}
+	useFakeRunner(t, r)
+	fw := &WindowsFirewall{banlistFile: filepath.Join(t.TempDir(), "obliguard-banlist.txt")}
+	for i := 0; i < maxIPsPerRule+1; i++ {
+		fw.BanIP(fmt.Sprintf("10.%d.%d.1", i/250, i%250))
+	}
+	fw.Flush()
+	lines := r.lines()
+	mustHaveLine(t, lines, "netsh advfirewall firewall delete rule name=Obliguard-Block-1-2-3-4-in")
+	// The chunk rule is (re)created after its last delete, never deleted after.
+	lastDel, lastAdd := -1, -1
+	for i, l := range lines {
+		if l == "netsh advfirewall firewall delete rule name=Obliguard-Block-in-1" {
+			lastDel = i
+		}
+		if strings.HasPrefix(l, "netsh advfirewall firewall add rule name=Obliguard-Block-in-1 ") {
+			lastAdd = i
+		}
+	}
+	if lastAdd < 0 || lastDel > lastAdd {
+		t.Fatal("the legacy cleanup deleted a grouped chunk rule it had just created")
+	}
+	for _, name := range []string{"Obliguard-Block-in", "Obliguard-Block-out-12"} {
+		if !isGroupedRuleName(name) {
+			t.Fatalf("%s is a grouped rule", name)
+		}
+	}
+	for _, name := range []string{"Obliguard-Block-1-2-3-4-in", "Obliguard-Block-in-", "Obliguard-Block-in-x"} {
+		if isGroupedRuleName(name) {
+			t.Fatalf("%s is not a grouped rule", name)
+		}
+	}
+}
+
 // ── pf ────────────────────────────────────────────────────────────────────────
 
 func TestPFCIDR(t *testing.T) {
 	r := &fakeRunner{handle: func(c fakeCall) (string, error) {
-		if c.line() == "pfctl -t obliguard_blocklist -T show" {
+		if c.line() == "pfctl -a obliguard -t obliguard_blocklist -T show" {
 			return "   1.2.3.0/24\n   5.6.7.8\n", nil
 		}
 		return "", nil
@@ -867,9 +1082,9 @@ func TestPFCIDR(t *testing.T) {
 	bsd := &FreeBSDPFFirewall{}
 	bsd.BanIP("2001:db8::/48")
 	lines := r.lines()
-	mustHaveLine(t, lines, "pfctl -t obliguard_blocklist -T add 1.2.3.0/24")
-	mustHaveLine(t, lines, "pfctl -t obliguard_blocklist -T delete 1.2.3.0/24")
-	mustHaveLine(t, lines, "pfctl -t obliguard_blocklist -T add 2001:db8::/48")
+	mustHaveLine(t, lines, "pfctl -a obliguard -t obliguard_blocklist -T add 1.2.3.0/24")
+	mustHaveLine(t, lines, "pfctl -a obliguard -t obliguard_blocklist -T delete 1.2.3.0/24")
+	mustHaveLine(t, lines, "pfctl -a obliguard -t obliguard_blocklist -T add 2001:db8::/48")
 	for _, fw := range []FirewallManager{mac, bsd} {
 		got, _ := fw.GetBannedIPs()
 		if want := []string{"1.2.3.0/24", "5.6.7.8"}; !reflect.DeepEqual(got, want) {

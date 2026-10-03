@@ -47,6 +47,8 @@ export interface DashboardSummary {
   topIps: DashboardTopIp[];
   /** Per approved device (agents and MikroTik), busiest first. */
   perAgent: DashboardAgentStats[];
+  /** Day-over-day comparisons of the hero KPIs. */
+  deltas: DashboardDeltas;
 }
 
 export interface IpEventStats {
@@ -54,4 +56,78 @@ export interface IpEventStats {
   last24h: number;
   /** Event count per device over the last 24 hours, busiest first. */
   byDevice: Array<{ deviceId: number; count: number }>;
+}
+
+/** Day-over-day comparisons of the hero KPIs (null = no reference point yet). */
+export interface DashboardDeltas {
+  /** Active bans now minus ~24 h ago (hourly snapshot, else yesterday's daily one). */
+  activeBans: number | null;
+  /** Failures of the last 24 h minus those of the 24 h before. */
+  failures24h: number | null;
+  /** Hostile unique IPs of the last 24 h minus those of the 24 h before. */
+  uniqueIps24h: number | null;
+  /** Connected agents now minus ~24 h ago (null for a team-restricted user). */
+  agentsConnected: number | null;
+}
+
+/**
+ * One bucket of the IPS activity series (GET /api/dashboard/timeseries: a day,
+ * 'YYYY-MM-DD'; GET /api/dashboard/hourly: an hour, ISO timestamp). The last
+ * point is the live current bucket. Flow figures count what happened in the
+ * bucket; gauges (activeBans, agents*) are the state when it was snapshotted,
+ * null when unknown (backfilled bucket, team-restricted caller).
+ */
+export interface IpsSeriesPoint {
+  bucket: string;
+  events: number;
+  failures: number;
+  /** Distinct IPs with at least one auth failure in the bucket. */
+  uniqueIps: number;
+  autoBans: number;
+  manualBans: number;
+  activeBans: number | null;
+  agentsTotal: number | null;
+  agentsConnected: number | null;
+}
+
+export interface DashboardBreakdownRow {
+  /** Service name, ISO country code ('??' = unknown) or device id (as a string). */
+  key: string;
+  /** Display label (agent name for bansPerAgent). */
+  label: string;
+  /** Auth failures (services, countries) or bans (bansPerAgent). */
+  count: number;
+  /** Distinct attacking IPs. */
+  uniqueIps: number;
+}
+
+/** GET /api/dashboard/breakdown?hours=24: top 8 of each dimension over the window. */
+export interface DashboardBreakdown {
+  hours: number;
+  topServices: DashboardBreakdownRow[];
+  topCountries: DashboardBreakdownRow[];
+  /** Bans of the window covering an IP the agent saw in the window, busiest first. */
+  bansPerAgent: Array<DashboardBreakdownRow & { deviceId: number }>;
+}
+
+/**
+ * GET /api/dashboard/groups: one row per visible group (direct agents only,
+ * the client nests the rows by parentId), plus a groupId=null row for the
+ * agents of no group when there are any.
+ */
+export interface DashboardGroupStats {
+  groupId: number | null;
+  groupName: string | null;
+  parentId: number | null;
+  sortOrder: number;
+  /** Owning tenant: set from the Default tenant only (god view bucketing). */
+  tenantId: number | null;
+  tenantName: string | null;
+  /** The group itself or an ancestor is in evaluate-only mode. */
+  evaluateOnly: boolean;
+  agents: number;
+  connected: number;
+  events24h: number;
+  failures24h: number;
+  bans24h: number;
 }

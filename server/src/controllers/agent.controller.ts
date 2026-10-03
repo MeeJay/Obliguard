@@ -3,9 +3,19 @@ import path from 'path';
 import fs from 'fs';
 import { agentService } from '../services/agent.service';
 import { serviceTemplateService } from '../services/serviceTemplate.service';
+import {
+  agentListService, AGENT_LIST_CHIPS, AGENT_LIST_SORT_FIELDS, AGENT_LIST_DEVICE_TYPES,
+  AGENT_LIST_DEFAULT_PAGE_SIZE, AGENT_LIST_MAX_PAGE_SIZE, AGENT_LIST_MAX_SEARCH,
+} from '../services/agentList.service';
+import type { AgentListChip, AgentListDeviceType, AgentListQuery, AgentListSortField } from '../services/agentList.service';
 import { configuredPublicOrigins, requestAuthority, requestProto } from '../utils/publicOrigin';
 import { obliguardHub } from '../services/obliguardHub.service';
-import { checkDeviceAccess } from '../services/deviceAccess.service';
+import { agentCommandService, hasAgentCapability, isAgentCommandType } from '../services/agentCommand.service';
+import {
+  resolveRequestAgent, requestAgentScope, scopeAgentIds, scopeAgentLevel, intersectAgentIds,
+} from '../services/agentScope.service';
+import type { AgentNeed } from '../services/agentScope.service';
+import { permissionService } from '../services/permission.service';
 import {
   warnBindingRefused, getServedAgentVersion, resolveAgentRoot, getAgentManifest, agentFileSha256,
 } from '../services/agent.service';
@@ -16,53 +26,100 @@ import { db } from '../db';
 import { isDeviceUuidFormat } from '../utils/agentIdentity';
 import { logger } from '../utils/logger';
 import { clientIp as requestClientIp } from '../utils/clientIp';
-import type { AgentThresholds, AgentDevice, AgentUpdatePolicy } from '@obliview/shared';
-import { isMasterTenant } from '@obliview/shared';
+import { auditService } from '../services/audit.service';
+import { legacyTypesToFlags, normalizeSettingValue, writableDefinition } from '../services/settings.service';
+import { agentUpdateRollout } from '../services/agentUpdateRollout.service';
+import type { RolloutScope } from '../services/agentUpdateRollout.service';
+import type { AgentThresholds, AgentDevice, AgentUpdatePolicy, AgentUpdateRequestResult, PermissionLevel } from '@obliview/shared';
 
 /**
- * Resolve a device by :id and enforce that it belongs to the caller's tenant
- * (the master tenant sees all). Returns null and writes a 404 otherwise — we
- * never reveal the existence of another tenant's device. Use on every
- * device-by-id handler now that reads/writes are open to non-admin members.
+ * Resolve a device by :id for a request (agentScope.resolveRequestAgent):
+ *   - tenant rule (A5): reads may cross tenants from the Default tenant (god
+ *     view); a write follows the operating tenant, with no platform-admin
+ *     bypass (403 from Default, 404 elsewhere);
+ *   - team rule (RBAC-8): a user restricted by team grants gets 404 on an
+ *     agent no grant covers and 403 on a write to a read-only one.
+ * Writes also need the tenant capability (route guard). Writes the error and
+ * returns null when refused.
  */
-async function requireDeviceInTenant(
-  req: Request,
-  res: Response,
-  id: number,
-): Promise<AgentDevice | null> {
-  if (isNaN(id)) {
-    res.status(400).json({ success: false, error: 'Invalid device ID' });
-    return null;
-  }
-  const device = await agentService.getDeviceById(id);
-  if (!device || (!isMasterTenant(req.tenantId) && device.tenantId !== req.tenantId)) {
-    res.status(404).json({ success: false, error: 'Device not found' });
-    return null;
-  }
-  return device;
-}
-
-/**
- * Resolve a device by :id for a WRITE: it must belong to the operating tenant.
- * No platform-admin bypass (A5): from the Default tenant a foreign device is
- * read-only (403), from any other tenant it does not exist (404).
- */
-async function requireDeviceWritable(
+async function requireDevice(
   req: Request,
   res: Response,
   id: unknown,
+  need: AgentNeed,
 ): Promise<AgentDevice | null> {
-  const r = await checkDeviceAccess(id, req.tenantId, 'write');
+  const r = await resolveRequestAgent(req, id, need);
   if (!r.ok) {
     res.status(r.status).json({ success: false, error: r.error });
     return null;
   }
-  const device = await agentService.getDeviceById(r.row.id);
+  const device = await agentService.getDeviceById(r.agent.id);
   if (!device) {
     res.status(404).json({ success: false, error: 'Device not found' });
     return null;
   }
-  return device;
+  return withAccessLevel(device, r.permission);
+}
+
+/** Read access to a device by :id (see requireDevice). */
+function requireDeviceInTenant(req: Request, res: Response, id: unknown): Promise<AgentDevice | null> {
+  return requireDevice(req, res, id, 'read');
+}
+
+/** Write access to a device by :id (see requireDevice). */
+function requireDeviceWritable(req: Request, res: Response, id: unknown): Promise<AgentDevice | null> {
+  return requireDevice(req, res, id, 'write');
+}
+
+/**
+ * Audit row of an action on one agent, filed in the agent's tenant (a Default
+ * admin acting on a customer agent leaves a trace in that tenant's log) and
+ * linked to the agent (its Activity tab).
+ */
+function auditDevice(
+  req: Request,
+  device: Pick<AgentDevice, 'id' | 'tenantId' | 'hostname' | 'name'>,
+  action: string,
+  details: Record<string, unknown> = {},
+): Promise<void> {
+  return auditService.logReq(req, {
+    action,
+    targetType: 'agent',
+    targetId: device.id,
+    deviceId: device.id,
+    tenantId: device.tenantId ?? undefined,
+    details: { hostname: device.name || device.hostname || null, ...details },
+  });
+}
+
+/** One audit row per agent of a bulk action (operating tenant: bulk ids never cross it). */
+function auditDevices(req: Request, ids: number[], action: string, details: Record<string, unknown> = {}): Promise<void> {
+  return auditService.logReqMany(req, ids.map((id) => ({
+    action, targetType: 'agent', targetId: id, deviceId: id, details: { bulk: true, ...details },
+  })));
+}
+
+/** Audit action of a queued agent command. */
+function commandAuditAction(command: string): string {
+  return command === 'uninstall' ? 'agent.uninstall_requested' : 'agent.command_sent';
+}
+
+/**
+ * The caller's team-level access to the device ('rw' without team
+ * restriction): the UI hides edit actions on 'ro' agents. The tenant
+ * capabilities still decide which writes are allowed.
+ */
+function withAccessLevel<T extends AgentDevice>(device: T, level: PermissionLevel): T & { accessLevel: PermissionLevel } {
+  return Object.assign(device, { accessLevel: level });
+}
+
+/**
+ * Bulk write ids: the operating tenant only (no master bypass, A5), then the
+ * agents the caller may write through their teams (RBAC-8). Others are dropped.
+ */
+async function writableBulkIds(req: Request, requested: number[]): Promise<number[]> {
+  const inTenant = await agentService.filterDeviceIdsByTenant(requested, req.tenantId);
+  return intersectAgentIds(inTenant, scopeAgentIds(await requestAgentScope(req), 'write'));
 }
 
 /** 1..5000 unique positive integer ids, or null. */
@@ -229,7 +286,7 @@ export async function agentDownload(req: Request, res: Response): Promise<void> 
   }
 
   // Same agent root as the served version (dist layout in prod, src layout under tsx).
-  const filePath = path.join(resolveAgentRoot() ?? path.resolve(__dirname, '../../../../agent'), 'dist', binaryName);
+  const filePath = agentPath('dist', binaryName);
 
   if (!fs.existsSync(filePath)) {
     res.status(404).json({ error: 'Agent binary not available' });
@@ -255,97 +312,65 @@ export async function agentDownload(req: Request, res: Response): Promise<void> 
   res.sendFile(filePath);
 }
 
-export function agentInstallerLinux(req: Request, res: Response): void {
-  const apiKey = req.query.key as string | undefined;
+// ── Installer scripts ───────────────────────────────────────────────────────
+//
+// The scripts are piped to a root shell (`curl … | sudo bash`), so nothing a
+// request controls is pasted into them verbatim:
+//   - the server URL is the validated public origin (inferServerUrl: APP_URL /
+//     configured origins), never req.protocol + the Host header — behind a
+//     proxy that gave http:// URLs, and a forged Host planted another server;
+//   - ?key= is embedded only when it is a well-formed key (a crafted link must
+//     not inject shell code into a script fetched from the real server).
 
-  const scriptPath = path.resolve(__dirname, '../../../../agent/installer/install.sh');
+/** An agent API key as embedded in an installer (keys are UUIDs; legacy keys stay [A-Za-z0-9._-]). */
+const INSTALLER_KEY_RE = /^[A-Za-z0-9._-]{8,128}$/;
+
+/** A file under the repo-level agent/ folder (dist layout, then src layout under tsx). */
+function agentPath(...parts: string[]): string {
+  return path.join(resolveAgentRoot() ?? path.resolve(__dirname, '../../../../agent'), ...parts);
+}
+
+function sendInstallerScript(req: Request, res: Response, file: string, notFound: string): void {
+  const scriptPath = agentPath('installer', file);
   if (!fs.existsSync(scriptPath)) {
-    res.status(404).json({ error: 'Installer not available' });
+    res.status(404).json({ error: notFound });
     return;
   }
 
   let script = fs.readFileSync(scriptPath, 'utf-8');
 
-  // Inject server URL and API key
-  const serverUrl = `${req.protocol}://${req.get('host')}`;
-  script = script.replace('__SERVER_URL__', serverUrl);
-  if (apiKey) {
-    script = script.replace('__API_KEY__', apiKey);
+  // Replacer functions: a '$' in a value is never read as a replacement pattern.
+  const serverUrl = inferServerUrl(req);
+  script = script.replace('__SERVER_URL__', () => serverUrl);
+  const apiKey = typeof req.query.key === 'string' ? req.query.key.trim() : '';
+  if (apiKey && INSTALLER_KEY_RE.test(apiKey)) {
+    script = script.replace('__API_KEY__', () => apiKey);
   }
 
   res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-  res.setHeader('Content-Disposition', 'attachment; filename="install.sh"');
+  res.setHeader('Content-Disposition', `attachment; filename="${file}"`);
+  res.setHeader('Cache-Control', 'no-store');
   res.send(script);
+}
+
+export function agentInstallerLinux(req: Request, res: Response): void {
+  sendInstallerScript(req, res, 'install.sh', 'Installer not available');
 }
 
 export function agentInstallerWindows(req: Request, res: Response): void {
-  const apiKey = req.query.key as string | undefined;
-
-  const scriptPath = path.resolve(__dirname, '../../../../agent/installer/install.ps1');
-  if (!fs.existsSync(scriptPath)) {
-    res.status(404).json({ error: 'Installer not available' });
-    return;
-  }
-
-  let script = fs.readFileSync(scriptPath, 'utf-8');
-
-  const serverUrl = `${req.protocol}://${req.get('host')}`;
-  script = script.replace('__SERVER_URL__', serverUrl);
-  if (apiKey) {
-    script = script.replace('__API_KEY__', apiKey);
-  }
-
-  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-  res.setHeader('Content-Disposition', 'attachment; filename="install.ps1"');
-  res.send(script);
+  sendInstallerScript(req, res, 'install.ps1', 'Installer not available');
 }
 
 export function agentInstallerMacos(req: Request, res: Response): void {
-  const apiKey = req.query.key as string | undefined;
-
-  const scriptPath = path.resolve(__dirname, '../../../../agent/installer/install-macos.sh');
-  if (!fs.existsSync(scriptPath)) {
-    res.status(404).json({ error: 'macOS installer not available' });
-    return;
-  }
-
-  let script = fs.readFileSync(scriptPath, 'utf-8');
-
-  const serverUrl = `${req.protocol}://${req.get('host')}`;
-  script = script.replace('__SERVER_URL__', serverUrl);
-  if (apiKey) {
-    script = script.replace('__API_KEY__', apiKey);
-  }
-
-  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-  res.setHeader('Content-Disposition', 'attachment; filename="install-macos.sh"');
-  res.send(script);
+  sendInstallerScript(req, res, 'install-macos.sh', 'macOS installer not available');
 }
 
 export function agentInstallerFreeBSD(req: Request, res: Response): void {
-  const apiKey = req.query.key as string | undefined;
-
-  const scriptPath = path.resolve(__dirname, '../../../../agent/installer/install-freebsd.sh');
-  if (!fs.existsSync(scriptPath)) {
-    res.status(404).json({ error: 'FreeBSD installer not available' });
-    return;
-  }
-
-  let script = fs.readFileSync(scriptPath, 'utf-8');
-
-  const serverUrl = `${req.protocol}://${req.get('host')}`;
-  script = script.replace('__SERVER_URL__', serverUrl);
-  if (apiKey) {
-    script = script.replace('__API_KEY__', apiKey);
-  }
-
-  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-  res.setHeader('Content-Disposition', 'attachment; filename="install-freebsd.sh"');
-  res.send(script);
+  sendInstallerScript(req, res, 'install-freebsd.sh', 'FreeBSD installer not available');
 }
 
 export function agentInstallerWindowsMsi(_req: Request, res: Response): void {
-  const msiPath = path.resolve(__dirname, '../../../../agent/dist/obliguard-agent.msi');
+  const msiPath = agentPath('dist', 'obliguard-agent.msi');
   if (!fs.existsSync(msiPath)) {
     res.status(404).json({ error: 'MSI installer not available (not yet built)' });
     return;
@@ -400,16 +425,30 @@ function validatedServerOverride(req: Request): string | null {
   return allowed.has(u.hostname.toLowerCase()) ? u.origin : null;
 }
 
+let unconfiguredOriginWarned = false;
+
+/**
+ * The server URL embedded in installers and wizards (agents enrol against it
+ * and self-update from it):
+ *   1. a validated ?server= (wizards downloaded from the app itself);
+ *   2. a configured public origin (APP_URL, CLIENT_ORIGIN fallback,
+ *      SSO_ALLOWED_HOSTS): the one for the hostname in use, else the first
+ *      (APP_URL) — a forged Host never ends up in a script;
+ *   3. nothing configured: best effort from the request (logged once).
+ */
 function inferServerUrl(req: Request): string {
-  // 1. Validated ?server= (the client sends window.location.origin, i.e. the
-  //    exact public URL the admin is using, port included).
   const override = validatedServerOverride(req);
   if (override) return override;
-  // 2. The configured public URL of this instance.
-  if (process.env.APP_URL) {
-    try { return new URL(process.env.APP_URL.includes('://') ? process.env.APP_URL : `https://${process.env.APP_URL}`).origin; } catch { /* malformed: fall through */ }
+  const { entries } = configuredPublicOrigins();
+  if (entries.length > 0) {
+    const here = requestAuthority(req)?.hostname;
+    const match = here ? entries.find((e) => e.hostname === here) : undefined;
+    return (match ?? entries[0]).build(requestProto(req));
   }
-  // 3. Best effort from the request (first X-Forwarded-Proto value, Host authority).
+  if (!unconfiguredOriginWarned) {
+    unconfiguredOriginWarned = true;
+    logger.warn('Agent installers: no APP_URL configured — the server URL is taken from the request Host; set APP_URL to the public URL of this instance');
+  }
   const authority = requestAuthority(req)?.authority ?? '';
   return authority ? `${requestProto(req)}://${authority}` : '';
 }
@@ -430,7 +469,7 @@ async function buildWizardPayload(req: Request, baseBin: Buffer): Promise<Buffer
 }
 
 export async function agentInstallerWizard(req: Request, res: Response): Promise<void> {
-  const exePath = path.resolve(__dirname, '../../../../agent/dist/obliguard-installer-wizard.exe');
+  const exePath = agentPath('dist', 'obliguard-installer-wizard.exe');
   if (!fs.existsSync(exePath)) {
     res.status(404).json({ error: 'Wizard installer not available (not yet built)' });
     return;
@@ -443,7 +482,7 @@ export async function agentInstallerWizard(req: Request, res: Response): Promise
 }
 
 export async function agentInstallerWizardLinux(req: Request, res: Response): Promise<void> {
-  const binPath = path.resolve(__dirname, '../../../../agent/dist/obliguard-installer-wizard-linux-amd64');
+  const binPath = agentPath('dist', 'obliguard-installer-wizard-linux-amd64');
   if (!fs.existsSync(binPath)) {
     res.status(404).json({ error: 'Linux wizard not available (not yet built)' });
     return;
@@ -458,49 +497,14 @@ export async function agentInstallerWizardLinux(req: Request, res: Response): Pr
 // ── Admin: Device Stats ──────────────────────────────────────────────────────
 
 export async function getDeviceStats(req: Request, res: Response): Promise<void> {
-  const online = await agentService.countOnlineDevices(req.tenantId);
+  const online = await agentService.countOnlineDevices(req.tenantId, scopeAgentIds(await requestAgentScope(req)));
   res.json({ success: true, data: { online } });
-}
-
-// ── Admin: API Keys ──────────────────────────────────────────────────────────
-
-export async function listKeys(req: Request, res: Response): Promise<void> {
-  const keys = await agentService.listKeys(req.tenantId);
-  res.json({ success: true, data: keys });
-}
-
-export async function createKey(req: Request, res: Response): Promise<void> {
-  const { name } = req.body as { name: string };
-  if (!name?.trim()) {
-    res.status(400).json({ success: false, error: 'Name is required' });
-    return;
-  }
-  const userId = req.session?.userId ?? 0;
-  const key = await agentService.createKey(name.trim(), userId, req.tenantId);
-  res.status(201).json({ success: true, data: key });
-}
-
-export async function deleteKey(req: Request, res: Response): Promise<void> {
-  const id = Number(req.params.id);
-  if (!Number.isInteger(id) || id <= 0) {
-    res.status(400).json({ success: false, error: 'Invalid API key ID' });
-    return;
-  }
-  // Tenant-scoped, no master bypass: credentials are never god-viewed.
-  const ok = await agentService.deleteKey(id, req.tenantId);
-  if (!ok) {
-    res.status(404).json({ success: false, error: 'API key not found' });
-    return;
-  }
-  const closed = obliguardHub.disconnectByApiKey(id);
-  logger.info({ apiKeyId: id, tenantId: req.tenantId, closed }, 'Agent API key deleted — live sessions closed');
-  res.json({ success: true, data: { closedSessions: closed } });
 }
 
 // ── Admin: Devices ──────────────────────────────────────────────────────────
 
 export async function getDevice(req: Request, res: Response): Promise<void> {
-  const device = await requireDeviceInTenant(req, res, Number(req.params.id));
+  const device = await requireDeviceInTenant(req, res, req.params.id);
   if (!device) return;
   res.json({ success: true, data: device });
 }
@@ -510,7 +514,15 @@ export async function getDevice(req: Request, res: Response): Promise<void> {
  * groupId: that group's devices (recursive=1: the whole subtree through
  * group_closure); 'none' = ungrouped devices. An unknown status is ignored
  * (all statuses), as before. Tenant scope unchanged (Default keeps the read
- * god view).
+ * god view); a user restricted by team grants only lists the granted agents
+ * (RBAC-8). Each device carries the caller's accessLevel ('ro' | 'rw').
+ *
+ * With ?paged=1 (W10-1, the /agents fleet list) the answer is one page,
+ * { rows, total, page, pageSize, counts }, filtered and sorted server-side:
+ *   q (hostname / name / IP), chips=online,offline,… (OR-ed), groupId +
+ *   recursive, tenants=1,2 (god view only), type=agent|mikrotik|m365,
+ *   sortBy, sortOrder=asc|desc, page (1-based), pageSize (<= 200).
+ * The unpaged answer (a bare device array) is kept for the existing callers.
  */
 export async function listDevices(req: Request, res: Response): Promise<void> {
   const status = typeof req.query.status === 'string' ? req.query.status : undefined;
@@ -530,13 +542,94 @@ export async function listDevices(req: Request, res: Response): Promise<void> {
     }
   }
   const recursive = req.query.recursive === '1' || req.query.recursive === 'true';
+
+  if (req.query.paged === '1' || req.query.paged === 'true') {
+    const parsed = parsePagedListQuery(req.query);
+    if (typeof parsed === 'string') {
+      res.status(400).json({ success: false, error: parsed });
+      return;
+    }
+    const scope = await requestAgentScope(req);
+    const result = await agentListService.listAgentsPaged({
+      ...parsed,
+      tenantId: req.tenantId,
+      visibleIds: scopeAgentIds(scope),
+      groupId,
+      recursive,
+    });
+    result.rows.forEach((d) => withAccessLevel(d, scopeAgentLevel(scope, d.id) ?? 'ro'));
+    res.json({ success: true, data: result });
+    return;
+  }
+
+  const scope = await requestAgentScope(req);
   const devices = await agentService.listDevices(
     req.tenantId,
     validStatuses.includes(status ?? '') ? (status as 'pending' | 'approved' | 'refused' | 'suspended') : undefined,
-    { groupId, recursive },
+    { groupId, recursive, visibleIds: scopeAgentIds(scope) },
   );
 
-  res.json({ success: true, data: devices });
+  res.json({ success: true, data: devices.map((d) => withAccessLevel(d, scopeAgentLevel(scope, d.id) ?? 'ro')) });
+}
+
+/** A comma-separated query value as a list ('' and absent = empty). */
+function csvParam(raw: unknown): string[] | null {
+  if (raw === undefined || raw === '') return [];
+  if (typeof raw !== 'string' || raw.length > 512) return null;
+  return raw.split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+/** A positive integer query value within [1, max], or the fallback when absent; null when invalid. */
+function intParam(raw: unknown, fallback: number, max: number): number | null {
+  if (raw === undefined || raw === '') return fallback;
+  if (typeof raw !== 'string' || !/^\d{1,6}$/.test(raw)) return null;
+  const n = Number(raw);
+  return n >= 1 && n <= max ? n : null;
+}
+
+/** The ?paged=1 filters (groupId / recursive are parsed by listDevices), or an error message. */
+function parsePagedListQuery(query: Request['query']): Omit<AgentListQuery, 'tenantId' | 'visibleIds' | 'groupId' | 'recursive'> | string {
+  const search = typeof query.q === 'string' ? query.q.slice(0, AGENT_LIST_MAX_SEARCH) : undefined;
+  if (query.q !== undefined && typeof query.q !== 'string') return 'Invalid q';
+
+  const chips = csvParam(query.chips);
+  if (chips === null || !chips.every((c) => (AGENT_LIST_CHIPS as readonly string[]).includes(c))) return 'Invalid chips';
+
+  const tenantsRaw = csvParam(query.tenants);
+  if (tenantsRaw === null || !tenantsRaw.every((v) => /^\d{1,9}$/.test(v) && Number(v) > 0)) return 'Invalid tenants';
+
+  let deviceType: AgentListDeviceType | undefined;
+  if (query.type !== undefined && query.type !== '') {
+    if (typeof query.type !== 'string' || !(AGENT_LIST_DEVICE_TYPES as readonly string[]).includes(query.type)) return 'Invalid type';
+    deviceType = query.type as AgentListDeviceType;
+  }
+
+  let sortBy: AgentListSortField | undefined;
+  if (query.sortBy !== undefined && query.sortBy !== '') {
+    if (typeof query.sortBy !== 'string' || !(AGENT_LIST_SORT_FIELDS as readonly string[]).includes(query.sortBy)) return 'Invalid sortBy';
+    sortBy = query.sortBy as AgentListSortField;
+  }
+  let sortOrder: 'asc' | 'desc' | undefined;
+  if (query.sortOrder !== undefined && query.sortOrder !== '') {
+    if (query.sortOrder !== 'asc' && query.sortOrder !== 'desc') return 'Invalid sortOrder';
+    sortOrder = query.sortOrder;
+  }
+
+  const page = intParam(query.page, 1, 1_000_000);
+  if (page === null) return 'Invalid page';
+  const pageSize = intParam(query.pageSize, AGENT_LIST_DEFAULT_PAGE_SIZE, AGENT_LIST_MAX_PAGE_SIZE);
+  if (pageSize === null) return 'Invalid pageSize';
+
+  return {
+    search,
+    chips: chips as AgentListChip[],
+    tenantIds: tenantsRaw.map(Number),
+    deviceType,
+    sortBy,
+    sortOrder,
+    page,
+    pageSize,
+  };
 }
 
 export async function updateDevice(req: Request, res: Response): Promise<void> {
@@ -569,11 +662,30 @@ export async function updateDevice(req: Request, res: Response): Promise<void> {
     return;
   }
 
+  // IPS settings cascade (W13): validate the agent-level values before any
+  // write (thresholds below), so a 400 leaves nothing half applied.
+  if (checkIntervalSeconds !== undefined) {
+    normalizeSettingValue(writableDefinition('checkIntervalSeconds', 'agent'), checkIntervalSeconds);
+  }
+  if (maxMissedPushes !== undefined && maxMissedPushes !== null) {
+    normalizeSettingValue(writableDefinition('maxMissedPushes', 'agent'), maxMissedPushes);
+  }
+  if ('notificationTypes' in req.body) {
+    const flags = legacyTypesToFlags(notificationTypes ?? null);
+    if (flags) normalizeSettingValue(writableDefinition('notificationTypes', 'agent'), flags);
+  }
+
   // Update policy (C17-1): the device is already in the operating tenant
   // (requireDeviceWritable, no platform-admin bypass).
   const hasPolicy = 'updatePolicy' in req.body;
   if (hasPolicy && !isUpdatePolicyInput(updatePolicy)) {
     res.status(400).json({ success: false, error: 'Invalid updatePolicy' });
+    return;
+  }
+  // Owner directive (C17): update POLICY writes stay platform-admin only, at
+  // every level (agents.manage covers the other device fields).
+  if (hasPolicy && req.session?.role !== 'admin') {
+    res.status(403).json({ success: false, error: 'The agent update policy is managed by platform administrators' });
     return;
   }
   // The approval branch below does not apply updatePolicy: refuse instead of dropping it silently.
@@ -621,13 +733,17 @@ export async function updateDevice(req: Request, res: Response): Promise<void> {
       await agentService.reinstateDevice(id);
       const device = await agentService.updateDevice(id, { status: 'approved', name });
       await applyRelease(device);
+      await auditDevice(req, loaded, 'agent.reinstated', releaseBinding ? { bindingReleased: true } : {});
       res.json({ success: true, data: device });
       return;
     }
 
     // First-time approval (pending → approved): create monitor
     const userId = req.session?.userId ?? 0;
-    const device = await agentService.approveDevice(id, userId, groupId ?? null, agentThresholds);
+    // No groupId in the body keeps the registration group (or the key's default
+    // group, W10-2); an explicit null still means "no group".
+    const approveGroup = 'groupId' in req.body ? (groupId ?? null) : undefined;
+    const device = await agentService.approveDevice(id, userId, approveGroup, agentThresholds);
     if (!device) {
       res.status(404).json({ success: false, error: 'Device not found' });
       return;
@@ -637,6 +753,10 @@ export async function updateDevice(req: Request, res: Response): Promise<void> {
       await agentService.updateDevice(id, { name });
     }
     await applyRelease(device);
+    await auditDevice(req, loaded, 'agent.approved', {
+      groupId: device.groupId ?? null,
+      ...(releaseBinding ? { bindingReleased: true } : {}),
+    });
     res.json({ success: true, data: device });
     return;
   }
@@ -678,6 +798,22 @@ export async function updateDevice(req: Request, res: Response): Promise<void> {
   }
 
   await applyRelease(device);
+  const fields = Object.keys(req.body as object).filter((k) => k !== 'status');
+  const statusAction = status === 'refused' ? 'agent.refused'
+    : status === 'suspended' ? 'agent.suspended'
+    : status === 'pending' ? 'agent.reset_pending'
+    : null;
+  if (statusAction) await auditDevice(req, loaded, statusAction, { previousStatus: loaded.status });
+  if (fields.length > 0) {
+    await auditDevice(req, loaded, releaseBinding && fields.length === 1 ? 'agent.binding_released' : 'agent.updated', {
+      fields,
+      ...('name' in req.body ? { name: name ?? null } : {}),
+      ...('groupId' in req.body ? { groupId: groupId ?? null, previousGroupId: loaded.groupId ?? null } : {}),
+      ...('evaluateOnly' in req.body ? { evaluateOnly } : {}),
+      ...(hasPolicy ? { updatePolicyFrom: loaded.updatePolicy ?? null, updatePolicyTo: updatePolicy ?? null } : {}),
+      ...(releaseBinding ? { bindingReleased: true } : {}),
+    });
+  }
   res.json({ success: true, data: device });
 }
 
@@ -696,12 +832,14 @@ export async function deleteDevice(req: Request, res: Response): Promise<void> {
     res.status(404).json({ success: false, error: 'Device not found' });
     return;
   }
+  await auditDevice(req, device, 'agent.deleted', { uuid: device.uuid, deviceType: device.deviceType ?? null });
   res.json({ success: true });
 }
 
 // ── Admin: Bulk Device Operations ────────────────────────────────────────────
-// Bulk writes follow the operating tenant, with no master bypass (A5): foreign
-// ids are silently dropped. Responses carry { affected, skipped }.
+// Bulk writes follow the operating tenant, with no master bypass (A5), and the
+// caller's team grants (RBAC-8): foreign, hidden and read-only ids are
+// silently dropped. Responses carry { affected, skipped }.
 
 export async function bulkDeleteDevices(req: Request, res: Response): Promise<void> {
   const requested = sanitizeDeviceIds((req.body as { deviceIds?: unknown })?.deviceIds);
@@ -709,8 +847,9 @@ export async function bulkDeleteDevices(req: Request, res: Response): Promise<vo
     res.status(400).json({ success: false, error: 'deviceIds array required' });
     return;
   }
-  const ids = await agentService.filterDeviceIdsByTenant(requested, req.tenantId);
+  const ids = await writableBulkIds(req, requested);
   const affected = await agentService.bulkDeleteDevices(ids, req.tenantId);
+  if (affected > 0) await auditDevices(req, ids, 'agent.deleted');
   res.json({ success: true, data: { affected, skipped: requested.length - affected } });
 }
 
@@ -728,6 +867,10 @@ export async function bulkUpdateDevices(req: Request, res: Response): Promise<vo
     res.status(400).json({ success: false, error: 'Invalid updatePolicy' });
     return;
   }
+  if (hasPolicy && req.session?.role !== 'admin') {
+    res.status(403).json({ success: false, error: 'The agent update policy is managed by platform administrators' });
+    return;
+  }
   const requested = sanitizeDeviceIds(deviceIds);
   if (!requested) {
     res.status(400).json({ success: false, error: 'deviceIds array required' });
@@ -742,7 +885,7 @@ export async function bulkUpdateDevices(req: Request, res: Response): Promise<vo
     res.status(400).json({ success: false, error: 'Invalid group' });
     return;
   }
-  const ids = await agentService.filterDeviceIdsByTenant(requested, req.tenantId);
+  const ids = await writableBulkIds(req, requested);
   const affected = await agentService.bulkUpdateDevices(
     ids, { groupId, overrideGroupSettings, status, ...(hasPolicy ? { updatePolicy } : {}) }, req.tenantId,
   );
@@ -750,6 +893,14 @@ export async function bulkUpdateDevices(req: Request, res: Response): Promise<vo
     logger.info({
       event: 'agent_update_device_policy', userId: req.session?.userId ?? null, tenantId: req.tenantId, deviceIds: ids.slice(0, 50), count: affected, to: updatePolicy ?? null,
     }, 'Agent update policy changed (bulk)');
+  }
+  if (affected > 0) {
+    const action = status === 'approved' ? 'agent.approved' : status === 'suspended' ? 'agent.suspended' : 'agent.updated';
+    await auditDevices(req, ids, action, {
+      ...(groupId !== undefined ? { groupId } : {}),
+      ...(overrideGroupSettings !== undefined ? { overrideGroupSettings } : {}),
+      ...(hasPolicy ? { updatePolicyTo: updatePolicy ?? null } : {}),
+    });
   }
   res.json({ success: true, data: { affected, skipped: requested.length - affected } });
 }
@@ -772,13 +923,18 @@ export async function bulkDeviceCommand(req: Request, res: Response, next: NextF
     }
     if (command === 'update') {
       requireServedVersion();
-      // Strict tenant scope inside the service: foreign ids count as notFound.
-      const data = await agentService.requestUpdate(requested, req.tenantId, req.session?.userId ?? null);
-      res.json({ success: true, data });
+      res.json({ success: true, data: await requestUpdateForRequest(req, requested) });
       return;
     }
-    const ids = await agentService.filterDeviceIdsByTenant(requested, req.tenantId);
-    const affected = await agentService.bulkSendCommand(ids, command, req.tenantId);
+    const ids = await writableBulkIds(req, requested);
+    // Uninstall goes through the command queue (W14-1): agents that already
+    // have one pending are skipped.
+    const queued = await agentService.bulkSendCommand(ids, command, req.tenantId, req.session?.userId ?? null);
+    if (queued.length > 0) {
+      await auditDevices(req, queued, commandAuditAction(command), { command });
+      await obliguardHub.deliverQueuedCommands(queued);
+    }
+    const affected = queued.length;
     res.json({ success: true, data: { affected, skipped: requested.length - affected } });
   } catch (err) {
     next(err);
@@ -802,12 +958,82 @@ export async function sendDeviceCommand(req: Request, res: Response, next: NextF
     }
     const device = await requireDeviceWritable(req, res, req.params.id);
     if (!device) return;
-    const ok = await agentService.sendCommand(device.id, command, req.tenantId);
+    // 409 commandOutstanding while an uninstall is already pending (W14-1).
+    const ok = await agentService.sendCommand(device.id, command, req.tenantId, req.session?.userId ?? null);
     if (!ok) {
       res.status(404).json({ success: false, error: 'Device not found' });
       return;
     }
+    await auditDevice(req, device, commandAuditAction(command), { command });
+    // A connected agent gets it now, the others on their next contact.
+    await obliguardHub.deliverQueuedCommands([device.id]);
     res.json({ success: true });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ── Agent command queue (W14-1) ──────────────────────────────────────────────
+// Mirrors Obliance /commands: one row per request with its acknowledgement,
+// result and history (agentCommand.service). Capabilities (route guard):
+// uninstall → agents.delete (+ step-up), update → agents.update, restart /
+// firewall_resync → agents.manage. Team scope: write access to the agent.
+
+/** Default / maximum rows of GET /devices/:id/commands. */
+const COMMAND_HISTORY_DEFAULT = 50;
+const COMMAND_HISTORY_MAX = 200;
+
+/** GET /agent/devices/:id/commands — the agent's command history, newest first. */
+export async function listDeviceCommands(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const device = await requireDeviceInTenant(req, res, req.params.id);
+    if (!device) return;
+    const raw = Number(req.query.limit);
+    const limit = Number.isInteger(raw) && raw > 0 ? Math.min(raw, COMMAND_HISTORY_MAX) : COMMAND_HISTORY_DEFAULT;
+    res.json({ success: true, data: await agentCommandService.list(device.id, limit) });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * POST /agent/devices/:id/commands { type } — queue a command. 'update' is
+ * an update request (the update policy decides: off anywhere → 409). The
+ * queued commands other than uninstall need an approved agent advertising
+ * 'cmdqueue' (older agents only understand the config-frame uninstall).
+ * 409 commandOutstanding while the same command is pending.
+ */
+export async function createDeviceCommand(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const type = (req.body as { type?: unknown } | undefined)?.type;
+    if (type === 'update') {
+      await requestDeviceUpdate(req, res, next);
+      return;
+    }
+    if (!isAgentCommandType(type)) throw new AppError(400, 'Unknown command type', 'unknownCommand');
+    const device = await requireDeviceWritable(req, res, req.params.id);
+    if (!device) return;
+    if ((device.deviceType ?? 'agent') !== 'agent') {
+      throw new AppError(409, 'Commands are only available for agents', 'notAnAgent');
+    }
+    if (type !== 'uninstall') {
+      if (device.status !== 'approved') {
+        throw new AppError(409, 'Only approved agents can receive this command', 'notApproved');
+      }
+      if (!hasAgentCapability(device.capabilities)) {
+        throw new AppError(409, 'This agent version cannot run this command: update the agent first', 'commandUnsupported');
+      }
+    }
+    const queued = await agentCommandService.enqueue({
+      deviceId: device.id,
+      tenantId: req.tenantId,
+      type,
+      createdBy: req.session?.userId ?? null,
+    });
+    await auditDevice(req, device, commandAuditAction(type), { command: type, commandId: queued.id });
+    // A connected agent gets it now, the others on their next contact.
+    await obliguardHub.deliverQueuedCommands([device.id]);
+    res.status(201).json({ success: true, data: (await agentCommandService.get(device.id, queued.id)) ?? queued });
   } catch (err) {
     next(err);
   }
@@ -825,6 +1051,7 @@ export async function requestDeviceUpdate(req: Request, res: Response, next: Nex
     requireServedVersion();
     const r = await agentService.requestUpdate([device.id], req.tenantId, req.session?.userId ?? null);
     if (r.requested === 1) {
+      await auditDevice(req, device, 'agent.update_requested', { targetVersion: r.targetVersion, fromVersion: device.agentVersion ?? null });
       res.json({ success: true, data: await agentService.getDeviceById(device.id) });
       return;
     }
@@ -848,6 +1075,7 @@ export async function retryDeviceUpdate(req: Request, res: Response, next: NextF
     requireServedVersion();
     const r = await agentService.retryUpdate(device.id, req.tenantId, req.session?.userId ?? null);
     if (r.requested === 1) {
+      await auditDevice(req, device, 'agent.update_retried', { targetVersion: r.targetVersion, fromVersion: device.agentVersion ?? null });
       res.json({ success: true, data: await agentService.getDeviceById(device.id) });
       return;
     }
@@ -865,13 +1093,32 @@ export async function cancelDeviceUpdate(req: Request, res: Response, next: Next
     const device = await requireDeviceWritable(req, res, req.params.id);
     if (!device) return;
     await agentService.cancelUpdateRequest(device.id, req.tenantId, req.session?.userId ?? null);
+    await auditDevice(req, device, 'agent.update_cancelled');
     res.json({ success: true, data: await agentService.getDeviceById(device.id) });
   } catch (err) {
     next(err);
   }
 }
 
-/** POST /agent/devices/bulk-request-update — foreign ids are counted in skipped.notFound. */
+/**
+ * requestUpdate on the agents the caller may write through their teams
+ * (RBAC-8); the others count in skipped.notFound like foreign ids (strict
+ * tenant scope inside the service).
+ */
+async function requestUpdateForRequest(req: Request, requested: number[]): Promise<AgentUpdateRequestResult> {
+  const ids = intersectAgentIds(requested, scopeAgentIds(await requestAgentScope(req), 'write'));
+  const data = await agentService.requestUpdate(ids, req.tenantId, req.session?.userId ?? null);
+  data.skipped.notFound += requested.length - ids.length;
+  if (data.requested > 0) {
+    await auditService.logReq(req, {
+      action: 'agent.bulk_update_requested', targetType: 'agent',
+      details: { ids: ids.slice(0, 500), requested: data.requested, targetVersion: data.targetVersion, skipped: data.skipped },
+    });
+  }
+  return data;
+}
+
+/** POST /agent/devices/bulk-request-update — foreign and non-writable ids are counted in skipped.notFound. */
 export async function bulkRequestUpdate(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const ids = sanitizeDeviceIds((req.body as { deviceIds?: unknown })?.deviceIds);
@@ -880,14 +1127,17 @@ export async function bulkRequestUpdate(req: Request, res: Response, next: NextF
       return;
     }
     requireServedVersion();
-    const data = await agentService.requestUpdate(ids, req.tenantId, req.session?.userId ?? null);
-    res.json({ success: true, data });
+    res.json({ success: true, data: await requestUpdateForRequest(req, ids) });
   } catch (err) {
     next(err);
   }
 }
 
-/** POST /agent/groups/:groupId/agent-update — outdated approved agents of the group and its sub-groups. */
+/**
+ * POST /agent/groups/:groupId/agent-update — outdated approved agents of the
+ * group and its sub-groups. A user restricted by team grants must see the
+ * group (404 otherwise) and only updates the agents they may write.
+ */
 export async function requestGroupUpdateHandler(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const groupId = Number(req.params.groupId);
@@ -896,9 +1146,82 @@ export async function requestGroupUpdateHandler(req: Request, res: Response, nex
     const verdict = g ? deviceAccessVerdict(g.tenant_id, req.tenantId, 'write') : 'not-found';
     if (verdict === 'forbidden') throw new AppError(403, 'This group belongs to another tenant: read-only from the Default tenant');
     if (verdict !== 'ok') throw new AppError(404, 'Group not found');
+    const scope = await requestAgentScope(req);
+    if (!scope.all) {
+      const visible = await permissionService.getVisibleGroupIds(req.session.userId!, false, req.tenantId);
+      if (visible !== 'all' && !visible.includes(groupId)) throw new AppError(404, 'Group not found');
+    }
     requireServedVersion();
-    const r = await agentService.requestGroupUpdate(groupId, req.tenantId, req.session?.userId ?? null);
+    const r = await agentService.requestGroupUpdate(groupId, req.tenantId, req.session?.userId ?? null, scopeAgentIds(scope, 'write'));
     if (!r) throw new AppError(404, 'Group not found');
+    await auditService.logReq(req, {
+      action: 'group.update_requested', targetType: 'group', targetId: groupId,
+      details: { requested: r.requested, targetVersion: r.targetVersion, skipped: r.skipped },
+    });
+    res.json({ success: true, data: r });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ── Fleet rollout (W12-4): preview, update all outdated, cancel all pending ──
+// agents.update (route guard), no step-up. Scope: the operating tenant, the
+// Default tenant covering every tenant (Obliance master scope); a user
+// restricted by team grants only reaches the agents they may write. The
+// 4-level update policy stays authoritative: a frozen agent is never offered.
+
+async function rolloutScope(req: Request): Promise<RolloutScope> {
+  return { tenantId: req.tenantId, writableIds: scopeAgentIds(await requestAgentScope(req), 'write') };
+}
+
+/** GET /agent/updates/preview — what "update all outdated" would do now, and the rollout progress. */
+export async function getUpdateRolloutPreview(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    res.json({ success: true, data: await agentUpdateRollout.preview(await rolloutScope(req)) });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * POST /agent/updates/all {scopeTenantId?} — request the update of every
+ * outdated, non-frozen agent of the scope (paced by the rollout window). The
+ * client sends back the preview's scopeTenantId: a session that switched
+ * tenant since (another tab) is refused with 409.
+ */
+export async function updateAllOutdatedAgents(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const body = (req.body ?? {}) as { scopeTenantId?: unknown };
+    if (body.scopeTenantId !== undefined && body.scopeTenantId !== null && Number(body.scopeTenantId) !== req.tenantId) {
+      throw new AppError(409, 'The operating tenant changed since the preview: review it again', 'rolloutScopeChanged');
+    }
+    requireServedVersion();
+    const r = await agentUpdateRollout.updateAll(await rolloutScope(req), req.session?.userId ?? null);
+    if (r.requested > 0) {
+      await auditService.logReq(req, {
+        action: 'agent.update_all_requested', targetType: 'agent',
+        details: {
+          requested: r.requested, targetVersion: r.targetVersion, allTenants: r.preview.allTenants,
+          byTenant: r.byTenant, skipped: r.skipped, frozen: r.preview.frozen.total,
+        },
+      });
+    }
+    res.json({ success: true, data: r });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/** POST /agent/updates/cancel-all — clear every pending update request of the scope. */
+export async function cancelAllAgentUpdates(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const r = await agentUpdateRollout.cancelAll(await rolloutScope(req), req.session?.userId ?? null);
+    if (r.cancelled > 0) {
+      await auditService.logReq(req, {
+        action: 'agent.update_all_cancelled', targetType: 'agent',
+        details: { cancelled: r.cancelled, byTenant: r.byTenant, autoContinuing: r.autoContinuing },
+      });
+    }
     res.json({ success: true, data: r });
   } catch (err) {
     next(err);
@@ -929,6 +1252,10 @@ export async function patchTenantUpdatePolicy(req: Request, res: Response, next:
     const r = await agentService.setTenantUpdatePolicy(req.tenantId, body.updatePolicy);
     if (!r) throw new AppError(404, 'Tenant not found');
     if (r.before !== body.updatePolicy) {
+      await auditService.logReq(req, {
+        action: 'tenant.update_policy_changed', targetType: 'tenant', targetId: req.tenantId,
+        details: { from: r.before ?? null, to: body.updatePolicy ?? null },
+      });
       logger.info({
         event: 'agent_update_tenant_policy', userId: req.session?.userId ?? null, tenantId: req.tenantId, from: r.before, to: body.updatePolicy,
       }, 'Tenant agent update policy changed');
@@ -939,10 +1266,14 @@ export async function patchTenantUpdatePolicy(req: Request, res: Response, next:
   }
 }
 
-/** GET /agent/devices/versions — version distribution (Default keeps the read god view). */
+/**
+ * GET /agent/devices/versions — version distribution (Default keeps the read
+ * god view), over the agents the caller sees (RBAC-8).
+ */
 export async function getDeviceVersionDistribution(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    res.json({ success: true, data: await agentService.getVersionDistribution(req.tenantId) });
+    const visibleIds = scopeAgentIds(await requestAgentScope(req));
+    res.json({ success: true, data: await agentService.getVersionDistribution(req.tenantId, visibleIds) });
   } catch (err) {
     next(err);
   }
@@ -954,8 +1285,8 @@ export async function getDeviceVersionDistribution(req: Request, res: Response, 
  * (after walking group inheritance chain).
  */
 export async function getDeviceTemplates(req: Request, res: Response): Promise<void> {
-  const id = Number(req.params.id);
-  if (!(await requireDeviceInTenant(req, res, id))) return;
-  const configs = await serviceTemplateService.getResolvedForDevice(id);
+  const device = await requireDeviceInTenant(req, res, req.params.id);
+  if (!device) return;
+  const configs = await serviceTemplateService.getResolvedForDevice(device.id);
   res.json({ success: true, data: configs });
 }

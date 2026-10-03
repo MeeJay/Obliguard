@@ -20,14 +20,27 @@ import type {
   NotificationBinding,
   SmtpServer,
 } from '@obliview/shared';
-import { NOTIFICATION_REDACTED } from '@obliview/shared';
+import { NOTIFICATION_REDACTED, isMasterTenant } from '@obliview/shared';
 import { notificationsApi } from '@/api/notifications.api';
 import { smtpServerApi } from '@/api/smtpServer.api';
 import { Button } from '@/components/common/Button';
 import { Input } from '@/components/common/Input';
+import { IconButton } from '@/components/common/IconButton';
+import { PageContainer } from '@/components/common/PageContainer';
+import { PageHeader } from '@/components/common/PageHeader';
+import { useConfirm } from '@/components/common/ConfirmDialog';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
 import { useTenantStore } from '@/store/tenantStore';
+import { useIsPlatformAdmin } from '@/hooks/usePermission';
+
+/**
+ * A binding as the server returns it: every row carries the tenant it belongs
+ * to (a tenant's global binding covers its own agents; the Default tenant's
+ * covers every tenant). A tenant only receives its own rows; the Default
+ * tenant receives every tenant's (god view).
+ */
+type TenantBinding = NotificationBinding;
 
 // ── Tenant sharing panel (per channel) ──────────────────────────────────────
 
@@ -56,10 +69,12 @@ function TenantSharingPanel({ channelId, currentTenantId }: TenantSharingPanelPr
         }
       })
       .catch(() => {
-        if (isMounted.current) setLoading(false);
+        if (!isMounted.current) return;
+        setLoading(false);
+        toast.error(t('notifications.failedLoadTenants', 'Failed to load the workspaces this channel is shared with'));
       });
     return () => { isMounted.current = false; };
-  }, [channelId]);
+  }, [channelId, t]);
 
   const applyChange = async (newIds: number[]) => {
     setSaving(true);
@@ -119,15 +134,17 @@ function TenantSharingPanel({ channelId, currentTenantId }: TenantSharingPanelPr
               className="inline-flex items-center gap-1 rounded-md bg-bg-tertiary border border-border px-2 py-0.5 text-xs text-text-primary"
             >
               <Building2 size={10} className="text-text-muted shrink-0" />
-              {tenant?.name ?? `Tenant #${tid}`}
-              <button
+              {tenant?.name ?? t('notifications.tenantFallback', { id: tid, defaultValue: 'Tenant #{{id}}' })}
+              <IconButton
+                label={t('notifications.removeTenantAccess')}
+                icon={<X size={10} />}
                 onClick={() => handleRemove(tid)}
                 disabled={saving}
-                className="ml-0.5 text-text-muted hover:text-status-down transition-colors"
-                title={t('notifications.removeTenantAccess')}
-              >
-                <X size={10} />
-              </button>
+                variant="danger"
+                size="xs"
+                touchTarget="overlay"
+                className="ml-0.5"
+              />
             </span>
           );
         })}
@@ -167,12 +184,16 @@ function TenantSharingPanel({ channelId, currentTenantId }: TenantSharingPanelPr
 
 export function NotificationsPage() {
   const { t } = useTranslation();
+  const confirmAction = useConfirm();
   const { currentTenantId, tenants } = useTenantStore();
   const isMultiTenant = tenants.length > 1;
+  // /admin/smtp-servers is platform-admin only: a tenant admin holding
+  // notifications.manage does not load it (no 403 toast).
+  const isPlatformAdmin = useIsPlatformAdmin();
 
   const [channels, setChannels] = useState<NotificationChannel[]>([]);
   const [plugins, setPlugins] = useState<NotificationPluginMeta[]>([]);
-  const [globalBindings, setGlobalBindings] = useState<NotificationBinding[]>([]);
+  const [globalBindings, setGlobalBindings] = useState<TenantBinding[]>([]);
   const [smtpServers, setSmtpServers] = useState<SmtpServer[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -198,13 +219,36 @@ export function NotificationsPage() {
       setPlugins(pl);
       setGlobalBindings(gb);
     } catch {
-      toast.error('Failed to load notifications');
+      toastLoadError(t('notifications.failedLoad', 'Failed to load notifications'), () => void load());
     }
   };
 
+  const loadSmtpServers = () => {
+    smtpServerApi.list().then(setSmtpServers).catch(() => {
+      toastLoadError(t('notifications.failedLoadSmtp', 'Failed to load SMTP servers'), loadSmtpServers);
+    });
+  };
+
+  /** Page-load failure: an error toast with a Retry action (one per message). */
+  const toastLoadError = (message: string, retry: () => void) => {
+    toast.error((tst) => (
+      <span className="flex items-center gap-3">
+        <span>{message}</span>
+        <button
+          type="button"
+          className="shrink-0 text-xs font-medium text-accent hover:underline"
+          onClick={() => { toast.dismiss(tst.id); retry(); }}
+        >
+          {t('common.retry', 'Retry')}
+        </button>
+      </span>
+    ), { id: `notifications-load:${message}` });
+  };
+
   useEffect(() => {
-    load();
-    smtpServerApi.list().then(setSmtpServers).catch(() => {});
+    void load();
+    if (isPlatformAdmin) loadSmtpServers();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const selectedPlugin = plugins.find((p) => p.type === selectedType);
@@ -265,7 +309,7 @@ export function NotificationsPage() {
   };
 
   const handleDelete = async (id: number, name: string) => {
-    if (!confirm(t('notifications.confirmDelete', { name }))) return;
+    if (!(await confirmAction({ message: t('notifications.confirmDelete', { name }), danger: true }))) return;
     try {
       await notificationsApi.deleteChannel(id);
       toast.success(t('notifications.deleted'));
@@ -294,7 +338,7 @@ export function NotificationsPage() {
   };
 
   const toggleGlobalBinding = async (channelId: number) => {
-    const existing = globalBindings.find((b) => b.channelId === channelId);
+    const existing = globalBindings.find((b) => b.channelId === channelId && isOwnBinding(b));
     try {
       if (existing) {
         await notificationsApi.removeBinding(channelId, 'global', null);
@@ -309,8 +353,23 @@ export function NotificationsPage() {
     }
   };
 
+  // The toggle reflects the operating tenant's own global binding only (a row
+  // without tenantId comes from a pre-034 server: treated as our own).
+  const isOwnBinding = (b: TenantBinding) => b.tenantId === undefined || b.tenantId === currentTenantId;
+
   const isGloballyBound = (channelId: number) =>
-    globalBindings.some((b) => b.channelId === channelId);
+    globalBindings.some((b) => b.channelId === channelId && isOwnBinding(b));
+
+  // Default tenant (god view): the other tenants that bound the channel globally.
+  const showTenantColumn = currentTenantId !== null && isMasterTenant(currentTenantId);
+  const otherTenantsBinding = (channelId: number): number[] =>
+    showTenantColumn
+      ? [...new Set(globalBindings
+          .filter((b) => b.channelId === channelId && !isOwnBinding(b))
+          .map((b) => b.tenantId as number))]
+      : [];
+
+  const tenantName = (id: number) => tenants.find((x) => x.id === id)?.name ?? `Tenant #${id}`;
 
   const toggleTenantPanel = (channelId: number) => {
     setExpandedTenants((prev) => {
@@ -322,14 +381,17 @@ export function NotificationsPage() {
   };
 
   return (
-    <div className="p-6 min-w-0">
-      <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-semibold text-text-primary">{t('notifications.title')}</h1>
-        <Button size="sm" onClick={openCreate}>
-          <Plus size={16} className="mr-1.5" />
-          {t('notifications.newChannel')}
-        </Button>
-      </div>
+    <PageContainer>
+      <PageHeader
+        className="mb-6"
+        title={t('notifications.title')}
+        actions={(
+          <Button size="sm" onClick={openCreate}>
+            <Plus size={16} className="mr-1.5" />
+            {t('notifications.newChannel')}
+          </Button>
+        )}
+      />
 
       {/* Create/Edit Form */}
       {showForm && (
@@ -505,7 +567,7 @@ export function NotificationsPage() {
                         {isShared && ch.tenantId && (
                           <span className="inline-flex items-center gap-1 rounded-full bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-accent">
                             <Building2 size={9} className="shrink-0" />
-                            {tenants.find((t) => t.id === ch.tenantId)?.name ?? `Tenant #${ch.tenantId}`}
+                            {tenantName(ch.tenantId)}
                           </span>
                         )}
                         {readOnly && (
@@ -517,12 +579,25 @@ export function NotificationsPage() {
                       </div>
                     </div>
 
+                    {/* Default tenant: the other workspaces whose global binding uses this channel */}
+                    {otherTenantsBinding(ch.id).length > 0 && (
+                      <span
+                        className="hidden sm:inline-flex shrink-0 items-center gap-1 rounded-md bg-bg-tertiary px-2 py-1 text-[11px] text-text-muted max-w-[16rem] truncate"
+                        title={t('notifications.globalInTenantsHint', 'Bound globally by these workspaces (covers their own agents only)')}
+                      >
+                        <Building2 size={11} className="shrink-0" />
+                        <span className="truncate">
+                          {t('notifications.globalInTenants', 'Global in')}: {otherTenantsBinding(ch.id).map(tenantName).join(', ')}
+                        </span>
+                      </span>
+                    )}
+
                     {/* Global binding: owner only (a shared channel just shows its state) */}
                     {readOnly ? (
                       isGloballyBound(ch.id) && (
                         <span className="shrink-0 rounded-md bg-accent/10 px-2 py-1 text-xs font-medium text-accent">
                           <Zap size={12} className="inline mr-1" />
-                          {t('remediations.globalActive')}
+                          {t('notifications.globalActive')}
                         </span>
                       )
                     ) : (
@@ -533,10 +608,12 @@ export function NotificationsPage() {
                           ? 'bg-accent/10 text-accent'
                           : 'text-text-muted hover:bg-bg-hover'
                       }`}
-                      title={isGloballyBound(ch.id) ? 'Remove from global' : 'Add to global notifications'}
+                      title={showTenantColumn
+                        ? t('notifications.globalDefaultHint', 'Global binding of the Default workspace: covers the agents of every workspace')
+                        : t('notifications.globalTenantHint', 'Global binding of this workspace: covers its own agents')}
                     >
                       <Zap size={12} className="inline mr-1" />
-                      {isGloballyBound(ch.id) ? t('remediations.globalActive') : t('common.enable')}
+                      {isGloballyBound(ch.id) ? t('notifications.globalActive') : t('common.enable')}
                     </button>
                     )}
 
@@ -560,42 +637,42 @@ export function NotificationsPage() {
                     )}
 
                     {/* Test — any visible channel */}
-                    <button
-                      onClick={() => handleTest(ch.id)}
-                      disabled={testing === ch.id}
-                      className="shrink-0 p-1.5 text-text-muted hover:text-accent opacity-0 group-hover:opacity-100 transition-opacity"
-                      title={t('notifications.sendTest')}
-                    >
-                      {testing === ch.id
+                    <IconButton
+                      label={t('notifications.sendTest')}
+                      icon={testing === ch.id
                         ? <Loader2 size={14} className="animate-spin" />
                         : <TestTube2 size={14} />}
-                    </button>
+                      onClick={() => void handleTest(ch.id)}
+                      disabled={testing === ch.id}
+                      variant="plain"
+                      className="shrink-0 hover:text-accent can-hover:opacity-0 can-hover:group-hover:opacity-100 focus-visible:opacity-100 transition-opacity"
+                    />
 
                     {/* View (read-only) for shared channels, Edit / Delete for owned ones */}
                     {readOnly ? (
-                      <button
+                      <IconButton
+                        label={t('notifications.viewChannel', 'Channel (read-only)')}
+                        icon={<Eye size={14} />}
                         onClick={() => openView(ch)}
-                        className="shrink-0 p-1.5 text-text-muted hover:text-text-primary opacity-0 group-hover:opacity-100 transition-opacity"
-                        title={t('notifications.viewChannel', 'Channel (read-only)')}
-                      >
-                        <Eye size={14} />
-                      </button>
+                        variant="plain"
+                        className="shrink-0 can-hover:opacity-0 can-hover:group-hover:opacity-100 focus-visible:opacity-100 transition-opacity"
+                      />
                     ) : (
                       <>
-                        <button
+                        <IconButton
+                          label={t('common.edit')}
+                          icon={<Pencil size={14} />}
                           onClick={() => openEdit(ch)}
-                          className="shrink-0 p-1.5 text-text-muted hover:text-text-primary opacity-0 group-hover:opacity-100 transition-opacity"
-                          title={t('common.edit')}
-                        >
-                          <Pencil size={14} />
-                        </button>
-                        <button
-                          onClick={() => handleDelete(ch.id, ch.name)}
-                          className="shrink-0 p-1.5 text-text-muted hover:text-status-down opacity-0 group-hover:opacity-100 transition-opacity"
-                          title={t('common.delete')}
-                        >
-                          <Trash2 size={14} />
-                        </button>
+                          variant="plain"
+                          className="shrink-0 can-hover:opacity-0 can-hover:group-hover:opacity-100 focus-visible:opacity-100 transition-opacity"
+                        />
+                        <IconButton
+                          label={t('common.delete')}
+                          icon={<Trash2 size={14} />}
+                          onClick={() => void handleDelete(ch.id, ch.name)}
+                          variant="plain"
+                          className="shrink-0 hover:text-status-down can-hover:opacity-0 can-hover:group-hover:opacity-100 focus-visible:opacity-100 transition-opacity"
+                        />
                       </>
                     )}
                   </div>
@@ -610,6 +687,6 @@ export function NotificationsPage() {
           </div>
         )}
       </div>
-    </div>
+    </PageContainer>
   );
 }

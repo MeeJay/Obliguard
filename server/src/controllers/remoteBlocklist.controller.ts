@@ -3,6 +3,18 @@ import { remoteBlocklistService } from '../services/remoteBlocklist.service';
 import { AppError } from '../middleware/errorHandler';
 import { parseLimitOffset } from '../utils/pagination';
 import { SsrfRefusedError } from '../utils/ssrfGuard';
+import { auditService } from '../services/audit.service';
+
+/** A list URL for the audit trail: origin + path only (a query string may carry a credential). */
+function auditUrl(raw: unknown): string | null {
+  if (typeof raw !== 'string' || raw === '') return null;
+  try {
+    const u = new URL(raw);
+    return `${u.protocol}//${u.host}${u.pathname}`;
+  } catch {
+    return '[invalid url]';
+  }
+}
 
 function parseId(raw: string): number {
   if (!/^[1-9][0-9]{0,9}$/.test(raw)) throw new AppError(400, 'Invalid id');
@@ -26,11 +38,16 @@ export const remoteBlocklistController = {
 
   async create(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const { name, sourceType, url, apiKey, syncInterval } = (req.body ?? {}) as Record<string, unknown>;
+      const { name, sourceType, url, apiKey, syncInterval, enforce } = (req.body ?? {}) as Record<string, unknown>;
       if (!name || !sourceType || !url) throw new AppError(400, 'name, sourceType, and url are required');
+      // enforce: optional, a new list does not create bans unless told to.
       const data = await remoteBlocklistService.create({
         name, sourceType, url, apiKey,
-        syncInterval, tenantId: req.tenantId,
+        syncInterval, enforce, tenantId: req.tenantId,
+      });
+      await auditService.logReq(req, {
+        action: 'remote_blocklist.created', targetType: 'remote_blocklist', targetId: (data as { id?: number } | null)?.id ?? null,
+        details: { name, sourceType, url: auditUrl(url), apiAccess: apiKey ? 'set' : 'none', syncInterval, enforce: enforce ?? false },
       });
       res.status(201).json({ success: true, data });
     } catch (err) { next(err); }
@@ -39,9 +56,23 @@ export const remoteBlocklistController = {
   async update(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const id = parseId(req.params.id);
-      const { name, url, apiKey, enabled, syncInterval } = (req.body ?? {}) as Record<string, unknown>;
-      const data = await remoteBlocklistService.update(id, req.tenantId, { name, url, apiKey, enabled, syncInterval });
+      // enforce: the per-list 'Enforce' toggle (off lifts the list's bans).
+      const { name, url, apiKey, enabled, enforce, syncInterval } = (req.body ?? {}) as Record<string, unknown>;
+      const data = await remoteBlocklistService.update(id, req.tenantId, { name, url, apiKey, enabled, enforce, syncInterval });
       if (!data) throw new AppError(404, 'Blocklist not found');
+      const fields = Object.entries({ name, url, apiKey, enabled, enforce, syncInterval })
+        .filter(([, v]) => v !== undefined).map(([k]) => k);
+      await auditService.logReq(req, {
+        action: 'remote_blocklist.updated', targetType: 'remote_blocklist', targetId: id,
+        details: {
+          fields,
+          ...(name !== undefined ? { name } : {}),
+          ...(url !== undefined ? { url: auditUrl(url) } : {}),
+          ...(enabled !== undefined ? { enabled } : {}),
+          ...(enforce !== undefined ? { enforce } : {}),
+          ...(syncInterval !== undefined ? { syncInterval } : {}),
+        },
+      });
       res.json({ success: true, data });
     } catch (err) { next(err); }
   },
@@ -51,6 +82,7 @@ export const remoteBlocklistController = {
       const id = parseId(req.params.id);
       const ok = await remoteBlocklistService.delete(id, req.tenantId);
       if (!ok) throw new AppError(404, 'Blocklist not found');
+      await auditService.logReq(req, { action: 'remote_blocklist.deleted', targetType: 'remote_blocklist', targetId: id });
       res.json({ success: true, message: 'Blocklist deleted' });
     } catch (err) { next(err); }
   },
@@ -65,6 +97,7 @@ export const remoteBlocklistController = {
         throw upstreamError(err);
       }
       if (!found) throw new AppError(404, 'Blocklist not found');
+      await auditService.logReq(req, { action: 'remote_blocklist.synced', targetType: 'remote_blocklist', targetId: id });
       res.json({ success: true, message: 'Sync completed' });
     } catch (err) { next(err); }
   },
@@ -92,6 +125,7 @@ export const remoteBlocklistController = {
       if (typeof enabled !== 'boolean') throw new AppError(400, 'enabled must be a boolean');
       const ok = await remoteBlocklistService.toggleIp(id, enabled, req.tenantId);
       if (!ok) throw new AppError(404, 'IP not found');
+      await auditService.logReq(req, { action: 'remote_blocklist.ip_toggled', targetType: 'remote_blocklist_ip', targetId: id, details: { enabled } });
       res.json({ success: true, message: enabled ? 'IP enabled' : 'IP disabled' });
     } catch (err) { next(err); }
   },
@@ -103,12 +137,14 @@ export const remoteBlocklistController = {
     } catch (err) { next(err); }
   },
 
-  async forcePush(_req: Request, res: Response, _next: NextFunction): Promise<void> {
+  async forcePush(req: Request, res: Response, _next: NextFunction): Promise<void> {
     try {
       const result = await remoteBlocklistService.pushNewBans();
+      await auditService.logReq(req, { action: 'remote_blocklist.pushed', targetType: 'oblitools', details: { result: result ?? null } });
       res.json({ success: true, message: result ?? 'Push completed' });
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unknown error';
+      await auditService.logReq(req, { action: 'remote_blocklist.pushed', targetType: 'oblitools', success: false, details: { error: msg.slice(0, 300) } });
       res.status(502).json({ success: false, message: msg, error: msg });
     }
   },

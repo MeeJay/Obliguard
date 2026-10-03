@@ -1,6 +1,7 @@
 import type { NotificationPlugin } from '../types';
 import type { IpsNotificationPayload } from '../../services/notification.service';
 import { statusIcon } from '../statusIcons';
+import { assertNotificationTarget, guardedFetch } from './outbound';
 
 const TAGS: Record<string, string> = {
   up: 'white_check_mark',
@@ -45,11 +46,13 @@ export const ntfyPlugin: NotificationPlugin = {
     };
     if (link && /^https?:\/\//i.test(link)) body.click = link;
 
-    const res = await fetch(`${String(config.serverUrl).replace(/\/+$/, '')}/`, {
+    // Self-hosted on the LAN more often than not: private targets are allowed
+    // unless NOTIFICATION_ALLOW_PRIVATE_TARGETS=false.
+    const target = await assertNotificationTarget(`${String(config.serverUrl ?? '').replace(/\/+$/, '')}/`, { privateByDefault: true });
+    const res = await guardedFetch(target, {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(10000),
     });
     if (!res.ok) throw new Error(`ntfy returned ${res.status}`);
   },

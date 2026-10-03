@@ -52,9 +52,12 @@ services:
       EXTERNAL_BAN_MAX_SECONDS: ${EXTERNAL_BAN_MAX_SECONDS:-}
       OBLIGATE_ISSUER: ${OBLIGATE_ISSUER:-}
       DELEGATION_ALLOW_JTI_REUSE: ${DELEGATION_ALLOW_JTI_REUSE:-}
+      # SSO membership reconciliation of Obligate accounts (see .env.example). Empty = on.
+      OBLIGATE_PRUNE_MEMBERSHIPS: ${OBLIGATE_PRUNE_MEMBERSHIPS:-}
+      NOTIFICATION_ALLOW_PRIVATE_TARGETS: ${NOTIFICATION_ALLOW_PRIVATE_TARGETS:-}
     volumes:
-      # Persistent custom directory: scripts, SSH keys, etc.
-      # SSH keys: chmod 700 custom/.ssh && chmod 600 custom/.ssh/id_*
+      # Persistent custom directory, kept for compatibility: the server (non-root
+      # since W14-4) reads nothing from /custom any more (no SSH keys, no scripts).
       - ${CUSTOM_DIR:-./custom}:/custom
 
   client:

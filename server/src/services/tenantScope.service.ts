@@ -1,7 +1,7 @@
 import type { Knex } from 'knex';
 import { isMasterTenant } from '@obliview/shared';
 import { db } from '../db';
-import { AppError } from '../middleware/errorHandler';
+import { codedError } from '../utils/errorCodes';
 import { deviceAccessVerdict, FOREIGN_DEVICE_READ_ONLY } from '../utils/tenantWriteRules';
 
 /**
@@ -26,7 +26,7 @@ const FOREIGN_GROUP_READ_ONLY = 'This group belongs to another tenant: read-only
 
 function parseScopeId(scopeId: unknown): number {
   const id = typeof scopeId === 'number' ? scopeId : Number(scopeId);
-  if (!Number.isSafeInteger(id) || id <= 0) throw new AppError(400, 'Invalid scopeId');
+  if (!Number.isSafeInteger(id) || id <= 0) throw codedError(400, 'SCOPE_ID_INVALID', 'Invalid scopeId');
   return id;
 }
 
@@ -70,22 +70,23 @@ export async function assertScopeInTenant(
     const id = parseScopeId(scopeId);
     if (id === Number(tenantId)) return;
     if (mode === 'read' && isMasterTenant(tenantId)) return;
-    if (isMasterTenant(tenantId)) throw new AppError(403, 'This scope belongs to another tenant: read-only from the Default tenant');
-    throw new AppError(404, 'Tenant not found');
+    if (isMasterTenant(tenantId)) throw codedError(403, 'FOREIGN_TENANT_READ_ONLY', 'This scope belongs to another tenant: read-only from the Default tenant');
+    throw codedError(404, 'TENANT_NOT_FOUND', 'Tenant not found');
   }
-  if (scope !== 'group' && scope !== 'agent') throw new AppError(400, `Unknown scope: ${String(scope)}`);
+  if (scope !== 'group' && scope !== 'agent') throw codedError(400, 'SCOPE_INVALID', `Unknown scope: ${String(scope)}`);
 
   const id = parseScopeId(scopeId);
   const what = scope === 'agent' ? 'Device' : 'Group';
+  const notFoundCode = scope === 'agent' ? 'AGENT_NOT_FOUND' : 'GROUP_NOT_FOUND';
   const owner = await resolveScopeTenant(scope, id);
-  if (owner == null) throw new AppError(404, `${what} not found`);
+  if (owner == null) throw codedError(404, notFoundCode, `${what} not found`);
   switch (deviceAccessVerdict(owner, tenantId, mode)) {
     case 'ok':
       return;
     case 'forbidden':
-      throw new AppError(403, scope === 'agent' ? FOREIGN_DEVICE_READ_ONLY : FOREIGN_GROUP_READ_ONLY);
+      throw codedError(403, 'FOREIGN_TENANT_READ_ONLY', scope === 'agent' ? FOREIGN_DEVICE_READ_ONLY : FOREIGN_GROUP_READ_ONLY);
     default:
-      throw new AppError(404, `${what} not found`);
+      throw codedError(404, notFoundCode, `${what} not found`);
   }
 }
 

@@ -3,20 +3,12 @@ import helmet from 'helmet';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import path from 'path';
-import { readFileSync, existsSync } from 'fs';
-import { join } from 'path';
-
-// Read server version from package.json at startup.
-// process.cwd() is the server directory in both dev (npx tsx) and Docker (WORKDIR /app/server).
-let serverVersion = 'dev';
-try {
-  const pkg = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf-8')) as { version: string };
-  serverVersion = pkg.version;
-} catch { /* ignore */ }
+import { existsSync } from 'fs';
 import { config } from './config';
-import { errorHandler } from './middleware/errorHandler';
+import { errorHandler, apiNotFoundHandler } from './middleware/errorHandler';
 import { apiLimiter } from './middleware/rateLimiter';
 import { routes } from './routes';
+import { healthHandler } from './routes/health';
 import { sessionMiddleware } from './session';
 import { sessionUserGuard } from './middleware/sessionUserGuard';
 
@@ -93,11 +85,12 @@ export function createApp() {
 
   // API routes
   app.use('/api', routes);
+  // Unknown /api/* answers 404 JSON (never the SPA index.html below).
+  app.use('/api', apiNotFoundHandler);
 
-  // Health check (public — also used by login page to display server version)
-  app.get('/health', (_req, res) => {
-    res.json({ status: 'ok', version: serverVersion, timestamp: new Date().toISOString() });
-  });
+  // Health check (public — also used by login page to display server version).
+  // 503 when the database does not answer SELECT 1 within 3 s.
+  app.get('/health', healthHandler);
 
   // Obli.tools unified desktop app downloads — serves pre-built binaries from obli.tools/dist/.
   // Whitelist prevents directory traversal; graceful 404 if a file isn't built yet.

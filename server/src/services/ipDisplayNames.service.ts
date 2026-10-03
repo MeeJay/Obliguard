@@ -26,14 +26,19 @@ export const ipDisplayNamesService = {
       .select('ip', 'label', 'tenant_id as tenantId')
       .orderBy('ip');
 
-    // Tenant label overrides global for the same IP
+    // One label per IP. A tenant sees its own label over the global one. The
+    // Default tenant (god view) writes global labels, so it prefers the global
+    // label, then its own legacy row, then the lowest other tenant id
+    // (deterministic instead of whichever row came last).
+    const master = isMasterTenant(tenantId);
+    const rank = (r: IpDisplayName): number => {
+      if (master) return r.tenantId === null ? 0 : isMasterTenant(r.tenantId) ? 1 : 2 + r.tenantId;
+      return r.tenantId === null ? 1 : 0;
+    };
     const map = new Map<string, IpDisplayName>();
     for (const row of rows as IpDisplayName[]) {
       const existing = map.get(row.ip);
-      if (!existing || row.tenantId !== null) {
-        // tenant-scoped entry wins over global
-        map.set(row.ip, row);
-      }
+      if (!existing || rank(row) < rank(existing)) map.set(row.ip, row);
     }
     return Array.from(map.values());
   },

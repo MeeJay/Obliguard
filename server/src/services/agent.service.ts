@@ -1,12 +1,14 @@
 import type { Server as SocketIOServer } from 'socket.io';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
+import { isIP } from 'net';
 import * as path from 'path';
 import { db } from '../db';
 import { obliguardHub } from './obliguardHub.service';
-import { emitToTenantAdmins, emitToTenantAudience } from '../utils/socketRooms';
+import { agentCommandService, hasAgentCapability, isAgentCommandType } from './agentCommand.service';
+import { agentKeyService } from './agentKey.service';
+import { emitAgentActivity, emitToTenantAdmins, emitToTenantAudience } from '../utils/socketRooms';
 import type {
-  AgentApiKey,
   AgentDevice,
   AgentDisplayConfig,
   AgentGlobalConfig,
@@ -26,8 +28,14 @@ import type {
   AgentDeviceUpdatedEvent,
   AgentDeviceCreatedEvent,
   AgentTenantUpdatePolicyInfo,
+  WindowsFirewallBackend,
+  IpEventsFrame,
+  IpEventStreamRow,
+  IpEventType,
+  IpFlowEvent,
 } from '@obliview/shared';
 import {
+  IP_EVENTS_FRAME_CAP,
   DEFAULT_AGENT_THRESHOLDS,
   DEFAULT_AGENT_GLOBAL_CONFIG,
   DEFAULT_AGENT_UPDATE_POLICY,
@@ -57,7 +65,10 @@ import {
   type ParsedUpdateStatus,
 } from '../utils/agentUpdate';
 import { appConfigService } from './appConfig.service';
+import { reserveRolloutSlot, releaseRolloutSlot, __resetRolloutStateForTest } from './agentUpdateRollout.service';
 import { notificationService } from './notification.service';
+import { liveAlertService, incidentStableKey } from './liveAlert.service';
+import type { LiveAlertIncidentKind } from './liveAlert.service';
 import { logger } from '../utils/logger';
 import { obligateService } from './obligate.service';
 import { whitelistService } from './whitelist.service';
@@ -70,6 +81,8 @@ import {
   type AgentKeyRef,
   type DeviceBindingRow,
 } from '../utils/agentIdentity';
+import { agentConfigService, type ResolvedAgentSettings } from './agentConfig.service';
+import { settingsService, writableDefinition, normalizeSettingValue, legacyTypesToFlags } from './settings.service';
 
 // ── Agent ↔ API-key binding (A5) ─────────────────────────────
 /**
@@ -134,7 +147,15 @@ export function warnBindingRefused(ctx: BindingRefusedCtx): void {
  */
 export const AGENT_DEVICE_CREATED_EVENT = SOCKET_EVENTS.AGENT_DEVICE_CREATED;
 
-export type HandlePushResult = ObliguardPushResponse & { enrolmentDeferred?: true };
+export type HandlePushResult = ObliguardPushResponse & {
+  enrolmentDeferred?: true;
+  /**
+   * Windows agents only (W13-1, settings cascade): the firewall backend to use.
+   * Sent on every config frame so a switch back to 'auto' applies too; agents
+   * that predate the switch ignore it (absent = 'auto').
+   */
+  firewallBackend?: WindowsFirewallBackend;
+};
 
 export interface HandlePushOptions {
   /**
@@ -191,6 +212,33 @@ function isRfc1918(ip: string): boolean {
   return false;
 }
 
+// ── Event address validation ────────────────────────────────
+// Agents validate addresses since W4-3, but older agents can still send a
+// non-IP string; one bad inet value would fail the whole ip_events batch
+// insert. Returns the canonical address (::ffff:a.b.c.d folded to IPv4) or
+// null when the value is not a literal IP.
+export function normalizeEventIp(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  let ip = raw.trim();
+  if (ip.startsWith('[') && ip.endsWith(']')) ip = ip.slice(1, -1);
+  const mapped = /^::ffff:([0-9.]+)$/i.exec(ip);
+  if (mapped) ip = mapped[1];
+  const v = isIP(ip);
+  if (v === 4) return ip;
+  if (v === 6) return ip.toLowerCase();
+  return null;
+}
+
+/** Keeps the events whose IP is a literal address, with the IP normalized. */
+function withValidEventIps(events: AgentIpEvent[]): AgentIpEvent[] {
+  const out: AgentIpEvent[] = [];
+  for (const ev of events) {
+    const ip = normalizeEventIp(ev?.ip);
+    if (ip) out.push(ip === ev.ip ? ev : { ...ev, ip });
+  }
+  return out;
+}
+
 // ── Socket.io instance (set from index.ts) ──────────────────
 let _io: SocketIOServer | null = null;
 export function setAgentServiceIO(io: SocketIOServer): void {
@@ -240,19 +288,210 @@ function touchLastSeen(deviceId: number): void {
     .catch((err) => logger.warn({ err, deviceId }, 'agent presence: last_seen_at write failed'));
 }
 
+// ── Event timestamps (W6-2) ──────────────────────────────────────────────────
+// Agent-supplied timestamps are clamped: a clock far in the future would keep
+// events inside every ban window (and on top of every list) forever, a very
+// old one would bypass the windows of a replayed log.
+
+/** Tolerated agent clock lead. */
+export const EVENT_TS_MAX_FUTURE_MS = 5 * 60_000;
+/** Oldest accepted event age. */
+export const EVENT_TS_MAX_AGE_MS = 24 * 60 * 60_000;
+
+/**
+ * Stored timestamp of an agent event: invalid or more than 5 min ahead →
+ * now; older than 24 h → now - 24 h; otherwise as reported.
+ */
+export function clampEventTimestamp(raw: unknown, now = Date.now()): Date {
+  const t = typeof raw === 'string' || typeof raw === 'number' ? new Date(raw).getTime() : NaN;
+  if (!Number.isFinite(t) || t > now + EVENT_TS_MAX_FUTURE_MS) return new Date(now);
+  if (t < now - EVENT_TS_MAX_AGE_MS) return new Date(now - EVENT_TS_MAX_AGE_MS);
+  return new Date(t);
+}
+
+// ── Live IP activity (W8-3) ──────────────────────────────────────────────────
+// After a flush is stored, its rows go out as ONE batched ip:events frame
+// (full rows with their ids, newest first, at most IP_EVENTS_FRAME_CAP) to the
+// agent's tenant feed, the Default feed and the agent's watchers
+// (socketRooms.emitAgentActivity: nothing is built when nobody listens). The
+// legacy ip:flow ping (one per ip + event type) keeps the same audience for
+// one release.
+
+/** One ip_events row as inserted by a flush. */
+interface StoredIpEvent {
+  device_id: number;
+  ip: string;
+  username: string | null;
+  service: string;
+  event_type: string;
+  timestamp: Date;
+  track_only: boolean;
+  tenant_id: number;
+  source_agent_id: number | null;
+  source_ip_type: 'lan' | 'wan' | null;
+}
+
+/** The ip:events frame of one stored flush (`ids`: RETURNING ids, in insert order). */
+export function buildIpEventsFrame(rows: StoredIpEvent[], ids: unknown[]): IpEventsFrame {
+  const events: IpEventStreamRow[] = [];
+  rows.forEach((r, i) => {
+    const raw = ids[i];
+    const id = Number(typeof raw === 'object' && raw !== null ? (raw as { id?: unknown }).id : raw);
+    if (!Number.isSafeInteger(id) || id <= 0) return;
+    events.push({
+      id,
+      ip: r.ip,
+      service: r.service,
+      eventType: r.event_type as IpEventType,
+      username: r.username,
+      deviceId: r.device_id,
+      tenantId: r.tenant_id,
+      timestamp: r.timestamp.toISOString(),
+      trackOnly: r.track_only,
+      sourceAgentId: r.source_agent_id,
+      sourceIpType: r.source_ip_type,
+    });
+  });
+  events.sort((a, b) => b.id - a.id);
+  const kept = events.slice(0, IP_EVENTS_FRAME_CAP);
+  return { events: kept, dropped: rows.length - kept.length };
+}
+
+/** Realtime fan-out of one stored flush of `deviceId` (never throws). */
+function emitStoredIpEvents(tenantId: number, deviceId: number, rows: StoredIpEvent[], ids: unknown[]): void {
+  if (!_io || rows.length === 0) return;
+  try {
+    emitAgentActivity(_io, tenantId, deviceId, SOCKET_EVENTS.IP_EVENTS, () => buildIpEventsFrame(rows, ids));
+    // Legacy ip:flow (NetMap, AgentDetail): one thin ping per (ip, event type).
+    const seen = new Set<string>();
+    for (const r of rows) {
+      const key = `${r.ip}:${r.event_type}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const flow: IpFlowEvent = {
+        ip: r.ip,
+        service: r.service,
+        eventType: r.event_type as IpEventType,
+        deviceId,
+        tenantId,
+        sourceAgentId: r.source_agent_id,
+        sourceIpType: r.source_ip_type,
+      };
+      if (!emitAgentActivity(_io, tenantId, deviceId, SOCKET_EVENTS.IP_FLOW, () => flow)) break;
+    }
+  } catch (err) {
+    logger.warn({ err, deviceId }, 'live IP activity emit failed');
+  }
+}
+
+// ── Threat notifications (W6-2) ──────────────────────────────────────────────
+// A device's flushed auth failures send ONE 'threat' notification per
+// cooldown window: last_threat_at is claimed with an atomic conditional
+// UPDATE, so concurrent flushes (HTTP push + WS frames) cannot both notify.
+
+/** Minimum gap between two threat notifications of a device. */
+export const THREAT_NOTIFY_COOLDOWN_SECONDS = 180;
+
+/**
+ * Mark the device under threat and notify its channels, at most once per
+ * cooldown window, with the busiest failing source of the batch (ip,
+ * service, count, username). Never throws.
+ */
+async function noteThreat(deviceId: number, events: AgentIpEvent[]): Promise<void> {
+  const failures = events.filter((ev) => ev.eventType === 'auth_failure');
+  if (failures.length === 0) return;
+  try {
+    const claimed = await db('agent_devices')
+      .where({ id: deviceId })
+      .where((q) => q.whereNull('last_threat_at')
+        .orWhereRaw('last_threat_at < now() - make_interval(secs => ?)', [THREAT_NOTIFY_COOLDOWN_SECONDS]))
+      .update({ last_threat_at: db.fn.now() })
+      .returning(['id', 'name', 'hostname']) as Array<{ id: number; name: string | null; hostname: string }>;
+    if (claimed.length === 0) return;
+
+    // Busiest (ip, service) of the batch.
+    const bySource = new Map<string, { ip: string; service: string; count: number; username?: string }>();
+    for (const ev of failures) {
+      const key = `${ev.ip}|${ev.service}`;
+      const cur = bySource.get(key) ?? { ip: ev.ip, service: ev.service, count: 0 };
+      cur.count++;
+      if (ev.username) cur.username = ev.username;
+      bySource.set(key, cur);
+    }
+    let top: { ip: string; service: string; count: number; username?: string } | undefined;
+    for (const s of bySource.values()) if (!top || s.count > top.count) top = s;
+
+    const label = claimed[0].name || claimed[0].hostname || String(deviceId);
+    await notificationService.sendForAgent(deviceId, label, 'threat', 'ok', [], 'threat', top
+      ? { ip: top.ip, service: top.service, failureCount: top.count, username: top.username }
+      : undefined);
+  } catch (err) {
+    logger.warn({ err, deviceId }, 'Threat notification failed');
+  }
+}
+
+// ── Device incidents (W6-2) ──────────────────────────────────────────────────
+
+/** Resolve a device's open incidents (all kinds, or `kinds`). Never throws. */
+async function resolveDeviceIncidents(deviceId: number, kinds?: LiveAlertIncidentKind[]): Promise<void> {
+  try {
+    if (!kinds) {
+      await liveAlertService.resolveIncidents({ deviceId });
+      return;
+    }
+    for (const kind of kinds) await liveAlertService.resolveIncidents({ deviceId, kind });
+  } catch (err) {
+    logger.warn({ err, deviceId }, 'agent incidents: resolve failed');
+  }
+}
+
+/** A new device waits for approval: an 'agent_pending' incident for its tenant. Never throws. */
+async function raisePendingIncident(device: { id: number; tenantId: number; hostname: string }, clientIp: string): Promise<void> {
+  try {
+    await liveAlertService.raiseIncident({
+      tenantId: device.tenantId,
+      kind: 'agent_pending',
+      stableKey: incidentStableKey('agent_pending', `device:${device.id}`),
+      deviceId: device.id,
+      severity: 'info',
+      title: `Agent awaiting approval: ${device.hostname || `#${device.id}`}`,
+      message: `A new agent (${device.hostname || 'unknown host'}, ${clientIp}) enrolled and waits for approval.`,
+      link: '/manage/agents',
+    });
+    // Approved / refused / deleted while the alert was raised: close it.
+    const row = await db('agent_devices').where({ id: device.id }).first('status') as { status: string } | undefined;
+    if (!row || row.status !== 'pending') await resolveDeviceIncidents(device.id, ['agent_pending']);
+  } catch (err) {
+    logger.warn({ err, deviceId: device.id }, 'agent incidents: pending alert failed');
+  }
+}
+
+/** An update attempt became 'failed': an 'agent_update_failed' incident (one per device). Never throws. */
+async function raiseUpdateFailedIncident(deviceId: number, targetVersion: string, reason: string): Promise<void> {
+  try {
+    const row = await db('agent_devices').where({ id: deviceId })
+      .first('tenant_id', 'name', 'hostname') as { tenant_id: number; name: string | null; hostname: string } | undefined;
+    if (!row) return;
+    const label = row.name || row.hostname || `#${deviceId}`;
+    await liveAlertService.raiseIncident({
+      tenantId: row.tenant_id,
+      kind: 'agent_update_failed',
+      stableKey: incidentStableKey('agent_update_failed', `device:${deviceId}`),
+      deviceId,
+      severity: 'warning',
+      title: `Agent update failed: ${label}`,
+      // reason may come from the agent (update_status error): bounded.
+      message: `${label} did not update to ${targetVersion} (${String(reason).slice(0, 200)}).`,
+      link: `/agents/${deviceId}`,
+    });
+  } catch (err) {
+    logger.warn({ err, deviceId }, 'agent incidents: update failure alert failed');
+  }
+}
+
 // ============================================================
 // Row ↔ Model helpers
 // ============================================================
-
-interface AgentApiKeyRow {
-  id: number;
-  name: string;
-  key: string;
-  created_by: number | null;
-  created_at: Date;
-  last_used_at: Date | null;
-  device_count?: string | number;
-}
 
 interface AgentDeviceRow {
   id: number;
@@ -346,18 +585,6 @@ function capabilitiesOf(raw: unknown): string[] {
   let v = raw;
   if (typeof v === 'string') { try { v = JSON.parse(v); } catch { return []; } }
   return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
-}
-
-function rowToApiKey(row: AgentApiKeyRow): AgentApiKey {
-  return {
-    id: row.id,
-    name: row.name,
-    key: row.key,
-    createdBy: row.created_by,
-    createdAt: row.created_at.toISOString(),
-    lastUsedAt: row.last_used_at ? row.last_used_at.toISOString() : null,
-    deviceCount: row.device_count ? Number(row.device_count) : undefined,
-  };
 }
 
 // ============================================================
@@ -523,6 +750,11 @@ export async function agentFileSha256(filePath: string): Promise<string> {
 
 let _now: () => number = () => Date.now();
 
+/** Clock of the update control (the harness may freeze it): the rollout window counts on it. */
+export function getAgentUpdateClock(): number {
+  return _now();
+}
+
 const REQUEST_NULLS = { update_requested_at: null, update_requested_version: null, update_requested_by: null };
 
 let _updPolicyCache: { map: Map<number, GroupPolicyEntry[]> | null; at: number } | null = null;
@@ -659,6 +891,7 @@ export function __resetAgentUpdateStateForTest(): void {
   _manifestOverride = undefined;
   _lastSeenWriteAt.clear();
   _now = () => Date.now();
+  __resetRolloutStateForTest();
 }
 
 type UpdCtx = {
@@ -828,6 +1061,7 @@ async function reconcileUpdateAttempts(
           logger.info({
             event: 'agent_update_succeeded', deviceId: device.id, tenantId: device.tenantId, targetVersion: a.target_version, reported,
           }, 'Agent update succeeded');
+          await resolveDeviceIncidents(device.id, ['agent_update_failed']);
         }
         continue;
       }
@@ -842,6 +1076,7 @@ async function reconcileUpdateAttempts(
         logger.warn({
           event: 'agent_update_failed', deviceId: device.id, tenantId: device.tenantId, targetVersion: a.target_version, reported, reason: 'reverted_or_failed',
         }, 'Agent update failed: the agent came back on its previous version');
+        await raiseUpdateFailedIncident(device.id, a.target_version, 'the agent came back on its previous version');
       }
     }
     if (changed) await emitAttemptPatch(device.id, device.tenantId);
@@ -860,7 +1095,9 @@ async function reconcileUpdateAttempts(
  * offers, then the cap of UPDATE_REQUEST_MAX_OFFERS offers per (device,
  * target) under every policy: past it the attempt is 'failed'
  * ('no_progress'), a pending request is dropped, and nothing is advertised
- * until a retry.
+ * until a retry. Last, the fleet-wide rollout window (W12-4,
+ * agentUpdateRollout.service): a frame that would carry latestVersion takes a
+ * slot of the window, or waits for a later heartbeat when it is full.
  */
 async function resolveAdvertisedVersion(device: AgentDevice, reported: string, now: number): Promise<string | undefined> {
   try {
@@ -879,14 +1116,14 @@ async function resolveAdvertisedVersion(device: AgentDevice, reported: string, n
     const a = await db('agent_update_attempts')
       .where({ device_id: device.id, target_version: served! })
       .first() as UpdateAttemptRow | undefined;
-    if (!a) return served!;
+    if (!a) return await withRolloutSlot(device.id, served!, now);
     const fresh = a.phase === 'cancelled' || a.phase === 'succeeded';
     if (a.last_offered_at && now - new Date(a.last_offered_at).getTime() < UPDATE_OFFER_MIN_INTERVAL_MS) return undefined;
     // An update in flight (progress phase, younger than the timeout) is neither
     // re-offered (that would reset its phase and hide a revert) nor abandoned.
     if ((PROGRESS_UPDATE_PHASES as readonly string[]).includes(a.phase)
       && now - new Date(a.updated_at).getTime() < UPDATE_ATTEMPT_TIMEOUT_MS) return undefined;
-    if (fresh || a.offered_count < UPDATE_REQUEST_MAX_OFFERS) return served!;
+    if (fresh || a.offered_count < UPDATE_REQUEST_MAX_OFFERS) return await withRolloutSlot(device.id, served!, now);
 
     // Cap reached without the agent reporting the target.
     const n = await db('agent_update_attempts')
@@ -900,6 +1137,7 @@ async function resolveAdvertisedVersion(device: AgentDevice, reported: string, n
         'Agent update abandoned after 3 offers without the agent reporting the new version',
       );
       await emitAttemptPatch(device.id, device.tenantId);
+      await raiseUpdateFailedIncident(device.id, served!, 'no progress after 3 offers');
     }
     return undefined;
   } catch (err) {
@@ -908,12 +1146,18 @@ async function resolveAdvertisedVersion(device: AgentDevice, reported: string, n
   }
 }
 
+/** `served` when the rollout window has a slot for this device (W12-4), else undefined (offered later). */
+async function withRolloutSlot(deviceId: number, served: string, now: number): Promise<string | undefined> {
+  return (await reserveRolloutSlot(deviceId, now)) ? served : undefined;
+}
+
 /**
  * Count an offer of `version` to a device, AFTER the config frame carrying it
  * was written. Conditional: at most one counted offer per 10 minutes and
  * UPDATE_REQUEST_MAX_OFFERS per (device, target) — a 'cancelled' or
  * 'succeeded' attempt restarts its budget. Returns false when the offer was
  * not counted (a concurrent frame won, or the cap was reached). Never throws.
+ * Releases the device's rollout slot: once counted, the offer is in the window.
  */
 export async function recordUpdateOffer(deviceId: number, version: string, now = _now()): Promise<boolean> {
   try {
@@ -944,6 +1188,8 @@ export async function recordUpdateOffer(deviceId: number, version: string, now =
   } catch (err) {
     logger.warn({ err, deviceId }, 'agent update: offer bookkeeping failed');
     return false;
+  } finally {
+    releaseRolloutSlot(deviceId);
   }
 }
 
@@ -982,20 +1228,37 @@ async function loadHydrationCtx(): Promise<HydrationCtx> {
   return { globalConfig, evalGroupIds, chains, tenantPolicies };
 }
 
+/** A legacy check interval column as a valid cascade value (older rows may hold < 10 s). */
+function clampCheckInterval(v: number | null | undefined): number {
+  return Math.min(86400, Math.max(10, Math.round(Number(v) || 60)));
+}
+
+/** A device row as the settings cascade needs it (agentConfig.service). */
+function cascadeRef(row: AgentDeviceRow) {
+  return { id: row.id, tenantId: row.tenant_id, groupId: row.group_id, evaluateOnly: row.evaluate_only ?? false };
+}
+
+/** Cascade settings of many rows (one resolver snapshot). */
+function resolveCascade(rows: AgentDeviceRow[]): Promise<Map<number, ResolvedAgentSettings>> {
+  return agentConfigService.resolveForDevices(rows.map(cascadeRef));
+}
+
 /**
  * Hydrate one device row (group config + thresholds read for its group).
  * withAttempt=false (agent channel hot path) leaves AgentDevice.update out.
  */
 async function hydrateDeviceRow(row: AgentDeviceRow, withAttempt = true): Promise<AgentDevice> {
-  const [groupConfig, groupThresholds, ctx, attempts] = await Promise.all([
+  const [groupConfig, groupThresholds, ctx, attempts, cascade] = await Promise.all([
     row.group_id ? getGroupAgentConfig(row.group_id) : null,
     row.group_id ? getGroupAgentThresholds(row.group_id) : null,
     loadHydrationCtx(),
     withAttempt ? loadLatestAttempts([row.id]) : null,
+    agentConfigService.resolveForDevice(cascadeRef(row)),
   ]);
   return rowToDevice(
     row, groupConfig, groupThresholds, ctx.globalConfig, evalStateFor(row, ctx.evalGroupIds),
     updCtx(row, ctx.chains, getServedAgentVersion(), ctx.tenantPolicies, attempts ? (attempts.get(row.id) ?? null) : undefined),
+    cascade,
   );
 }
 
@@ -1003,6 +1266,7 @@ function hydrateDeviceRows(
   rows: ListRow[],
   ctx: HydrationCtx,
   attempts: Map<number, UpdateAttemptRow>,
+  cascade: Map<number, ResolvedAgentSettings>,
 ): AgentDevice[] {
   const { globalConfig, evalGroupIds, chains, tenantPolicies } = ctx;
   const served = getServedAgentVersion();
@@ -1017,7 +1281,10 @@ function hydrateDeviceRows(
         ? JSON.parse(r._group_agent_thresholds)
         : r._group_agent_thresholds) as AgentThresholds
       : null;
-    const dev = rowToDevice(r, gc, gt, globalConfig, evalStateFor(r, evalGroupIds), updCtx(r, chains, served, tenantPolicies, attempts.get(r.id) ?? null));
+    const dev = rowToDevice(
+      r, gc, gt, globalConfig, evalStateFor(r, evalGroupIds),
+      updCtx(r, chains, served, tenantPolicies, attempts.get(r.id) ?? null), cascade.get(r.id),
+    );
     (dev as AgentDevice & { groupName?: string | null }).groupName = r._group_name ?? null;
     return dev;
   });
@@ -1030,6 +1297,7 @@ function rowToDevice(
   globalConfig?: AgentGlobalConfig | null,
   evalState?: { evaluateOnly: boolean; source: 'agent' | 'group' | null },
   upd?: UpdCtx,
+  cascade?: ResolvedAgentSettings,
 ): AgentDevice {
   const override = row.override_group_settings ?? false;
 
@@ -1040,25 +1308,19 @@ function rowToDevice(
   const evaluateOnlySource: 'agent' | 'group' | null =
     evalState !== undefined ? evalState.source : (row.evaluate_only ? 'agent' : null);
 
-  // Global defaults (fall through when group/device have no override)
-  const globalCIS = globalConfig?.checkIntervalSeconds ?? DEFAULT_AGENT_GLOBAL_CONFIG.checkIntervalSeconds;
-  const globalMMP = globalConfig?.maxMissedPushes     ?? DEFAULT_AGENT_GLOBAL_CONFIG.maxMissedPushes;
-
-  // checkIntervalSeconds: when overrideGroupSettings=true use device value; else group → global → default
-  const resolvedCIS = override
-    ? row.check_interval_seconds
-    : (groupConfig?.pushIntervalSeconds ?? globalCIS);
-
-  // maxMissedPushes: null at device level = inherit from group → global → default
+  // Effective heartbeat settings: the IPS settings cascade (W13-1, global ->
+  // tenant -> group chain -> agent). Without it (a row just inserted, never
+  // read back) the legacy columns give the same answer for the device / group /
+  // global levels.
   const deviceMMP = row.agent_max_missed_pushes ?? null;
-  const resolvedMMP = deviceMMP !== null
-    ? deviceMMP
-    : (groupConfig?.maxMissedPushes ?? globalMMP);
-
-  const resolvedSettings: AgentDevice['resolvedSettings'] = {
-    checkIntervalSeconds: resolvedCIS,
-    maxMissedPushes:      resolvedMMP,
-  };
+  const resolvedSettings: AgentDevice['resolvedSettings'] = cascade
+    ? { checkIntervalSeconds: cascade.checkIntervalSeconds, maxMissedPushes: cascade.maxMissedPushes }
+    : {
+        checkIntervalSeconds: override
+          ? row.check_interval_seconds
+          : (groupConfig?.pushIntervalSeconds ?? globalConfig?.checkIntervalSeconds ?? DEFAULT_AGENT_GLOBAL_CONFIG.checkIntervalSeconds),
+        maxMissedPushes: deviceMMP ?? groupConfig?.maxMissedPushes ?? globalConfig?.maxMissedPushes ?? DEFAULT_AGENT_GLOBAL_CONFIG.maxMissedPushes,
+      };
 
   return {
     id: row.id,
@@ -1147,6 +1409,11 @@ async function getGroupAgentThresholds(groupId: number): Promise<AgentThresholds
 let _evalGroupCache: { set: Set<number>; at: number } | null = null;
 const EVAL_GROUP_CACHE_TTL_MS = 15_000;
 
+/** Drop the evaluate-only group cache (a group's flag changed). */
+export function invalidateEvaluateOnlyCache(): void {
+  _evalGroupCache = null;
+}
+
 async function getEvaluateOnlyGroupIds(): Promise<Set<number>> {
   const nowMs = Date.now();
   if (_evalGroupCache && nowMs - _evalGroupCache.at < EVAL_GROUP_CACHE_TTL_MS) {
@@ -1179,34 +1446,6 @@ function evalStateFor(
 // ============================================================
 
 export const agentService = {
-
-  // ── API Keys ────────────────────────────────────────────
-
-  async listKeys(tenantId: number): Promise<AgentApiKey[]> {
-    const rows = await db('agent_api_keys as k')
-      .leftJoin('agent_devices as d', 'k.id', 'd.api_key_id')
-      .where({ 'k.tenant_id': tenantId })
-      .groupBy('k.id')
-      .select('k.*', db.raw('COUNT(d.id) as device_count'))
-      .orderBy('k.created_at', 'desc') as AgentApiKeyRow[];
-    return rows.map(rowToApiKey);
-  },
-
-  async createKey(name: string, createdBy: number, tenantId: number): Promise<AgentApiKey> {
-    const [row] = await db('agent_api_keys')
-      .insert({ name, created_by: createdBy, tenant_id: tenantId })
-      .returning('*') as AgentApiKeyRow[];
-    return rowToApiKey(row);
-  },
-
-  /**
-   * Tenant-scoped, with no master bypass: credentials are never god-viewed
-   * (listKeys is tenant-scoped too). The caller closes the key's live sessions.
-   */
-  async deleteKey(id: number, tenantId: number): Promise<boolean> {
-    const count = await db('agent_api_keys').where({ id, tenant_id: tenantId }).del();
-    return count > 0;
-  },
 
   // ── Agent ↔ API-key binding (A5) ────────────────────────
 
@@ -1327,14 +1566,12 @@ export const agentService = {
 
   /**
    * Returns the raw key string for a key id, scoped to the tenant — used by the
-   * offline-wizard download endpoints to bake the key into the installer. Never
-   * exposes a key the caller couldn't already see via listKeys (same tenant scope).
+   * offline-wizard download endpoints to bake the key into the installer. Same
+   * tenant scope and capability as the key list; a disabled key is never baked
+   * (null, the wizard is then served without a key).
    */
   async getKeyById(id: number, tenantId: number): Promise<string | null> {
-    const row = await db('agent_api_keys')
-      .where({ id, tenant_id: tenantId })
-      .first() as { key: string } | undefined;
-    return row?.key ?? null;
+    return agentKeyService.reveal(id, tenantId);
   },
 
   // ── Devices ─────────────────────────────────────────────
@@ -1342,18 +1579,21 @@ export const agentService = {
   /**
    * Devices of the tenant (Default: every tenant — read god view). Optional
    * filters: status; groupId (that group only, or with recursive its whole
-   * subtree through group_closure; null = ungrouped devices).
+   * subtree through group_closure; null = ungrouped devices); visibleIds (the
+   * caller's team scope, permissionService.getVisibleAgentIds: 'all' or
+   * undefined = no restriction).
    */
   async listDevices(
     tenantId: number,
     status?: AgentDevice['status'],
-    filter: { groupId?: number | null; recursive?: boolean } = {},
+    filter: { groupId?: number | null; recursive?: boolean; visibleIds?: number[] | 'all' } = {},
   ): Promise<AgentDevice[]> {
     // LEFT JOIN to fetch agent_group_config in one round-trip so resolvedSettings
     // can be computed without N+1 queries.
     const query = deviceListQuery().orderBy('d.created_at', 'desc');
     if (!isMasterTenant(tenantId)) query.where({ 'd.tenant_id': tenantId });
     if (status) query.where({ 'd.status': status });
+    if (Array.isArray(filter.visibleIds)) query.whereIn('d.id', filter.visibleIds);
     if (filter.groupId === null) {
       query.whereNull('d.group_id');
     } else if (filter.groupId !== undefined) {
@@ -1364,8 +1604,8 @@ export const agentService = {
       }
     }
     const [rows, ctx] = await Promise.all([query as Promise<ListRow[]>, loadHydrationCtx()]);
-    const attempts = await loadLatestAttempts(rows.map((r) => r.id));
-    return hydrateDeviceRows(rows, ctx, attempts);
+    const [attempts, cascade] = await Promise.all([loadLatestAttempts(rows.map((r) => r.id)), resolveCascade(rows)]);
+    return hydrateDeviceRows(rows, ctx, attempts, cascade);
   },
 
   /** Devices of `ids` that belong to `tenantId` — strict, no Default god view (writes). */
@@ -1375,8 +1615,8 @@ export const agentService = {
       deviceListQuery().whereIn('d.id', ids).andWhere({ 'd.tenant_id': tenantId }) as Promise<ListRow[]>,
       loadHydrationCtx(),
     ]);
-    const attempts = await loadLatestAttempts(rows.map((r) => r.id));
-    return hydrateDeviceRows(rows, ctx, attempts);
+    const [attempts, cascade] = await Promise.all([loadLatestAttempts(rows.map((r) => r.id)), resolveCascade(rows)]);
+    return hydrateDeviceRows(rows, ctx, attempts, cascade);
   },
 
   async getDeviceById(id: number): Promise<AgentDevice | null> {
@@ -1410,9 +1650,11 @@ export const agentService = {
     return rows.map((r) => r.id);
   },
 
-  async countOnlineDevices(tenantId: number): Promise<number> {
+  /** Approved devices of the tenant (Default: all), within `visibleIds` when given (team scope). */
+  async countOnlineDevices(tenantId: number, visibleIds?: number[] | 'all'): Promise<number> {
     const q = db('agent_devices').where({ status: 'approved' });
     if (!isMasterTenant(tenantId)) q.where({ tenant_id: tenantId });
+    if (Array.isArray(visibleIds)) q.whereIn('id', visibleIds);
     const [row] = await q.count<Array<{ count: string }>>({ count: '*' });
     return Number(row?.count ?? 0);
   },
@@ -1445,6 +1687,27 @@ export const agentService = {
     evaluateOnly?: boolean;
     updatePolicy?: AgentUpdatePolicy | null;
   }): Promise<AgentDevice | null> {
+    // IPS settings cascade (W13-1): the agent-level knobs are settings rows,
+    // validated before anything is written (AppError 400); the legacy columns
+    // below are kept in sync for their remaining readers.
+    const cascadeWrites: Array<{ key: string; value: unknown }> = [];
+    if (data.checkIntervalSeconds !== undefined || data.overrideGroupSettings !== undefined) {
+      const cur = await db('agent_devices').where({ id }).first('check_interval_seconds', 'override_group_settings') as
+        { check_interval_seconds: number; override_group_settings: boolean } | undefined;
+      if (cur) {
+        const overriding = data.overrideGroupSettings ?? cur.override_group_settings;
+        cascadeWrites.push({
+          key: 'checkIntervalSeconds',
+          value: !overriding ? null : (data.checkIntervalSeconds ?? clampCheckInterval(cur.check_interval_seconds)),
+        });
+      }
+    }
+    if ('maxMissedPushes' in data && data.maxMissedPushes !== undefined) cascadeWrites.push({ key: 'maxMissedPushes', value: data.maxMissedPushes });
+    if ('notificationTypes' in data) cascadeWrites.push({ key: 'notificationTypes', value: legacyTypesToFlags(data.notificationTypes ?? null) });
+    for (const w of cascadeWrites) {
+      if (w.value !== null) normalizeSettingValue(writableDefinition(w.key, 'agent'), w.value);
+    }
+
     const update: Record<string, unknown> = { updated_at: new Date() };
     if (data.status !== undefined) update.status = data.status;
     if (data.groupId !== undefined) update.group_id = data.groupId;
@@ -1471,10 +1734,17 @@ export const agentService = {
       .update(update)
       .returning('*') as AgentDeviceRow[];
     if (!row) return null;
+    if (cascadeWrites.length > 0) {
+      await settingsService.writeMany({ level: 'agent', scopeId: id, tenantId: row.tenant_id }, cascadeWrites, { mirror: false });
+    }
     if (dropRequest) await cancelOpenAttempts([id]);
     if (data.status === 'suspended' || data.status === 'refused') {
       obliguardHub.disconnectDevice(row.uuid, `Device ${data.status}`);
     }
+    // Incidents (W6-2): approval / refusal closes the pending alert; a
+    // suspended or refused device is not expected online (all closed).
+    if (data.status === 'suspended' || data.status === 'refused') await resolveDeviceIncidents(id);
+    else if (data.status === 'approved') await resolveDeviceIncidents(id, ['agent_pending']);
     const device = await hydrateDeviceRow(row);
 
     // Broadcast so the sidebar can update without polling: the owning
@@ -1490,9 +1760,11 @@ export const agentService = {
     const rows = await db('agent_devices').where({ id, tenant_id: tenantId }).del(['uuid']) as Array<{ uuid: string }>;
     for (const r of rows) obliguardHub.disconnectDevice(r.uuid, 'Device deleted');
     if (rows.length > 0) {
+      await settingsService.removeScopes('agent', [id]);
       _presence.delete(id);
       _lastSeenWriteAt.delete(id);
       emitToTenantAudience(_io, tenantId, SOCKET_EVENTS.AGENT_DEVICE_DELETED, { deviceId: id });
+      await resolveDeviceIncidents(id);
     }
     return rows.length > 0;
   },
@@ -1508,6 +1780,7 @@ export const agentService = {
     const q = db('agent_devices').whereIn('id', ids);
     if (tenantId !== null) q.where({ tenant_id: tenantId });
     const rows = await q.del(['id', 'uuid', 'tenant_id']) as Array<{ id: number; uuid: string; tenant_id: number }>;
+    await settingsService.removeScopes('agent', rows.map((r) => r.id));
     for (const r of rows) {
       obliguardHub.disconnectDevice(r.uuid, 'Device deleted');
       _presence.delete(r.id);
@@ -1516,6 +1789,7 @@ export const agentService = {
     // Broadcast deletion events so the frontend updates in real-time
     for (const r of rows) {
       emitToTenantAudience(_io, r.tenant_id, SOCKET_EVENTS.AGENT_DEVICE_DELETED, { deviceId: r.id });
+      await resolveDeviceIncidents(r.id);
     }
     return rows.length;
   },
@@ -1536,9 +1810,26 @@ export const agentService = {
     const rows = await db('agent_devices')
       .whereIn('id', ids)
       .where({ tenant_id: tenantId })
-      .update(update, ['id', 'uuid']) as Array<{ id: number; uuid: string }>;
+      .update(update, ['id', 'uuid', 'check_interval_seconds']) as Array<{ id: number; uuid: string; check_interval_seconds: number }>;
+    // Settings cascade (W13-1): the override switch sets / resets the agent-level check interval.
+    if (data.overrideGroupSettings !== undefined) {
+      for (const r of rows) {
+        await settingsService.write(
+          { level: 'agent', scopeId: r.id, tenantId },
+          'checkIntervalSeconds',
+          data.overrideGroupSettings ? clampCheckInterval(r.check_interval_seconds) : null,
+          { mirror: false },
+        );
+      }
+    }
     if (data.status === 'suspended') {
       for (const r of rows) obliguardHub.disconnectDevice(r.uuid, 'Device suspended');
+    }
+    // Incidents (W6-2): same rules as updateDevice.
+    if (data.status !== undefined) {
+      for (const r of rows) {
+        await resolveDeviceIncidents(r.id, data.status === 'suspended' ? undefined : ['agent_pending']);
+      }
     }
     if (data.updatePolicy === 'off' || data.status === 'suspended') {
       await cancelOpenAttempts(rows.map((r) => r.id));
@@ -1557,21 +1848,67 @@ export const agentService = {
     return rows.length;
   },
 
-  /** Queue a command to be delivered to a device of `tenantId` on its next push. */
-  async sendCommand(id: number, command: string, tenantId: number): Promise<boolean> {
+  /**
+   * Queue a command for a device of `tenantId`. Queue commands (uninstall,
+   * restart, firewall_resync) go to agent_commands (W14-1; an uninstall also
+   * sets pending_command, the legacy fallback) and throw 409
+   * commandOutstanding while the same one is pending. Any other value keeps
+   * the legacy pending_command path. False when the device is not found.
+   */
+  async sendCommand(id: number, command: string, tenantId: number, createdBy: number | null = null): Promise<boolean> {
+    if (isAgentCommandType(command)) {
+      try {
+        await agentCommandService.enqueue({ deviceId: id, tenantId, type: command, createdBy });
+        return true;
+      } catch (err) {
+        if ((err as { statusCode?: number }).statusCode === 404) return false;
+        throw err;
+      }
+    }
     const count = await db('agent_devices')
       .where({ id, tenant_id: tenantId })
       .update({ pending_command: command, updated_at: new Date() });
     return count > 0;
   },
 
-  /** Queue a command for multiple devices of `tenantId` at once. Returns the count. */
-  async bulkSendCommand(ids: number[], command: string, tenantId: number): Promise<number> {
-    if (ids.length === 0) return 0;
-    return db('agent_devices')
+  /**
+   * Queue a command for multiple devices of `tenantId` at once. Queue
+   * commands skip the devices that already have it pending. Returns the ids
+   * the command was queued for.
+   */
+  async bulkSendCommand(ids: number[], command: string, tenantId: number, createdBy: number | null = null): Promise<number[]> {
+    if (ids.length === 0) return [];
+    if (isAgentCommandType(command)) {
+      return agentCommandService.enqueueMany(ids, tenantId, command, createdBy);
+    }
+    const rows = await db('agent_devices')
       .whereIn('id', ids)
       .where({ tenant_id: tenantId })
-      .update({ pending_command: command, updated_at: new Date() });
+      .update({ pending_command: command, updated_at: new Date() }, ['id']) as Array<{ id: number }>;
+    return rows.map((r) => r.id);
+  },
+
+  /**
+   * The full ban list a device must enforce now (firewall_resync payload,
+   * W14-1): same resolution as the push ban delta against an empty firewall
+   * (scopes, tenant exclusions, whitelist, CIDR capability). An evaluate-only
+   * agent enforces nothing: []. Null when the device does not exist.
+   */
+  async resolveFullBanList(deviceId: number): Promise<string[] | null> {
+    const device = await this.getDeviceById(deviceId);
+    if (!device || device.tenantId == null) return null;
+    if (device.evaluateOnly) return [];
+    let groupIds: number[] = [];
+    if (device.groupId) {
+      const groupRows = await db('group_closure')
+        .where('descendant_id', device.groupId)
+        .select('ancestor_id')
+        .orderBy('depth', 'asc') as { ancestor_id: number }[];
+      groupIds = groupRows.map((r) => r.ancestor_id);
+    }
+    const whitelist = await whitelistService.resolveWhitelistForAgent(deviceId, groupIds, device.tenantId);
+    const full = await banService.computeBanDelta(deviceId, groupIds, device.tenantId, [], whitelist);
+    return full.add;
   },
 
   /**
@@ -1597,6 +1934,7 @@ export const agentService = {
   async suspendDevice(id: number): Promise<void> {
     await db('agent_devices').where({ id }).update({ status: 'suspended', updated_at: new Date(), ...REQUEST_NULLS });
     await cancelOpenAttempts([id]);
+    await resolveDeviceIncidents(id);
   },
 
   /** Reinstate a suspended device: set status=approved */
@@ -1608,15 +1946,26 @@ export const agentService = {
 
   /**
    * Approve a device: set status=approved, create ONE monitor with all thresholds.
+   * groupId undefined = no choice made: the device keeps the group it got at
+   * registration, else its API key's default group (W10-2); null = no group.
    */
   async approveDevice(
     deviceId: number,
     approvedBy: number,
-    groupId: number | null,
+    groupIdInput: number | null | undefined,
     customThresholds?: AgentThresholds,
   ): Promise<AgentDevice | null> {
     const device = await this.getDeviceById(deviceId);
     if (!device) return null;
+    let groupId: number | null = groupIdInput ?? null;
+    if (groupIdInput === undefined) {
+      groupId = device.groupId ?? null;
+      if (groupId == null && device.apiKeyId != null) {
+        const keyGroup = await agentKeyService.defaultGroupFor(device.apiKeyId);
+        // Only a group of the device's own tenant (the key may have been re-bound).
+        if (keyGroup != null && await this.isGroupInTenant(keyGroup, device.tenantId)) groupId = keyGroup;
+      }
+    }
 
     // Update device status and reset interval to 60s on approval
     const updated = await this.updateDevice(deviceId, {
@@ -1703,11 +2052,14 @@ export const agentService = {
         }
         return { status: 'pending', enrolmentDeferred: true };
       }
-      // Register new device as pending (race-safe: uuid is UNIQUE)
+      // Register new device as pending (race-safe: uuid is UNIQUE), in the
+      // key's default group when it has one in the key's tenant (W10-2).
       const caps = sanitizeAgentCapabilities(body.capabilities);
+      const defaultGroupId = await agentKeyService.defaultGroupFor(agentApiKeyId);
       const [row] = await db('agent_devices')
         .insert({
           uuid: deviceUuid,
+          ...(defaultGroupId != null ? { group_id: defaultGroupId } : {}),
           hostname: body.hostname,
           ip: clientIp,
           os_info: body.osInfo ? JSON.stringify(body.osInfo) : null,
@@ -1729,6 +2081,9 @@ export const agentService = {
       // A new enrolment waits for approval: tell the tenant's admins (DATA-REALTIME-4).
       const created: AgentDeviceCreatedEvent = { deviceId: device.id, device };
       emitToTenantAdmins(_io, agentTenantId, AGENT_DEVICE_CREATED_EVENT, created);
+      // ...and the bell (W6-2): resolved on approval, refusal or deletion.
+      // Not awaited: enrolment answers do not wait for the alert. Never throws.
+      void raisePendingIncident({ id: device.id, tenantId: agentTenantId, hostname: device.hostname }, clientIp);
     } else {
       // ── b. Update device metadata ─────────────────────
       // Clear updating_since if set (agent came back after update)
@@ -1926,13 +2281,14 @@ export const agentService = {
     // ── g. Process events ─────────────────────────────────
     // Opt-in gate: drop events whose service has a resolved-but-disabled
     // template before any storage / reputation / live-map emission.
-    const incomingEvents: AgentIpEvent[] = (body.events ?? []).filter(
+    const incomingEvents: AgentIpEvent[] = withValidEventIps(body.events ?? []).filter(
       (ev: AgentIpEvent) => !disabledServices.has(ev.service),
     );
     if (incomingEvents.length > 0) {
       try {
+        const receivedAt = Date.now();
         // Enrich each event with source_agent_id / source_ip_type
-        const enrichedEvents = incomingEvents.map((ev: AgentIpEvent) => {
+        const enrichedEvents: StoredIpEvent[] = incomingEvents.map((ev: AgentIpEvent) => {
           let sourceAgentId: number | null = null;
           let sourceIpType: 'lan' | 'wan' | null = null;
 
@@ -1956,7 +2312,7 @@ export const agentService = {
             username: ev.username ?? null,
             service: ev.service,
             event_type: ev.eventType,
-            timestamp: new Date(ev.timestamp),
+            timestamp: clampEventTimestamp(ev.timestamp, receivedAt),
             raw_log: ev.rawLog ?? null,
             track_only: trackOnlyServices.has(ev.service),
             tenant_id: agentTenantId,
@@ -1965,7 +2321,7 @@ export const agentService = {
           };
         });
 
-        await db('ip_events').insert(enrichedEvents);
+        const insertedIds = await db('ip_events').insert(enrichedEvents).returning(['id']) as unknown[];
 
         // Update IP reputation from the new events
         await ipReputationService.upsertFromEvents(
@@ -1978,55 +2334,14 @@ export const agentService = {
           })),
         );
 
-        // ── Threat detection: check if any IPs from this push are now suspicious ──
-        // If so, mark this device as "under threat" for the next 3 min.
-        const failureIps = [...new Set(
-          incomingEvents
-            .filter(ev => ev.eventType === 'auth_failure')
-            .map(ev => ev.ip),
-        )];
-        if (failureIps.length > 0) {
-          try {
-            // ip_reputation has no 'status' column — status is computed on the fly.
-          // Use total_failures > 0 as a proxy for "suspicious / worse".
-          const suspiciousRows = await db('ip_reputation')
-              .whereIn('ip', failureIps)
-              .where('total_failures', '>', 0)
-              .select('ip')
-              .limit(1);
-            if (suspiciousRows.length > 0) {
-              await db('agent_devices').where({ id: deviceId }).update({ last_threat_at: new Date() });
-              const deviceLabel = (await db('agent_devices').where({ id: deviceId }).select('name', 'hostname').first() as { name: string | null; hostname: string } | undefined);
-              const label = deviceLabel?.name ?? deviceLabel?.hostname ?? String(deviceId);
-              notificationService.sendForAgent(deviceId, label, 'threat', 'ok', [], 'threat').catch(
-                (err) => logger.warn({ err, deviceId }, 'Failed to send threat notification'),
-              );
-            }
-          } catch (err) {
-            logger.warn({ err, deviceId }, 'handlePush: failed to check threat status');
-          }
-        }
+        // ── Threat detection ──
+        // Any auth failure of this batch puts the device under threat (every
+        // failing source is at least 'suspicious'); one notification per
+        // cooldown window (atomic last_threat_at claim). Never throws.
+        void noteThreat(deviceId, incomingEvents);
 
-        // Emit real-time connection events to the live threat map
-        // One event per unique IP (deduplicated per push cycle)
-        if (_io) {
-          const seen = new Set<string>();
-          for (const enriched of enrichedEvents) {
-            const key = `${enriched.ip}:${enriched.event_type}`;
-            if (seen.has(key)) continue;
-            seen.add(key);
-            emitToTenantAudience(_io, agentTenantId, 'ip:flow', {
-              ip: enriched.ip,
-              service: enriched.service,
-              eventType: enriched.event_type,  // 'auth_failure' | 'auth_success'
-              deviceId,
-              tenantId: agentTenantId,
-              // Peer link enrichment
-              sourceAgentId: enriched.source_agent_id,
-              sourceIpType: enriched.source_ip_type,
-            });
-          }
-        }
+        // Live IP activity: batched ip:events + legacy ip:flow (W8-3).
+        emitStoredIpEvents(agentTenantId, deviceId, enrichedEvents, insertedIds);
       } catch (err) {
         logger.warn({ err, deviceId }, 'handlePush: failed to insert ip_events');
       }
@@ -2049,7 +2364,9 @@ export const agentService = {
 
     let resolvedWhitelist: string[] = [];
     let banDelta: { add: string[]; remove: string[] } = { add: [], remove: [] };
-    let resolvedRateLimits: RateLimitRule[] = [];
+    // undefined (not []) when resolution fails: the field is then omitted and
+    // the agent keeps its limits instead of clearing them on a transient error.
+    let resolvedRateLimits: RateLimitRule[] | undefined = [];
 
     try {
       resolvedWhitelist = await whitelistService.resolveWhitelistForAgent(
@@ -2065,6 +2382,7 @@ export const agentService = {
       const { rateLimitPolicyService } = await import('./rateLimitPolicy.service');
       resolvedRateLimits = await rateLimitPolicyService.resolveForAgent(deviceId, groupIds, agentTenantId);
     } catch (err) {
+      resolvedRateLimits = undefined;
       logger.warn({ err, deviceId }, 'handlePush: rateLimitPolicyService.resolveForAgent failed');
     }
 
@@ -2118,14 +2436,22 @@ export const agentService = {
     // removed — no enabled template means the agent stays silent for that service.
 
     // ── i. Handle pending command ─────────────────────────
+    // Agents advertising 'cmdqueue' (W14-1) get their commands as 'command'
+    // frames from the hub (queue drained after the config frame). The others
+    // keep the legacy path: a queued uninstall is claimed from the queue
+    // (history row, pending_command cleared, uninstall_commanded_at set) and
+    // rides the config frame; any other pending_command value (e.g. 'update')
+    // is delivered as before.
     let pendingCommand: string | undefined;
-    if (device.pendingCommand) {
-      pendingCommand = device.pendingCommand;
-      const commandUpdate: Record<string, unknown> = { pending_command: null, updated_at: new Date() };
-      if (pendingCommand === 'uninstall') {
-        commandUpdate.uninstall_commanded_at = new Date();
+    const pushCaps = sanitizeAgentCapabilities(body.capabilities) ?? device.capabilities ?? [];
+    if (device.pendingCommand === 'uninstall') {
+      if (!hasAgentCapability(pushCaps) && (await agentCommandService.claim(deviceId, false)).legacyUninstall) {
+        pendingCommand = 'uninstall';
       }
-      await db('agent_devices').where({ id: deviceId }).update(commandUpdate);
+    } else if (device.pendingCommand) {
+      pendingCommand = device.pendingCommand;
+      await db('agent_devices').where({ id: deviceId })
+        .update({ pending_command: null, updated_at: new Date() });
     }
 
     // ── j. Update device last push time ──────────────────
@@ -2146,7 +2472,7 @@ export const agentService = {
         * (device.resolvedSettings.maxMissedPushes ?? 2) * 1000;
     const cameOnline = notePresence(deviceId, graceMs, pushTime.getTime());
     if (_io) {
-      emitToTenantAudience(_io, agentTenantId, 'agent:pushHeartbeat', {
+      emitToTenantAudience(_io, agentTenantId, SOCKET_EVENTS.AGENT_PUSH_HEARTBEAT, {
         deviceId,
         updatedAt: pushTime.toISOString(),
         agentVersion: body.agentVersion ?? device.agentVersion,
@@ -2161,10 +2487,26 @@ export const agentService = {
         });
       }
     }
+    // Back after a declared outage (HTTP push, or the first heartbeat after a
+    // server restart): resolve the offline incident and notify 'up' (W6-2).
+    if (cameOnline) await obliguardHub.recoverOnline(deviceId);
 
     // ── k. Return ObliguardPushResponse ──────────────────
     // latestVersion only when the update policy allows it (C17-1): 'auto', or a
     // live explicit request; at most one offer per 10 min. Never throws.
+    // Windows firewall backend (W13-1 cascade): Windows agents only.
+    let firewallBackend: WindowsFirewallBackend | undefined;
+    if (device.deviceType !== 'mikrotik' && (body.osInfo?.platform ?? device.osInfo?.platform) === 'windows') {
+      try {
+        firewallBackend = (await agentConfigService.resolveForDevice({
+          id: deviceId, tenantId: device.tenantId, groupId: device.groupId,
+        })).windowsFirewallBackend;
+      } catch (err) {
+        // Omitted: the agent keeps the backend it runs.
+        logger.warn({ err, deviceId }, 'handlePush: firewall backend resolution failed');
+      }
+    }
+
     let advertised = await resolveAdvertisedVersion(device, body.agentVersion || device.agentVersion || '', _now());
     if (advertised && !opts.deferOfferRecord && !(await recordUpdateOffer(deviceId, advertised))) advertised = undefined;
     return {
@@ -2174,7 +2516,8 @@ export const agentService = {
       banList: { add: banDelta.add, remove: banDelta.remove },
       whitelist: resolvedWhitelist,
       services: serviceConfigsMap,
-      rateLimits: resolvedRateLimits,
+      ...(resolvedRateLimits ? { rateLimits: resolvedRateLimits } : {}),
+      ...(firewallBackend ? { firewallBackend } : {}),
       command: pendingCommand ?? '',
     };
   },
@@ -2238,7 +2581,7 @@ export const agentService = {
     } catch { /* not yet configured — all services default to ban mode */ }
 
     // Opt-in gate: drop events whose service has a resolved-but-disabled template.
-    const incomingEvents = events.filter((ev) => !disabledServices.has(ev.service));
+    const incomingEvents = withValidEventIps(events).filter((ev) => !disabledServices.has(ev.service));
     if (incomingEvents.length === 0) return;
 
     // Peer link maps (LAN + WAN) — same logic as handlePush
@@ -2276,7 +2619,8 @@ export const agentService = {
 
     // Enrich + insert events
     try {
-      const enrichedEvents = incomingEvents.map((ev: AgentIpEvent) => {
+      const receivedAt = Date.now();
+      const enrichedEvents: StoredIpEvent[] = incomingEvents.map((ev: AgentIpEvent) => {
         let sourceAgentId: number | null = null;
         let sourceIpType: 'lan' | 'wan' | null = null;
 
@@ -2300,7 +2644,7 @@ export const agentService = {
           username: ev.username ?? null,
           service: ev.service,
           event_type: ev.eventType,
-          timestamp: new Date(ev.timestamp),
+          timestamp: clampEventTimestamp(ev.timestamp, receivedAt),
           raw_log: ev.rawLog ?? null,
           track_only: trackOnlyServices.has(ev.service),
           tenant_id: tenantId,
@@ -2309,7 +2653,7 @@ export const agentService = {
         };
       });
 
-      await db('ip_events').insert(enrichedEvents);
+      const insertedIds = await db('ip_events').insert(enrichedEvents).returning(['id']) as unknown[];
 
       await ipReputationService.upsertFromEvents(
         incomingEvents.map((ev: AgentIpEvent) => ({
@@ -2321,47 +2665,11 @@ export const agentService = {
         })),
       );
 
-      // Threat detection — same check as handlePush
-      const failureIps = [...new Set(
-        incomingEvents
-          .filter((ev: AgentIpEvent) => ev.eventType === 'auth_failure')
-          .map((ev: AgentIpEvent) => ev.ip),
-      )];
-      if (failureIps.length > 0) {
-        const suspiciousRows = await db('ip_reputation')
-          .whereIn('ip', failureIps)
-          .where('total_failures', '>', 0)
-          .select('ip')
-          .limit(1);
-        if (suspiciousRows.length > 0) {
-          await db('agent_devices').where({ id: deviceId }).update({ last_threat_at: new Date() });
-          const deviceLabel = await db('agent_devices').where({ id: deviceId })
-            .select('name', 'hostname').first() as { name: string | null; hostname: string } | undefined;
-          const label = deviceLabel?.name ?? deviceLabel?.hostname ?? String(deviceId);
-          notificationService.sendForAgent(deviceId, label, 'threat', 'ok', [], 'threat').catch(
-            (err) => logger.warn({ err, deviceId }, 'processEventsFlush: threat notification failed'),
-          );
-        }
-      }
+      // Threat detection — same rule and cooldown as handlePush. Never throws.
+      void noteThreat(deviceId, incomingEvents);
 
-      // Emit real-time events to the Starmap
-      if (_io) {
-        const seen = new Set<string>();
-        for (const enriched of enrichedEvents) {
-          const key = `${enriched.ip}:${enriched.event_type}`;
-          if (seen.has(key)) continue;
-          seen.add(key);
-          emitToTenantAudience(_io, tenantId, 'ip:flow', {
-            ip: enriched.ip,
-            service: enriched.service,
-            eventType: enriched.event_type,
-            deviceId,
-            tenantId,
-            sourceAgentId: enriched.source_agent_id,
-            sourceIpType: enriched.source_ip_type,
-          });
-        }
-      }
+      // Live IP activity: batched ip:events + legacy ip:flow (W8-3).
+      emitStoredIpEvents(tenantId, deviceId, enrichedEvents, insertedIds);
     } catch (err) {
       logger.warn({ err, deviceId }, 'processEventsFlush: event insert failed');
     }
@@ -2437,19 +2745,52 @@ export const agentService = {
     return n > 0;
   },
 
-  /** "Update outdated agents" of a group of `tenantId` and its sub-groups; null when the group is not in the tenant. */
-  async requestGroupUpdate(groupId: number, tenantId: number, userId: number | null): Promise<AgentUpdateRequestResult | null> {
+  /**
+   * Cancel the pending requests of these devices of `tenantId` (strict) and
+   * close their open attempts ("cancel all pending", W12-4). Emits one patch
+   * per cleared device when `emit` (bulk callers cap it). Returns the count.
+   */
+  async cancelUpdateRequests(ids: number[], tenantId: number, opts: { emit?: boolean } = {}): Promise<number> {
+    if (ids.length === 0) return 0;
+    const cleared = await db('agent_devices')
+      .whereIn('id', ids)
+      .andWhere({ tenant_id: tenantId })
+      .whereNotNull('update_requested_at')
+      .update(REQUEST_NULLS, ['id']) as Array<{ id: number }>;
+    const clearedIds = cleared.map((r) => Number(r.id));
+    await cancelOpenAttempts(clearedIds);
+    if (opts.emit) {
+      for (const id of clearedIds) emitDevicePatch(tenantId, id, { updateRequestedAt: null, updateRequestedVersion: null, updatePending: false });
+    }
+    return clearedIds.length;
+  },
+
+  /**
+   * "Update outdated agents" of a group of `tenantId` and its sub-groups; null
+   * when the group is not in the tenant. `writableIds` (the caller's team
+   * scope, permissionService.getWritableAgentIds) limits the agents touched.
+   */
+  async requestGroupUpdate(
+    groupId: number,
+    tenantId: number,
+    userId: number | null,
+    writableIds?: number[] | 'all',
+  ): Promise<AgentUpdateRequestResult | null> {
     if (!(await db('monitor_groups').where({ id: groupId, tenant_id: tenantId }).first('id'))) return null;
-    const ids = await db('agent_devices')
+    const q = db('agent_devices')
       .whereIn('group_id', db('group_closure').where({ ancestor_id: groupId }).select('descendant_id'))
-      .andWhere({ tenant_id: tenantId, status: 'approved', device_type: 'agent' })
-      .pluck('id') as number[];
+      .andWhere({ tenant_id: tenantId, status: 'approved', device_type: 'agent' });
+    if (Array.isArray(writableIds)) q.whereIn('id', writableIds);
+    const ids = await q.pluck('id') as number[];
     return this.requestUpdate(ids, tenantId, userId);
   },
 
-  /** Version distribution of approved agents (Default: every tenant — read god view). */
-  async getVersionDistribution(tenantId: number): Promise<AgentVersionDistribution> {
-    const devices = (await this.listDevices(tenantId, 'approved')).filter((d) => d.deviceType === 'agent');
+  /**
+   * Version distribution of approved agents (Default: every tenant — read god
+   * view), within `visibleIds` when given (team scope).
+   */
+  async getVersionDistribution(tenantId: number, visibleIds?: number[] | 'all'): Promise<AgentVersionDistribution> {
+    const devices = (await this.listDevices(tenantId, 'approved', { visibleIds })).filter((d) => d.deviceType === 'agent');
     const served = getServedAgentVersion();
     const [global, tenantPolicy] = await Promise.all([
       appConfigService.getAgentGlobal(),
@@ -2464,7 +2805,10 @@ export const agentService = {
       else if (served && isStrictlyNewerAgentVersion(served, v)) outdated++;
       else upToDate++;
       if (d.updatePending) updatePending++;
-      if (d.update?.phase === 'failed') updateFailed++;
+      // A failed attempt superseded by the running version is not counted
+      // (same rule as the client's visibleUpdateAttempt badge).
+      if (d.update?.phase === 'failed'
+        && !(v && d.update.targetVersion && !isStrictlyNewerAgentVersion(d.update.targetVersion, v))) updateFailed++;
       policies[d.resolvedUpdatePolicy ?? DEFAULT_AGENT_UPDATE_POLICY]++;
       const key = v || 'unknown';
       counts.set(key, (counts.get(key) ?? 0) + 1);
@@ -2654,6 +2998,7 @@ export const agentService = {
         logger.warn({
           event: 'agent_update_failed', deviceId, tenantId, targetVersion: st.targetVersion, reason: st.error ?? 'failed',
         }, 'Agent update failed (reported by the agent)');
+        await raiseUpdateFailedIncident(deviceId, st.targetVersion, st.error ?? 'reported by the agent');
       } else {
         logger.info({ event: 'agent_update_status', deviceId, tenantId, targetVersion: st.targetVersion, phase: st.phase }, 'Agent update progress');
       }
@@ -2702,6 +3047,7 @@ export const agentService = {
     }
     for (const a of timedOut) {
       logger.warn({ event: 'agent_update_failed', deviceId: a.device_id, targetVersion: a.target_version, reason: 'timeout' }, 'Agent update timed out');
+      await raiseUpdateFailedIncident(Number(a.device_id), a.target_version, 'timeout');
     }
     for (const id of ids) await emitAttemptPatch(id);
     logger.info(`Agent updating cleanup: ${rows.length} stuck device(s), ${timedOut.length} attempt(s) timed out.`);

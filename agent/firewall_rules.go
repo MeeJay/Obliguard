@@ -48,6 +48,12 @@ type FwAddRequest struct {
 // server refuses a remote port for them instead of creating a broader rule).
 const capFwRemotePort = "fw_remote_port"
 
+// firewallRuleCapabilities lists the rule-management features of this agent,
+// appended to the heartbeat capabilities (older servers ignore the field).
+func firewallRuleCapabilities() []string {
+	return []string{capFwRemotePort}
+}
+
 // FwResponse is sent back to the server after a firewall command.
 type FwResponse struct {
 	Type     string   `json:"type"` // "firewall_response"
@@ -200,8 +206,10 @@ const (
 
 // fwReservedName reports names a custom rule must never take: the Obliguard
 // ban rules (managed by FirewallManager) and netsh's "all" wildcard.
+// Surrounding spaces are ignored: netsh may trim "all " into the wildcard.
 func fwReservedName(name string) bool {
-	return strings.EqualFold(name, "all") || strings.HasPrefix(strings.ToLower(name), strings.ToLower(fwWinBanRulePrefix))
+	n := strings.ToLower(strings.TrimSpace(name))
+	return n == "all" || strings.HasPrefix(n, strings.ToLower(fwWinBanRulePrefix))
 }
 
 // fwIsAny: "", "any" (any case) mean "no constraint".

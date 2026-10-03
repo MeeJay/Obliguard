@@ -4,6 +4,7 @@ import { AppError } from '../middleware/errorHandler';
 import { z } from 'zod';
 import { APP_THEME_IDS } from '../validators/profile.schema';
 import { mergePreferences, normEmail } from './profile.controller';
+import { auditService } from '../services/audit.service';
 
 // Must match REQUIRED_ENROLLMENT_VERSION in client/src/components/layout/ProtectedRoute.tsx
 export const REQUIRED_ENROLLMENT_VERSION = 2;
@@ -83,6 +84,13 @@ export const enrollmentController = {
         .returning(['id', 'username', 'display_name', 'role', 'is_active', 'created_at', 'updated_at', 'preferences', 'email', 'preferred_language', 'enrollment_version']);
 
       if (!row) throw new AppError(409, 'Enrollment is already completed');
+
+      await auditService.logReq(req, {
+        action: 'auth.enrollment_completed',
+        targetType: 'user',
+        targetId: row.id,
+        details: { emailSet: nextEmail !== null, language: preferredLanguage },
+      });
 
       res.json({
         success: true,

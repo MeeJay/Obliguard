@@ -179,7 +179,7 @@ describe('02 tenant membership', () => {
     const x = await createUser(h.db, { tenants: [2, tid] });
     const c = await h.login(x.username);
     assert.equal((await c.post('/api/tenant/default', { tenantId: tid })).status, 200);
-    assert.equal((await admin.del(`/api/tenants/${tid}`)).status, 200);
+    assert.equal((await admin.del(`/api/tenants/${tid}`, { confirmName: 'Fav' })).status, 200);
     assert.equal(await prefOf(x.id), null);
     const again = await h.login(x.username);
     assert.equal((await again.get('/api/auth/me')).json?.data?.currentTenantId, 2);

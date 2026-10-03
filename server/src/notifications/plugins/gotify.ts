@@ -1,6 +1,7 @@
 import type { NotificationPlugin } from '../types';
 import type { IpsNotificationPayload } from '../../services/notification.service';
 import { statusIcon } from '../statusIcons';
+import { assertNotificationTarget, guardedFetch } from './outbound';
 
 export const gotifyPlugin: NotificationPlugin = {
   type: 'gotify',
@@ -21,7 +22,10 @@ export const gotifyPlugin: NotificationPlugin = {
       ? (payload.message ?? payload.title ?? payload.monitorName)
       : `${payload.oldStatus} → ${payload.newStatus}${payload.message ? `\n${payload.message}` : ''}`;
 
-    const res = await fetch(`${url}?token=${encodeURIComponent(String(config.appToken))}`, {
+    // Self-hosted on the LAN more often than not: private targets are allowed
+    // unless NOTIFICATION_ALLOW_PRIVATE_TARGETS=false.
+    const target = await assertNotificationTarget(`${url}?token=${encodeURIComponent(String(config.appToken))}`, { privateByDefault: true });
+    const res = await guardedFetch(target, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -29,7 +33,6 @@ export const gotifyPlugin: NotificationPlugin = {
         message,
         priority: Number(config.priority) || 5,
       }),
-      signal: AbortSignal.timeout(10000),
     });
     if (!res.ok) throw new Error(`Gotify returned ${res.status}`);
   },

@@ -1,35 +1,34 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, Navigate, useSearchParams } from 'react-router-dom';
 import {
   Plus,
   Trash2,
   Key,
   Cpu,
-  Monitor,
   CheckCircle,
   XCircle,
-  Clock,
   Copy,
   Check,
   RefreshCw,
-  ExternalLink,
   Pencil,
-  PauseCircle,
-  PowerOff,
   X,
-  Settings2,
   Router,
-  Eye,
   ArrowUpCircle,
   Lock,
   AlertTriangle,
+  FolderOpen,
+  List,
+  RotateCcw,
+  Ban,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { SOCKET_EVENTS } from '@obliview/shared';
 import type {
-  AgentApiKey, AgentDevice, MonitorGroup, AgentUpdatePolicy, AgentVersionDistribution, AgentTenantUpdatePolicyInfo,
+  AgentDevice, MonitorGroup, AgentUpdatePolicy, AgentVersionDistribution, AgentTenantUpdatePolicyInfo,
 } from '@obliview/shared';
 import { agentApi } from '@/api/agent.api';
+import type { AgentUpdateRolloutPreview, AgentUpdateAllResult, RolloutFrozenLevel } from '@/api/agent.api';
+import { agentKeysApi, type AgentKey, type AgentKeyCreated } from '@/api/agentKeys.api';
 import { groupsApi } from '@/api/groups.api';
 import { getSocket } from '@/socket/socketClient';
 import { useSocketStore } from '@/store/socketStore';
@@ -37,31 +36,45 @@ import { toDevicePatch } from '@/store/agentStore';
 import { SOCKET_RESYNC_EVENT } from '@/hooks/useSocket';
 import { Button } from '@/components/common/Button';
 import { Input } from '@/components/common/Input';
+import { IconButton } from '@/components/common/IconButton';
+import { Modal } from '@/components/common/Modal';
+import { PageContainer } from '@/components/common/PageContainer';
+import { PageHeader } from '@/components/common/PageHeader';
+import { SegmentedTabs } from '@/components/common/SegmentedTabs';
+import { TableScroll } from '@/components/common/TableScroll';
+import { EmptyState } from '@/components/common/EmptyState';
+import { ToggleSwitch } from '@/components/common/ToggleSwitch';
+import { TenantBadge } from '@/components/common/TenantBadge';
+import { useConfirm, usePrompt } from '@/components/common/ConfirmDialog';
 import { useUiStore } from '@/store/uiStore';
-import { useAuthStore } from '@/store/authStore';
+import { useCan, Can, useIsPlatformAdmin } from '@/hooks/usePermission';
+import { useTabParam } from '@/hooks/useTabParam';
 import { useTenantStore } from '@/store/tenantStore';
 import { AddMikroTikModal } from '@/components/mikrotik/AddMikroTikModal';
 import { anonHostname, anonIp } from '@/utils/anonymize';
 import {
   agentBuildLabel, agentUpdateErrorMessage, isUpdateFailed, isUpdateInFlight, visibleUpdateAttempt,
+  updatePolicySourceLabel,
 } from '@/utils/agentUpdate';
 import { UpdateStatusBadge } from '@/components/agent/UpdateStatusBadge';
 import { LastSeenPill } from '@/components/agent/LastSeenPill';
 import toast from 'react-hot-toast';
 
+/**
+ * /manage/agents — the "Agent config" hub (W10-2), mirrored from Obliance
+ * AdminDevicesPage: enrolment keys, pending approvals and the agent update
+ * policy. The fleet list itself lives on /agents (AgentListPage): the legacy
+ * `?tab=devices` and `?status=…` links (dashboard deep links) are redirected
+ * there, `?status=pending` opens the approvals tab.
+ */
+
 /** Emitted to tenant admins when an agent registers (pending approval). */
 const AGENT_DEVICE_CREATED = SOCKET_EVENTS.AGENT_DEVICE_CREATED;
 
-type Tab = 'keys' | 'devices';
-type DeviceStatusFilter = 'pending' | 'approved' | 'refused' | 'suspended' | 'all';
-/** 'keep' = no change; null = remove from group; number = assign to group */
-type GroupSelection = 'keep' | null | number;
+const TABS = ['keys', 'approvals', 'policy'] as const;
+type Tab = typeof TABS[number];
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-function truncateKey(key: string) {
-  return key.slice(0, 8) + '...' + key.slice(-4);
-}
 
 function formatDate(dateStr: string) {
   return new Date(dateStr).toLocaleDateString(undefined, {
@@ -73,110 +86,45 @@ function formatDate(dateStr: string) {
   });
 }
 
-function StatusBadge({ status }: { status: AgentDevice['status'] }) {
-  const { t } = useTranslation();
-  const styles: Record<AgentDevice['status'], { icon: React.ReactNode; label: string; cls: string }> = {
-    pending: {
-      icon: <Clock size={11} />,
-      label: t('status.pending'),
-      cls: 'bg-yellow-500/10 text-yellow-400',
-    },
-    approved: {
-      icon: <CheckCircle size={11} />,
-      label: t('status.approved'),
-      cls: 'bg-status-up/10 text-status-up',
-    },
-    refused: {
-      icon: <XCircle size={11} />,
-      label: t('status.refused'),
-      cls: 'bg-status-down/10 text-status-down',
-    },
-    suspended: {
-      icon: <PauseCircle size={11} />,
-      label: t('status.suspended'),
-      cls: 'bg-text-muted/15 text-text-muted',
-    },
-  };
-  const s = styles[status];
-  return (
-    <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium ${s.cls}`}>
-      {s.icon}
-      {s.label}
-    </span>
-  );
-}
-
-// ── CopyButton ────────────────────────────────────────────────────────────────
-
-function CopyButton({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false);
-
-  const handleCopy = async () => {
+/** Copy to the clipboard with a toast that reflects the real outcome. */
+async function copyWithToast(text: string, okMsg: string, failMsg: string): Promise<boolean> {
+  try {
     await navigator.clipboard.writeText(text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
-  return (
-    <button
-      onClick={handleCopy}
-      className="shrink-0 p-1 rounded text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors"
-      title="Copy"
-    >
-      {copied ? <Check size={14} className="text-status-up" /> : <Copy size={14} />}
-    </button>
-  );
+    toast.success(okMsg);
+    return true;
+  } catch {
+    toast.error(failMsg);
+    return false;
+  }
 }
 
-// ── TriStateCheckbox ──────────────────────────────────────────────────────────
+/** Agent groups of the operating tenant, flattened depth-first with their depth. */
+interface FlatGroup { id: number; name: string; depth: number; group: MonitorGroup }
 
-/**
- * Tri-state checkbox: true / false / null (indeterminate = mixed values across selection).
- * Any click resolves the indeterminate state to true or false.
- */
-function TriStateCheckbox({
-  value,
-  onChange,
-  label,
-  description,
+function GroupSelect({
+  value, onChange, groups, disabled, className, ariaLabel,
 }: {
-  value: boolean | null;
-  onChange: (v: boolean) => void;
-  label: string;
-  description?: string;
+  value: number | null;
+  onChange: (id: number | null) => void;
+  groups: FlatGroup[];
+  disabled?: boolean;
+  className?: string;
+  ariaLabel?: string;
 }) {
-  const ref = useRef<HTMLInputElement>(null);
-  useEffect(() => {
-    if (ref.current) {
-      ref.current.indeterminate = value === null;
-    }
-  }, [value]);
-
+  const { t } = useTranslation();
   return (
-    <label className="flex items-start gap-3 cursor-pointer group">
-      <div className="relative h-4 w-4 shrink-0 mt-0.5">
-        <input
-          ref={ref}
-          type="checkbox"
-          checked={value === true}
-          onChange={e => onChange(e.target.checked)}
-          data-indeterminate={value === null}
-          className="peer appearance-none h-4 w-4 rounded border cursor-pointer transition-colors bg-bg-tertiary border-border checked:bg-accent checked:border-accent data-[indeterminate=true]:bg-accent/60 data-[indeterminate=true]:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30"
-        />
-        <svg className="pointer-events-none absolute top-0 left-0 hidden h-4 w-4 text-white peer-checked:block" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M2.5 8L6 11.5L13.5 4.5" />
-        </svg>
-        {value === null && (
-          <svg className="pointer-events-none absolute top-0 left-0 h-4 w-4 text-white" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-            <path d="M4 8h8" />
-          </svg>
-        )}
-      </div>
-      <div>
-        <p className="text-sm font-medium text-text-primary group-hover:text-accent transition-colors">{label}</p>
-        {description && <p className="text-xs text-text-muted leading-relaxed">{description}</p>}
-      </div>
-    </label>
+    <select
+      value={value ?? ''}
+      onChange={e => onChange(e.target.value ? Number(e.target.value) : null)}
+      disabled={disabled}
+      aria-label={ariaLabel}
+      className={className ?? 'w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent disabled:opacity-60'}
+    >
+      <option value="">{t('agents.noGroup')}</option>
+      {groups.map(g => (
+        <option key={g.id} value={g.id}>{'  '.repeat(g.depth)}{g.name}</option>
+      ))}
+    </select>
   );
 }
 
@@ -185,226 +133,191 @@ function TriStateCheckbox({
 function ApproveModal({
   device,
   groups,
+  initialGroupId,
+  canPickGroup,
   onApprove,
   onCancel,
 }: {
   device: AgentDevice;
-  groups: MonitorGroup[];
-  onApprove: (groupId: number | null) => void;
+  groups: FlatGroup[];
+  /** agents.manage: without it the server refuses a groupId next to the status. */
+  canPickGroup: boolean;
+  /** Pre-filled: the device's registration group, else its key's default group. */
+  initialGroupId: number | null;
+  /** undefined: keep the registration group (or the key's default group). */
+  onApprove: (groupId: number | null | undefined) => Promise<void>;
   onCancel: () => void;
 }) {
   const { t } = useTranslation();
-  const [selectedGroupId, setSelectedGroupId] = useState<number | null>(null);
-  const agentGroups = groups.filter(g => g.kind === 'agent');
-  const selectedGroup = agentGroups.find(g => g.id === selectedGroupId);
+  const [selectedGroupId, setSelectedGroupId] = useState<number | null>(
+    initialGroupId != null && groups.some(g => g.id === initialGroupId) ? initialGroupId : null,
+  );
+  const [saving, setSaving] = useState(false);
+  const selectedGroup = groups.find(g => g.id === selectedGroupId)?.group;
   const hasGroupThresholds = selectedGroup?.agentThresholds != null;
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-      <div className="w-full max-w-sm rounded-xl border border-border bg-bg-primary shadow-2xl p-6">
-        <h2 className="text-base font-semibold text-text-primary mb-1">{t('agents.approveTitle')}</h2>
-        <p className="text-sm text-text-muted mb-4">
-          {t('agents.approveDesc', { hostname: anonHostname(device.hostname) })}
-        </p>
-
-        <div className="space-y-1 mb-4">
-          <label className="block text-sm font-medium text-text-secondary">{t('agents.assignGroup')}</label>
-          <select
-            value={selectedGroupId ?? ''}
-            onChange={e => setSelectedGroupId(e.target.value ? Number(e.target.value) : null)}
-            className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
-          >
-            <option value="">{t('agents.noGroup')}</option>
-            {agentGroups.map(g => (
-              <option key={g.id} value={g.id}>{g.name}</option>
-            ))}
-          </select>
-          {agentGroups.length === 0 && (
-            <p className="text-xs text-text-muted mt-1">{t('agents.noAgentGroups')}</p>
-          )}
-          {hasGroupThresholds && (
-            <p className="text-xs text-status-up mt-1">{t('agents.groupThresholdsNote')}</p>
-          )}
-        </div>
-
-        <div className="flex gap-2">
-          <Button onClick={() => onApprove(selectedGroupId)} className="flex-1">
-            <CheckCircle size={14} className="mr-1.5" />{t('agents.approve')}
-          </Button>
-          <Button variant="secondary" onClick={onCancel} className="flex-1">{t('common.cancel')}</Button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ── EditAgentModal ────────────────────────────────────────────────────────────
-
-function EditAgentModal({
-  device,
-  groups,
-  keyName,
-  onSave,
-  onCancel,
-}: {
-  device: AgentDevice;
-  groups: MonitorGroup[];
-  /** Name of the API key the device is bound to (null when unknown / not listed). */
-  keyName: string | null;
-  onSave: (data: {
-    name: string | null;
-    groupId?: number | null;
-    overrideGroupSettings: boolean;
-    suspended: boolean;
-    releaseKeyBinding: boolean;
-  }) => void;
-  onCancel: () => void;
-}) {
-  const [name, setName] = useState(device.name ?? '');
-  const [groupId, setGroupId] = useState<number | null>(device.groupId ?? null);
-  const [overrideGroupSettings, setOverrideGroupSettings] = useState(device.overrideGroupSettings);
-  const [suspended, setSuspended] = useState(device.status === 'suspended');
-  const [releaseKeyBinding, setReleaseKeyBinding] = useState(false);
-  const [saving, setSaving] = useState(false);
-
-  const { t } = useTranslation();
-  const agentGroups = groups.filter(g => g.kind === 'agent');
-  const isMikrotik = device.deviceType === 'mikrotik';
-
-  const handleSave = async () => {
+  const submit = async () => {
     setSaving(true);
-    onSave({
-      name: name.trim() || null,
-      groupId,
-      overrideGroupSettings,
-      suspended,
-      releaseKeyBinding,
-    });
+    try { await onApprove(canPickGroup ? selectedGroupId : undefined); } finally { setSaving(false); }
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-      <div className="w-full max-w-sm rounded-xl border border-border bg-bg-primary shadow-2xl p-6">
-        <h2 className="text-base font-semibold text-text-primary mb-1">{t('agents.editAgent')}</h2>
-        <p className="text-xs text-text-muted mb-5">
-          {t('agents.hostnameInfo', { hostname: anonHostname(device.hostname) })}
-        </p>
-
-        <div className="space-y-4">
-          {/* Display name */}
-          <div>
-            <label className="block text-sm font-medium text-text-secondary mb-1">{t('agents.displayName')}</label>
-            <Input
-              placeholder={device.hostname}
-              value={name}
-              onChange={e => setName(e.target.value)}
-              autoFocus
-            />
-            <p className="text-xs text-text-muted mt-1">{t('agents.displayNameDesc')}</p>
-          </div>
-
-          {/* Group */}
-          <div>
-            <label className="block text-sm font-medium text-text-secondary mb-1">{t('agents.agentGroup')}</label>
-            <select
-              value={groupId ?? ''}
-              onChange={e => setGroupId(e.target.value === '' ? null : Number(e.target.value))}
-              className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
-            >
-              <option value="">{t('agents.noGroup')}</option>
-              {agentGroups.map(g => (
-                <option key={g.id} value={g.id}>{g.name}</option>
-              ))}
-            </select>
-          </div>
-
-          {/* Override group settings */}
-          <label className="flex items-start gap-3 cursor-pointer group">
-            <div className="relative h-4 w-4 shrink-0 mt-0.5">
-              <input
-                type="checkbox"
-                checked={overrideGroupSettings}
-                onChange={e => setOverrideGroupSettings(e.target.checked)}
-                className="peer appearance-none h-4 w-4 rounded border cursor-pointer transition-colors bg-bg-tertiary border-border checked:bg-accent checked:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30"
-              />
-              <svg className="pointer-events-none absolute top-0 left-0 hidden h-4 w-4 text-white peer-checked:block" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M2.5 8L6 11.5L13.5 4.5" />
-              </svg>
-            </div>
-            <div>
-              <p className="text-sm font-medium text-text-primary group-hover:text-accent transition-colors">
-                {t('agents.overrideGroupSettings')}
-              </p>
-              <p className="text-xs text-text-muted leading-relaxed">
-                {t('agents.overrideGroupSettingsDesc')}
-              </p>
-            </div>
-          </label>
-
-          {/* Suspend toggle */}
-          <label className="flex items-start gap-3 cursor-pointer group">
-            <div className="relative h-4 w-4 shrink-0 mt-0.5">
-              <input
-                type="checkbox"
-                checked={suspended}
-                onChange={e => setSuspended(e.target.checked)}
-                className="peer appearance-none h-4 w-4 rounded border cursor-pointer transition-colors bg-bg-tertiary border-border checked:bg-accent checked:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30"
-              />
-              <svg className="pointer-events-none absolute top-0 left-0 hidden h-4 w-4 text-white peer-checked:block" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M2.5 8L6 11.5L13.5 4.5" />
-              </svg>
-            </div>
-            <div>
-              <p className="text-sm font-medium text-text-primary group-hover:text-accent transition-colors">
-                {t('agents.suspended')}
-              </p>
-              <p className="text-xs text-text-muted leading-relaxed">
-                {t('agents.suspendedDesc')}
-              </p>
-            </div>
-          </label>
-
-          {/* API-key binding (agents only) */}
-          {!isMikrotik && (
-            <div className="rounded-md border border-border bg-bg-secondary px-3 py-2">
-              <p className="text-xs text-text-muted">
-                {device.apiKeyId != null
-                  ? t('agents.boundKey', 'Bound API key: {{name}}', { name: keyName ?? `#${device.apiKeyId}` })
-                  : t('agents.noBoundKey', 'Not bound to an API key: the next key of this tenant claims it')}
-              </p>
-              {device.apiKeyId != null && (
-                <label className="flex items-start gap-3 cursor-pointer group mt-2">
-                  <div className="relative h-4 w-4 shrink-0 mt-0.5">
-                    <input
-                      type="checkbox"
-                      checked={releaseKeyBinding}
-                      onChange={e => setReleaseKeyBinding(e.target.checked)}
-                      className="peer appearance-none h-4 w-4 rounded border cursor-pointer transition-colors bg-bg-tertiary border-border checked:bg-accent checked:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30"
-                    />
-                    <svg className="pointer-events-none absolute top-0 left-0 hidden h-4 w-4 text-white peer-checked:block" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M2.5 8L6 11.5L13.5 4.5" />
-                    </svg>
-                  </div>
-                  <div>
-                    <p className="text-sm font-medium text-text-primary group-hover:text-accent transition-colors">
-                      {t('agents.releaseKeyBinding', 'Release API key binding')}
-                    </p>
-                    <p className="text-xs text-text-muted leading-relaxed">
-                      {t('agents.releaseKeyBindingDesc', 'Use this after reinstalling the agent with another key of this tenant: the agent is disconnected and the first key that reconnects is bound (stop the old install first if it still runs). Group and settings are kept.')}
-                    </p>
-                  </div>
-                </label>
-              )}
-            </div>
-          )}
+    <Modal
+      open
+      onClose={onCancel}
+      title={t('agents.approveTitle')}
+      size="sm"
+      dismissible={!saving}
+      footer={(
+        <div className="flex gap-2">
+          <Button onClick={() => void submit()} loading={saving} className="flex-1">
+            <CheckCircle size={14} className="mr-1.5" />{t('agents.approve')}
+          </Button>
+          <Button variant="secondary" onClick={onCancel} disabled={saving} className="flex-1">{t('common.cancel')}</Button>
         </div>
+      )}
+    >
+      <p className="text-sm text-text-muted mb-4">
+        {canPickGroup
+          ? t('agents.approveDesc', { hostname: anonHostname(device.hostname) })
+          : t('agentDetail.lifecycle.approveDescNoGroup', {
+            hostname: anonHostname(device.hostname),
+            defaultValue: 'Approve {{hostname}}: it starts receiving its configuration and enforcing bans. It keeps its current group (or the default group of its enrollment key).',
+          })}
+      </p>
+      {canPickGroup && <div className="space-y-1">
+        <label className="block text-sm font-medium text-text-secondary">{t('agents.assignGroup')}</label>
+        <GroupSelect value={selectedGroupId} onChange={setSelectedGroupId} groups={groups} ariaLabel={t('agents.assignGroup')} />
+        {groups.length === 0 && (
+          <p className="text-xs text-text-muted mt-1">{t('agents.noAgentGroups')}</p>
+        )}
+        {initialGroupId != null && selectedGroupId === initialGroupId && (
+          <p className="text-xs text-text-muted mt-1">
+            {t('agentConfig.approvals.prefilled', 'Pre-filled with the enrolment key\'s default group.')}
+          </p>
+        )}
+        {hasGroupThresholds && (
+          <p className="text-xs text-status-up mt-1">{t('agents.groupThresholdsNote')}</p>
+        )}
+      </div>}
+    </Modal>
+  );
+}
 
-        <div className="flex gap-2 mt-6">
-          <Button onClick={handleSave} loading={saving} className="flex-1">{t('common.save')}</Button>
-          <Button variant="secondary" onClick={onCancel} className="flex-1">{t('common.cancel')}</Button>
+// ── CreateKeyModal + NewKeyModal (copy once) ──────────────────────────────────
+
+function CreateKeyModal({
+  groups,
+  onCreated,
+  onCancel,
+}: {
+  groups: FlatGroup[];
+  onCreated: (key: AgentKeyCreated) => void;
+  onCancel: () => void;
+}) {
+  const { t } = useTranslation();
+  const [name, setName] = useState('');
+  const [groupId, setGroupId] = useState<number | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  const submit = async () => {
+    if (!name.trim() || saving) return;
+    setSaving(true);
+    try {
+      onCreated(await agentKeysApi.create(name.trim(), groupId));
+    } catch (err) {
+      toast.error(agentUpdateErrorMessage(err, t, t('agentConfig.keys.createFailed', 'Failed to create the key')));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal
+      open
+      onClose={onCancel}
+      title={t('agentConfig.keys.newTitle', 'New enrolment key')}
+      icon={<Key size={16} />}
+      size="sm"
+      dismissible={!saving}
+      footer={(
+        <div className="flex gap-2">
+          <Button onClick={() => void submit()} loading={saving} disabled={!name.trim()} className="flex-1">
+            {t('common.create')}
+          </Button>
+          <Button variant="secondary" onClick={onCancel} disabled={saving} className="flex-1">{t('common.cancel')}</Button>
+        </div>
+      )}
+    >
+      <div className="space-y-4">
+        <div>
+          <label className="block text-sm font-medium text-text-secondary mb-1">{t('agentConfig.keys.name', 'Name')}</label>
+          <Input
+            placeholder={t('agentConfig.keys.namePlaceholder', 'Key name (e.g. Production servers)')}
+            value={name}
+            maxLength={255}
+            onChange={e => setName(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') void submit(); }}
+            autoFocus
+          />
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-text-secondary mb-1">{t('agentConfig.keys.defaultGroup', 'Default group')}</label>
+          <GroupSelect value={groupId} onChange={setGroupId} groups={groups} ariaLabel={t('agentConfig.keys.defaultGroup', 'Default group')} />
+          <p className="text-xs text-text-muted mt-1">
+            {t('agentConfig.keys.defaultGroupHelp', 'Agents enrolled with this key land in this group (still pending approval), so its templates, limits and team access apply from the start.')}
+          </p>
         </div>
       </div>
-    </div>
+    </Modal>
+  );
+}
+
+function NewKeyModal({ created, onClose }: { created: AgentKeyCreated; onClose: () => void }) {
+  const { t } = useTranslation();
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    if (await copyWithToast(
+      created.key,
+      t('common.copied', 'Copied'),
+      t('agentConfig.keys.copyFailed', 'Could not copy — select the key and copy it manually'),
+    )) setCopied(true);
+  };
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title={t('agentConfig.keys.createdTitle', 'Key created')}
+      icon={<Key size={16} />}
+      size="md"
+      closeOnBackdrop={false}
+      footer={<Button onClick={onClose} className="w-full">{t('common.close', 'Close')}</Button>}
+    >
+      <div className="space-y-3">
+        <p className="text-sm text-text-secondary">
+          {t('agentConfig.keys.createdDesc', {
+            defaultValue: 'Copy the key "{{name}}" now: the list only shows a masked value. The Add Agent dialog builds the install commands for you.',
+            name: created.name,
+          })}
+        </p>
+        <div className="flex items-start gap-2 rounded-md bg-bg-tertiary p-3">
+          <code className="flex-1 text-sm font-mono text-text-primary break-all select-all">{created.key}</code>
+          <IconButton
+            label={t('common.copy', 'Copy')}
+            icon={copied ? <Check size={14} className="text-status-up" /> : <Copy size={14} />}
+            onClick={() => void copy()}
+            size="md"
+            className="shrink-0"
+          />
+        </div>
+        {created.defaultGroupName && (
+          <p className="flex items-center gap-1.5 text-xs text-text-muted">
+            <FolderOpen size={12} />
+            {t('agentConfig.keys.defaultGroupIs', { defaultValue: 'Default group: {{group}}', group: created.defaultGroupName })}
+          </p>
+        )}
+      </div>
+    </Modal>
   );
 }
 
@@ -413,7 +326,7 @@ function EditAgentModal({
 function AgentVersionStrip({ dist }: { dist: AgentVersionDistribution }) {
   const { t } = useTranslation();
   return (
-    <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 mb-4 px-4 py-2.5 rounded-lg border border-border bg-bg-secondary text-xs">
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-4 py-2.5 rounded-lg border border-border bg-bg-secondary text-xs">
       <span className="font-medium text-text-secondary">{t('agentUpdate.distribution.title', 'Agent versions')}</span>
       {dist.latestVersion && (
         <span className="text-text-primary">
@@ -458,7 +371,7 @@ function MissingBuildsBanner({ builds, version }: { builds: string[]; version: s
   const { t } = useTranslation();
   if (builds.length === 0) return null;
   return (
-    <div className="flex items-start gap-2 mb-4 px-4 py-2.5 rounded-lg border border-amber-500/30 bg-amber-500/10 text-xs text-amber-400">
+    <div className="flex items-start gap-2 px-4 py-2.5 rounded-lg border border-amber-500/30 bg-amber-500/10 text-xs text-amber-400">
       <AlertTriangle size={14} className="shrink-0 mt-0.5" />
       <div>
         <p className="font-medium">
@@ -482,7 +395,9 @@ function MissingBuildsBanner({ builds, version }: { builds: string[]; version: s
 
 /**
  * Global policy (read-only here, changed in Settings) next to the operating
- * tenant's policy: a selector for platform admins, read-only otherwise.
+ * tenant's policy: a selector for platform admins, read-only otherwise. The
+ * group level is set on the group pages, the agent level on the agent page
+ * and in the /agents batch bar (platform admins).
  */
 function AgentUpdatePolicyBar({
   isAdmin,
@@ -496,6 +411,7 @@ function AgentUpdatePolicyBar({
   onChanged: () => void;
 }) {
   const { t } = useTranslation();
+  const askConfirm = useConfirm();
   const [info, setInfo] = useState<AgentTenantUpdatePolicyInfo | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -519,8 +435,14 @@ function AgentUpdatePolicyBar({
   const change = async (value: 'inherit' | AgentUpdatePolicy) => {
     const next = value === 'inherit' ? null : value;
     if (next === info.updatePolicy) return;
-    if (next === 'auto' && !confirm(t('agents.update.confirmTenantAuto', 'Every agent of this tenant without a group or agent policy will update to the latest version at its next heartbeat, and to every future release. Continue?'))) return;
-    if (next === 'off' && !confirm(t('agents.update.confirmTenantOff', 'Freeze updates for every agent of this tenant? Pending update requests are cancelled, whatever the groups and agents set.'))) return;
+    if (next === 'auto' && !(await askConfirm({
+      message: t('agents.update.confirmTenantAuto', 'Every agent of this tenant without a group or agent policy will update to the latest version at its next heartbeat, and to every future release. Continue?'),
+    }))) return;
+    if (next === 'off' && !(await askConfirm({
+      message: t('agents.update.confirmTenantOff', 'Freeze updates for every agent of this tenant? Pending update requests are cancelled, whatever the groups and agents set.'),
+      danger: true,
+      confirmLabel: t('agentUpdate.policy.off', 'Off (frozen)'),
+    }))) return;
     setSaving(true);
     try {
       setInfo(await agentApi.setTenantUpdatePolicy(next));
@@ -533,23 +455,24 @@ function AgentUpdatePolicyBar({
   };
 
   return (
-    <div className="mb-4 px-4 py-2.5 rounded-lg border border-border bg-bg-secondary text-xs">
+    <div className="px-4 py-2.5 rounded-lg border border-border bg-bg-secondary text-xs">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
         <span className="font-medium text-text-secondary">{t('agentUpdate.policyLabel', 'Agent updates')}</span>
-        <span className="flex items-center gap-2 text-text-muted">
+        <span className="flex flex-wrap items-center gap-2 text-text-muted">
           {t('agents.update.globalPolicy', 'Global policy')}: <span className="text-text-primary">{globalText}</span>
           {isAdmin && (
             <Link to="/settings" className="text-accent hover:underline">{t('agentUpdate.changeDefault', 'Change default')}</Link>
           )}
         </span>
-        <span className="flex items-center gap-2 text-text-muted">
+        <span className="flex flex-wrap items-center gap-2 text-text-muted">
           {tenantLabel}:
           {isAdmin ? (
             <select
               value={info.updatePolicy ?? 'inherit'}
               onChange={e => void change(e.target.value as 'inherit' | AgentUpdatePolicy)}
               disabled={saving}
-              className="rounded border border-border bg-bg-tertiary px-2 py-1 text-xs text-text-primary focus:outline-none focus:border-accent disabled:opacity-60"
+              aria-label={tenantLabel}
+              className="rounded border border-border bg-bg-tertiary px-2 py-1 text-xs text-text-primary focus:outline-none focus:border-accent disabled:opacity-60 coarse:min-h-10"
             >
               <option value="inherit">{inheritText}</option>
               <option value="auto">{policyName('auto')}</option>
@@ -571,136 +494,255 @@ function AgentUpdatePolicyBar({
   );
 }
 
-// ── BulkEditAgentModal ────────────────────────────────────────────────────────
+// ── UpdateRolloutModal (W12-4: update all outdated, paced) ────────────────────
 
-function BulkEditAgentModal({
-  devices,
-  groups,
-  onSave,
-  onCancel,
-}: {
-  devices: AgentDevice[];
-  groups: MonitorGroup[];
-  onSave: (data: {
-    groupId?: number | null;
-    overrideGroupSettings?: boolean;
-    status?: 'approved' | 'suspended';
-    updatePolicy?: AgentUpdatePolicy | null;
-  }) => void;
-  onCancel: () => void;
-}) {
-  const { t } = useTranslation();
-  const agentGroups = groups.filter(g => g.kind === 'agent');
+/** Progress refresh while the modal shows a running rollout. */
+const ROLLOUT_POLL_MS = 5_000;
+const FROZEN_LEVELS: RolloutFrozenLevel[] = ['global', 'tenant', 'group', 'agent', 'unresolved'];
 
-  // Compute initial tri-state values: single value if all same, null if mixed
-  const allSameOverride = devices.every(d => d.overrideGroupSettings === devices[0].overrideGroupSettings);
-
-  const [groupSelection, setGroupSelection] = useState<GroupSelection>('keep');
-  const [overrideGroupSettings, setOverrideGroupSettings] = useState<boolean | null>(
-    allSameOverride ? devices[0].overrideGroupSettings : null,
+function RolloutStat({ label, value, tone }: { label: string; value: number; tone?: string }) {
+  return (
+    <div className="rounded-lg border border-border bg-bg-tertiary px-3 py-2">
+      <div className={`text-lg font-semibold tabular-nums ${tone ?? 'text-text-primary'}`}>{value}</div>
+      <div className="text-[11px] text-text-muted">{label}</div>
+    </div>
   );
-  const [statusAction, setStatusAction] = useState<'no-change' | 'approved' | 'suspended'>('no-change');
-  const [updatePolicy, setUpdatePolicy] = useState<'__keep__' | 'inherit' | AgentUpdatePolicy>('__keep__');
-  const [saving, setSaving] = useState(false);
+}
 
-  const handleSave = async () => {
-    const data: {
-      groupId?: number | null;
-      overrideGroupSettings?: boolean;
-      status?: 'approved' | 'suspended';
-      updatePolicy?: AgentUpdatePolicy | null;
-    } = {};
+function RolloutBreakdown({ title, rows }: { title: string; rows: Array<{ key: string; label: string; count: number }> }) {
+  if (rows.length === 0) return null;
+  return (
+    <div className="min-w-0">
+      <p className="text-[11px] font-medium uppercase tracking-wide text-text-muted mb-1">{title}</p>
+      <ul className="space-y-0.5 text-xs">
+        {rows.map(r => (
+          <li key={r.key} className="flex items-center justify-between gap-2">
+            <span className="truncate text-text-secondary">{r.label}</span>
+            <span className="tabular-nums text-text-primary">{r.count}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
 
-    if (groupSelection !== 'keep') data.groupId = groupSelection;
-    if (overrideGroupSettings !== null) data.overrideGroupSettings = overrideGroupSettings;
-    if (statusAction !== 'no-change') data.status = statusAction;
-    if (updatePolicy !== '__keep__') data.updatePolicy = updatePolicy === 'inherit' ? null : updatePolicy;
+/**
+ * "Update all outdated" (Obliance update-all preview): what the action does
+ * now — per tenant / group / platform, the frozen agents with the level that
+ * froze them (never updated, owner directive C17), the server pace — then the
+ * progress of the rollout (offered / succeeded / failed), refreshed every 5 s.
+ */
+function UpdateRolloutModal({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
+  const { t } = useTranslation();
+  const [preview, setPreview] = useState<AgentUpdateRolloutPreview | null>(null);
+  const [loadError, setLoadError] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [result, setResult] = useState<AgentUpdateAllResult | null>(null);
 
-    setSaving(true);
-    onSave(data);
+  useEffect(() => {
+    let cancelled = false;
+    agentApi.getUpdateRolloutPreview()
+      .then(p => { if (!cancelled) setPreview(p); })
+      .catch(() => { if (!cancelled) setLoadError(true); });
+    return () => { cancelled = true; };
+  }, []);
+
+  // Progress: re-read the preview while the rollout view is open.
+  useEffect(() => {
+    if (!result) return;
+    const timer = setInterval(() => {
+      agentApi.getUpdateRolloutPreview().then(setPreview).catch(() => { /* keep the last figures */ });
+    }, ROLLOUT_POLL_MS);
+    return () => clearInterval(timer);
+  }, [result]);
+
+  const levelLabels: Record<RolloutFrozenLevel, string> = {
+    global: t('agentConfig.rollout.levelGlobal', 'Global policy'),
+    tenant: t('agentConfig.rollout.levelTenant', 'Tenant policy'),
+    group: t('agentConfig.rollout.levelGroup', 'Group policy'),
+    agent: t('agentConfig.rollout.levelAgent', 'Agent policy'),
+    unresolved: t('agentConfig.rollout.levelUnresolved', 'Policy unreadable'),
   };
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-      <div className="w-full max-w-sm rounded-xl border border-border bg-bg-primary shadow-2xl p-6">
-        <h2 className="text-base font-semibold text-text-primary mb-1">
-          {t('agents.bulkEditTitle', { count: devices.length })}
-        </h2>
-        <p className="text-xs text-text-muted mb-5">
-          {t('agents.bulkEditDesc')}
-        </p>
+  const submit = async () => {
+    if (!preview) return;
+    setSubmitting(true);
+    try {
+      const r = await agentApi.updateAllOutdated(preview.scopeTenantId);
+      setResult(r);
+      setPreview(r.preview);
+      toast.success(t('agentConfig.rollout.requestedToast', { defaultValue: '{{count}} update(s) requested', count: r.requested }));
+      onDone();
+    } catch (err) {
+      toast.error(agentUpdateErrorMessage(err, t, t('agentUpdate.bulkFailed', 'Failed to request the updates')));
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
-        <div className="space-y-4">
-          {/* Group */}
-          <div>
-            <label className="block text-sm font-medium text-text-secondary mb-1">{t('agents.agentGroup')}</label>
-            <select
-              value={
-                groupSelection === 'keep' ? '__keep__'
-                : groupSelection === null ? ''
-                : String(groupSelection)
-              }
-              onChange={e => {
-                const v = e.target.value;
-                if (v === '__keep__') setGroupSelection('keep');
-                else if (v === '') setGroupSelection(null);
-                else setGroupSelection(Number(v));
-              }}
-              className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
-            >
-              <option value="__keep__">{t('agents.keepCurrent')}</option>
-              <option value="">{t('agents.noGroup')}</option>
-              {agentGroups.map(g => (
-                <option key={g.id} value={g.id}>{g.name}</option>
-              ))}
-            </select>
-          </div>
+  const p = preview;
+  const prog = p?.progress;
+  const progTotal = prog ? prog.waiting + prog.offered + prog.inProgress + prog.succeeded + prog.failed : 0;
+  const pct = (n: number) => (progTotal > 0 ? `${(n / progTotal) * 100}%` : '0%');
 
-          {/* Override group settings */}
-          <TriStateCheckbox
-            value={overrideGroupSettings}
-            onChange={setOverrideGroupSettings}
-            label={t('agents.overrideGroupSettings')}
-            description={t('agents.overrideGroupSettingsDesc')}
-          />
-
-          {/* Status */}
-          <div>
-            <label className="block text-sm font-medium text-text-secondary mb-1">{t('common.status')}</label>
-            <select
-              value={statusAction}
-              onChange={e => setStatusAction(e.target.value as 'no-change' | 'approved' | 'suspended')}
-              className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
-            >
-              <option value="no-change">{t('agents.noChange')}</option>
-              <option value="approved">{t('agents.approveAll')}</option>
-              <option value="suspended">{t('agents.suspendAll')}</option>
-            </select>
-          </div>
-
-          {/* Update policy (C17-1) */}
-          <div>
-            <label className="block text-sm font-medium text-text-secondary mb-1">{t('agentUpdate.policyLabel', 'Agent updates')}</label>
-            <select
-              value={updatePolicy}
-              onChange={e => setUpdatePolicy(e.target.value as '__keep__' | 'inherit' | AgentUpdatePolicy)}
-              className="w-full rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
-            >
-              <option value="__keep__">{t('agents.keepCurrent')}</option>
-              <option value="inherit">{t('agentUpdate.policy.inherit', 'Inherit')}</option>
-              <option value="auto">{t('agentUpdate.policy.auto', 'Automatic')}</option>
-              <option value="manual">{t('agentUpdate.policy.manual', 'Manual')}</option>
-              <option value="off">{t('agentUpdate.policy.off', 'Off (frozen)')}</option>
-            </select>
-          </div>
-        </div>
-
-        <div className="flex gap-2 mt-6">
-          <Button onClick={handleSave} loading={saving} className="flex-1">{t('common.apply')}</Button>
-          <Button variant="secondary" onClick={onCancel} className="flex-1">{t('common.cancel')}</Button>
-        </div>
-      </div>
+  const footer = result ? (
+    <Button variant="secondary" onClick={onClose}>{t('common.close', 'Close')}</Button>
+  ) : (
+    <div className="flex gap-2">
+      <Button variant="secondary" onClick={onClose} disabled={submitting}>{t('common.cancel')}</Button>
+      <Button onClick={() => void submit()} loading={submitting} disabled={!p || p.toRequest === 0}>
+        <ArrowUpCircle size={14} className="mr-1.5" />
+        {t('agentConfig.rollout.confirm', { defaultValue: 'Update {{count}} agent(s)', count: p?.toRequest ?? 0 })}
+      </Button>
     </div>
+  );
+
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      size="lg"
+      icon={<ArrowUpCircle size={16} className="text-accent" />}
+      title={t('agentConfig.rollout.title', 'Update all outdated agents')}
+      dismissible={!submitting}
+      footer={footer}
+    >
+      {loadError ? (
+        <p className="text-sm text-red-400">{t('agentConfig.rollout.loadFailed', 'Failed to load the rollout preview')}</p>
+      ) : !p ? (
+        <div className="flex items-center justify-center py-8"><RefreshCw size={18} className="animate-spin text-text-muted" /></div>
+      ) : (
+        <div className="space-y-4 text-sm">
+          <p className="text-text-secondary">
+            {t('agentConfig.rollout.summary', {
+              defaultValue: '{{count}} outdated agent(s) will update to v{{version}}.',
+              count: p.targets,
+              version: p.latestVersion ?? '?',
+            })}
+            {p.allTenants && (
+              <span className="ml-1 text-text-muted">{t('agentConfig.rollout.allTenants', '(every tenant: Default tenant)')}</span>
+            )}
+          </p>
+
+          {result && prog && (
+            <div className="space-y-2 rounded-lg border border-border bg-bg-secondary p-3">
+              <p className="text-xs font-medium text-text-secondary">
+                {t('agentConfig.rollout.progressTitle', { defaultValue: 'Rollout to v{{version}}', version: p.latestVersion ?? '?' })}
+              </p>
+              <div
+                className="flex h-2 overflow-hidden rounded-full bg-bg-tertiary"
+                role="progressbar"
+                aria-valuemin={0}
+                aria-valuemax={progTotal}
+                aria-valuenow={prog.succeeded}
+              >
+                <div className="bg-green-500" style={{ width: pct(prog.succeeded) }} />
+                <div className="bg-blue-500" style={{ width: pct(prog.inProgress + prog.offered) }} />
+                <div className="bg-red-500" style={{ width: pct(prog.failed) }} />
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+                <RolloutStat label={t('agentConfig.rollout.waiting', 'Waiting')} value={prog.waiting} />
+                <RolloutStat label={t('agentConfig.rollout.offered', 'Offered')} value={prog.offered} tone="text-blue-400" />
+                <RolloutStat label={t('agentConfig.rollout.inProgress', 'Updating')} value={prog.inProgress} tone="text-blue-400" />
+                <RolloutStat label={t('agentConfig.rollout.succeeded', 'Succeeded')} value={prog.succeeded} tone="text-green-400" />
+                <RolloutStat label={t('agentConfig.rollout.failed', 'Failed')} value={prog.failed} tone="text-red-400" />
+              </div>
+              <p className="text-[11px] text-text-muted">
+                {t('agentConfig.rollout.windowUsage', {
+                  defaultValue: '{{used}} of {{max}} offers used in the current {{seconds}} s window.',
+                  used: p.rollout.offersInWindow,
+                  max: p.rollout.maxPerWindow,
+                  seconds: p.rollout.windowSeconds,
+                })}
+              </p>
+            </div>
+          )}
+
+          {!result && (
+            <>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                <RolloutStat label={t('agentConfig.rollout.toRequest', 'New requests')} value={p.toRequest} tone="text-accent" />
+                <RolloutStat label={t('agentConfig.rollout.alreadyRequested', 'Already requested')} value={p.alreadyRequested} />
+                <RolloutStat label={t('agentConfig.rollout.inFlight', 'Updating now')} value={p.inFlight} />
+                <RolloutStat label={t('agentConfig.rollout.online', 'Online now')} value={p.online} tone="text-green-400" />
+              </div>
+              <p className="text-xs text-text-muted">
+                {t('agentConfig.rollout.pace', {
+                  defaultValue: 'Offers are paced at {{max}} per {{seconds}} s for the whole fleet: about {{minutes}} min for these agents. Offline agents update when they come back.',
+                  max: p.rollout.maxPerWindow,
+                  seconds: p.rollout.windowSeconds,
+                  minutes: p.rollout.estimatedMinutes,
+                })}
+              </p>
+              {p.auto > 0 && (
+                <p className="text-xs text-text-muted">
+                  {t('agentConfig.rollout.autoNote', { defaultValue: '{{count}} of them follow the Auto policy and update even without a request.', count: p.auto })}
+                </p>
+              )}
+              <div className="grid gap-4 sm:grid-cols-3">
+                {p.allTenants && (
+                  <RolloutBreakdown
+                    title={t('agentConfig.rollout.byTenant', 'By tenant')}
+                    rows={p.byTenant.filter(x => x.targets > 0).map(x => ({ key: String(x.tenantId), label: x.tenantName ?? `#${x.tenantId}`, count: x.targets }))}
+                  />
+                )}
+                <RolloutBreakdown
+                  title={t('agentConfig.rollout.byGroup', 'By group')}
+                  rows={p.byGroup.slice(0, 8).map(x => ({
+                    key: `${x.tenantId}:${x.groupId ?? ''}`,
+                    label: x.groupName ?? t('agentConfig.rollout.noGroup', 'No group'),
+                    count: x.targets,
+                  }))}
+                />
+                <RolloutBreakdown
+                  title={t('agentConfig.rollout.byPlatform', 'By platform')}
+                  rows={p.byPlatform.map(x => ({ key: x.platform, label: x.platform, count: x.targets }))}
+                />
+              </div>
+            </>
+          )}
+
+          {p.frozen.total > 0 && (
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-400 space-y-2">
+              <p className="flex items-center gap-1.5 font-medium">
+                <Lock size={12} />
+                {t('agentConfig.rollout.frozenTitle', { defaultValue: '{{count}} outdated agent(s) are frozen and will not update', count: p.frozen.total })}
+              </p>
+              <p className="flex flex-wrap gap-x-3 gap-y-1 text-amber-400/90">
+                {FROZEN_LEVELS.filter(l => p.frozen.byLevel[l] > 0).map(l => (
+                  <span key={l}>{levelLabels[l]}: {p.frozen.byLevel[l]}</span>
+                ))}
+              </p>
+              <ul className="max-h-40 overflow-y-auto space-y-0.5 text-amber-400/80">
+                {p.frozen.agents.map(a => (
+                  <li key={a.id} className="flex items-center justify-between gap-2">
+                    <span className="truncate">{a.name ?? anonHostname(a.hostname)}</span>
+                    <span className="shrink-0">{levelLabels[a.level]}{a.sourceGroupName ? ` (${a.sourceGroupName})` : ''}</span>
+                  </li>
+                ))}
+              </ul>
+              {p.frozen.truncated && (
+                <p className="text-amber-400/70">{t('agentConfig.rollout.frozenTruncated', 'Only the first 200 are listed.')}</p>
+              )}
+            </div>
+          )}
+
+          {(p.noBuild > 0 || p.failed > 0 || p.unknownVersion > 0) && (
+            <div className="space-y-0.5 text-xs text-text-muted">
+              {p.noBuild > 0 && (
+                <p>{t('agentConfig.rollout.noBuild', { defaultValue: '{{count}} agent(s) have no build of this version for their platform.', count: p.noBuild })}</p>
+              )}
+              {p.failed > 0 && (
+                <p>{t('agentConfig.rollout.failedSkipped', { defaultValue: '{{count}} agent(s) failed to update to this version: retry them one by one.', count: p.failed })}</p>
+              )}
+              {p.unknownVersion > 0 && (
+                <p>{t('agentConfig.rollout.unknownVersion', { defaultValue: '{{count}} agent(s) never reported a version.', count: p.unknownVersion })}</p>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </Modal>
   );
 }
 
@@ -708,53 +750,70 @@ function BulkEditAgentModal({
 
 export function AdminAgentPage() {
   const { t } = useTranslation();
-  // API-key management is admin-only; a 'monitor_rw' non-admin only gets the
-  // devices tab. Keep the sensitive keys tab hidden for them.
-  const isAdmin = useAuthStore((s) => s.user?.role === 'admin');
-  const [tab, setTab] = useState<Tab>('devices');
-  const [deviceFilter, setDeviceFilter] = useState<DeviceStatusFilter>('all');
+  const askConfirm = useConfirm();
+  const prompt = usePrompt();
+  const [searchParams] = useSearchParams();
 
-  const [keys, setKeys] = useState<AgentApiKey[]>([]);
+  // Permission layer (W7-4): each surface follows its server capability.
+  const canKeys = useCan('agents.keys');
+  const canApprove = useCan('agents.approve');
+  const canManageAgents = useCan('agents.manage');
+  const canDelete = useCan('agents.delete');
+  const canUpdate = useCan('agents.update');
+  // Update POLICY writes are platform-admin only (owner directive C17).
+  const isAdmin = useIsPlatformAdmin();
+
+  const allowedTabs = useMemo<Tab[]>(() => (canKeys ? [...TABS] : TABS.filter(x => x !== 'keys')), [canKeys]);
+  const [tab, setTab] = useTabParam<Tab>(allowedTabs, canKeys ? 'keys' : 'approvals');
+
+  const [keys, setKeys] = useState<AgentKey[]>([]);
   const [devices, setDevices] = useState<AgentDevice[]>([]);
   // Latest rows for socket handlers (known-device check without re-binding).
   const devicesRef = useRef<AgentDevice[]>([]);
   devicesRef.current = devices;
   const [groups, setGroups] = useState<MonitorGroup[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const [dist, setDist] = useState<AgentVersionDistribution | null>(null);
 
   const { openAddAgentModal } = useUiStore();
   const [showAddMikroTik, setShowAddMikroTik] = useState(false);
   const [showCreateKey, setShowCreateKey] = useState(false);
-  const [newKeyName, setNewKeyName] = useState('');
-  const [saving, setSaving] = useState(false);
-
+  const [createdKey, setCreatedKey] = useState<AgentKeyCreated | null>(null);
   const [approvingDevice, setApprovingDevice] = useState<AgentDevice | null>(null);
-  const [editingDevice, setEditingDevice] = useState<AgentDevice | null>(null);
+  const [busyKeyId, setBusyKeyId] = useState<number | null>(null);
+  const [showRollout, setShowRollout] = useState(false);
 
-  // ── Live operational status (socket) ─────────────────────────────────────────
-  const [liveAgentStatus, setLiveAgentStatus] = useState<Map<number, string>>(new Map());
+  // ── Data ─────────────────────────────────────────────────────────────────────
 
-  // ── Bulk select state ────────────────────────────────────────────────────────
-  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
-  const [showBulkEditModal, setShowBulkEditModal] = useState(false);
-  const selectAllRef = useRef<HTMLInputElement>(null);
-
-  // ── Agent version distribution (C17-1) ──────────────────────────────────────
-  const [dist, setDist] = useState<AgentVersionDistribution | null>(null);
-
-  const loadAll = useCallback(async () => {
+  const loadKeys = useCallback(async () => {
+    // GET /agent/keys needs agents.keys: the default 'user' set reaches this
+    // page through agents.approve / agents.manage without it.
+    if (!canKeys) { setKeys([]); return; }
     try {
-      const [k, d, v] = await Promise.all([
-        agentApi.listKeys(),
+      setKeys(await agentKeysApi.list());
+    } catch {
+      toast.error(t('agentConfig.keys.loadFailed', 'Failed to load the enrolment keys'));
+    }
+  }, [canKeys, t]);
+
+  const loadDevices = useCallback(async () => {
+    try {
+      const [d, v] = await Promise.all([
         agentApi.listDevices(),
         agentApi.getVersionDistribution().catch(() => null),
       ]);
-      setKeys(k);
       setDevices(d);
       setDist(v);
     } catch {
-      toast.error('Failed to load agent data');
+      toast.error(t('agentConfig.loadFailed', 'Failed to load agent data'));
+    } finally {
+      setLoaded(true);
     }
-  }, []);
+  }, [t]);
+
+  const loadAll = useCallback(async () => {
+    await Promise.all([loadKeys(), loadDevices()]);
+  }, [loadKeys, loadDevices]);
 
   const loadGroups = useCallback(async () => {
     try {
@@ -769,13 +828,13 @@ export function AdminAgentPage() {
       flatten(tree);
       setGroups(flat);
     } catch {
-      // ignore
+      // ignore: the selectors only offer "No group"
     }
   }, []);
 
   useEffect(() => {
-    loadAll();
-    loadGroups();
+    void loadAll();
+    void loadGroups();
   }, [loadAll, loadGroups]);
 
   // Live updates via Socket.io. Re-bound when the socket instance changes
@@ -806,33 +865,16 @@ export function AdminAgentPage() {
       }
       setDevices(prev => prev.map(d => (d.id === p.deviceId ? { ...d, ...fields } : d)));
     };
-
-    // A new agent registered (pending approval).
+    // A new agent registered (pending approval): also refreshes the key counters.
     const onDeviceCreated = () => { scheduleReload(); };
-
-    // Auto-delete after uninstall: remove device from list & selection
     const onDeviceDeleted = (data: { deviceId: number }) => {
       setDevices(prev => prev.filter(d => d.id !== data.deviceId));
-      setSelectedIds(prev => {
-        const next = new Set(prev);
-        next.delete(data.deviceId);
-        return next;
-      });
     };
-
-    // Track live operational status per device (e.g. 'updating') + presence.
-    const onAgentStatusChanged = (data: { deviceId: number; status: string; wsConnected?: boolean }) => {
-      setLiveAgentStatus(prev => {
-        const next = new Map(prev);
-        next.set(data.deviceId, data.status);
-        return next;
-      });
-      if (data.wsConnected !== undefined) {
-        const ws = data.wsConnected;
-        setDevices(prev => prev.map(d => (d.id === data.deviceId && d.wsConnected !== ws ? { ...d, wsConnected: ws } : d)));
-      }
+    const onAgentStatusChanged = (data: { deviceId: number; wsConnected?: boolean }) => {
+      if (data.wsConnected === undefined) return;
+      const ws = data.wsConnected;
+      setDevices(prev => prev.map(d => (d.id === data.deviceId && d.wsConnected !== ws ? { ...d, wsConnected: ws } : d)));
     };
-
     // Socket reconnected: events emitted meanwhile are lost — reload.
     const onResync = () => { scheduleReload(); };
 
@@ -859,212 +901,215 @@ export function AdminAgentPage() {
     (tid: number | null | undefined) => currentTenantId != null && tid != null && tid !== currentTenantId,
     [currentTenantId],
   );
-  const ownGroups = useMemo(() => groups.filter(g => !isForeign(g.tenantId)), [groups, isForeign]);
 
-  const filteredDevices = deviceFilter === 'all'
-    ? devices
-    : devices.filter(d => d.status === deviceFilter);
-  const selectableDevices = filteredDevices.filter(d => !isForeign(d.tenantId));
-
-  const pendingCount = devices.filter(d => d.status === 'pending' && !isForeign(d.tenantId)).length;
-
-  // ── Select-all checkbox indeterminate state ──────────────────────────────────
-  const allSelected = selectableDevices.length > 0 && selectableDevices.every(d => selectedIds.has(d.id));
-  const someSelected = !allSelected && selectableDevices.some(d => selectedIds.has(d.id));
-
-  useEffect(() => {
-    if (selectAllRef.current) {
-      selectAllRef.current.indeterminate = someSelected;
+  /** Agent groups of the operating tenant, tree order with depth (selectors). */
+  const ownAgentGroups = useMemo<FlatGroup[]>(() => {
+    const own = groups.filter(g => g.kind === 'agent' && !isForeign(g.tenantId));
+    const byParent = new Map<number | null, MonitorGroup[]>();
+    const ids = new Set(own.map(g => g.id));
+    for (const g of own) {
+      const parent = g.parentId != null && ids.has(g.parentId) ? g.parentId : null;
+      byParent.set(parent, [...(byParent.get(parent) ?? []), g]);
     }
-  }, [someSelected]);
+    const out: FlatGroup[] = [];
+    const walk = (parent: number | null, depth: number) => {
+      for (const g of byParent.get(parent) ?? []) {
+        out.push({ id: g.id, name: g.name, depth, group: g });
+        walk(g.id, depth + 1);
+      }
+    };
+    walk(null, 0);
+    return out;
+  }, [groups, isForeign]);
+  const groupName = useCallback((id: number | null | undefined) => (id == null ? null : groups.find(g => g.id === id)?.name ?? null), [groups]);
+  const keyById = useMemo(() => new Map(keys.map(k => [k.id, k])), [keys]);
 
-  const toggleSelectAll = () => {
-    if (allSelected) {
-      setSelectedIds(new Set());
-    } else {
-      setSelectedIds(new Set(selectableDevices.map(d => d.id)));
-    }
-  };
+  const pendingDevices = useMemo(() => devices.filter(d => d.status === 'pending'), [devices]);
+  const refusedDevices = useMemo(() => devices.filter(d => d.status === 'refused'), [devices]);
+  const pendingCount = pendingDevices.filter(d => !isForeign(d.tenantId)).length;
 
-  const toggleSelect = (id: number) => {
-    setSelectedIds(prev => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
+  /** Approved agents with something to act on: update available / requested / failed. */
+  const attentionDevices = useMemo(() => devices.filter(d =>
+    d.status === 'approved' && d.deviceType === 'agent'
+    && (d.updateAvailable || d.updatePending || isUpdateFailed(visibleUpdateAttempt(d)) || isUpdateInFlight(visibleUpdateAttempt(d)))),
+  [devices]);
 
-  const handleFilterChange = (f: DeviceStatusFilter) => {
-    setDeviceFilter(f);
-    setSelectedIds(new Set());
-  };
+  // ── Legacy URLs: the fleet list moved to /agents ─────────────────────────────
+  const rawTab = searchParams.get('tab');
+  const rawStatus = searchParams.get('status');
+  if (rawTab === 'devices' || (rawStatus && rawStatus !== 'pending')) {
+    return <Navigate to={rawStatus && rawStatus !== 'pending' ? `/agents?status=${encodeURIComponent(rawStatus)}` : '/agents'} replace />;
+  }
+  if (rawStatus === 'pending') {
+    return <Navigate to="/manage/agents?tab=approvals" replace />;
+  }
 
   // ── Key actions ──────────────────────────────────────────────────────────────
 
-  const handleCreateKey = async () => {
-    if (!newKeyName.trim()) return;
-    setSaving(true);
+  const patchKey = async (key: AgentKey, patch: Parameters<typeof agentKeysApi.update>[1], okMsg: string) => {
+    setBusyKeyId(key.id);
     try {
-      await agentApi.createKey(newKeyName.trim());
-      toast.success('API Key created');
-      setNewKeyName('');
-      setShowCreateKey(false);
-      loadAll();
-    } catch {
-      toast.error('Failed to create key');
+      const updated = await agentKeysApi.update(key.id, patch);
+      setKeys(prev => prev.map(k => (k.id === key.id ? { ...k, ...updated } : k)));
+      toast.success(okMsg);
+      return updated;
+    } catch (err) {
+      toast.error(agentUpdateErrorMessage(err, t, t('agentConfig.keys.saveFailed', 'Failed to save the key')));
+      return null;
     } finally {
-      setSaving(false);
+      setBusyKeyId(null);
     }
   };
 
-  const handleDeleteKey = async (key: AgentApiKey) => {
-    if (!confirm(`Delete key "${key.name}"? Devices using this key will stop pushing.`)) return;
+  const handleToggleKey = async (key: AgentKey, active: boolean) => {
+    if (!active && !(await askConfirm({
+      title: t('agentConfig.keys.disableTitle', 'Disable this key?'),
+      message: t('agentConfig.keys.disableConfirm', {
+        defaultValue: 'Agents connected with "{{name}}" are disconnected now and refused until the key is re-enabled. Its {{count}} device(s) keep their binding, group and history.',
+        name: key.name,
+        count: key.deviceCount,
+      }),
+      danger: true,
+      confirmLabel: t('agentConfig.keys.disable', 'Disable'),
+    }))) return;
+    const r = await patchKey(key, { isActive: active }, active
+      ? t('agentConfig.keys.enabledToast', 'Key re-enabled')
+      : t('agentConfig.keys.disabledToast', 'Key disabled'));
+    if (r && !active && r.closedSessions > 0) {
+      toast(t('agentConfig.keys.sessionsClosed', { defaultValue: '{{count}} live session(s) closed', count: r.closedSessions }));
+    }
+  };
+
+  const handleRenameKey = async (key: AgentKey) => {
+    const name = await prompt({
+      title: t('agentConfig.keys.renameTitle', 'Rename key'),
+      defaultValue: key.name,
+      required: true,
+    });
+    if (name === null || !name.trim() || name.trim() === key.name) return;
+    await patchKey(key, { name: name.trim() }, t('agentConfig.keys.renamedToast', 'Key renamed'));
+  };
+
+  const handleKeyGroup = async (key: AgentKey, groupId: number | null) => {
+    if (groupId === key.defaultGroupId) return;
+    await patchKey(key, { defaultGroupId: groupId }, t('agentConfig.keys.groupSavedToast', 'Default group saved'));
+  };
+
+  const handleDeleteKey = async (key: AgentKey) => {
+    if (!(await askConfirm({
+      title: t('agentConfig.keys.deleteTitle', 'Delete this key?'),
+      message: t('agentConfig.keys.deleteConfirm', {
+        defaultValue: 'Deleting "{{name}}" disconnects its agents and releases the binding of its {{count}} device(s): the next key of this tenant that connects claims them. To stop a leaked key while keeping its devices, disable it instead.',
+        name: key.name,
+        count: key.deviceCount,
+      }),
+      danger: true,
+      requireText: key.deviceCount > 0 ? key.name : undefined,
+    }))) return;
     try {
-      await agentApi.deleteKey(key.id);
-      toast.success('Key deleted');
-      loadAll();
-    } catch {
-      toast.error('Failed to delete key');
+      await agentKeysApi.remove(key.id);
+      toast.success(t('agentConfig.keys.deletedToast', 'Key deleted'));
+      void loadKeys();
+    } catch (err) {
+      toast.error(agentUpdateErrorMessage(err, t, t('agentConfig.keys.deleteFailed', 'Failed to delete the key')));
     }
   };
 
-  // ── Device actions ───────────────────────────────────────────────────────────
+  // ── Approval actions ─────────────────────────────────────────────────────────
 
-  const handleApprove = async (groupId: number | null) => {
+  /** Registration group of the device, else its key's default group. */
+  const approvalGroupOf = (device: AgentDevice): number | null =>
+    device.groupId ?? (device.apiKeyId != null ? keyById.get(device.apiKeyId)?.defaultGroupId ?? null : null);
+
+  const handleApprove = async (groupId: number | null | undefined) => {
     if (!approvingDevice) return;
     try {
-      await agentApi.updateDevice(approvingDevice.id, { status: 'approved', groupId });
-      toast.success(`${approvingDevice.hostname} approved — monitors created`);
+      // No groupId without agents.manage: the server keeps the registration
+      // group (or the key's default group) instead of answering 403.
+      await agentApi.updateDevice(approvingDevice.id, groupId === undefined ? { status: 'approved' } : { status: 'approved', groupId });
+      toast.success(t('agentConfig.approvals.approvedToast', {
+        defaultValue: '{{name}} approved',
+        name: anonHostname(approvingDevice.name ?? approvingDevice.hostname),
+      }));
       setApprovingDevice(null);
-      loadAll();
-    } catch {
-      toast.error('Failed to approve device');
+      void loadAll();
+    } catch (err) {
+      toast.error(agentUpdateErrorMessage(err, t, t('agentConfig.approvals.approveFailed', 'Failed to approve the agent')));
     }
   };
 
   const handleRefuse = async (device: AgentDevice) => {
-    if (!confirm(`Refuse device "${device.hostname}"? It will enter backoff mode.`)) return;
+    if (!(await askConfirm({
+      title: t('agentConfig.approvals.refuseTitle', 'Refuse this agent?'),
+      message: t('agentConfig.approvals.refuseConfirm', {
+        defaultValue: '{{name}} is refused: it enters backoff mode and gets no configuration. You can reinstate it later.',
+        name: anonHostname(device.hostname),
+      }),
+      danger: true,
+      confirmLabel: t('agentConfig.approvals.refuse', 'Refuse'),
+    }))) return;
     try {
       await agentApi.updateDevice(device.id, { status: 'refused' });
-      toast.success('Device refused');
-      loadAll();
-    } catch {
-      toast.error('Failed to refuse device');
+      toast.success(t('agentConfig.approvals.refusedToast', 'Agent refused'));
+      void loadAll();
+    } catch (err) {
+      toast.error(agentUpdateErrorMessage(err, t, t('agentConfig.approvals.refuseFailed', 'Failed to refuse the agent')));
     }
   };
 
   const handleReinstate = async (device: AgentDevice) => {
     try {
       await agentApi.updateDevice(device.id, { status: 'pending' });
-      toast.success('Device reinstated to pending');
-      loadAll();
-    } catch {
-      toast.error('Failed to reinstate device');
+      toast.success(t('agentConfig.approvals.reinstatedToast', 'Agent back to pending'));
+      void loadAll();
+    } catch (err) {
+      toast.error(agentUpdateErrorMessage(err, t, t('agentConfig.approvals.reinstateFailed', 'Failed to reinstate the agent')));
     }
   };
 
   const handleDeleteDevice = async (device: AgentDevice) => {
-    if (!confirm(`Delete device "${device.hostname}" and all its monitors?`)) return;
+    if (!(await askConfirm({
+      message: t('agentConfig.approvals.deleteConfirm', {
+        defaultValue: 'Delete {{name}}? Its entry and history are removed; a still-installed agent enrols again as pending.',
+        name: anonHostname(device.hostname),
+      }),
+      danger: true,
+    }))) return;
     try {
       await agentApi.deleteDevice(device.id);
-      toast.success('Device deleted');
-      setSelectedIds(prev => { const next = new Set(prev); next.delete(device.id); return next; });
-      loadAll();
-    } catch {
-      toast.error('Failed to delete device');
-    }
-  };
-
-  /** Send an uninstall command to a single device. */
-  const handleUninstallDevice = async (device: AgentDevice) => {
-    if (!confirm(
-      `Uninstall agent on "${device.name ?? device.hostname}"?\n\n` +
-      `The command will be sent on the agent's next push. The service will be removed from the machine. ` +
-      `The device entry will be automatically deleted a few minutes after uninstall.`,
-    )) return;
-    try {
-      await agentApi.sendCommand(device.id, 'uninstall');
-      toast.success(`Uninstall command queued for ${device.name ?? device.hostname}`);
-    } catch {
-      toast.error('Failed to queue uninstall command');
-    }
-  };
-
-  const handleEditSave = async (data: {
-    name: string | null;
-    groupId?: number | null;
-    overrideGroupSettings: boolean;
-    suspended: boolean;
-    releaseKeyBinding: boolean;
-  }) => {
-    if (!editingDevice) return;
-    try {
-      const newStatus = data.suspended ? 'suspended'
-        : editingDevice.status === 'suspended' ? 'approved'
-        : undefined;
-      await agentApi.updateDevice(editingDevice.id, {
-        name: data.name,
-        ...(data.groupId !== undefined ? { groupId: data.groupId } : {}),
-        overrideGroupSettings: data.overrideGroupSettings,
-        ...(newStatus ? { status: newStatus } : {}),
-        ...(data.releaseKeyBinding ? { apiKeyId: null } : {}),
-      });
-      toast.success('Agent updated');
-      setEditingDevice(null);
-      loadAll();
-    } catch {
-      toast.error('Failed to update agent');
-    }
-  };
-
-  // ── Bulk actions ─────────────────────────────────────────────────────────────
-
-  const selectedDevices = devices.filter(d => selectedIds.has(d.id));
-
-  const handleBulkDelete = async () => {
-    const count = selectedIds.size;
-    if (!confirm(`Delete ${count} device${count !== 1 ? 's' : ''} and all their monitors? This cannot be undone.`)) return;
-    try {
-      await agentApi.bulkDeleteDevices([...selectedIds]);
-      toast.success(`${count} device${count !== 1 ? 's' : ''} deleted`);
-      setSelectedIds(new Set());
-      loadAll();
-    } catch {
-      toast.error('Failed to delete devices');
-    }
-  };
-
-  const handleBulkUninstall = async () => {
-    const count = selectedIds.size;
-    if (!confirm(
-      `Send uninstall command to ${count} agent${count !== 1 ? 's' : ''}?\n\n` +
-      `Each agent will uninstall itself on its next push. ` +
-      `Device entries will be automatically deleted a few minutes after uninstall.`,
-    )) return;
-    try {
-      await agentApi.bulkSendCommand([...selectedIds], 'uninstall');
-      toast.success(`Uninstall command queued for ${count} agent${count !== 1 ? 's' : ''}`);
-      setSelectedIds(new Set());
-    } catch {
-      toast.error('Failed to queue bulk uninstall command');
+      toast.success(t('agentConfig.approvals.deletedToast', 'Agent deleted'));
+      void loadAll();
+    } catch (err) {
+      toast.error(agentUpdateErrorMessage(err, t, t('agentConfig.approvals.deleteFailed', 'Failed to delete the agent')));
     }
   };
 
   // ── Agent updates (C17-1) ────────────────────────────────────────────────────
 
   const handleRequestUpdate = async (device: AgentDevice) => {
-    if (!confirm(t('agentUpdate.confirmUpdate', {
-      defaultValue: 'Update {{name}} to v{{version}}?',
-      name: device.name ?? device.hostname,
-      version: device.latestAgentVersion,
+    if (!(await askConfirm({
+      message: t('agentUpdate.confirmUpdate', {
+        defaultValue: 'Update {{name}} to v{{version}}?',
+        name: device.name ?? device.hostname,
+        version: device.latestAgentVersion,
+      }),
+      confirmLabel: t('agentUpdate.updateNow', 'Update now'),
     }))) return;
     try {
       await agentApi.requestUpdate(device.id);
       toast.success(t('agentUpdate.requestedToast', 'Update requested: the agent updates at its next heartbeat'));
-      loadAll();
+      void loadDevices();
     } catch (err) {
-      toast.error(agentUpdateErrorMessage(err, t, 'Failed to request the update'));
+      toast.error(agentUpdateErrorMessage(err, t, t('agentUpdate.requestFailed', 'Failed to request the update')));
+    }
+  };
+
+  const handleCancelUpdate = async (device: AgentDevice) => {
+    try {
+      await agentApi.cancelUpdate(device.id);
+      void loadDevices();
+    } catch (err) {
+      toast.error(agentUpdateErrorMessage(err, t, t('agentUpdate.cancelFailed', 'Failed to cancel the update')));
     }
   };
 
@@ -1074,288 +1119,391 @@ export function AdminAgentPage() {
     agentApi.getVersionDistribution().then(setDist).catch(() => {});
   };
 
-  const handleCancelUpdate = async (device: AgentDevice) => {
-    try {
-      await agentApi.cancelUpdate(device.id);
-      loadAll();
-    } catch (err) {
-      toast.error(agentUpdateErrorMessage(err, t, 'Failed to cancel the update'));
-    }
-  };
-
-  const handleBulkRequestUpdate = async () => {
-    const count = selectedIds.size;
-    if (!confirm(t('agentUpdate.confirmBulk', {
-      defaultValue: 'Request an update to v{{version}} for {{count}} agent(s)?',
-      count,
-      version: dist?.latestVersion ?? '?',
+  /** "Cancel all pending" (W12-4): every pending request of the scope (Default: every tenant). */
+  const handleCancelAllUpdates = async () => {
+    if (!(await askConfirm({
+      message: t('agentConfig.rollout.cancelAllConfirm', 'Cancel every pending agent update request? Agents already installing finish; agents under the Auto policy keep updating.'),
+      danger: true,
+      confirmLabel: t('agentConfig.rollout.cancelAll', 'Cancel all pending'),
     }))) return;
     try {
-      const r = await agentApi.bulkRequestUpdate([...selectedIds]);
-      const skipped = r.skipped.off + r.skipped.current + r.skipped.notUpdatable + r.skipped.notFound;
-      toast.success(t('agentUpdate.bulkResult', {
-        defaultValue: '{{requested}} update(s) requested, {{skipped}} skipped',
-        requested: r.requested,
-        skipped,
-      }));
-      setSelectedIds(new Set());
-      loadAll();
-    } catch (err) {
-      toast.error(agentUpdateErrorMessage(err, t, 'Failed to request the updates'));
-    }
-  };
-
-  const handleBulkEditSave = async (data: {
-    groupId?: number | null;
-    overrideGroupSettings?: boolean;
-    status?: 'approved' | 'suspended';
-    updatePolicy?: AgentUpdatePolicy | null;
-  }) => {
-    const count = selectedIds.size;
-    try {
-      const r = await agentApi.bulkUpdateDevices([...selectedIds], data);
-      toast.success(`${count} agent${count !== 1 ? 's' : ''} updated`);
-      if (r?.skipped) {
-        toast(t('agentUpdate.bulkSkippedOtherTenant', {
-          defaultValue: '{{count}} agent(s) of other tenants were not changed',
-          count: r.skipped,
+      const r = await agentApi.cancelAllUpdates();
+      toast.success(t('agentConfig.rollout.cancelledToast', { defaultValue: '{{count}} pending update(s) cancelled', count: r.cancelled }));
+      if (r.autoContinuing > 0) {
+        toast(t('agentConfig.rollout.autoContinuing', {
+          defaultValue: '{{count}} outdated agent(s) follow the Auto policy and keep updating: set their policy to Manual or Off to stop them.',
+          count: r.autoContinuing,
         }));
       }
-      setShowBulkEditModal(false);
-      setSelectedIds(new Set());
-      loadAll();
-    } catch {
-      toast.error('Failed to update agents');
+      void loadDevices();
+    } catch (err) {
+      toast.error(agentUpdateErrorMessage(err, t, t('agentConfig.rollout.cancelFailed', 'Failed to cancel the pending updates')));
     }
   };
 
-  return (
-    <div className="p-6">
-      {/* Header */}
-      <div className="flex items-center justify-between mb-6">
-        <div className="flex items-center gap-3">
-          <Cpu size={20} className="text-accent" />
-          <h1 className="text-xl font-semibold text-text-primary">Agents</h1>
-          {pendingCount > 0 && (
-            <span className="rounded-full bg-yellow-500/20 px-2 py-0.5 text-xs font-medium text-yellow-400">
-              {pendingCount} pending
-            </span>
-          )}
-        </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={loadAll}
-            className="p-2 rounded-lg text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors"
-            title="Refresh"
-          >
-            <RefreshCw size={14} />
-          </button>
-          <Button variant="secondary" onClick={() => setShowAddMikroTik(true)}>
-            <Router size={14} className="mr-1.5" />Add MikroTik
-          </Button>
-          <Button onClick={openAddAgentModal}>
-            <Plus size={14} className="mr-1.5" />Add Agent
-          </Button>
-        </div>
+  // ── Render helpers ───────────────────────────────────────────────────────────
+
+  const th = 'px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide whitespace-nowrap';
+  const td = 'px-4 py-3 align-top';
+
+  const deviceName = (device: AgentDevice) => (
+    <div className="min-w-0">
+      <div className="flex items-center gap-1.5 flex-wrap">
+        {device.status === 'approved' ? (
+          <Link to={`/agents/${device.id}`} className="font-medium text-text-primary hover:text-accent transition-colors">
+            {anonHostname(device.name ?? device.hostname)}
+          </Link>
+        ) : (
+          <span className="font-medium text-text-primary">{anonHostname(device.name ?? device.hostname)}</span>
+        )}
+        <TenantBadge tenantId={device.tenantId} />
+      </div>
+      {device.name && <div className="text-[10px] text-text-muted mt-0.5">{anonHostname(device.hostname)}</div>}
+      <div className="text-[10px] text-text-muted font-mono mt-0.5">{device.uuid.slice(0, 12)}…</div>
+    </div>
+  );
+
+  const osText = (device: AgentDevice) => (device.osInfo
+    ? `${device.osInfo.distro ?? device.osInfo.platform} ${device.osInfo.release ?? ''}`
+    : '—');
+
+  const keyLabel = (device: AgentDevice) => {
+    if (device.apiKeyId == null) return <span className="text-text-muted">—</span>;
+    const k = keyById.get(device.apiKeyId);
+    if (!k) return <span className="text-text-muted">#{device.apiKeyId}</span>;
+    return (
+      <span className={k.isActive ? 'text-text-secondary' : 'text-text-muted line-through'}>{k.name}</span>
+    );
+  };
+
+  // ── Tabs ─────────────────────────────────────────────────────────────────────
+
+  const keysTab = (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <p className="text-sm text-text-muted max-w-3xl">
+          {t('agentConfig.keys.description', 'Enrolment keys authenticate agents. Disable a leaked key to cut its agents off at once without losing its devices; give a key a default group so new agents land in the right place.')}
+        </p>
+        <Button size="sm" onClick={() => setShowCreateKey(true)}>
+          <Plus size={13} className="mr-1" />{t('agentConfig.keys.new', 'New key')}
+        </Button>
       </div>
 
-      {/* Tab switcher */}
-      <div className="flex items-center gap-1 mb-6 rounded-lg bg-bg-secondary p-1 border border-border w-fit">
-        <button
-          onClick={() => setTab('devices')}
-          className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${
-            tab === 'devices' ? 'bg-accent text-white' : 'text-text-muted hover:text-text-primary'
-          }`}
-        >
-          <Monitor size={13} className="inline mr-1.5" />
-          {t('agents.tabDevices')}
-          {pendingCount > 0 && (
-            <span className="ml-1.5 inline-flex items-center justify-center w-4 h-4 rounded-full bg-yellow-500 text-white text-[10px] font-bold">
-              {pendingCount}
-            </span>
-          )}
-        </button>
-        {isAdmin && (
-          <button
-            onClick={() => setTab('keys')}
-            className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${
-              tab === 'keys' ? 'bg-accent text-white' : 'text-text-muted hover:text-text-primary'
-            }`}
-          >
-            <Key size={13} className="inline mr-1.5" />
-            {t('agents.tabKeys')}
-          </button>
+      <div className="rounded-lg border border-border bg-bg-secondary overflow-hidden">
+        {keys.length === 0 ? (
+          <EmptyState
+            icon={<Key size={28} />}
+            title={t('agentConfig.keys.empty', 'No enrolment key yet')}
+            description={t('agentConfig.keys.emptyDesc', 'Create a key, then use Add Agent to get the install command.')}
+          />
+        ) : (
+          <TableScroll>
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-border bg-bg-tertiary">
+                  <th className={th}>{t('agentConfig.keys.name', 'Name')}</th>
+                  <th className={th}>{t('agentConfig.keys.key', 'Key')}</th>
+                  <th className={th}>{t('agentConfig.keys.enabled', 'Enabled')}</th>
+                  <th className={th}>{t('agentConfig.keys.defaultGroup', 'Default group')}</th>
+                  <th className={th}>{t('agentConfig.keys.devices', 'Devices')}</th>
+                  <th className={th}>{t('agentConfig.keys.usage', 'Created / last used')}</th>
+                  <th className={`${th} text-right`}>{t('common.actions')}</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {keys.map(key => {
+                  const busy = busyKeyId === key.id;
+                  return (
+                    <tr key={key.id} className={key.isActive ? '' : 'bg-bg-tertiary/40'}>
+                      <td className={td}>
+                        <div className="flex items-center gap-2">
+                          <Key size={14} className={key.isActive ? 'text-accent shrink-0' : 'text-text-muted shrink-0'} />
+                          <span className="font-medium text-text-primary break-all">{key.name}</span>
+                        </div>
+                        {!key.isActive && key.revokedAt && (
+                          <div className="text-[11px] text-status-down mt-0.5">
+                            {t('agentConfig.keys.disabledSince', { defaultValue: 'Disabled {{date}}', date: formatDate(key.revokedAt) })}
+                          </div>
+                        )}
+                      </td>
+                      <td className={td}>
+                        <code className="text-xs font-mono text-text-muted whitespace-nowrap">{key.keyMasked}</code>
+                      </td>
+                      <td className={td}>
+                        <ToggleSwitch
+                          checked={key.isActive}
+                          onChange={v => void handleToggleKey(key, v)}
+                          disabled={busy}
+                          size="sm"
+                          ariaLabel={key.isActive
+                            ? t('agentConfig.keys.disableAria', { defaultValue: 'Disable {{name}}', name: key.name })
+                            : t('agentConfig.keys.enableAria', { defaultValue: 'Enable {{name}}', name: key.name })}
+                        />
+                      </td>
+                      <td className={td}>
+                        <GroupSelect
+                          value={key.defaultGroupId}
+                          onChange={id => void handleKeyGroup(key, id)}
+                          groups={ownAgentGroups}
+                          disabled={busy}
+                          ariaLabel={t('agentConfig.keys.defaultGroupOf', { defaultValue: 'Default group of {{name}}', name: key.name })}
+                          className="max-w-[14rem] rounded-md border border-border bg-bg-tertiary px-2 py-1 text-xs text-text-primary focus:outline-none focus:ring-2 focus:ring-accent disabled:opacity-60 coarse:min-h-10"
+                        />
+                        {/* A default group of a group list that is not loaded (or of a
+                            non-agent kind) is still shown by name. */}
+                        {key.defaultGroupId != null && !ownAgentGroups.some(g => g.id === key.defaultGroupId) && key.defaultGroupName && (
+                          <div className="text-[11px] text-text-muted mt-0.5">{key.defaultGroupName}</div>
+                        )}
+                      </td>
+                      <td className={`${td} text-text-muted whitespace-nowrap`}>
+                        {t('agentConfig.keys.deviceCount', { defaultValue: '{{count}} device(s)', count: key.deviceCount })}
+                        {key.pendingCount > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => setTab('approvals')}
+                            className="block text-xs text-yellow-400 hover:underline coarse:min-h-10"
+                          >
+                            {t('agentConfig.keys.pendingCount', { defaultValue: '{{count}} pending', count: key.pendingCount })}
+                          </button>
+                        )}
+                      </td>
+                      <td className={`${td} text-xs text-text-muted whitespace-nowrap`}>
+                        <div>{formatDate(key.createdAt)}</div>
+                        <div>
+                          {key.lastUsedAt
+                            ? t('agentConfig.keys.lastUsed', { defaultValue: 'Last used {{date}}', date: formatDate(key.lastUsedAt) })
+                            : t('agentConfig.keys.neverUsed', 'Never used')}
+                        </div>
+                      </td>
+                      <td className={`${td} text-right`}>
+                        <div className="flex items-center justify-end gap-1">
+                          <IconButton
+                            label={t('agentConfig.keys.rename', 'Rename')}
+                            icon={<Pencil size={13} />}
+                            onClick={() => void handleRenameKey(key)}
+                            disabled={busy}
+                          />
+                          <IconButton
+                            label={t('common.delete')}
+                            icon={<Trash2 size={13} />}
+                            variant="danger"
+                            onClick={() => void handleDeleteKey(key)}
+                            disabled={busy}
+                          />
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </TableScroll>
+        )}
+      </div>
+    </div>
+  );
+
+  const approvalsTab = (
+    <div className="space-y-6">
+      <div className="rounded-lg border border-border bg-bg-secondary overflow-hidden">
+        {pendingDevices.length === 0 ? (
+          <EmptyState
+            icon={<Cpu size={28} />}
+            title={t('agentConfig.approvals.empty', 'No agent waiting for approval')}
+            description={t('agentConfig.approvals.emptyDesc', 'New agents appear here after their first connection. Use Add Agent to get the install command.')}
+          />
+        ) : (
+          <TableScroll>
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-border bg-bg-tertiary">
+                  <th className={th}>{t('agentConfig.approvals.agent', 'Agent')}</th>
+                  <th className={th}>IP</th>
+                  <th className={th}>OS</th>
+                  <th className={th}>{t('common.agent')}</th>
+                  {canKeys && <th className={th}>{t('agentConfig.approvals.key', 'Key')}</th>}
+                  <th className={th}>{t('agentConfig.approvals.targetGroup', 'Target group')}</th>
+                  <th className={th}>{t('agents.update.lastSeen', 'Last seen')}</th>
+                  <th className={th}>{t('agentConfig.approvals.registered', 'Registered')}</th>
+                  <th className={`${th} text-right`}>{t('common.actions')}</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {pendingDevices.map(device => {
+                  const foreign = isForeign(device.tenantId);
+                  const target = approvalGroupOf(device);
+                  return (
+                    <tr key={device.id} className="hover:bg-bg-hover transition-colors">
+                      <td className={td}>{deviceName(device)}</td>
+                      <td className={`${td} text-text-muted`}>{anonIp(device.ip)}</td>
+                      <td className={`${td} text-text-muted`}>{osText(device)}</td>
+                      <td className={`${td} text-text-muted`}>{device.agentVersion ?? '—'}</td>
+                      {canKeys && <td className={td}>{keyLabel(device)}</td>}
+                      <td className={`${td} text-text-muted`}>
+                        {target != null
+                          ? <span className="inline-flex items-center gap-1"><FolderOpen size={12} />{groupName(target) ?? `#${target}`}</span>
+                          : '—'}
+                      </td>
+                      <td className={td}>
+                        {!device.lastSeenAt
+                          ? <span className="text-text-muted text-xs">—</span>
+                          : <LastSeenPill lastSeenAt={device.lastSeenAt} />}
+                      </td>
+                      <td className={`${td} text-text-muted text-xs whitespace-nowrap`}>{formatDate(device.createdAt)}</td>
+                      <td className={`${td} text-right`}>
+                        {foreign ? (
+                          <span className="text-[11px] text-text-muted">{t('agents.foreignReadOnlyShort', 'Read-only (other tenant)')}</span>
+                        ) : (
+                          <Can cap="agents.approve">
+                            <div className="flex items-center justify-end gap-1.5">
+                              <Button size="sm" onClick={() => setApprovingDevice(device)}>
+                                <CheckCircle size={12} className="mr-1" />{t('agents.approve')}
+                              </Button>
+                              <Button size="sm" variant="danger" onClick={() => void handleRefuse(device)}>
+                                <XCircle size={12} className="mr-1" />{t('agentConfig.approvals.refuse', 'Refuse')}
+                              </Button>
+                            </div>
+                          </Can>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </TableScroll>
         )}
       </div>
 
-      {/* ── Devices Tab ── */}
-      {tab === 'devices' && (
-        <>
-          <AgentUpdatePolicyBar
-            isAdmin={isAdmin}
-            tenantId={currentTenantId}
-            tenantName={currentTenantName}
-            onChanged={() => { void loadAll(); }}
-          />
-          {dist && <MissingBuildsBanner builds={dist.missingBuilds ?? []} version={dist.latestVersion} />}
-          {dist && dist.total > 0 && <AgentVersionStrip dist={dist} />}
-
-          {/* Status filter */}
-          <div className="flex gap-1 mb-4">
-            {(['all', 'approved', 'refused', 'suspended', 'pending'] as DeviceStatusFilter[]).map(f => (
-              <button
-                key={f}
-                onClick={() => handleFilterChange(f)}
-                className={`px-3 py-1.5 text-sm rounded-md transition-colors capitalize ${
-                  deviceFilter === f
-                    ? 'bg-bg-tertiary text-text-primary font-medium'
-                    : 'text-text-muted hover:text-text-primary hover:bg-bg-hover'
-                }`}
-              >
-                {f}
-                {f !== 'all' && (
-                  <span className="ml-1.5 text-xs text-text-muted">
-                    ({devices.filter(d => d.status === f).length})
-                  </span>
-                )}
-              </button>
-            ))}
-          </div>
-
-          {/* Bulk action bar */}
-          {selectedIds.size > 0 && (
-            <div className="flex items-center gap-3 mb-3 px-4 py-2.5 rounded-lg bg-accent/10 border border-accent/20">
-              <span className="text-sm font-medium text-accent">
-                {selectedIds.size} selected
-              </span>
-              <div className="flex items-center gap-2 ml-auto">
-                <Button size="sm" variant="secondary" onClick={() => setShowBulkEditModal(true)}>
-                  <Settings2 size={12} className="mr-1.5" />{t('common.edit')}
-                </Button>
-                <Button size="sm" variant="secondary" onClick={handleBulkRequestUpdate}>
-                  <ArrowUpCircle size={12} className="mr-1.5" />{t('agentUpdate.bulkUpdate', 'Update')}
-                </Button>
-                <Button size="sm" variant="secondary" onClick={handleBulkUninstall}>
-                  <PowerOff size={12} className="mr-1.5" />Uninstall
-                </Button>
-                <Button size="sm" variant="danger" onClick={handleBulkDelete}>
-                  <Trash2 size={12} className="mr-1.5" />{t('common.delete')}
-                </Button>
-                <button
-                  onClick={() => setSelectedIds(new Set())}
-                  className="p-1.5 rounded text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors"
-                  title="Clear selection"
-                >
-                  <X size={14} />
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* Devices table */}
+      {refusedDevices.length > 0 && (
+        <section className="space-y-2">
+          <h2 className="text-sm font-semibold text-text-secondary">
+            {t('agentConfig.approvals.refusedTitle', { defaultValue: 'Refused ({{count}})', count: refusedDevices.length })}
+          </h2>
           <div className="rounded-lg border border-border bg-bg-secondary overflow-hidden">
-            {filteredDevices.length === 0 ? (
-              <div className="py-12 text-center">
-                <Cpu size={32} className="mx-auto mb-2 text-text-muted" />
-                <p className="text-sm text-text-muted">
-                  {deviceFilter === 'pending' ? 'No devices waiting for approval' : `No ${deviceFilter} devices`}
-                </p>
-                {deviceFilter === 'pending' && (
-                  <p className="text-xs text-text-muted mt-1">
-                    Click "Add Agent" to get the installation command
-                  </p>
-                )}
-              </div>
-            ) : (
+            <TableScroll>
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-border bg-bg-tertiary">
-                    <th className="px-3 py-2.5 w-8">
-                      <div className="relative h-4 w-4">
-                        <input
-                          ref={selectAllRef}
-                          type="checkbox"
-                          checked={allSelected}
-                          onChange={toggleSelectAll}
-                          data-indeterminate={someSelected}
-                          title={allSelected ? 'Deselect all' : 'Select all'}
-                          className="peer appearance-none h-4 w-4 rounded border cursor-pointer transition-colors bg-bg-tertiary border-border checked:bg-accent checked:border-accent data-[indeterminate=true]:bg-accent/60 data-[indeterminate=true]:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30"
-                        />
-                        <svg className="pointer-events-none absolute top-0 left-0 hidden h-4 w-4 text-white peer-checked:block" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                          <path d="M2.5 8L6 11.5L13.5 4.5" />
-                        </svg>
-                        {someSelected && (
-                          <svg className="pointer-events-none absolute top-0 left-0 h-4 w-4 text-white" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-                            <path d="M4 8h8" />
-                          </svg>
-                        )}
-                      </div>
-                    </th>
-                    <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">Hostname</th>
-                    <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">IP</th>
-                    <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">OS</th>
-                    <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">{t('common.agent')}</th>
-                    <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">{t('common.status')}</th>
-                    <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">{t('agents.update.lastSeen', 'Last seen')}</th>
-                    <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wide">Registered</th>
-                    <th className="px-4 py-2.5 text-right text-xs font-medium text-text-muted uppercase tracking-wide">{t('common.actions')}</th>
+                    <th className={th}>{t('agentConfig.approvals.agent', 'Agent')}</th>
+                    <th className={th}>IP</th>
+                    {canKeys && <th className={th}>{t('agentConfig.approvals.key', 'Key')}</th>}
+                    <th className={th}>{t('agents.update.lastSeen', 'Last seen')}</th>
+                    <th className={`${th} text-right`}>{t('common.actions')}</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border">
-                  {filteredDevices.map(device => (
-                    <tr
-                      key={device.id}
-                      className={`hover:bg-bg-hover transition-colors ${selectedIds.has(device.id) ? 'bg-accent/5' : ''}`}
-                    >
-                      {/* Checkbox */}
-                      <td className="px-3 py-3">
-                        <div className="relative h-4 w-4">
-                          <input
-                            type="checkbox"
-                            checked={selectedIds.has(device.id)}
-                            onChange={() => toggleSelect(device.id)}
-                            disabled={isForeign(device.tenantId)}
-                            className="peer appearance-none h-4 w-4 rounded border cursor-pointer disabled:cursor-not-allowed disabled:opacity-40 transition-colors bg-bg-tertiary border-border checked:bg-accent checked:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30"
-                          />
-                          <svg className="pointer-events-none absolute top-0 left-0 hidden h-4 w-4 text-white peer-checked:block" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                            <path d="M2.5 8L6 11.5L13.5 4.5" />
-                          </svg>
-                        </div>
+                  {refusedDevices.map(device => (
+                    <tr key={device.id}>
+                      <td className={td}>{deviceName(device)}</td>
+                      <td className={`${td} text-text-muted`}>{anonIp(device.ip)}</td>
+                      {canKeys && <td className={td}>{keyLabel(device)}</td>}
+                      <td className={td}>
+                        {!device.lastSeenAt
+                          ? <span className="text-text-muted text-xs">—</span>
+                          : <LastSeenPill lastSeenAt={device.lastSeenAt} />}
                       </td>
-                      <td className="px-4 py-3">
-                        {device.status === 'approved' ? (
-                          <Link
-                            to={`/agents/${device.id}`}
-                            className="font-medium text-text-primary hover:text-accent transition-colors"
-                          >
-                            {anonHostname(device.name ?? device.hostname)}
-                          </Link>
+                      <td className={`${td} text-right`}>
+                        {isForeign(device.tenantId) ? (
+                          <span className="text-[11px] text-text-muted">{t('agents.foreignReadOnlyShort', 'Read-only (other tenant)')}</span>
                         ) : (
-                          <span className="font-medium text-text-primary">{anonHostname(device.name ?? device.hostname)}</span>
+                          <div className="flex items-center justify-end gap-1">
+                            {canApprove && (
+                              <Button size="sm" variant="secondary" onClick={() => void handleReinstate(device)}>
+                                <RotateCcw size={12} className="mr-1" />{t('agentConfig.approvals.reinstate', 'Reinstate')}
+                              </Button>
+                            )}
+                            {canDelete && (
+                              <IconButton
+                                label={t('common.delete')}
+                                icon={<Trash2 size={13} />}
+                                variant="danger"
+                                onClick={() => void handleDeleteDevice(device)}
+                              />
+                            )}
+                          </div>
                         )}
-                        {device.name && (
-                          <div className="text-[10px] text-text-muted mt-0.5">{anonHostname(device.hostname)}</div>
-                        )}
-                        <div className="text-[10px] text-text-muted font-mono mt-0.5">{device.uuid.slice(0, 12)}…</div>
                       </td>
-                      <td className="px-4 py-3 text-text-muted">{anonIp(device.ip)}</td>
-                      <td className="px-4 py-3 text-text-muted">
-                        {device.osInfo
-                          ? `${device.osInfo.distro ?? device.osInfo.platform} ${device.osInfo.release ?? ''}`
-                          : '—'}
-                      </td>
-                      <td className="px-4 py-3 text-text-muted">
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </TableScroll>
+          </div>
+        </section>
+      )}
+    </div>
+  );
+
+  const policyTab = (
+    <div className="space-y-4">
+      <AgentUpdatePolicyBar
+        isAdmin={isAdmin}
+        tenantId={currentTenantId}
+        tenantName={currentTenantName}
+        onChanged={() => { void loadDevices(); }}
+      />
+      {dist && <MissingBuildsBanner builds={dist.missingBuilds ?? []} version={dist.latestVersion} />}
+      {dist && dist.total > 0 && <AgentVersionStrip dist={dist} />}
+
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-sm font-semibold text-text-secondary">
+          {t('agentConfig.policy.attentionTitle', 'Agents with an update to handle')}
+        </h2>
+        {canUpdate && dist && (
+          <div className="flex flex-wrap items-center gap-2">
+            {dist.updatePending > 0 && (
+              <Button size="sm" variant="ghost" onClick={() => void handleCancelAllUpdates()}>
+                <Ban size={12} className="mr-1.5" />
+                {t('agentConfig.rollout.cancelAll', 'Cancel all pending')}
+              </Button>
+            )}
+            {dist.outdated > 0 && (
+              <Button size="sm" variant="secondary" onClick={() => setShowRollout(true)}>
+                <ArrowUpCircle size={12} className="mr-1.5" />
+                {t('agentConfig.rollout.updateAll', 'Update all outdated')}
+              </Button>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="rounded-lg border border-border bg-bg-secondary overflow-hidden">
+        {attentionDevices.length === 0 ? (
+          <EmptyState
+            compact
+            icon={<CheckCircle size={24} />}
+            title={t('agentConfig.policy.allCurrent', 'Every agent is up to date')}
+          />
+        ) : (
+          <TableScroll>
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-border bg-bg-tertiary">
+                  <th className={th}>{t('agentConfig.approvals.agent', 'Agent')}</th>
+                  <th className={th}>{t('common.agent')}</th>
+                  <th className={th}>{t('agentUpdate.policyLabel', 'Agent updates')}</th>
+                  <th className={th}>{t('agents.update.lastSeen', 'Last seen')}</th>
+                  <th className={`${th} text-right`}>{t('common.actions')}</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {attentionDevices.map(device => {
+                  const foreign = isForeign(device.tenantId);
+                  const attempt = visibleUpdateAttempt(device);
+                  return (
+                    <tr key={device.id} className="hover:bg-bg-hover transition-colors">
+                      <td className={td}>{deviceName(device)}</td>
+                      <td className={`${td} text-text-muted`}>
                         <div className="flex items-center gap-1.5 flex-wrap">
                           <span>{device.agentVersion ?? '—'}</span>
-                          {device.deviceType === 'agent' && (
-                            <UpdateStatusBadge
-                              device={device}
-                              size="sm"
-                              canRetry={!isForeign(device.tenantId) && device.status === 'approved' && device.resolvedUpdatePolicy !== 'off'}
-                              onRetried={handleRetried}
-                            />
-                          )}
-                          {device.updateAvailable && device.latestAgentVersion && !visibleUpdateAttempt(device) && (
+                          <UpdateStatusBadge
+                            device={device}
+                            size="sm"
+                            canRetry={canUpdate && !foreign && device.status === 'approved' && device.resolvedUpdatePolicy !== 'off'}
+                            onRetried={handleRetried}
+                          />
+                          {device.updateAvailable && device.latestAgentVersion && !attempt && (
                             <span
                               className="rounded-full px-1.5 py-0.5 text-[10px] font-medium bg-amber-500/10 text-amber-400"
                               title={t('agentUpdate.updateAvailableShort', 'Update available')}
@@ -1363,258 +1511,171 @@ export function AdminAgentPage() {
                               ↑ v{device.latestAgentVersion}
                             </span>
                           )}
-                          {device.updatePending && !isUpdateInFlight(visibleUpdateAttempt(device)) && (
+                          {device.updatePending && !isUpdateInFlight(attempt) && (
                             <span className="rounded-full px-1.5 py-0.5 text-[10px] font-medium bg-blue-500/10 text-blue-400">
                               {t('agentUpdate.updateRequested', { defaultValue: 'Update to v{{version}} requested', version: device.updateRequestedVersion })}
                             </span>
                           )}
-                          {device.resolvedUpdatePolicy === 'off' && device.updateAvailable && (
-                            <span className="inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium bg-bg-tertiary text-text-muted">
-                              <Lock size={9} />
-                              {t('agentUpdate.frozenBadge', 'Updates frozen')}
-                            </span>
-                          )}
                         </div>
                       </td>
-                      <td className="px-4 py-3">
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                          <StatusBadge status={device.status} />
-                          {!isUpdateInFlight(visibleUpdateAttempt(device)) && (liveAgentStatus.get(device.id) === 'updating' ||
-                            (device.updatingSince != null &&
-                              Date.now() - new Date(device.updatingSince).getTime() < 10 * 60 * 1000)) && (
-                            <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium bg-blue-500/10 text-blue-400">
-                              <RefreshCw size={10} className="animate-spin" />
-                              Updating
+                      <td className={`${td} text-xs`}>
+                        {device.resolvedUpdatePolicy ? (
+                          <div className="flex flex-col gap-0.5">
+                            <span className={device.resolvedUpdatePolicy === 'off' ? 'inline-flex items-center gap-1 text-amber-400' : 'text-text-primary'}>
+                              {device.resolvedUpdatePolicy === 'off' && <Lock size={10} />}
+                              {t(`agentUpdate.policy.${device.resolvedUpdatePolicy}`, device.resolvedUpdatePolicy)}
                             </span>
-                          )}
-                          {device.evaluateOnly && (
-                            <span
-                              className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium bg-amber-500/10 text-amber-500 border border-amber-500/20"
-                              title={t('evaluateOnly.badgeTooltip')}
-                            >
-                              <Eye size={10} />
-                              {t('evaluateOnly.badge')}
-                            </span>
-                          )}
-                        </div>
+                            {device.updatePolicySource && (
+                              <span className="text-text-muted">
+                                {updatePolicySourceLabel(device.updatePolicySource, t, {
+                                  tenantName: currentTenantName,
+                                  groupName: groupName(device.updatePolicySourceGroupId),
+                                })}
+                              </span>
+                            )}
+                          </div>
+                        ) : <span className="text-text-muted">—</span>}
                       </td>
-                      <td className="px-4 py-3">
-                        {device.status === 'pending' && !device.lastSeenAt
-                          ? <span className="text-text-muted text-xs">—</span>
-                          : <LastSeenPill lastSeenAt={device.lastSeenAt} />}
+                      <td className={td}>
+                        <LastSeenPill lastSeenAt={device.lastSeenAt} />
                       </td>
-                      <td className="px-4 py-3 text-text-muted text-xs">{formatDate(device.createdAt)}</td>
-                      <td className="px-4 py-3 text-right">
-                        {isForeign(device.tenantId) ? (
-                        <div className="flex items-center justify-end gap-1">
-                          {device.status === 'approved' && (
-                            <Link
-                              to={`/agents/${device.id}`}
-                              className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-medium text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors"
-                              title="View detail"
-                            >
-                              <ExternalLink size={12} />
-                              View
-                            </Link>
-                          )}
-                          <span className="text-[11px] text-text-muted">{t('agents.foreignReadOnlyShort', 'Read-only (other tenant)')}</span>
-                        </div>
-                        ) : (
-                        <div className="flex items-center justify-end gap-1">
-                          {device.status === 'pending' && (
-                            <>
-                              <Button size="sm" onClick={() => setApprovingDevice(device)}>
-                                <CheckCircle size={12} className="mr-1" />{t('agents.approve')}
-                              </Button>
-                              <Button size="sm" variant="danger" onClick={() => handleRefuse(device)}>
-                                Refuse
-                              </Button>
-                            </>
-                          )}
-                          {device.status === 'approved' && (
-                            <Link
-                              to={`/agents/${device.id}`}
-                              className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-medium text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors"
-                              title="View detail"
-                            >
-                              <ExternalLink size={12} />
-                              View
-                            </Link>
-                          )}
-                          {device.status === 'refused' && (
-                            <Button size="sm" variant="secondary" onClick={() => handleReinstate(device)}>
-                              Reinstate
-                            </Button>
-                          )}
-                          {device.status === 'suspended' && (
-                            <Button size="sm" variant="secondary" onClick={() => agentApi.updateDevice(device.id, { status: 'approved' }).then(loadAll)}>
-                              Reinstate
-                            </Button>
-                          )}
-                          {(device.status === 'approved' || device.status === 'suspended') && (
-                            <button
-                              onClick={() => setEditingDevice(device)}
-                              className="p-1.5 rounded text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors"
-                              title="Edit"
-                            >
-                              <Pencil size={13} />
-                            </button>
-                          )}
-                          {/* Agent update (C17-1) — approved agents of the operating tenant */}
-                          {device.status === 'approved' && device.deviceType === 'agent' && device.updatePending && (
-                            <button
-                              onClick={() => handleCancelUpdate(device)}
-                              className="p-1.5 rounded text-blue-400 hover:text-text-primary hover:bg-bg-hover transition-colors"
-                              title={t('agentUpdate.cancelRequest', 'Cancel')}
-                            >
-                              <X size={13} />
-                            </button>
-                          )}
-                          {device.status === 'approved' && device.deviceType === 'agent' && !device.updatePending
-                            && device.updateAvailable && device.resolvedUpdatePolicy !== 'off'
-                            && !isUpdateFailed(visibleUpdateAttempt(device)) && (
-                            <button
-                              onClick={() => handleRequestUpdate(device)}
-                              className="p-1.5 rounded text-amber-400 hover:text-amber-300 hover:bg-amber-400/10 transition-colors"
-                              title={t('agentUpdate.updateNow', 'Update now')}
-                            >
-                              <ArrowUpCircle size={13} />
-                            </button>
-                          )}
-                          {/* Uninstall — approved devices only */}
-                          {device.status === 'approved' && (
-                            <button
-                              onClick={() => handleUninstallDevice(device)}
-                              className="p-1.5 rounded text-text-muted hover:text-orange-400 hover:bg-orange-400/10 transition-colors"
-                              title="Uninstall agent"
-                            >
-                              <PowerOff size={13} />
-                            </button>
-                          )}
-                          <button
-                            onClick={() => handleDeleteDevice(device)}
-                            className="p-1.5 rounded text-text-muted hover:text-status-down hover:bg-status-down/10 transition-colors"
-                            title="Delete"
-                          >
-                            <Trash2 size={13} />
-                          </button>
-                        </div>
+                      <td className={`${td} text-right`}>
+                        {!foreign && canUpdate && (
+                          <div className="flex items-center justify-end gap-1">
+                            {device.updatePending && (
+                              <IconButton
+                                label={t('agentUpdate.cancelRequest', 'Cancel')}
+                                icon={<X size={13} />}
+                                onClick={() => void handleCancelUpdate(device)}
+                              />
+                            )}
+                            {!device.updatePending && device.updateAvailable && device.resolvedUpdatePolicy !== 'off'
+                              && !isUpdateFailed(attempt) && (
+                              <IconButton
+                                label={t('agentUpdate.updateNow', 'Update now')}
+                                icon={<ArrowUpCircle size={13} />}
+                                variant="accent"
+                                onClick={() => void handleRequestUpdate(device)}
+                              />
+                            )}
+                          </div>
                         )}
                       </td>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
-        </>
-      )}
+                  );
+                })}
+              </tbody>
+            </table>
+          </TableScroll>
+        )}
+      </div>
+    </div>
+  );
 
-      {/* ── API Keys Tab (admin-only) ── */}
-      {isAdmin && tab === 'keys' && (
-        <>
-          <div className="flex items-center justify-between mb-4">
-            <p className="text-sm text-text-muted">API Keys are used to authenticate agents during installation.</p>
-            <Button size="sm" onClick={() => setShowCreateKey(true)}>
-              <Plus size={13} className="mr-1" />{t('common.new')} Key
-            </Button>
-          </div>
+  return (
+    <PageContainer className="space-y-6">
+      <PageHeader
+        icon={<Cpu size={20} />}
+        title={t('agentConfig.title', 'Agent config')}
+        description={t('agentConfig.subtitle', 'Enrolment keys, pending approvals and the agent update policy. The fleet itself is on the Agents page.')}
+        badge={pendingCount > 0 ? (
+          <span className="rounded-full bg-yellow-500/20 px-2 py-0.5 text-xs font-medium text-yellow-400">
+            {t('agentConfig.pendingBadge', { defaultValue: '{{count}} pending', count: pendingCount })}
+          </span>
+        ) : undefined}
+        actions={(
+          <>
+            <Link
+              to="/agents"
+              className="inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors coarse:min-h-10"
+            >
+              <List size={14} />{t('agentConfig.fleetLink', 'Agent list')}
+            </Link>
+            <IconButton
+              label={t('common.refresh', 'Refresh')}
+              icon={<RefreshCw size={14} />}
+              onClick={() => { void loadAll(); void loadGroups(); }}
+              size="lg"
+            />
+            <Can cap="integrations.mikrotik">
+              <Button variant="secondary" onClick={() => setShowAddMikroTik(true)}>
+                <Router size={14} className="mr-1.5" />{t('agentConfig.addMikrotik', 'Add MikroTik')}
+              </Button>
+            </Can>
+            <Can cap="agents.keys">
+              <Button onClick={openAddAgentModal}>
+                <Plus size={14} className="mr-1.5" />{t('addAgent.title', 'Add Agent')}
+              </Button>
+            </Can>
+          </>
+        )}
+      />
 
-          {/* Create key form */}
-          {showCreateKey && (
-            <div className="mb-4 rounded-lg border border-border bg-bg-secondary p-4">
-              <h3 className="text-sm font-semibold text-text-secondary uppercase tracking-wide mb-3">{t('common.new')} API Key</h3>
-              <div className="flex gap-2">
-                <Input
-                  placeholder="Key name (e.g. Production Servers)"
-                  value={newKeyName}
-                  onChange={e => setNewKeyName(e.target.value)}
-                  onKeyDown={e => e.key === 'Enter' && handleCreateKey()}
-                  autoFocus
-                />
-                <Button onClick={handleCreateKey} loading={saving} disabled={!newKeyName.trim()}>
-                  {t('common.create')}
-                </Button>
-                <Button variant="secondary" onClick={() => { setShowCreateKey(false); setNewKeyName(''); }}>
-                  {t('common.cancel')}
-                </Button>
-              </div>
-            </div>
-          )}
+      <SegmentedTabs<Tab>
+        value={tab}
+        onChange={setTab}
+        fill={false}
+        ariaLabel={t('agentConfig.title', 'Agent config')}
+        tabs={[
+          { id: 'keys', label: t('agentConfig.tabs.keys', 'Enrolment keys'), icon: <Key size={13} />, hidden: !canKeys },
+          {
+            id: 'approvals',
+            label: t('agentConfig.tabs.approvals', 'Pending approvals'),
+            icon: <CheckCircle size={13} />,
+            badge: pendingCount > 0 ? (
+              <span className="inline-flex items-center justify-center min-w-4 h-4 px-1 rounded-full bg-yellow-500 text-white text-[10px] font-bold">
+                {pendingCount}
+              </span>
+            ) : undefined,
+          },
+          { id: 'policy', label: t('agentConfig.tabs.policy', 'Update policy'), icon: <ArrowUpCircle size={13} /> },
+        ]}
+      />
 
-          {/* Keys list */}
-          <div className="rounded-lg border border-border bg-bg-secondary divide-y divide-border">
-            {keys.length === 0 ? (
-              <div className="py-10 text-center">
-                <Key size={28} className="mx-auto mb-2 text-text-muted" />
-                <p className="text-sm text-text-muted">No API keys yet</p>
-              </div>
-            ) : (
-              keys.map(key => (
-                <div key={key.id} className="flex items-center gap-3 px-4 py-3 group">
-                  <Key size={14} className="shrink-0 text-accent" />
-                  <div className="flex-1 min-w-0">
-                    <div className="font-medium text-text-primary text-sm">{key.name}</div>
-                    <div className="flex items-center gap-3 mt-0.5">
-                      <span className="text-xs font-mono text-text-muted">{truncateKey(key.key)}</span>
-                      <CopyButton text={key.key} />
-                      {key.deviceCount !== undefined && (
-                        <span className="text-xs text-text-muted">{key.deviceCount} device{key.deviceCount !== 1 ? 's' : ''}</span>
-                      )}
-                    </div>
-                  </div>
-                  <div className="text-xs text-text-muted shrink-0 text-right">
-                    <div>Created {formatDate(key.createdAt)}</div>
-                    {key.lastUsedAt && <div>Last used {formatDate(key.lastUsedAt)}</div>}
-                  </div>
-                  <button
-                    onClick={() => handleDeleteKey(key)}
-                    className="shrink-0 p-1.5 rounded text-text-muted hover:text-status-down hover:bg-status-down/10 transition-colors opacity-0 group-hover:opacity-100"
-                    title="Delete"
-                  >
-                    <Trash2 size={13} />
-                  </button>
-                </div>
-              ))
-            )}
-          </div>
-        </>
-      )}
+      {!loaded ? (
+        <div className="flex items-center justify-center py-10">
+          <RefreshCw size={18} className="animate-spin text-text-muted" />
+        </div>
+      ) : tab === 'keys' && canKeys ? keysTab : tab === 'approvals' ? approvalsTab : policyTab}
 
       {/* Modals */}
       {approvingDevice && (
         <ApproveModal
           device={approvingDevice}
-          groups={ownGroups}
+          groups={ownAgentGroups}
+          initialGroupId={approvalGroupOf(approvingDevice)}
+          canPickGroup={canManageAgents}
           onApprove={handleApprove}
           onCancel={() => setApprovingDevice(null)}
         />
       )}
 
-      {editingDevice && (
-        <EditAgentModal
-          device={editingDevice}
-          groups={ownGroups}
-          keyName={keys.find(k => k.id === editingDevice.apiKeyId)?.name ?? null}
-          onSave={handleEditSave}
-          onCancel={() => setEditingDevice(null)}
+      {showCreateKey && (
+        <CreateKeyModal
+          groups={ownAgentGroups}
+          onCancel={() => setShowCreateKey(false)}
+          onCreated={(k) => {
+            setShowCreateKey(false);
+            setCreatedKey(k);
+            void loadKeys();
+          }}
         />
       )}
 
-      {showBulkEditModal && selectedDevices.length > 0 && (
-        <BulkEditAgentModal
-          devices={selectedDevices}
-          groups={ownGroups}
-          onSave={handleBulkEditSave}
-          onCancel={() => setShowBulkEditModal(false)}
+      {createdKey && <NewKeyModal created={createdKey} onClose={() => setCreatedKey(null)} />}
+
+      {showRollout && (
+        <UpdateRolloutModal
+          onClose={() => { setShowRollout(false); void loadDevices(); }}
+          onDone={() => { void loadDevices(); }}
         />
       )}
 
       <AddMikroTikModal
         open={showAddMikroTik}
         onClose={() => setShowAddMikroTik(false)}
-        onCreated={() => { loadAll(); toast.success('MikroTik device created'); }}
+        onCreated={() => { void loadAll(); toast.success(t('agentConfig.mikrotikCreated', 'MikroTik device created')); }}
       />
-    </div>
+    </PageContainer>
   );
 }

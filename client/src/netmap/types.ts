@@ -17,6 +17,8 @@ export interface AgentNode {
   deviceColor: string;
   /** Device type label for display. */
   deviceType: string;
+  /** Effective evaluate-only (dry-run) state: observes events, never bans. */
+  evaluateOnly: boolean;
 }
 
 export interface IpNode {

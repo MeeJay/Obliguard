@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { teamsController } from '../controllers/teams.controller';
 import { requireAuth } from '../middleware/auth';
-import { requireRole } from '../middleware/rbac';
+import { requireCapability } from '../middleware/rbac';
 import { validate } from '../middleware/validate';
 import {
   createTeamSchema,
@@ -12,9 +12,11 @@ import {
 
 const router = Router();
 
-// All team routes require admin
+// Teams are managed with the tenant capability users.manage (W7-3). Writes
+// follow the operating tenant (teams.controller loadTeam): a team of another
+// tenant is read-only from Default and not found elsewhere.
 router.use(requireAuth);
-router.use(requireRole('admin'));
+router.use(requireCapability('users.manage'));
 
 // Team CRUD
 router.get('/', teamsController.list);

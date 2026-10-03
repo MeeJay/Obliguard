@@ -322,3 +322,48 @@ export function buildMatchesServed(manifest: AgentManifest | null, served: strin
   if (!file) return false;
   return manifest.artifacts[file]?.version === served;
 }
+
+// ── Paced fleet rollout (W12-4 / FLEET-AGENT-10) ─────────────────────────────
+
+/**
+ * Update offers handed out per window, fleet-wide (every tenant): a large
+ * fleet downloading a 10-20 MB build in the same minute would saturate the
+ * server's uplink. Same pace as Obliance UPDATE_AGENT_ROLLOUT_MAX_PER_WINDOW.
+ */
+export const UPDATE_ROLLOUT_MAX_PER_WINDOW = 25;
+/** Rolling window of the rollout cap (offers counted by last_offered_at). */
+export const UPDATE_ROLLOUT_WINDOW_MS = 60_000;
+/**
+ * A slot reserved for a config frame that was not counted yet (WS: written
+ * first, counted after) is released after this delay when the frame never
+ * made it (failed write, dropped channel).
+ */
+export const UPDATE_ROLLOUT_RESERVATION_MS = 15_000;
+
+/** Level that froze an agent ('unresolved': the policy lookup failed, fail closed). */
+export type RolloutFrozenLevel = 'global' | 'tenant' | 'group' | 'agent' | 'unresolved';
+export const ROLLOUT_FROZEN_LEVELS: readonly RolloutFrozenLevel[] = ['global', 'tenant', 'group', 'agent', 'unresolved'];
+
+/** Whether one more offer fits: counted offers plus reserved slots stay under the cap. */
+export function rolloutWindowHasRoom(counted: number, reserved: number, cap = UPDATE_ROLLOUT_MAX_PER_WINDOW): boolean {
+  return counted + reserved < cap;
+}
+
+/** Minutes the cap needs to offer the update to `targets` agents (0 when none). */
+export function rolloutEstimatedMinutes(
+  targets: number,
+  perWindow = UPDATE_ROLLOUT_MAX_PER_WINDOW,
+  windowMs = UPDATE_ROLLOUT_WINDOW_MS,
+): number {
+  if (targets <= 0 || perWindow <= 0) return 0;
+  return Math.ceil(targets / perWindow) * Math.ceil(windowMs / 60_000);
+}
+
+/** Platform label of an osInfo for the rollout preview: 'linux-amd64', 'windows-amd64', 'unknown'. */
+export function rolloutPlatformOf(osInfo: { platform?: unknown; arch?: unknown } | null | undefined): string {
+  if (!osInfo || typeof osInfo.platform !== 'string' || !osInfo.platform.trim()) return 'unknown';
+  const p = osInfo.platform.trim().toLowerCase();
+  const platform = p === 'win32' ? 'windows' : p;
+  const arch = typeof osInfo.arch === 'string' && osInfo.arch.trim() ? goArch(osInfo.arch) : '';
+  return arch ? `${platform}-${arch}` : platform;
+}

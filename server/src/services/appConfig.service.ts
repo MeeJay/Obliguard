@@ -1,9 +1,75 @@
 import { db } from '../db';
-import type { AppConfig, AgentGlobalConfig, NotificationTypeConfig, ObligateConfig } from '@obliview/shared';
+import type { AppConfig, AgentGlobalConfig, NotificationTypeConfig, ObligateConfig, RateLimitEnforcement } from '@obliview/shared';
 import { DEFAULT_NOTIFICATION_TYPES } from '@obliview/shared';
+import { codedError } from '../utils/errorCodes';
 
 const AGENT_GLOBAL_CONFIG_KEY = 'agent_global_config';
 const OBLIGATE_CONFIG_KEY     = 'obligate_config';
+const RATE_LIMIT_ENFORCEMENT_KEY = 'rateLimitEnforcement';
+
+export type { RateLimitEnforcement };
+
+// ── Data retention (W12-1 / D15) ─────────────────────────────────────────────
+
+/** Retention windows, in days, applied hourly by services/retention.service.ts. */
+export type RetentionKey = 'eventsDays' | 'reputationDays' | 'banHistoryDays' | 'auditDays';
+export type RetentionConfig = Record<RetentionKey, number>;
+
+interface RetentionDef {
+  /** app_config key holding the explicit value (unset = env fallback, then default). */
+  key: string;
+  default: number;
+  min: number;
+  max: number;
+  /** Environment variable used when no explicit value is stored. */
+  env: string | null;
+}
+
+export const RETENTION_DEFS: Readonly<Record<RetentionKey, RetentionDef>> = {
+  // ip_events: raw connection/auth firehose. Dashboard history survives the
+  // purge through the IPS snapshot tables (ipsSnapshot.service). Min 1: the
+  // env variable accepted any positive window before W12-1.
+  eventsDays:     { key: 'retention.eventsDays',     default: 90,  min: 1,  max: 3650, env: 'IP_EVENTS_RETENTION_DAYS' },
+  // ip_reputation rows inactive for this long (never banned or whitelisted ones).
+  reputationDays: { key: 'retention.reputationDays', default: 180, min: 7,  max: 3650, env: null },
+  // Inactive (lifted / expired) ban rows, counted from lifted_at / expires_at.
+  banHistoryDays: { key: 'retention.banHistoryDays', default: 365, min: 7,  max: 3650, env: null },
+  auditDays:      { key: 'retention.auditDays',      default: 365, min: 30, max: 3650, env: 'AUDIT_RETENTION_DAYS' },
+};
+
+export const RETENTION_KEYS = Object.keys(RETENTION_DEFS) as RetentionKey[];
+
+/** One retention setting as shown in Settings: stored value, effective value and bounds. */
+export interface RetentionSettingView {
+  /** Explicit value stored in app_config, null when unset. */
+  value: number | null;
+  /** Value the retention job applies (stored, else env fallback, else default). */
+  effective: number;
+  /** Value used when nothing is stored: the env fallback when set, else the built-in default. */
+  fallback: number;
+  default: number;
+  min: number;
+  max: number;
+  env: string | null;
+  /** Clamped env value, null when the variable is unset or invalid. */
+  envValue: number | null;
+}
+export type RetentionView = Record<RetentionKey, RetentionSettingView>;
+
+/** Integer days within the setting's bounds, or null (unset / not a number). */
+function parseRetentionDays(raw: string | null | undefined, def: RetentionDef): number | null {
+  if (raw == null || raw.trim() === '') return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return null;
+  return Math.min(def.max, Math.max(def.min, Math.floor(n)));
+}
+
+/**
+ * The switch is read on every agent heartbeat: cached briefly, and dropped
+ * whenever the key is written through this service.
+ */
+const RATE_LIMIT_ENFORCEMENT_TTL_MS = 5_000;
+let rateLimitEnforcementCache: { value: RateLimitEnforcement; at: number } | null = null;
 
 export const appConfigService = {
   async get(key: string): Promise<string | null> {
@@ -16,6 +82,92 @@ export const appConfigService = {
       .insert({ key, value })
       .onConflict('key')
       .merge({ value });
+    if (key === RATE_LIMIT_ENFORCEMENT_KEY) rateLimitEnforcementCache = null;
+  },
+
+  async unset(key: string): Promise<void> {
+    await db('app_config').where({ key }).delete();
+    if (key === RATE_LIMIT_ENFORCEMENT_KEY) rateLimitEnforcementCache = null;
+  },
+
+  // ── Data retention (W12-1) ─────────────────────────────────────────────
+
+  /** Stored, env and effective values of every retention window. */
+  async getRetentionView(): Promise<RetentionView> {
+    const rows = await db('app_config')
+      .whereIn('key', RETENTION_KEYS.map((k) => RETENTION_DEFS[k].key))
+      .select('key', 'value') as Array<{ key: string; value: string }>;
+    const stored = new Map(rows.map((r) => [r.key, r.value]));
+    const view = {} as RetentionView;
+    for (const k of RETENTION_KEYS) {
+      const def = RETENTION_DEFS[k];
+      const value = parseRetentionDays(stored.get(def.key), def);
+      const envValue = def.env ? parseRetentionDays(process.env[def.env], def) : null;
+      const fallback = envValue ?? def.default;
+      view[k] = {
+        value, effective: value ?? fallback, fallback,
+        default: def.default, min: def.min, max: def.max, env: def.env, envValue,
+      };
+    }
+    return view;
+  },
+
+  /** Effective retention windows (days), always within their bounds. */
+  async getRetention(): Promise<RetentionConfig> {
+    const view = await this.getRetentionView();
+    const cfg = {} as RetentionConfig;
+    for (const k of RETENTION_KEYS) cfg[k] = view[k].effective;
+    return cfg;
+  },
+
+  /**
+   * Partial update: an integer within [min, max] stores the value, null
+   * clears it (back to the env fallback / default). Anything else is a 400
+   * and nothing is written.
+   */
+  async setRetention(patch: unknown): Promise<RetentionView> {
+    if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+      throw codedError(400, 'FIELD_OBJECT', 'Retention settings must be an object', { field: 'retention' });
+    }
+    const entries = Object.entries(patch as Record<string, unknown>);
+    if (entries.length === 0) throw codedError(400, 'RETENTION_SETTINGS_EMPTY', 'No retention setting given');
+    const writes: Array<{ key: string; value: number | null }> = [];
+    for (const [k, v] of entries) {
+      // Own keys only: 'toString' / '__proto__' are not settings.
+      const def = Object.prototype.hasOwnProperty.call(RETENTION_DEFS, k)
+        ? RETENTION_DEFS[k as RetentionKey] : undefined;
+      if (!def) throw codedError(400, 'SETTING_UNKNOWN', `Unknown retention setting: ${k}`, { key: k });
+      if (v === null) { writes.push({ key: def.key, value: null }); continue; }
+      if (typeof v !== 'number' || !Number.isInteger(v) || v < def.min || v > def.max) {
+        throw codedError(400, 'FIELD_INTEGER_RANGE', `${k} must be an integer between ${def.min} and ${def.max} days`, { field: k, min: def.min, max: def.max });
+      }
+      writes.push({ key: def.key, value: v });
+    }
+    await db.transaction(async (trx) => {
+      for (const w of writes) {
+        if (w.value === null) await trx('app_config').where({ key: w.key }).delete();
+        else await trx('app_config').insert({ key: w.key, value: String(w.value) }).onConflict('key').merge({ value: String(w.value) });
+      }
+    });
+    return this.getRetentionView();
+  },
+
+  // ── Rate-limit enforcement switch (W4-5) ───────────────────────────────
+
+  /** 'on' only when explicitly enabled; anything else (unset included) is 'off'. */
+  async getRateLimitEnforcement(): Promise<RateLimitEnforcement> {
+    const now = Date.now();
+    if (rateLimitEnforcementCache && now - rateLimitEnforcementCache.at < RATE_LIMIT_ENFORCEMENT_TTL_MS) {
+      return rateLimitEnforcementCache.value;
+    }
+    const value: RateLimitEnforcement = (await this.get(RATE_LIMIT_ENFORCEMENT_KEY)) === 'on' ? 'on' : 'off';
+    rateLimitEnforcementCache = { value, at: now };
+    return value;
+  },
+
+  async setRateLimitEnforcement(value: RateLimitEnforcement): Promise<RateLimitEnforcement> {
+    await this.set(RATE_LIMIT_ENFORCEMENT_KEY, value);
+    return value;
   },
 
   async getAll(): Promise<AppConfig> {

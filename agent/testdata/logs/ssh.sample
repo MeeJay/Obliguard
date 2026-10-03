@@ -1,0 +1,55 @@
+@@ parser ssh
+# Real sshd (OpenSSH 8/9) lines, syslog and journald short-traditional.
+# Directive grammar: see parseSampleFile in logwatcher_test.go.
+
+@@ expect {"ip":"203.0.113.10","user":"root"}
+Jan 15 10:20:30 web1 sshd[1234]: Failed password for root from 203.0.113.10 port 51234 ssh2
+
+@@ expect {"ip":"203.0.113.11","user":"admin"}
+Jan 15 10:20:31 web1 sshd[1235]: Failed password for invalid user admin from 203.0.113.11 port 40022 ssh2
+
+@@ expect {"ip":"2001:db8::25","user":"deploy"}
+Jan 15 10:20:32 web1 sshd[1236]: Failed publickey for deploy from 2001:db8::25 port 50122 ssh2: RSA SHA256:Zm9vYmFyYmF6cXV4cXV1eGNvcmdlZ3JhdWx0Z2FycGx5
+
+@@ expect {"ip":"203.0.113.12","user":"oracle"}
+Jan 15 10:20:33 web1 sshd[1237]: Failed keyboard-interactive/pam for invalid user oracle from 203.0.113.12 port 33310 ssh2
+
+@@ expect {"ip":"203.0.113.13","user":""}
+Jan 15 10:20:34 web1 sshd[1238]: Failed password for invalid user  from 203.0.113.13 port 33311 ssh2
+
+@@ expect {"ip":"198.51.100.7","user":"root"}
+Jan 15 10:20:35 web1 sshd[1239]: Failed password for root from ::ffff:198.51.100.7 port 22022 ssh2
+
+# rsyslog folding: one event per repetition.
+@@ expect {"ip":"203.0.113.14","user":"root","count":3}
+Jan 15 10:20:36 web1 sshd[1240]: message repeated 3 times: [ Failed password for root from 203.0.113.14 port 41000 ssh2]
+
+@@ expect {"type":"auth_success","ip":"192.0.2.50","user":"alice"}
+Jan 15 10:21:00 web1 sshd[1300]: Accepted publickey for alice from 192.0.2.50 port 52000 ssh2: ED25519 SHA256:YWxpY2VrZXlmaW5nZXJwcmludA
+
+@@ expect {"type":"auth_success","ip":"192.0.2.51","user":"bob"}
+Jan 15 10:21:01 web1 sshd[1301]: Accepted password for bob from 192.0.2.51 port 52001 ssh2
+
+# Negative: noise around authentication.
+@@ none
+Jan 15 10:21:02 web1 sshd[1302]: Invalid user admin from 203.0.113.15 port 40023
+@@ none
+Jan 15 10:21:03 web1 sshd[1303]: Connection closed by authenticating user root 203.0.113.16 port 40024 [preauth]
+@@ none
+Jan 15 10:21:04 web1 sshd[1304]: Received disconnect from 203.0.113.17 port 40025:11: Bye Bye [preauth]
+@@ none
+Jan 15 10:21:05 web1 sshd[1305]: Failed password for root from web.example.com port 40026 ssh2
+
+# Injection: the username carries a fake "from <ip> port <n>" trailer.
+# The address must never be 198.51.100.66; such a username cannot exist, the line is dropped.
+@@ none
+Jan 15 10:22:00 web1 sshd[1400]: Failed password for invalid user x from 198.51.100.66 port 22 ssh2 from 203.0.113.20 port 41111 ssh2
+@@ none
+Jan 15 10:22:01 web1 sshd[1401]: Failed password for invalid user a from 198.51.100.66 port 1 from 203.0.113.21 port 41112 ssh2
+@@ none
+Jan 15 10:22:02 web1 sshd[1402]: Failed password for invalid user x from 198.51.100.66 port 22 ssh2: RSA y from 203.0.113.22 port 41113 ssh2
+@@ none
+Jan 15 10:22:03 web1 sshd[1403]: message repeated 2 times: [ Failed password for invalid user y from 198.51.100.66 port 9 from 203.0.113.23 port 41114 ssh2]
+# Spaces alone in a username are fine: the trailer binds the address.
+@@ expect {"ip":"203.0.113.24","user":"john smith"}
+Jan 15 10:22:04 web1 sshd[1404]: Failed password for invalid user john smith from 203.0.113.24 port 41115 ssh2

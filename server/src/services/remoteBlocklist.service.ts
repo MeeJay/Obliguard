@@ -4,9 +4,13 @@ import { appConfigService } from './appConfig.service';
 import { logger } from '../utils/logger';
 import { checkBanTarget } from '../utils/protectedIps';
 import { parseIpOrCidr } from '../utils/ipValidation';
+import type { BanTarget } from '../utils/ipValidation';
 import { assertPublicHttpUrl, isPrivateAddress, SsrfRefusedError } from '../utils/ssrfGuard';
 import { AppError } from '../middleware/errorHandler';
+import { codedError, type ErrorCode, type ErrorParams } from '../utils/errorCodes';
+import { liveAlertService, incidentStableKey } from './liveAlert.service';
 import { isMasterTenant, MASTER_TENANT_ID } from '@obliview/shared';
+import { banService } from './ban.service';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -17,6 +21,8 @@ interface BlocklistRow {
   url: string;
   api_key: string | null;
   enabled: boolean;
+  /** Create 'remote' bans from the list (migration 037). */
+  enforce: boolean;
   sync_interval: number;
   last_sync_at: Date | null;
   last_sync_count: number;
@@ -32,6 +38,8 @@ export interface RemoteBlocklist {
   url: string;
   hasApiKey: boolean;
   enabled: boolean;
+  /** The list creates global 'remote' bans (else its entries are only listed). */
+  enforce: boolean;
   syncInterval: number;
   lastSyncAt: string | null;
   lastSyncCount: number;
@@ -46,6 +54,7 @@ export interface RemoteBlocklistPatch {
   url?: unknown;
   apiKey?: unknown;
   enabled?: unknown;
+  enforce?: unknown;
   syncInterval?: unknown;
 }
 
@@ -59,10 +68,13 @@ interface BlockedIpRow {
   reports: number;
   sources: string[] | null;
   enabled: boolean;
+  /** 'banned' | 'suspicious' as reported by the source (migration 037). */
+  status: string;
   created_at: Date;
   // Joined
   blocklist_name?: string;
   source_type?: string;
+  list_enforce?: boolean;
 }
 
 export interface RemoteBlockedIp {
@@ -77,6 +89,12 @@ export interface RemoteBlockedIp {
   reports: number;
   sources: string[];
   enabled: boolean;
+  /** 'banned' | 'suspicious' as reported by the source. */
+  status: string;
+  /** The entry's list enforces (creates bans). */
+  listEnforce: boolean;
+  /** A ban is wanted for this entry: list enforcing, entry enabled and 'banned'. */
+  enforced: boolean;
 }
 
 // ── Limits ───────────────────────────────────────────────────────────────────
@@ -120,6 +138,7 @@ function rowToBlocklist(row: BlocklistRow, opts: { redact?: boolean } = {}): Rem
     url: opts.redact ? redactUrl(row.url) : row.url,
     hasApiKey: !!row.api_key,
     enabled: row.enabled,
+    enforce: row.enforce,
     syncInterval: row.sync_interval,
     lastSyncAt: row.last_sync_at?.toISOString() ?? null,
     lastSyncCount: row.last_sync_count,
@@ -142,6 +161,9 @@ function rowToBlockedIp(row: BlockedIpRow): RemoteBlockedIp {
     reports: row.reports,
     sources: row.sources ?? [],
     enabled: row.enabled,
+    status: row.status ?? 'banned',
+    listEnforce: !!row.list_enforce,
+    enforced: !!row.list_enforce && row.enabled && (row.status ?? 'banned') === 'banned',
   };
 }
 
@@ -159,35 +181,35 @@ function scopeLists<Q extends Knex.QueryBuilder>(q: Q, tenantId: number | null |
   }) as Q;
 }
 
-function badRequest(message: string): AppError {
-  return new AppError(400, message);
+function badRequest(code: ErrorCode, message: string, params?: ErrorParams): AppError {
+  return codedError(400, code, message, params);
 }
 
 function parseName(v: unknown): string {
-  if (typeof v !== 'string' || !v.trim()) throw badRequest('name must be a non-empty string');
+  if (typeof v !== 'string' || !v.trim()) throw badRequest('FIELD_REQUIRED', 'name must be a non-empty string', { field: 'name' });
   const s = v.trim();
-  if (s.length > NAME_MAX) throw badRequest(`name must be at most ${NAME_MAX} characters`);
+  if (s.length > NAME_MAX) throw badRequest('FIELD_TOO_LONG', `name must be at most ${NAME_MAX} characters`, { field: 'name', max: NAME_MAX });
   return s;
 }
 
 function parseUrlString(v: unknown): string {
-  if (typeof v !== 'string' || !v.trim()) throw badRequest('url must be a non-empty string');
+  if (typeof v !== 'string' || !v.trim()) throw badRequest('FIELD_REQUIRED', 'url must be a non-empty string', { field: 'url' });
   const s = v.trim();
-  if (s.length > URL_MAX) throw badRequest(`url must be at most ${URL_MAX} characters`);
+  if (s.length > URL_MAX) throw badRequest('FIELD_TOO_LONG', `url must be at most ${URL_MAX} characters`, { field: 'url', max: URL_MAX });
   return s;
 }
 
 function parseApiKey(v: unknown): string | null {
   if (v === null || v === undefined) return null;
-  if (typeof v !== 'string') throw badRequest('apiKey must be a string');
+  if (typeof v !== 'string') throw badRequest('FIELD_STRING', 'apiKey must be a string', { field: 'apiKey' });
   const s = v.trim();
-  if (s.length > API_KEY_MAX) throw badRequest(`apiKey must be at most ${API_KEY_MAX} characters`);
+  if (s.length > API_KEY_MAX) throw badRequest('FIELD_TOO_LONG', `apiKey must be at most ${API_KEY_MAX} characters`, { field: 'apiKey', max: API_KEY_MAX });
   return s || null;
 }
 
 function parseSyncInterval(v: unknown): number {
   if (typeof v !== 'number' || !Number.isInteger(v) || v < SYNC_INTERVAL_MIN || v > SYNC_INTERVAL_MAX) {
-    throw badRequest(`syncInterval must be an integer between ${SYNC_INTERVAL_MIN} and ${SYNC_INTERVAL_MAX} seconds`);
+    throw badRequest('FIELD_INTEGER_RANGE', `syncInterval must be an integer between ${SYNC_INTERVAL_MIN} and ${SYNC_INTERVAL_MAX} seconds`, { field: 'syncInterval', min: SYNC_INTERVAL_MIN, max: SYNC_INTERVAL_MAX });
   }
   return v;
 }
@@ -197,7 +219,7 @@ async function assertListUrl(url: string): Promise<void> {
   try {
     await assertPublicHttpUrl(url);
   } catch (err) {
-    if (err instanceof SsrfRefusedError) throw badRequest(err.message);
+    if (err instanceof SsrfRefusedError) throw badRequest('BLOCKLIST_URL_REFUSED', err.message);
     throw err;
   }
 }
@@ -253,6 +275,133 @@ function shareableHost(raw: string): string | null {
   return p.address;
 }
 
+// ── Ban provenance (W9-1) ────────────────────────────────────────────────────
+
+/** origin_ref of the 'remote' bans created from a list. */
+export function blocklistOriginRef(listId: number): string {
+  return `blocklist:${listId}`;
+}
+
+/** SQL: ban row `b` as a network, comparable with remote_blocked_ips.ip. */
+const BAN_NETWORK_SQL = 'set_masklen(b.ip, COALESCE(b.cidr_prefix, masklen(b.ip)))';
+
+/**
+ * Bring a list's 'remote' bans in line with its entries (owner decision 6):
+ *   - a list that does not enforce has no active ban (all lifted as
+ *     'remote_sync', which sets no BanEngine watermark);
+ *   - an enforcing list has one global ban per enabled 'banned' entry:
+ *     bans whose entry is gone, disabled or now 'suspicious' are lifted,
+ *     missing ones are created (banService.createRemoteBans: whitelisted
+ *     entries and entries already covered by an active global ban skipped).
+ * A disabled list (no sync) keeps its bans until it stops enforcing or is
+ * deleted. Entries are re-checked like every ban target (the protected set
+ * may have grown since they were stored). The stored enforce flag decides,
+ * not the caller's copy: a sync started before an admin turned enforcement
+ * off must not bring the list's bans back (a deleted list counts as off).
+ */
+async function reconcileListBans(list: Pick<BlocklistRow, 'id' | 'name' | 'tenant_id' | 'source_type'>): Promise<{ created: number; lifted: number }> {
+  const ref = blocklistOriginRef(list.id);
+  const stored = await db('remote_blocklists').where({ id: list.id }).first('enforce') as { enforce: boolean } | undefined;
+  if (!stored?.enforce) return { created: 0, lifted: await banService.deactivateRemoteBans(ref) };
+
+  const staleIds = await db('ip_bans as b')
+    .where({ 'b.origin_ref': ref, 'b.ban_type': 'remote', 'b.is_active': true })
+    .whereNotExists(
+      db('remote_blocked_ips as ri').select(db.raw('1'))
+        .where('ri.blocklist_id', list.id)
+        .where('ri.enabled', true)
+        .where('ri.status', 'banned')
+        .whereRaw(`ri.ip = ${BAN_NETWORK_SQL}`),
+    )
+    .pluck('b.id') as number[];
+  const lifted = (await banService.deactivateBans(staleIds, 'remote_sync')).length;
+
+  const candidates = await db('remote_blocked_ips as ri')
+    .where('ri.blocklist_id', list.id)
+    .where('ri.enabled', true)
+    .where('ri.status', 'banned')
+    .whereNotExists(
+      db('ip_bans as b').select(db.raw('1'))
+        .where('b.is_active', true)
+        .where('b.scope', 'global')
+        .whereRaw(`${BAN_NETWORK_SQL} >>= ri.ip`),
+    )
+    .select(db.raw('ri.ip::text AS target'), 'ri.reason', 'ri.reports') as Array<{ target: string; reason: string | null; reports: number }>;
+
+  const targets: Array<BanTarget & { reason: string }> = [];
+  for (const c of candidates) {
+    const chk = await checkBanTarget(c.target, { allowCidr: true, silent: true });
+    if (!chk.ok) continue;
+    const reason = list.source_type === 'oblitools'
+      ? `obli.tools: ${c.reason ?? 'shared ban'} (${c.reports} reports)`
+      : `Remote blocklist "${list.name}"`;
+    targets.push({ ...chk.target, reason });
+  }
+  const created = await banService.createRemoteBans(targets, {
+    originRef: ref,
+    // Instance lists belong to the Default tenant.
+    originTenantId: list.tenant_id ?? MASTER_TENANT_ID,
+    reason: `Remote blocklist "${list.name}"`,
+  });
+  if (created > 0 || lifted > 0) {
+    logger.info({ listId: list.id, created, lifted }, 'Remote blocklist: bans reconciled');
+  }
+  return { created, lifted };
+}
+
+/** reconcileListBans that logs instead of throwing (CRUD side effects). */
+async function reconcileQuietly(list: Pick<BlocklistRow, 'id' | 'name' | 'tenant_id' | 'source_type'>): Promise<void> {
+  try {
+    await reconcileListBans(list);
+  } catch (err) {
+    logger.error({ err, listId: list.id }, 'Remote blocklist: ban reconciliation failed');
+  }
+}
+
+// ── Sync failure alerts (W6-2) ───────────────────────────────────────────────
+
+function syncFailureKey(listId: number): string {
+  return incidentStableKey('blocklist_sync_failed', `list:${listId}`);
+}
+
+/**
+ * Lists known to have no open sync alert (in memory): a healthy list costs
+ * no live_alerts query per sync. Cleared for a list on failure; after a
+ * restart the first successful sync checks once.
+ */
+const syncHealthy = new Set<number>();
+
+/** Raise (or bump) the list's sync-failure incident. Never throws. */
+async function reportSyncFailure(list: BlocklistRow, err: unknown): Promise<void> {
+  syncHealthy.delete(list.id);
+  const reason = (err instanceof Error ? err.message : String(err)).slice(0, 300);
+  try {
+    await liveAlertService.raiseIncident({
+      // A platform list (tenant_id NULL) belongs to the Default tenant.
+      tenantId: list.tenant_id ?? MASTER_TENANT_ID,
+      kind: 'blocklist_sync_failed',
+      stableKey: syncFailureKey(list.id),
+      severity: 'warning',
+      title: `Blocklist sync failed: ${list.name}`,
+      message: `Remote blocklist "${list.name}" could not be synchronised: ${reason}`,
+      link: '/settings',
+    });
+  } catch (e) {
+    logger.warn({ err: e, listId: list.id }, 'Remote blocklist: sync failure alert failed');
+  }
+}
+
+/** Resolve the list's sync-failure incident, if any. Never throws. */
+async function resolveSyncFailure(listId: number): Promise<void> {
+  if (syncHealthy.has(listId)) return;
+  try {
+    await liveAlertService.resolveIncidents({ stableKey: syncFailureKey(listId) });
+    syncHealthy.add(listId);
+  } catch (e) {
+    logger.warn({ err: e, listId }, 'Remote blocklist: sync alert resolve failed');
+  }
+}
+
 // ── Service ──────────────────────────────────────────────────────────────────
 
 export const remoteBlocklistService = {
@@ -276,11 +425,12 @@ export const remoteBlocklistService = {
     url: unknown;
     apiKey?: unknown;
     syncInterval?: unknown;
+    enforce?: unknown;
     tenantId?: number | null;
   }): Promise<RemoteBlocklist> {
     const name = parseName(data.name);
     if (!SOURCE_TYPES.includes(data.sourceType as typeof SOURCE_TYPES[number])) {
-      throw badRequest(`sourceType must be one of: ${SOURCE_TYPES.join(', ')}`);
+      throw badRequest('FIELD_ONE_OF', `sourceType must be one of: ${SOURCE_TYPES.join(', ')}`, { field: 'sourceType', options: SOURCE_TYPES.join(', ') });
     }
     const sourceType = data.sourceType as typeof SOURCE_TYPES[number];
     const url = parseUrlString(data.url);
@@ -288,6 +438,13 @@ export const remoteBlocklistService = {
     const syncInterval = data.syncInterval === undefined || data.syncInterval === null
       ? 600
       : parseSyncInterval(data.syncInterval);
+    // A new list only lists its entries until an admin turns enforcement on
+    // (owner decision 6; the column default true only covers legacy rows).
+    let enforce = false;
+    if (data.enforce !== undefined && data.enforce !== null) {
+      if (typeof data.enforce !== 'boolean') throw badRequest('FIELD_BOOLEAN', 'enforce must be a boolean', { field: 'enforce' });
+      enforce = data.enforce;
+    }
     await assertListUrl(url);
 
     const [row] = await db<BlocklistRow>('remote_blocklists')
@@ -297,6 +454,7 @@ export const remoteBlocklistService = {
         url,
         api_key: apiKey,
         sync_interval: syncInterval,
+        enforce,
         tenant_id: data.tenantId ?? null,
       })
       .returning('*');
@@ -306,7 +464,8 @@ export const remoteBlocklistService = {
   /**
    * Whitelisted fields only. Changing the URL without supplying a new key
    * drops the stored key: it must never be sent to a host it was not
-   * entered for.
+   * entered for. Turning `enforce` off lifts the list's bans at once;
+   * turning it on creates them from the entries already synced.
    */
   async update(id: number, tenantId: number | null | undefined, patch: RemoteBlocklistPatch): Promise<RemoteBlocklist | null> {
     const current = await this.getRow(id, tenantId);
@@ -315,8 +474,12 @@ export const remoteBlocklistService = {
     const updateData: Record<string, unknown> = { updated_at: new Date() };
     if (patch.name !== undefined) updateData.name = parseName(patch.name);
     if (patch.enabled !== undefined) {
-      if (typeof patch.enabled !== 'boolean') throw badRequest('enabled must be a boolean');
+      if (typeof patch.enabled !== 'boolean') throw badRequest('FIELD_BOOLEAN', 'enabled must be a boolean', { field: 'enabled' });
       updateData.enabled = patch.enabled;
+    }
+    if (patch.enforce !== undefined) {
+      if (typeof patch.enforce !== 'boolean') throw badRequest('FIELD_BOOLEAN', 'enforce must be a boolean', { field: 'enforce' });
+      updateData.enforce = patch.enforce;
     }
     if (patch.syncInterval !== undefined) updateData.sync_interval = parseSyncInterval(patch.syncInterval);
     if (patch.apiKey !== undefined) updateData.api_key = parseApiKey(patch.apiKey);
@@ -333,13 +496,19 @@ export const remoteBlocklistService = {
       .where({ id: current.id })
       .update(updateData)
       .returning('*');
-    return row ? rowToBlocklist(row) : null;
+    if (!row) return null;
+    if (row.enforce !== current.enforce) await reconcileQuietly(row);
+    return rowToBlocklist(row);
   },
 
   async delete(id: number, tenantId: number | null | undefined): Promise<boolean> {
     const current = await this.getRow(id, tenantId);
     if (!current) return false;
+    // Its bans go with it (entries cascade).
+    await banService.deactivateRemoteBans(blocklistOriginRef(current.id));
     const count = await db('remote_blocklists').where({ id: current.id }).del();
+    // A deleted list no longer fails: close its sync alert.
+    if (count > 0) await resolveSyncFailure(current.id);
     return count > 0;
   },
 
@@ -360,6 +529,7 @@ export const remoteBlocklistService = {
           'ri.*',
           'bl.name as blocklist_name',
           'bl.source_type',
+          'bl.enforce as list_enforce',
         ),
       filters.tenantId,
       'bl.tenant_id',
@@ -382,23 +552,34 @@ export const remoteBlocklistService = {
       tenantId,
       'bl.tenant_id',
     );
-    const count = await db('remote_blocked_ips')
+    const [entry] = await db('remote_blocked_ips')
       .where({ id })
       .whereIn('blocklist_id', visible)
-      .update({ enabled });
-    return count > 0;
+      .update({ enabled })
+      .returning('blocklist_id') as Array<{ blocklist_id: number }>;
+    if (!entry) return false;
+    // Applied at once on an enforcing list (ban created / lifted).
+    const list = await db<BlocklistRow>('remote_blocklists').where({ id: entry.blocklist_id }).first();
+    if (list?.enforce) await reconcileQuietly(list);
+    return true;
   },
 
-  async getStats(tenantId: number | null | undefined): Promise<{ total: number; enabled: number; sources: number; lastSync: string | null }> {
+  async getStats(tenantId: number | null | undefined): Promise<{ total: number; enabled: number; enforced: number; sources: number; lastSync: string | null }> {
     const visible = () => scopeLists(db('remote_blocklists as bl').select('bl.id'), tenantId, 'bl.tenant_id');
     const total = await db('remote_blocked_ips').whereIn('blocklist_id', visible()).count('id as count').first() as { count: string };
     const enabled = await db('remote_blocked_ips').whereIn('blocklist_id', visible()).where({ enabled: true }).count('id as count').first() as { count: string };
+    // Entries a ban is wanted for (enforcing list, enabled, 'banned').
+    const enforced = await db('remote_blocked_ips')
+      .whereIn('blocklist_id', visible().where('bl.enforce', true))
+      .where({ enabled: true, status: 'banned' })
+      .count('id as count').first() as { count: string };
     const sources = await scopeLists(db('remote_blocklists').where({ enabled: true }), tenantId).count('id as count').first() as { count: string };
     const lastSync = await scopeLists(db('remote_blocklists').whereNotNull('last_sync_at'), tenantId)
       .orderBy('last_sync_at', 'desc').select('last_sync_at').first() as { last_sync_at: Date } | undefined;
     return {
       total: Number(total?.count ?? 0),
       enabled: Number(enabled?.count ?? 0),
+      enforced: Number(enforced?.count ?? 0),
       sources: Number(sources?.count ?? 0),
       lastSync: lastSync?.last_sync_at?.toISOString() ?? null,
     };
@@ -418,12 +599,23 @@ export const remoteBlocklistService = {
     }
   },
 
+  /**
+   * Sync one list. A failure raises a 'blocklist_sync_failed' live alert of
+   * the list's tenant (platform lists: Default), one per list; the next
+   * successful sync resolves it. The error is rethrown.
+   */
   async syncOne(list: BlocklistRow): Promise<void> {
-    if (list.source_type === 'oblitools') {
-      await this.syncOblitools(list);
-    } else {
-      await this.syncUrl(list);
+    try {
+      if (list.source_type === 'oblitools') {
+        await this.syncOblitools(list);
+      } else {
+        await this.syncUrl(list);
+      }
+    } catch (err) {
+      await reportSyncFailure(list, err);
+      throw err;
     }
+    await resolveSyncFailure(list.id);
   },
 
   async syncOblitools(list: BlocklistRow): Promise<void> {
@@ -472,11 +664,13 @@ export const remoteBlocklistService = {
       }
       const ip = chk.target.cidr;
 
-      // Store in remote_blocked_ips (tracking/display)
+      // Stored with the source's verdict: an enforcing list bans the
+      // 'banned' entries only (reconcileListBans below).
       await db('remote_blocked_ips')
         .insert({
           blocklist_id: list.id,
           ip,
+          status,
           reason: typeof data.reason === 'string' ? data.reason.slice(0, 256) : null,
           first_seen: data.first_seen ? new Date(data.first_seen) : new Date(),
           last_seen: data.last_seen ? new Date(data.last_seen) : new Date(),
@@ -489,45 +683,25 @@ export const remoteBlocklistService = {
           last_seen: db.raw('GREATEST(EXCLUDED.last_seen, remote_blocked_ips.last_seen)'),
           reports: db.raw('GREATEST(EXCLUDED.reports, remote_blocked_ips.reports)'),
           sources: db.raw('COALESCE(EXCLUDED.sources, remote_blocked_ips.sources)'),
+          status: db.raw('EXCLUDED.status'),
         });
 
       if (status === 'banned') {
-        // Create a global auto-ban if not already banned
-        const existingBan = await db('ip_bans').whereRaw('ip = ?::inet', [chk.target.address]).where('is_active', true).first();
-        if (!existingBan) {
-          await db('ip_bans').insert({
-            ip: chk.target.address,
-            scope: 'global',
-            ban_type: 'auto',
-            reason: `obli.tools: ${data.reason ?? 'shared ban'} (${data.reports ?? 1} reports)`,
-            is_active: true,
-          }).catch(() => {}); // ignore duplicates
-        }
         countBanned++;
       } else {
-        // Suspicious: inject auth_failure events to pre-load the ban engine counter.
-        // Each "report" from another instance counts as one failure, effectively
-        // reducing the remaining attempts before this IP gets auto-banned locally.
-        const reports = Math.min(data.reports ?? 1, 10); // Cap at 10 to avoid instant-ban
-        for (let i = 0; i < reports; i++) {
-          await db('ip_events').insert({
-            id: `oblitools-${ip}-${Date.now()}-${i}`,
-            ip,
-            username: '',
-            service: 'oblitools_shared',
-            event_type: 'auth_failure',
-            raw_log: `obli.tools: suspicious IP (${data.reports ?? 1} reports from ${(data.sources ?? []).length} sources)`,
-            tenant_id: list.tenant_id,
-            source_ip_type: 'public',
-            timestamp: new Date(),
-          }).catch(() => {});
-        }
-        // Mark IP as suspicious in reputation
+        // Suspicious: listed and shown in IP Reputation, never pre-loaded into
+        // the BanEngine counters (an imported report is not a local failure;
+        // the former ip_events injection never worked: string id into a
+        // bigIncrements column).
         const { ipReputationService } = await import('./ipReputation.service');
         await ipReputationService.ensureExists(ip).catch(() => {});
         countSuspicious++;
       }
     }
+
+    // Global 'remote' bans of the 'banned' entries, only when the list
+    // enforces (owner decision 6).
+    await reconcileListBans(list);
 
     if (countRefused > 0) {
       logger.warn({ listId: list.id, refused: countRefused }, 'obli.tools sync: refused reserved/protected/invalid entries');
@@ -573,6 +747,11 @@ export const remoteBlocklistService = {
 
     // Batch upsert (entries are de-duplicated: one statement may not touch a row twice)
     const now = new Date();
+    if (ips.size === 0) {
+      // An empty answer is more likely a transient upstream problem than an
+      // emptied list: the entries (and their bans) are kept.
+      logger.warn({ listId: list.id }, 'URL blocklist sync: empty list, entries kept');
+    }
     const all = [...ips];
     for (let i = 0; i < all.length; i += UPSERT_CHUNK) {
       const chunk = all.slice(i, i + UPSERT_CHUNK);
@@ -586,6 +765,13 @@ export const remoteBlocklistService = {
         .onConflict(['blocklist_id', 'ip'])
         .merge({ last_seen: now });
     }
+
+    // The list mirrors the source: entries it no longer serves are dropped
+    // (their bans are lifted by the reconciliation).
+    if (all.length > 0) {
+      await db('remote_blocked_ips').where({ blocklist_id: list.id }).where('last_seen', '<', now).del();
+    }
+    await reconcileListBans(list);
 
     await db('remote_blocklists').where({ id: list.id }).update({
       last_sync_at: now,
@@ -628,6 +814,7 @@ export const remoteBlocklistService = {
       .where('b.banned_at', '>', lastPush)
       .where('b.banned_at', '<=', pushStartedAt)
       .whereNull('b.origin_app')
+      .whereNull('b.origin_ref')
       .whereNull('b.cidr_prefix')
       .where((w) => {
         w.whereNull('b.reason').orWhere((r) => {

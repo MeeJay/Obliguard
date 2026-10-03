@@ -1,5 +1,6 @@
 import { db } from '../db';
-import { AppError } from '../middleware/errorHandler';
+import { codedError } from '../utils/errorCodes';
+import { readTenantsFor } from '../middleware/tenant';
 import type {
   ServiceTemplate,
   ServiceTemplateAssignment,
@@ -30,7 +31,12 @@ interface ServiceTemplateRow {
   created_by: number | null;
   created_at: Date;
   updated_at: Date;
+  /** Joined from tenants (list queries only). */
+  tenant_name?: string | null;
 }
+
+/** A listed template with its owning tenant's name (W10-5; null tenant = platform template). */
+export type ServiceTemplateListItem = ServiceTemplate & { tenantName: string | null };
 
 interface ServiceTemplateAssignmentRow {
   id: number;
@@ -90,30 +96,122 @@ function rowToAssignment(row: ServiceTemplateAssignmentRow): ServiceTemplateAssi
   };
 }
 
+/**
+ * One resolved entry of an agent: agent assignment override > nearest group
+ * assignment override > template default. Group-owned templates get no group
+ * assignment (they belong TO the group).
+ */
+function buildResolvedEntry(
+  tpl: ServiceTemplateRow,
+  agentAssignment: ServiceTemplateAssignmentRow | null,
+  groupAssignment: ServiceTemplateAssignmentRow | null,
+  templateOwnerScope: 'group' | null,
+): ResolvedServiceConfig {
+  const logPath =
+    agentAssignment?.log_path_override ??
+    groupAssignment?.log_path_override ??
+    tpl.default_log_path;
+
+  const threshold =
+    agentAssignment?.threshold_override ??
+    groupAssignment?.threshold_override ??
+    tpl.threshold;
+
+  const windowSeconds =
+    agentAssignment?.window_seconds_override ??
+    groupAssignment?.window_seconds_override ??
+    tpl.window_seconds;
+
+  const enabledOverrideScope: ResolvedServiceConfig['enabledOverrideScope'] =
+    agentAssignment?.enabled_override !== null && agentAssignment?.enabled_override !== undefined
+      ? 'agent'
+      : groupAssignment?.enabled_override !== null && groupAssignment?.enabled_override !== undefined
+        ? 'group'
+        : null;
+
+  const enabled =
+    agentAssignment?.enabled_override ??
+    groupAssignment?.enabled_override ??
+    tpl.enabled;
+
+  const thresholdOverrideScope: ResolvedServiceConfig['thresholdOverrideScope'] =
+    agentAssignment?.threshold_override !== null && agentAssignment?.threshold_override !== undefined
+      ? 'agent'
+      : groupAssignment?.threshold_override !== null && groupAssignment?.threshold_override !== undefined
+        ? 'group'
+        : null;
+
+  const thresholdOverride =
+    agentAssignment?.threshold_override !== undefined ? agentAssignment.threshold_override :
+    groupAssignment?.threshold_override !== undefined ? groupAssignment.threshold_override :
+    null;
+
+  const windowSecondsOverride =
+    agentAssignment?.window_seconds_override !== undefined ? agentAssignment.window_seconds_override :
+    groupAssignment?.window_seconds_override !== undefined ? groupAssignment.window_seconds_override :
+    null;
+
+  return {
+    templateId: tpl.id,
+    name: tpl.name,
+    serviceType: tpl.service_type as ResolvedServiceConfig['serviceType'],
+    isBuiltin: tpl.is_builtin,
+    logPath,
+    customRegex: tpl.custom_regex,
+    threshold,
+    windowSeconds,
+    enabled,
+    mode: (tpl.mode ?? 'ban') as ServiceTemplateMode,
+    sampleRequested: agentAssignment?.sample_requested ?? false,
+    enabledOverrideScope,
+    templateOwnerScope,
+    thresholdOverrideScope,
+    thresholdOverride,
+    windowSecondsOverride,
+  };
+}
+
+/** Sort of a resolved list: enabled first, then by name. */
+function sortResolved(resolved: ResolvedServiceConfig[]): ResolvedServiceConfig[] {
+  return resolved.sort((a, b) => {
+    if (a.enabled !== b.enabled) return a.enabled ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+}
+
+/** An agent to resolve: its id and its ancestor group ids, closest first. */
+export interface AgentTemplateScope {
+  deviceId: number;
+  groupIds: number[];
+}
+
 // ── Service ──────────────────────────────────────────────────────────────────
 
 class ServiceTemplateService {
   /**
    * Lists all service templates visible to the caller:
    *   - Platform-wide built-in templates (tenant_id IS NULL)
-   *   - Tenant-owned custom templates for this tenant
+   *   - Tenant-owned custom templates of the read tenants (readTenantsFor,
+   *     W10-5): every tenant from Default (narrowed by `tenantIds`, the
+   *     tenant chips), the operating tenant alone anywhere else - the
+   *     platform role grants nothing extra
    *   - Excludes local templates (owner_scope IS NOT NULL) — use listLocal() for those
-   * Admins additionally see all tenant-scoped templates.
+   * Rows carry tenantId + tenantName (null = platform template).
    */
-  async list(tenantId: number, isAdmin: boolean): Promise<ServiceTemplate[]> {
-    const query = db<ServiceTemplateRow>('service_templates')
-      .whereNull('owner_scope')  // exclude local templates
+  async list(tenantId: number, _isAdmin?: boolean, tenantIds?: number[]): Promise<ServiceTemplateListItem[]> {
+    const tenants = readTenantsFor(tenantId, tenantIds);
+    const query = db<ServiceTemplateRow>('service_templates as st')
+      .leftJoin('tenants as tt', 'tt.id', 'st.tenant_id')
+      .whereNull('st.owner_scope')  // exclude local templates
       .where((builder) => {
-        builder.whereNull('tenant_id');
-        if (!isAdmin && !isMasterTenant(tenantId)) {
-          builder.orWhere('tenant_id', tenantId);
-        } else {
-          builder.orWhereNotNull('tenant_id');
-        }
-      });
+        builder.whereNull('st.tenant_id');
+        if (tenants === 'all') builder.orWhereNotNull('st.tenant_id');
+        else if (tenants.length > 0) builder.orWhereIn('st.tenant_id', tenants);
+      })
+      .select('st.*', 'tt.name as tenant_name');
 
-    const rows = await query.orderBy('is_builtin', 'desc').orderBy('name', 'asc');
-    return rows.map((row) => rowToTemplate(row));
+    const rows = await query.orderBy('st.is_builtin', 'desc').orderBy('st.name', 'asc').orderBy('st.id', 'asc') as ServiceTemplateRow[];
+    return rows.map((row) => ({ ...rowToTemplate(row), tenantName: row.tenant_name ?? null }));
   }
 
   /**
@@ -130,18 +228,19 @@ class ServiceTemplateService {
 
   /**
    * Fetches a single template by ID, including its assignments.
-   * Tenant members may only access platform-wide or their own tenant's templates.
+   * Outside Default, only platform-wide or the operating tenant's own
+   * templates are readable, whatever the platform role (W10-5).
    */
   async getById(
     id: number,
     tenantId: number,
-    isAdmin: boolean,
+    _isAdmin?: boolean,
   ): Promise<ServiceTemplate | null> {
     const row = await db<ServiceTemplateRow>('service_templates').where({ id }).first();
     if (!row) return null;
 
-    // Access control: non-admins can only see global or their tenant's templates
-    if (!isAdmin && !isMasterTenant(tenantId) && row.tenant_id !== null && row.tenant_id !== tenantId) {
+    // Access control: platform templates, or the operating tenant's own (all from Default).
+    if (!isMasterTenant(tenantId) && row.tenant_id !== null && Number(row.tenant_id) !== Number(tenantId)) {
       return null;
     }
 
@@ -218,11 +317,11 @@ class ServiceTemplateService {
     tenantId: number,
   ): Promise<ServiceTemplate> {
     const existing = await db<ServiceTemplateRow>('service_templates').where({ id }).first();
-    if (!existing) throw new AppError(404, 'Service template not found');
+    if (!existing) throw codedError(404, 'SERVICE_TEMPLATE_NOT_FOUND', 'Service template not found');
 
     // Tenant access control: non-null tenant_id must match caller's tenant
     if (existing.tenant_id !== null && existing.tenant_id !== tenantId) {
-      throw new AppError(404, 'Service template not found');
+      throw codedError(404, 'SERVICE_TEMPLATE_NOT_FOUND', 'Service template not found');
     }
 
     const updates: Partial<ServiceTemplateRow> = {
@@ -239,7 +338,7 @@ class ServiceTemplateService {
     // customRegex only allowed on non-builtin templates
     if (data.customRegex !== undefined) {
       if (existing.is_builtin) {
-        throw new AppError(400, 'Cannot set custom regex on a built-in template');
+        throw codedError(400, 'SERVICE_TEMPLATE_BUILTIN_REGEX', 'Cannot set custom regex on a built-in template');
       }
       updates.custom_regex = data.customRegex;
     }
@@ -259,14 +358,14 @@ class ServiceTemplateService {
    */
   async delete(id: number, tenantId: number): Promise<void> {
     const existing = await db<ServiceTemplateRow>('service_templates').where({ id }).first();
-    if (!existing) throw new AppError(404, 'Service template not found');
+    if (!existing) throw codedError(404, 'SERVICE_TEMPLATE_NOT_FOUND', 'Service template not found');
 
     if (existing.is_builtin) {
-      throw new AppError(400, 'Cannot delete a built-in service template');
+      throw codedError(400, 'SERVICE_TEMPLATE_BUILTIN_DELETE', 'Cannot delete a built-in service template');
     }
 
     if (existing.tenant_id !== null && existing.tenant_id !== tenantId) {
-      throw new AppError(404, 'Service template not found');
+      throw codedError(404, 'SERVICE_TEMPLATE_NOT_FOUND', 'Service template not found');
     }
 
     // Remove assignments first (FK constraint)
@@ -288,7 +387,7 @@ class ServiceTemplateService {
     const template = await db<ServiceTemplateRow>('service_templates')
       .where({ id: templateId })
       .first();
-    if (!template) throw new AppError(404, 'Service template not found');
+    if (!template) throw codedError(404, 'SERVICE_TEMPLATE_NOT_FOUND', 'Service template not found');
 
     const existing = await db<ServiceTemplateAssignmentRow>('service_template_assignments')
       .where({ template_id: templateId, scope, scope_id: scopeId })
@@ -342,7 +441,7 @@ class ServiceTemplateService {
       .where({ template_id: templateId, scope, scope_id: scopeId })
       .del();
 
-    if (!deleted) throw new AppError(404, 'Service template assignment not found');
+    if (!deleted) throw codedError(404, 'SERVICE_TEMPLATE_ASSIGNMENT_NOT_FOUND', 'Service template assignment not found');
   }
 
   /**
@@ -360,151 +459,105 @@ class ServiceTemplateService {
     deviceId: number,
     groupIds: number[],
   ): Promise<ResolvedServiceConfig[]> {
-    // 1. Fetch ALL global templates (opt-out — every global template applies by default)
-    const globalTemplates = await db<ServiceTemplateRow>('service_templates')
-      .whereNull('owner_scope');
+    const resolved = await this.resolveForAgents([{ deviceId, groupIds }]);
+    return resolved.get(deviceId) ?? [];
+  }
 
-    // 2. Fetch group-owned templates for the device's direct group (groupIds[0] = depth-0 = self)
-    const directGroupId = groupIds.length > 0 ? groupIds[0] : null;
-    const groupOwnedTemplates: ServiceTemplateRow[] = directGroupId !== null
+  /**
+   * resolveForAgent for many agents at once (ban engine cycle, W11-3): at
+   * most four queries whatever the number of agents (global templates,
+   * group-owned templates of every direct group, agent assignments, group
+   * assignments of every ancestor group). Each agent gets exactly what
+   * resolveForAgent returns for it; every agent of `agents` has an entry.
+   */
+  async resolveForAgents(
+    agents: ReadonlyArray<AgentTemplateScope>,
+  ): Promise<Map<number, ResolvedServiceConfig[]>> {
+    const out = new Map<number, ResolvedServiceConfig[]>();
+    if (agents.length === 0) return out;
+
+    // 1. ALL global templates (opt-out — every global template applies by default)
+    const globalTemplates = await db<ServiceTemplateRow>('service_templates')
+      .whereNull('owner_scope')
+      .orderBy('id');
+
+    // 2. Group-owned templates of each agent's direct group (groupIds[0] = depth-0 = self)
+    const directGroupIds = [...new Set(
+      agents.map((a) => (a.groupIds.length > 0 ? a.groupIds[0] : null)).filter((g): g is number => g !== null),
+    )];
+    const groupOwnedTemplates: ServiceTemplateRow[] = directGroupIds.length > 0
       ? await db<ServiceTemplateRow>('service_templates')
           .where('owner_scope', 'group')
-          .where('owner_scope_id', directGroupId)
+          .whereRaw('owner_scope_id = ANY(?::int[])', [directGroupIds])
+          .orderBy('id')
       : [];
-
-    const allTemplates = [...globalTemplates, ...groupOwnedTemplates];
-    if (allTemplates.length === 0) return [];
-
-    const allTemplateIds  = allTemplates.map(t => t.id);
-    const globalTemplateIds = globalTemplates.map(t => t.id);
-
-    // 3. Fetch ALL agent-level assignments in one query
-    const agentAssignments = await db<ServiceTemplateAssignmentRow>('service_template_assignments')
-      .where({ scope: 'agent', scope_id: deviceId })
-      .whereIn('template_id', allTemplateIds);
-
-    const agentAssignmentByTemplate = new Map<number, ServiceTemplateAssignmentRow>();
-    for (const asgn of agentAssignments) {
-      agentAssignmentByTemplate.set(asgn.template_id, asgn);
+    const ownedByGroup = new Map<number, ServiceTemplateRow[]>();
+    for (const tpl of groupOwnedTemplates) {
+      const gid = Number(tpl.owner_scope_id);
+      const list = ownedByGroup.get(gid);
+      if (list) list.push(tpl); else ownedByGroup.set(gid, [tpl]);
     }
 
-    // 4. Fetch group-level assignments for GLOBAL templates only (walk closest → farthest)
-    const groupAssignmentByTemplate = new Map<number, ServiceTemplateAssignmentRow>();
-    if (groupIds.length > 0 && globalTemplateIds.length > 0) {
+    if (globalTemplates.length === 0 && groupOwnedTemplates.length === 0) {
+      for (const a of agents) out.set(a.deviceId, []);
+      return out;
+    }
+
+    const allTemplateIds = [...globalTemplates, ...groupOwnedTemplates].map(t => t.id);
+    const globalTemplateIds = globalTemplates.map(t => t.id);
+
+    // 3. Agent-level assignments of every agent, in one query
+    const deviceIds = [...new Set(agents.map((a) => a.deviceId))];
+    const agentAssignments = await db<ServiceTemplateAssignmentRow>('service_template_assignments')
+      .where('scope', 'agent')
+      .whereRaw('scope_id = ANY(?::int[])', [deviceIds])
+      .whereRaw('template_id = ANY(?::int[])', [allTemplateIds])
+      .orderBy('id');
+    const agentAssignmentByKey = new Map<string, ServiceTemplateAssignmentRow>();
+    for (const asgn of agentAssignments) {
+      agentAssignmentByKey.set(`${asgn.scope_id}:${asgn.template_id}`, asgn);
+    }
+
+    // 4. Group-level assignments of GLOBAL templates for every ancestor group
+    const ancestorIds = [...new Set(agents.flatMap((a) => a.groupIds))];
+    const groupAssignmentsByGroup = new Map<number, ServiceTemplateAssignmentRow[]>();
+    if (ancestorIds.length > 0 && globalTemplateIds.length > 0) {
       const allGroupAssignments = await db<ServiceTemplateAssignmentRow>('service_template_assignments')
         .where('scope', 'group')
-        .whereIn('scope_id', groupIds)
-        .whereIn('template_id', globalTemplateIds);
+        .whereRaw('scope_id = ANY(?::int[])', [ancestorIds])
+        .whereRaw('template_id = ANY(?::int[])', [globalTemplateIds])
+        .orderBy('id');
+      for (const asgn of allGroupAssignments) {
+        const list = groupAssignmentsByGroup.get(asgn.scope_id);
+        if (list) list.push(asgn); else groupAssignmentsByGroup.set(asgn.scope_id, [asgn]);
+      }
+    }
 
+    for (const { deviceId, groupIds } of agents) {
+      // Nearest group assignment per template (walk closest → farthest)
+      const groupAssignmentByTemplate = new Map<number, ServiceTemplateAssignmentRow>();
       for (const groupId of groupIds) {
-        for (const asgn of allGroupAssignments.filter(a => a.scope_id === groupId)) {
+        for (const asgn of groupAssignmentsByGroup.get(groupId) ?? []) {
           if (!groupAssignmentByTemplate.has(asgn.template_id)) {
             groupAssignmentByTemplate.set(asgn.template_id, asgn);
           }
         }
       }
+      const agentAssignment = (tplId: number) => agentAssignmentByKey.get(`${deviceId}:${tplId}`) ?? null;
+
+      const resolved: ResolvedServiceConfig[] = [];
+      // 5. Global templates — agent + group overrides
+      for (const tpl of globalTemplates) {
+        resolved.push(buildResolvedEntry(tpl, agentAssignment(tpl.id), groupAssignmentByTemplate.get(tpl.id) ?? null, null));
+      }
+      // 6. Group-owned templates — agent override only (no group-level bind/unbind)
+      const directGroupId = groupIds.length > 0 ? groupIds[0] : null;
+      for (const tpl of directGroupId !== null ? ownedByGroup.get(directGroupId) ?? [] : []) {
+        resolved.push(buildResolvedEntry(tpl, agentAssignment(tpl.id), null, 'group'));
+      }
+      out.set(deviceId, sortResolved(resolved));
     }
-
-    // ── Helper to build one resolved entry ───────────────────────────────────
-    function buildEntry(
-      tpl: ServiceTemplateRow,
-      agentAssignment: ServiceTemplateAssignmentRow | null,
-      groupAssignment: ServiceTemplateAssignmentRow | null,
-      templateOwnerScope: 'group' | null,
-    ): ResolvedServiceConfig {
-      const logPath =
-        agentAssignment?.log_path_override ??
-        groupAssignment?.log_path_override ??
-        tpl.default_log_path;
-
-      const threshold =
-        agentAssignment?.threshold_override ??
-        groupAssignment?.threshold_override ??
-        tpl.threshold;
-
-      const windowSeconds =
-        agentAssignment?.window_seconds_override ??
-        groupAssignment?.window_seconds_override ??
-        tpl.window_seconds;
-
-      const enabledOverrideScope: ResolvedServiceConfig['enabledOverrideScope'] =
-        agentAssignment?.enabled_override !== null && agentAssignment?.enabled_override !== undefined
-          ? 'agent'
-          : groupAssignment?.enabled_override !== null && groupAssignment?.enabled_override !== undefined
-            ? 'group'
-            : null;
-
-      const enabled =
-        agentAssignment?.enabled_override ??
-        groupAssignment?.enabled_override ??
-        tpl.enabled;
-
-      const thresholdOverrideScope: ResolvedServiceConfig['thresholdOverrideScope'] =
-        agentAssignment?.threshold_override !== null && agentAssignment?.threshold_override !== undefined
-          ? 'agent'
-          : groupAssignment?.threshold_override !== null && groupAssignment?.threshold_override !== undefined
-            ? 'group'
-            : null;
-
-      const thresholdOverride =
-        agentAssignment?.threshold_override !== undefined ? agentAssignment.threshold_override :
-        groupAssignment?.threshold_override !== undefined ? groupAssignment.threshold_override :
-        null;
-
-      const windowSecondsOverride =
-        agentAssignment?.window_seconds_override !== undefined ? agentAssignment.window_seconds_override :
-        groupAssignment?.window_seconds_override !== undefined ? groupAssignment.window_seconds_override :
-        null;
-
-      return {
-        templateId: tpl.id,
-        name: tpl.name,
-        serviceType: tpl.service_type as ResolvedServiceConfig['serviceType'],
-        isBuiltin: tpl.is_builtin,
-        logPath,
-        customRegex: tpl.custom_regex,
-        threshold,
-        windowSeconds,
-        enabled,
-        mode: (tpl.mode ?? 'ban') as ServiceTemplateMode,
-        sampleRequested: agentAssignment?.sample_requested ?? false,
-        enabledOverrideScope,
-        templateOwnerScope,
-        thresholdOverrideScope,
-        thresholdOverride,
-        windowSecondsOverride,
-      };
-    }
-
-    const resolved: ResolvedServiceConfig[] = [];
-
-    // 5. Global templates — agent + group overrides
-    for (const tpl of globalTemplates) {
-      resolved.push(buildEntry(
-        tpl,
-        agentAssignmentByTemplate.get(tpl.id) ?? null,
-        groupAssignmentByTemplate.get(tpl.id) ?? null,
-        null,
-      ));
-    }
-
-    // 6. Group-owned templates — agent override only (they belong TO the group)
-    for (const tpl of groupOwnedTemplates) {
-      resolved.push(buildEntry(
-        tpl,
-        agentAssignmentByTemplate.get(tpl.id) ?? null,
-        null, // no group-level bind/unbind for group-owned templates
-        'group',
-      ));
-    }
-
-    // Sort: enabled first, then by name
-    resolved.sort((a, b) => {
-      if (a.enabled !== b.enabled) return a.enabled ? -1 : 1;
-      return a.name.localeCompare(b.name);
-    });
-
-    return resolved;
+    return out;
   }
 
   /**
@@ -617,7 +670,7 @@ class ServiceTemplateService {
     const template = await db<ServiceTemplateRow>('service_templates')
       .where({ id: templateId })
       .first();
-    if (!template) throw new AppError(404, 'Service template not found');
+    if (!template) throw codedError(404, 'SERVICE_TEMPLATE_NOT_FOUND', 'Service template not found');
 
     const existing = await db<ServiceTemplateAssignmentRow>('service_template_assignments')
       .where({ template_id: templateId, scope: 'agent', scope_id: deviceId })

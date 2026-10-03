@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from 'react';
 import { ChevronRight, ChevronDown, Folder, Search, X } from 'lucide-react';
 import type { GroupTreeNode } from '@obliview/shared';
 import { cn } from '@/utils/cn';
+import { useTranslation } from 'react-i18next';
 
 interface GroupPickerProps {
   value: number | null;
@@ -125,7 +126,8 @@ function TreeNode({ node, depth, selectedId, onSelect, filter, excludeId, kindFi
   );
 }
 
-export function GroupPicker({ value, onChange, tree, placeholder = 'Select a group', excludeId, kindFilter }: GroupPickerProps) {
+export function GroupPicker({ value, onChange, tree, placeholder, excludeId, kindFilter }: GroupPickerProps) {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [filter, setFilter] = useState('');
   const containerRef = useRef<HTMLDivElement>(null);
@@ -166,7 +168,7 @@ export function GroupPicker({ value, onChange, tree, placeholder = 'Select a gro
         className="flex w-full items-center justify-between rounded-md border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
       >
         <span className={cn(!selectedName && 'text-text-muted')}>
-          {selectedName || placeholder}
+          {selectedName || (placeholder ?? t('groups.picker.placeholder', { defaultValue: 'Select a group' }))}
         </span>
         <ChevronDown size={14} className={cn('transition-transform', open && 'rotate-180')} />
       </button>
@@ -182,7 +184,7 @@ export function GroupPicker({ value, onChange, tree, placeholder = 'Select a gro
               type="text"
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
-              placeholder="Search groups..."
+              placeholder={t('groups.picker.search', { defaultValue: 'Search groups...' })}
               className="flex-1 bg-transparent text-sm text-text-primary placeholder:text-text-muted focus:outline-none"
             />
             {filter && (
@@ -206,7 +208,7 @@ export function GroupPicker({ value, onChange, tree, placeholder = 'Select a gro
               )}
             >
               <span className="w-3.5 shrink-0" />
-              <span className="italic">No group</span>
+              <span className="italic">{t('groups.picker.noGroup', { defaultValue: 'No group' })}</span>
             </button>
 
             {tree.map((node) => (

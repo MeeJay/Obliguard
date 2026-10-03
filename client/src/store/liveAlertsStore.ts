@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type { LiveAlertData } from '@obliview/shared';
+import { useTenantStore } from './tenantStore';
 
 export type AlertSeverity = 'down' | 'up' | 'warning' | 'info';
 
@@ -37,6 +38,10 @@ interface LiveAlertsState extends AlertPrefs {
   fetchAlerts: () => Promise<void>;
   /** Add a single alert received via socket (NOTIFICATION_NEW). */
   addAlertFromServer: (alert: LiveAlertData) => void;
+  /** Drop incidents the server resolved (NOTIFICATION_RESOLVED). */
+  applyResolvedFromServer: (ids: number[]) => void;
+  /** Mark alerts read elsewhere as read here too (NOTIFICATION_READ). */
+  applyReadFromServer: (ids: number[], readAt?: string | null) => void;
 
   // ── Actions ───────────────────────────────────────────────────────────────────
   /** Dismiss the toast popup for one alert (keeps it in the bell, does NOT mark as read). */
@@ -55,6 +60,11 @@ interface LiveAlertsState extends AlertPrefs {
 
 function toLocalAlert(data: LiveAlertData): LiveAlert {
   return { ...data, toastDismissed: false };
+}
+
+/** Resolved incidents are hidden by default (the server omits them unless asked). */
+function isActive(data: LiveAlertData): boolean {
+  return !data.resolvedAt;
 }
 
 async function apiPatch(path: string): Promise<void> {
@@ -91,7 +101,7 @@ export const useLiveAlertsStore = create<LiveAlertsState>()(
           const res = await fetch('/api/live-alerts/all', { credentials: 'include' });
           if (!res.ok) return;
           const data = (await res.json()) as { alerts: LiveAlertData[] };
-          set({ alerts: data.alerts.map(toLocalAlert) });
+          set({ alerts: data.alerts.filter(isActive).map(toLocalAlert) });
         } catch {
           // Ignore network errors (user may not be logged in yet)
         }
@@ -99,9 +109,27 @@ export const useLiveAlertsStore = create<LiveAlertsState>()(
 
       addAlertFromServer: (alert) =>
         set((s) => {
-          // Skip if already in list (e.g. double-emit)
-          if (s.alerts.some((a) => a.id === alert.id)) return s;
+          // Skip if already in list (e.g. double-emit) or already resolved
+          if (!isActive(alert) || s.alerts.some((a) => a.id === alert.id)) return s;
           return { alerts: [toLocalAlert(alert), ...s.alerts].slice(0, 200) };
+        }),
+
+      applyResolvedFromServer: (ids) =>
+        set((s) => {
+          if (ids.length === 0) return s;
+          const gone = new Set(ids);
+          return { alerts: s.alerts.filter((a) => !gone.has(a.id)) };
+        }),
+
+      applyReadFromServer: (ids, readAt) =>
+        set((s) => {
+          if (ids.length === 0) return s;
+          const read = new Set(ids);
+          return {
+            alerts: s.alerts.map((a) => read.has(a.id)
+              ? { ...a, read: true, readAt: readAt ?? a.readAt ?? null, toastDismissed: true }
+              : a),
+          };
         }),
 
       // ── Actions ────────────────────────────────────────────────────────────
@@ -148,6 +176,22 @@ export const useLiveAlertsStore = create<LiveAlertsState>()(
 );
 
 // ─── Computed helpers (exported for components) ───────────────────────────────
+
+/**
+ * Open an alert's deep link (bell and toasts). An alert of another tenant
+ * switches the session tenant first, then does a full page navigation so no
+ * stale tenant data stays in memory (same as F5). Without a link, an
+ * other-tenant alert lands on that tenant's dashboard.
+ */
+export async function openAlertLink(alert: LiveAlertData, navigate: (to: string) => void): Promise<void> {
+  const { currentTenantId, setCurrentTenant } = useTenantStore.getState();
+  if (alert.tenantId && currentTenantId != null && alert.tenantId !== currentTenantId) {
+    await setCurrentTenant(alert.tenantId);
+    window.location.href = alert.navigateTo ?? '/';
+    return;
+  }
+  if (alert.navigateTo) navigate(alert.navigateTo);
+}
 
 /** Count of unread alerts, optionally filtered to a specific tenant. */
 export function countUnread(alerts: LiveAlert[], tenantId?: number | null): number {

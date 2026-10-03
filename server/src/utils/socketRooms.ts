@@ -4,7 +4,12 @@
  * Rooms (joined in socket.ts from the server-side session only):
  *   - `tenant:<id>`        sockets whose current tenant is <id>;
  *   - `tenant:<id>:admin`  platform admins operating <id>;
- *   - `general`            every authenticated socket.
+ *   - `general`            every authenticated socket;
+ *   - `tenant:<id>:ipfeed` sockets of <id> without a team restriction: the
+ *                          tenant's IP activity (ip:events / ip:flow);
+ *   - `agentwatch:<dev>`   sockets watching agent <dev> (agent:watch, TTL,
+ *                          services/agentWatch.service.ts) or granted it by
+ *                          a team (team-restricted sockets, joined at connect).
  *
  * Operational events go to the OWNING tenant's room plus the Default tenant's
  * room (the god view of operational reads), like Obliance's metricsRooms /
@@ -94,4 +99,56 @@ export function emitGlobal(
 export function emitToPlatformAdmins(io: IO, event: string, payload: unknown): void {
   if (!io) return;
   io.to('role:admin').emit(event, payload);
+}
+
+// ── Agent IP activity (W8-3) ─────────────────────────────────────────────────
+
+/** IP activity feed of a tenant: its sockets without a team restriction. */
+export function ipFeedRoom(tenantId: number): string {
+  return `tenant:${tenantId}:ipfeed`;
+}
+
+/** Sockets that receive one agent's IP activity outside the tenant feed. */
+export function agentWatchRoom(deviceId: number): string {
+  return `agentwatch:${deviceId}`;
+}
+
+/**
+ * Rooms of one agent's IP activity: the feed of its tenant, the Default feed
+ * (god view) and the agent's watch room. An unknown tenant reaches the
+ * Default feed and the watchers only.
+ */
+export function agentActivityRooms(tenantId: number | null | undefined, deviceId: number): string[] {
+  const tid = validTenant(tenantId);
+  const rooms = [ipFeedRoom(MASTER_TENANT_ID)];
+  if (tid !== null && tid !== MASTER_TENANT_ID) rooms.unshift(ipFeedRoom(tid));
+  if (Number.isSafeInteger(deviceId) && deviceId > 0) rooms.push(agentWatchRoom(deviceId));
+  return rooms;
+}
+
+/** Of `rooms`, those holding at least one socket of this server (in-memory adapter). */
+export function occupiedRooms(io: SocketIOServer, rooms: string[]): string[] {
+  const all = io.sockets?.adapter?.rooms;
+  if (!all) return rooms;
+  return rooms.filter((r) => (all.get(r)?.size ?? 0) > 0);
+}
+
+/**
+ * Emit one agent's IP activity (ip:events / ip:flow) to agentActivityRooms.
+ * Nothing is built nor sent when no socket listens (`payload` is only called
+ * then). A socket in several of the rooms gets one copy. Returns whether it
+ * was sent.
+ */
+export function emitAgentActivity(
+  io: IO,
+  tenantId: number | null | undefined,
+  deviceId: number,
+  event: string,
+  payload: () => unknown,
+): boolean {
+  if (!io) return false;
+  const rooms = occupiedRooms(io, agentActivityRooms(tenantId, deviceId));
+  if (rooms.length === 0) return false;
+  io.to(rooms).emit(event, payload());
+  return true;
 }

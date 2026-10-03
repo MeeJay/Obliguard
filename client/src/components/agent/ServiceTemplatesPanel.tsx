@@ -4,6 +4,13 @@ import { cn } from '@/utils/cn';
 import { serviceTemplatesApi } from '@/api/serviceTemplates.api';
 import type { ResolvedServiceConfig } from '@obliview/shared';
 import toast from 'react-hot-toast';
+import { useTranslation } from 'react-i18next';
+import { IconButton } from '@/components/common/IconButton';
+
+/** The server's `error` message of a failed request, if any. */
+function apiErrorMessage(err: unknown): string | undefined {
+  return (err as { response?: { data?: { error?: string } } })?.response?.data?.error;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -18,6 +25,7 @@ function ServiceTypeBadge({ type }: { type: string }) {
 }
 
 function ModeBadge({ mode }: { mode: string }) {
+  const { t } = useTranslation();
   return (
     <span className={cn(
       'inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold',
@@ -26,7 +34,9 @@ function ModeBadge({ mode }: { mode: string }) {
         : 'bg-amber-500/10 text-amber-400',
     )}>
       {mode === 'ban' ? <Shield size={8} /> : <EyeOff size={8} />}
-      {mode === 'ban' ? 'Ban' : 'Track'}
+      {mode === 'ban'
+        ? t('agentDetail.templatesPanel.modeBan', { defaultValue: 'Ban' })
+        : t('agentDetail.templatesPanel.modeTrack', { defaultValue: 'Track' })}
     </span>
   );
 }
@@ -66,6 +76,7 @@ function OverridesEditor({
   scopeId: number;
   onSaved: () => void;
 }) {
+  const { t } = useTranslation();
   const [threshold,  setThreshold]  = useState(String(cfg.thresholdOverride ?? cfg.threshold));
   const [windowSecs, setWindowSecs] = useState(String(cfg.windowSecondsOverride ?? cfg.windowSeconds));
   const [logPath,    setLogPath]    = useState(cfg.logPath ?? '');
@@ -81,20 +92,20 @@ function OverridesEditor({
   async function save() {
     setSaving(true);
     try {
-      const t = Math.max(1, Number(threshold) || cfg.threshold);
+      const thr = Math.max(1, Number(threshold) || cfg.threshold);
       const w = Math.max(10, Number(windowSecs) || cfg.windowSeconds);
       await serviceTemplatesApi.upsertAssignment(
         cfg.templateId, apiScope, scopeId,
         {
-          thresholdOverride: t,
+          thresholdOverride: thr,
           windowSecondsOverride: w,
           logPathOverride: logPath.trim() || null,
         },
       );
       onSaved();
-      toast.success('Overrides saved');
+      toast.success(t('agentDetail.templatesPanel.overridesSaved', { defaultValue: 'Overrides saved' }));
     } catch {
-      toast.error('Failed to save overrides');
+      toast.error(t('agentDetail.templatesPanel.overridesSaveFailed', { defaultValue: 'Failed to save overrides' }));
     } finally {
       setSaving(false);
     }
@@ -108,9 +119,9 @@ function OverridesEditor({
         { thresholdOverride: null, windowSecondsOverride: null, logPathOverride: null },
       );
       onSaved();
-      toast.success('Overrides reset to template defaults');
+      toast.success(t('agentDetail.templatesPanel.overridesReset', { defaultValue: 'Overrides reset to template defaults' }));
     } catch {
-      toast.error('Failed to reset overrides');
+      toast.error(t('agentDetail.templatesPanel.overridesResetFailed', { defaultValue: 'Failed to reset overrides' }));
     } finally {
       setSaving(false);
     }
@@ -121,18 +132,20 @@ function OverridesEditor({
   return (
     <div className="px-4 pb-3 pt-2 space-y-2 border-t border-border/50 bg-bg-tertiary/30">
       <span className="text-[10px] font-semibold uppercase tracking-wide text-text-muted block">
-        Overrides
+        {t('agentDetail.templatesPanel.overrides', { defaultValue: 'Overrides' })}
       </span>
 
       {/* Log path */}
       <label className="flex items-center gap-2 text-[11px] text-text-secondary">
         <FolderOpen size={11} className="text-text-muted flex-shrink-0" />
-        <span className="flex-shrink-0">Log path</span>
+        <span className="flex-shrink-0">{t('agentDetail.templatesPanel.logPath', { defaultValue: 'Log path' })}</span>
         <input
           type="text"
           value={logPath}
           onChange={e => setLogPath(e.target.value)}
-          placeholder={cfg.isBuiltin ? 'Built-in path' : 'e.g. /var/log/app/auth.log'}
+          placeholder={cfg.isBuiltin
+            ? t('agentDetail.templatesPanel.builtinPath', { defaultValue: 'Built-in path' })
+            : t('agentDetail.templatesPanel.logPathPlaceholder', { defaultValue: 'e.g. /var/log/app/auth.log' })}
           className="flex-1 min-w-0 rounded border border-border bg-bg-secondary px-2 py-1 text-xs font-mono text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent"
         />
       </label>
@@ -140,7 +153,7 @@ function OverridesEditor({
       {/* Threshold + window row */}
       <div className="flex flex-wrap items-center gap-3">
         <label className="flex items-center gap-1.5 text-[11px] text-text-secondary">
-          Failures
+          {t('agentDetail.templatesPanel.failures', { defaultValue: 'Failures' })}
           <input
             type="number"
             min={1}
@@ -151,7 +164,7 @@ function OverridesEditor({
         </label>
 
         <label className="flex items-center gap-1.5 text-[11px] text-text-secondary">
-          Window
+          {t('agentDetail.templatesPanel.window', { defaultValue: 'Window' })}
           <input
             type="number"
             min={10}
@@ -163,12 +176,12 @@ function OverridesEditor({
         </label>
 
         <span className="text-[10px] text-text-muted">
-          (template default: {cfg.threshold}f / {cfg.windowSeconds}s)
+          {t('agentDetail.templatesPanel.templateDefault', { threshold: cfg.threshold, window: cfg.windowSeconds, defaultValue: '(template default: {{threshold}}f / {{window}}s)' })}
         </span>
 
         {hasOverride && (
           <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-400">
-            {cfg.thresholdOverrideScope} override
+            {(cfg.thresholdOverrideScope === 'agent' ? t('agentDetail.templatesPanel.agentOverride', { defaultValue: 'agent override' }) : t('agentDetail.templatesPanel.groupOverride', { defaultValue: 'group override' }))}
           </span>
         )}
 
@@ -177,11 +190,11 @@ function OverridesEditor({
             <button
               onClick={() => void resetOverrides()}
               disabled={saving}
-              title="Reset all overrides to template defaults"
+              title={t('agentDetail.templatesPanel.resetAllHint', { defaultValue: 'Reset all overrides to template defaults' })}
               className="flex items-center gap-1 rounded px-2 py-1 text-[11px] text-amber-500 hover:bg-amber-500/10 disabled:opacity-50 transition-colors"
             >
               <RotateCcw size={10} />
-              Reset
+              {t('common.reset')}
             </button>
           )}
           <button
@@ -190,7 +203,7 @@ function OverridesEditor({
             className="flex items-center gap-1 rounded px-2 py-1 text-[11px] text-accent hover:bg-accent/10 disabled:opacity-50 transition-colors"
           >
             <Check size={10} />
-            {saving ? 'Saving…' : 'Save'}
+            {saving ? t('common.saving') : t('common.save')}
           </button>
         </div>
       </div>
@@ -209,6 +222,7 @@ export function ServiceTemplatesPanel({
   onCreateLocal,
   readOnly = false,
 }: ServiceTemplatesPanelProps) {
+  const { t } = useTranslation();
   const [configs, setConfigs]   = useState<ResolvedServiceConfig[]>([]);
   const [loading, setLoading]   = useState(true);
   const [expanded, setExpanded] = useState(true);
@@ -223,10 +237,24 @@ export function ServiceTemplatesPanel({
         ? await serviceTemplatesApi.getResolvedForGroup(scopeId)
         : await serviceTemplatesApi.getResolvedForDevice(scopeId);
       setConfigs(data);
+    } catch (err) {
+      // Page-load failure: say so, with a Retry (the panel would otherwise stay empty).
+      toast.error((tst) => (
+        <span className="flex items-center gap-3">
+          <span>{apiErrorMessage(err) ?? t('agentDetail.templatesPanel.loadFailed', { defaultValue: 'Failed to load service templates' })}</span>
+          <button
+            type="button"
+            className="shrink-0 text-xs font-medium text-accent hover:underline"
+            onClick={() => { toast.dismiss(tst.id); void load(); }}
+          >
+            {t('common.retry')}
+          </button>
+        </span>
+      ), { id: `service-templates-load:${scope}:${scopeId}` });
     } finally {
       setLoading(false);
     }
-  }, [scope, scopeId]);
+  }, [scope, scopeId, t]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -249,6 +277,8 @@ export function ServiceTemplatesPanel({
         { enabledOverride: true },
       );
       await load();
+    } catch (err) {
+      toast.error(apiErrorMessage(err) ?? t('agentDetail.templatesPanel.bindFailed', { defaultValue: 'Failed to bind the template' }));
     } finally {
       setBusy(b => ({ ...b, [cfg.templateId]: false }));
     }
@@ -267,6 +297,8 @@ export function ServiceTemplatesPanel({
         { enabledOverride: false },
       );
       await load();
+    } catch (err) {
+      toast.error(apiErrorMessage(err) ?? t('agentDetail.templatesPanel.unbindFailed', { defaultValue: 'Failed to unbind the template' }));
     } finally {
       setBusy(b => ({ ...b, [cfg.templateId]: false }));
     }
@@ -281,6 +313,8 @@ export function ServiceTemplatesPanel({
     try {
       await serviceTemplatesApi.deleteAssignment(cfg.templateId, apiScope, scopeId);
       await load();
+    } catch (err) {
+      toast.error(apiErrorMessage(err) ?? t('agentDetail.templatesPanel.resetFailed', { defaultValue: 'Failed to reset the override' }));
     } finally {
       setBusy(b => ({ ...b, [cfg.templateId]: false }));
     }
@@ -304,11 +338,12 @@ export function ServiceTemplatesPanel({
             ? <ChevronUp size={14} className="text-text-muted" />
             : <ChevronDown size={14} className="text-text-muted" />}
           <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide">
-            Service Templates
+            {t('agentDetail.templatesPanel.title', { defaultValue: 'Service Templates' })}
           </h2>
           {!loading && (
             <span className="text-xs text-text-muted">
-              {boundCount} active{unboundCount > 0 ? `, ${unboundCount} inactive` : ''}
+              {t('agentDetail.templatesPanel.activeCount', { count: boundCount, defaultValue: '{{count}} active' })}
+              {unboundCount > 0 ? `, ${t('agentDetail.templatesPanel.inactiveCount', { count: unboundCount, defaultValue: '{{count}} inactive' })}` : ''}
             </span>
           )}
         </div>
@@ -318,18 +353,17 @@ export function ServiceTemplatesPanel({
             <button
               onClick={onCreateLocal}
               className="inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] text-accent hover:bg-accent/10 transition-colors"
-              title="Create local template for this agent"
+              title={t('agentDetail.templatesPanel.createLocalHint', { defaultValue: 'Create local template for this agent' })}
             >
-              <Plus size={11} /> Local template
+              <Plus size={11} /> {t('agentDetail.templatesPanel.localTemplate', { defaultValue: 'Local template' })}
             </button>
           )}
-          <button
+          <IconButton
+            label={t('common.refresh')}
+            icon={<RefreshCw size={12} className={loading ? 'animate-spin' : ''} />}
             onClick={() => void load()}
-            className="p-1 rounded text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors"
-            title="Refresh"
-          >
-            <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
-          </button>
+            size="sm"
+          />
         </div>
       </div>
 
@@ -337,10 +371,10 @@ export function ServiceTemplatesPanel({
       {expanded && (
         <div>
           {loading ? (
-            <div className="py-8 text-center text-sm text-text-muted">Loading…</div>
+            <div className="py-8 text-center text-sm text-text-muted">{t('common.loading')}</div>
           ) : configs.length === 0 ? (
             <div className="py-8 text-center text-sm text-text-muted">
-              No service templates configured.
+              {t('agentDetail.templatesPanel.empty', { defaultValue: 'No service templates configured.' })}
             </div>
           ) : (
             <div className="divide-y divide-border">
@@ -375,7 +409,7 @@ export function ServiceTemplatesPanel({
                           {isGroupTpl && (
                             <span className="inline-flex items-center gap-1 rounded-full bg-purple-500/10 px-2 py-0.5 text-[10px] font-medium text-purple-400">
                               <Layers size={8} />
-                              Group template
+                              {t('agentDetail.templatesPanel.groupTemplate', { defaultValue: 'Group template' })}
                             </span>
                           )}
 
@@ -383,7 +417,7 @@ export function ServiceTemplatesPanel({
 
                           {/* No override at all and template is off by default */}
                           {!cfg.enabled && overrideScope === null && (
-                            <span className="text-[10px] text-text-muted">Inactive by default</span>
+                            <span className="text-[10px] text-text-muted">{t('agentDetail.templatesPanel.inactiveByDefault', { defaultValue: 'Inactive by default' })}</span>
                           )}
 
                           {/* Device scope: agent-level explicit override */}
@@ -394,14 +428,16 @@ export function ServiceTemplatesPanel({
                                 ? 'bg-green-500/10 text-green-400'
                                 : 'bg-amber-500/10 text-amber-400',
                             )}>
-                              {cfg.enabled ? 'Bound (agent)' : 'Unbound (agent)'}
+                              {cfg.enabled
+                                ? t('agentDetail.templatesPanel.boundAgent', { defaultValue: 'Bound (agent)' })
+                                : t('agentDetail.templatesPanel.unboundAgent', { defaultValue: 'Unbound (agent)' })}
                             </span>
                           )}
 
                           {/* Device scope: unbound by a group-level override (no agent override on top) */}
                           {scope === 'device' && overrideScope === 'group' && !cfg.enabled && (
                             <span className="inline-flex items-center rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-500">
-                              Unbound (group)
+                              {t('agentDetail.templatesPanel.unboundGroup', { defaultValue: 'Unbound (group)' })}
                             </span>
                           )}
 
@@ -413,7 +449,9 @@ export function ServiceTemplatesPanel({
                                 ? 'bg-green-500/10 text-green-400'
                                 : 'bg-amber-500/10 text-amber-400',
                             )}>
-                              {cfg.enabled ? 'Bound (group)' : 'Unbound (group)'}
+                              {cfg.enabled
+                                ? t('agentDetail.templatesPanel.boundGroup', { defaultValue: 'Bound (group)' })
+                                : t('agentDetail.templatesPanel.unboundGroup', { defaultValue: 'Unbound (group)' })}
                             </span>
                           )}
                         </div>
@@ -424,7 +462,7 @@ export function ServiceTemplatesPanel({
                             {cfg.threshold}f / {cfg.windowSeconds}s
                             {cfg.thresholdOverrideScope && (
                               <span className="text-amber-400 ml-1">
-                                ({cfg.thresholdOverrideScope} override)
+                                ({(cfg.thresholdOverrideScope === 'agent' ? t('agentDetail.templatesPanel.agentOverride', { defaultValue: 'agent override' }) : t('agentDetail.templatesPanel.groupOverride', { defaultValue: 'group override' }))})
                               </span>
                             )}
                           </span>
@@ -441,18 +479,14 @@ export function ServiceTemplatesPanel({
 
                         {/* Threshold editor toggle — only when active at this scope */}
                         {cfg.enabled && !readOnly && (
-                          <button
+                          <IconButton
+                            label={t('agentDetail.templatesPanel.editThreshold', { defaultValue: 'Edit threshold override' })}
+                            icon={isEditingThis ? <X size={12} /> : <Sliders size={12} />}
                             onClick={() => setEditingThreshold(isEditingThis ? null : cfg.templateId)}
-                            title="Edit threshold override"
-                            className={cn(
-                              'shrink-0 rounded-md p-1.5 text-xs transition-colors',
-                              isEditingThis
-                                ? 'bg-accent/10 text-accent'
-                                : 'text-text-muted hover:text-text-primary hover:bg-bg-hover',
-                            )}
-                          >
-                            {isEditingThis ? <X size={12} /> : <Sliders size={12} />}
-                          </button>
+                            variant="accent"
+                            active={isEditingThis}
+                            className="shrink-0 rounded-md"
+                          />
                         )}
 
                         {/* Reset: only shown when this scope has an explicit override */}
@@ -462,13 +496,13 @@ export function ServiceTemplatesPanel({
                             disabled={isBusy}
                             title={
                               scope === 'device'
-                                ? 'Remove agent override — inherit from group / template default'
-                                : 'Remove group override — inherit from template default'
+                                ? t('agentDetail.templatesPanel.resetAgentHint', { defaultValue: 'Remove agent override — inherit from group / template default' })
+                                : t('agentDetail.templatesPanel.resetGroupHint', { defaultValue: 'Remove group override — inherit from template default' })
                             }
                             className="shrink-0 rounded-md px-2 py-1 text-xs font-medium text-amber-500 hover:bg-amber-500/10 disabled:opacity-50 transition-colors flex items-center gap-1"
                           >
                             <RotateCcw size={11} />
-                            Reset
+                            {t('common.reset')}
                           </button>
                         )}
 
@@ -477,10 +511,12 @@ export function ServiceTemplatesPanel({
                           <button
                             onClick={() => void unbind(cfg)}
                             disabled={isBusy}
-                            title={scope === 'group' ? 'Unbind for all agents in this group' : 'Unbind for this agent'}
+                            title={scope === 'group'
+                              ? t('agentDetail.templatesPanel.unbindGroupHint', { defaultValue: 'Unbind for all agents in this group' })
+                              : t('agentDetail.templatesPanel.unbindAgentHint', { defaultValue: 'Unbind for this agent' })}
                             className="shrink-0 rounded-md px-2 py-1 text-xs font-medium text-text-muted hover:bg-bg-hover hover:text-text-primary disabled:opacity-50 transition-colors"
                           >
-                            Unbind
+                            {t('agentDetail.templatesPanel.unbind', { defaultValue: 'Unbind' })}
                           </button>
                         ) : (
                           <button
@@ -488,14 +524,14 @@ export function ServiceTemplatesPanel({
                             disabled={isBusy}
                             title={
                               scope === 'device' && overrideScope === 'group'
-                                ? 'Override group: bind for this agent only'
+                                ? t('agentDetail.templatesPanel.bindOverrideGroupHint', { defaultValue: 'Override group: bind for this agent only' })
                                 : scope === 'group'
-                                ? 'Bind for all agents in this group'
-                                : 'Bind for this agent'
+                                ? t('agentDetail.templatesPanel.bindGroupHint', { defaultValue: 'Bind for all agents in this group' })
+                                : t('agentDetail.templatesPanel.bindAgentHint', { defaultValue: 'Bind for this agent' })
                             }
                             className="shrink-0 rounded-md px-2 py-1 text-xs font-medium text-accent hover:bg-accent/10 disabled:opacity-50 transition-colors"
                           >
-                            Bind
+                            {t('agentDetail.templatesPanel.bind', { defaultValue: 'Bind' })}
                           </button>
                         )}
                       </div>

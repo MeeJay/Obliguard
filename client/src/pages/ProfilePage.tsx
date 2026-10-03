@@ -1,11 +1,12 @@
 import { useState, useEffect, type FormEvent } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { User, Save, KeyRound, Bell, CheckCircle2, AlertTriangle, QrCode, Mail, ArrowLeftRight, Palette, Star } from 'lucide-react';
 import { ThemePicker } from '@/components/common/ThemePicker';
 import { loadSavedTheme, type AppTheme } from '@/utils/theme';
 import { profileApi } from '@/api/profile.api';
 import { appConfigApi } from '@/api/appConfig.api';
-import { twoFactorApi, type TwoFactorStatus } from '@/api/twoFactor.api';
+import { twoFactorApi, type TwoFactorStatus, type FactorProof } from '@/api/twoFactor.api';
 import { useAuthStore } from '@/store/authStore';
 import { useTenantStore } from '@/store/tenantStore';
 import { useLiveAlertsStore } from '@/store/liveAlertsStore';
@@ -14,9 +15,11 @@ import { Input } from '@/components/common/Input';
 import { SUPPORTED_LANGUAGES, setLanguage } from '@/i18n';
 import toast from 'react-hot-toast';
 
+type FactorAction = 'totpSetup' | 'totpDisable' | 'emailSetup' | 'emailDisable';
+
 export function ProfilePage() {
   const { t } = useTranslation();
-  const { user: sessionUser, requires2faSetup, preferredTenantId, setDefaultTenant } = useAuthStore();
+  const { user: sessionUser, requires2faSetup, preferredTenantId, setDefaultTenant, checkSession } = useAuthStore();
   const tenants = useTenantStore((st) => st.tenants);
   const [savingFavourite, setSavingFavourite] = useState(false);
 
@@ -71,11 +74,21 @@ export function ProfilePage() {
   const [totpCode, setTotpCode] = useState('');
   const [totpSaving, setTotpSaving] = useState(false);
 
-  // Email OTP setup flow
-  const [emailSetupStep, setEmailSetupStep] = useState<'idle' | 'entering' | 'sent'>('idle');
-  const [emailInput, setEmailInput] = useState('');
+  // Email OTP setup flow (codes go to the profile address)
+  const [emailSetupStep, setEmailSetupStep] = useState<'idle' | 'sent'>('idle');
+  const [emailSentTo, setEmailSentTo] = useState('');
   const [emailCode, setEmailCode] = useState('');
   const [emailSaving, setEmailSaving] = useState(false);
+
+  // Factor-change proof: adding, replacing or removing a second factor asks
+  // for a current authenticator code (TOTP on) or the current password.
+  const [proofAction, setProofAction] = useState<FactorAction | null>(null);
+  const [proofValue, setProofValue] = useState('');
+  const [proofBusy, setProofBusy] = useState(false);
+  const proofKind: 'totp' | 'password' = tfaStatus?.totpEnabled ? 'totp' : 'password';
+
+  const [searchParams] = useSearchParams();
+  const setup2fa = searchParams.get('setup2fa') === '1';
 
   useEffect(() => {
     profileApi.get().then((profile) => {
@@ -171,13 +184,130 @@ export function ProfilePage() {
     }
   };
 
+  // ?setup2fa=1 (force_2fa redirect): bring the 2FA section into view.
+  useEffect(() => {
+    if (!setup2fa || !tfaStatus) return;
+    document.getElementById('security-2fa')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [setup2fa, tfaStatus]);
+
+  /** Server message for 4xx answers (e.g. "This code was already used"), else the fallback. */
+  const serverError = (err: unknown, fallback: string): string => {
+    const r = (err as { response?: { status?: number; data?: { error?: string; proofInvalid?: boolean } } })?.response;
+    if (r?.data?.proofInvalid) return t('profile.security.invalidProof', 'Invalid code or password');
+    if (r?.status === 429) return r.data?.error || fallback;
+    return r?.status && r.status < 500 && r.data?.error ? r.data.error : fallback;
+  };
+
+  /** A factor was added or removed: refresh the session state (force_2fa gate:
+   *  the last factor removed turns it on, a first factor turns it off). */
+  const afterFactorChange = async () => {
+    await checkSession().catch(() => {});
+  };
+
+  /** A first TOTP enrolment (no factor yet) needs no proof; every other change does. */
+  const needsProof = (action: FactorAction): boolean =>
+    action !== 'totpSetup' || !!(tfaStatus?.totpEnabled || tfaStatus?.emailOtpEnabled);
+
+  const runFactorAction = async (action: FactorAction, proof: FactorProof): Promise<boolean> => {
+    try {
+      if (action === 'totpSetup') {
+        const data = await twoFactorApi.totpSetup(proof);
+        setTotpSetupData(data);
+        setTotpCode('');
+      } else if (action === 'totpDisable') {
+        await twoFactorApi.totpDisable(proof);
+        setTfaStatus((s) => s ? { ...s, totpEnabled: false } : s);
+        toast.success(t('profile.security.totpDisabled'));
+        await afterFactorChange();
+      } else if (action === 'emailSetup') {
+        await twoFactorApi.emailSetup(proof);
+        setEmailSentTo(originalEmail);
+        setEmailSetupStep('sent');
+        setEmailCode('');
+        toast.success(t('profile.security.codeSent'));
+      } else {
+        await twoFactorApi.emailDisable(proof);
+        setTfaStatus((s) => s ? { ...s, emailOtpEnabled: false } : s);
+        toast.success(t('profile.security.emailOtpDisabled'));
+        await afterFactorChange();
+      }
+      return true;
+    } catch (err) {
+      const fallback = action === 'totpSetup' ? t('profile.security.failedStartTotp')
+        : action === 'totpDisable' ? t('profile.security.failedDisableTotp')
+        : action === 'emailSetup' ? t('profile.security.failedSendCode')
+        : t('profile.security.failedDisableEmailOtp');
+      toast.error(serverError(err, fallback));
+      return false;
+    }
+  };
+
+  const startFactorAction = (action: FactorAction) => {
+    if (!needsProof(action)) { void runFactorAction(action, {}); return; }
+    setProofValue('');
+    setProofAction(action);
+  };
+
+  const submitProof = async () => {
+    if (!proofAction || !proofValue) return;
+    setProofBusy(true);
+    const proof: FactorProof = proofKind === 'totp' ? { currentCode: proofValue } : { currentPassword: proofValue };
+    const ok = await runFactorAction(proofAction, proof);
+    setProofBusy(false);
+    if (ok) { setProofAction(null); setProofValue(''); }
+  };
+
+  const renderProofForm = () => (
+    <div className="space-y-2">
+      <p className="text-xs text-text-muted">
+        {proofKind === 'totp'
+          ? t('profile.security.proofTotpHint', 'Confirm with a current code of your authenticator app.')
+          : t('profile.security.proofPasswordHint', 'Confirm with your current password.')}
+      </p>
+      <div className="flex items-end gap-2">
+        <div className="flex-1">
+          {proofKind === 'totp' ? (
+            <Input
+              label={t('profile.security.proofTotpLabel', 'Current authenticator code')}
+              type="text"
+              inputMode="numeric"
+              value={proofValue}
+              onChange={(e) => setProofValue(e.target.value.replace(/\D/g, '').slice(0, 6))}
+              placeholder="000000"
+              autoComplete="one-time-code"
+              autoFocus
+            />
+          ) : (
+            <Input
+              label={t('profile.security.proofPasswordLabel', 'Current password')}
+              type="password"
+              value={proofValue}
+              onChange={(e) => setProofValue(e.target.value)}
+              placeholder={t('profile.password.currentPlaceholder')}
+              autoComplete="current-password"
+              autoFocus
+            />
+          )}
+        </div>
+        <Button
+          disabled={proofBusy || (proofKind === 'totp' ? proofValue.length !== 6 : !proofValue)}
+          loading={proofBusy}
+          onClick={() => { void submitProof(); }}
+        >
+          {t('common.confirm')}
+        </Button>
+        <Button variant="ghost" onClick={() => { setProofAction(null); setProofValue(''); }}>{t('common.cancel')}</Button>
+      </div>
+    </div>
+  );
+
   if (sessionUser?.foreignSource === 'obligate' && obligateUrl) {
     return (
       <div className="p-6 max-w-2xl mx-auto">
         <div className="bg-bg-secondary border border-border rounded-lg p-6 text-center">
-          <h2 className="text-lg font-medium text-text-primary mb-2">Profile managed by Obligate</h2>
+          <h2 className="text-lg font-medium text-text-primary mb-2">{t('profile.obligate.title', { defaultValue: 'Profile managed by Obligate' })}</h2>
           <p className="text-sm text-text-secondary mb-4">
-            Your profile, password, and preferences are managed centrally through Obligate SSO.
+            {t('profile.obligate.desc', { defaultValue: 'Your profile, password, and preferences are managed centrally through Obligate SSO.' })}
           </p>
           <a
             href={`${obligateUrl}/account`}
@@ -185,7 +315,7 @@ export function ProfilePage() {
             rel="noopener noreferrer"
             className="inline-flex items-center gap-2 px-4 py-2 bg-accent hover:bg-accent-hover text-white rounded-md font-medium text-sm transition-colors"
           >
-            Open Obligate Profile
+            {t('profile.obligate.open', { defaultValue: 'Open Obligate Profile' })}
           </a>
         </div>
       </div>
@@ -425,8 +555,8 @@ export function ProfilePage() {
       </div>
 
       {/* Security / 2FA section */}
-      {(allow2fa || requires2faSetup) && (
-        <div>
+      {(allow2fa || requires2faSetup || tfaStatus?.totpEnabled || tfaStatus?.emailOtpEnabled) && (
+        <div id="security-2fa" className="mb-8">
           <h2 className="text-lg font-semibold text-text-primary mb-4">{t('profile.security.title')}</h2>
 
           {requires2faSetup && (
@@ -447,40 +577,30 @@ export function ProfilePage() {
                   <p className="text-sm font-medium text-text-primary">{t('profile.security.totp')}</p>
                   {tfaStatus?.totpEnabled && <CheckCircle2 size={14} className="text-green-400" />}
                 </div>
-                {tfaStatus?.totpEnabled ? (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={async () => {
-                      try {
-                        await twoFactorApi.totpDisable();
-                        setTfaStatus((s) => s ? { ...s, totpEnabled: false } : s);
-                        toast.success(t('profile.security.totpDisabled'));
-                      } catch { toast.error(t('profile.security.failedDisableTotp')); }
-                    }}
-                  >
-                    {t('common.disable')}
-                  </Button>
-                ) : !totpSetupData ? (
-                  <Button
-                    size="sm"
-                    onClick={async () => {
-                      try {
-                        const data = await twoFactorApi.totpSetup();
-                        setTotpSetupData(data);
-                        setTotpCode('');
-                      } catch { toast.error(t('profile.security.failedStartTotp')); }
-                    }}
-                  >
-                    {t('common.enable')}
-                  </Button>
-                ) : null}
+                {!totpSetupData && proofAction === null && (
+                  tfaStatus?.totpEnabled ? (
+                    <div className="flex gap-2">
+                      <Button size="sm" variant="ghost" onClick={() => startFactorAction('totpSetup')}>
+                        {t('profile.security.replace', 'Replace')}
+                      </Button>
+                      <Button size="sm" variant="ghost" onClick={() => startFactorAction('totpDisable')}>
+                        {t('common.disable')}
+                      </Button>
+                    </div>
+                  ) : (
+                    <Button size="sm" onClick={() => startFactorAction('totpSetup')}>
+                      {t('common.enable')}
+                    </Button>
+                  )
+                )}
               </div>
 
-              {!tfaStatus?.totpEnabled && totpSetupData && (
+              {(proofAction === 'totpSetup' || proofAction === 'totpDisable') && renderProofForm()}
+
+              {totpSetupData && (
                 <div className="space-y-3">
                   <p className="text-xs text-text-muted">{t('profile.security.totpScanDesc')}</p>
-                  <img src={totpSetupData.qrDataUrl} alt="TOTP QR Code" className="w-40 h-40 rounded-lg border border-border" />
+                  <img src={totpSetupData.qrDataUrl} alt={t('profile.security.totpQrAlt', { defaultValue: 'TOTP QR Code' })} className="w-40 h-40 rounded-lg border border-border" />
                   <p className="text-xs text-text-muted font-mono break-all">{t('profile.security.totpSecret', { secret: totpSetupData.secret })}</p>
                   <div className="flex items-end gap-2">
                     <div className="flex-1">
@@ -498,13 +618,17 @@ export function ProfilePage() {
                       loading={totpSaving}
                       onClick={async () => {
                         setTotpSaving(true);
+                        const replacing = !!tfaStatus?.totpEnabled;
                         try {
                           await twoFactorApi.totpEnable(totpCode);
                           setTfaStatus((s) => s ? { ...s, totpEnabled: true } : s);
                           setTotpSetupData(null);
                           setTotpCode('');
-                          toast.success(t('profile.security.totpEnabled'));
-                        } catch { toast.error(t('profile.security.invalidCode')); }
+                          toast.success(replacing
+                            ? t('profile.security.totpReplaced', 'Authenticator app replaced')
+                            : t('profile.security.totpEnabled'));
+                          await afterFactorChange();
+                        } catch (err) { toast.error(serverError(err, t('profile.security.invalidCode'))); }
                         finally { setTotpSaving(false); }
                       }}
                     >
@@ -529,59 +653,32 @@ export function ProfilePage() {
                     </>
                   )}
                 </div>
-                {tfaStatus?.emailOtpEnabled ? (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={async () => {
-                      try {
-                        await twoFactorApi.emailDisable();
-                        setTfaStatus((s) => s ? { ...s, emailOtpEnabled: false, email: null } : s);
-                        toast.success(t('profile.security.emailOtpDisabled'));
-                      } catch { toast.error(t('profile.security.failedDisableEmailOtp')); }
-                    }}
-                  >
-                    {t('common.disable')}
-                  </Button>
-                ) : emailSetupStep === 'idle' ? (
-                  <Button size="sm" onClick={() => setEmailSetupStep('entering')}>{t('common.enable')}</Button>
-                ) : null}
+                {proofAction === null && emailSetupStep === 'idle' && (
+                  tfaStatus?.emailOtpEnabled ? (
+                    <Button size="sm" variant="ghost" onClick={() => startFactorAction('emailDisable')}>
+                      {t('common.disable')}
+                    </Button>
+                  ) : (
+                    <Button size="sm" disabled={!originalEmail} onClick={() => startFactorAction('emailSetup')}>
+                      {t('common.enable')}
+                    </Button>
+                  )
+                )}
               </div>
 
-              {!tfaStatus?.emailOtpEnabled && emailSetupStep === 'entering' && (
-                <div className="space-y-3">
-                  <Input
-                    label={t('profile.security.yourEmail')}
-                    type="email"
-                    value={emailInput}
-                    onChange={(e) => setEmailInput(e.target.value)}
-                    placeholder={t('profile.security.emailPlaceholder')}
-                    autoFocus
-                  />
-                  <div className="flex gap-2">
-                    <Button
-                      disabled={!emailInput || emailSaving}
-                      loading={emailSaving}
-                      onClick={async () => {
-                        setEmailSaving(true);
-                        try {
-                          await twoFactorApi.emailSetup(emailInput);
-                          setEmailSetupStep('sent');
-                          toast.success(t('profile.security.codeSent'));
-                        } catch { toast.error(t('profile.security.failedSendCode')); }
-                        finally { setEmailSaving(false); }
-                      }}
-                    >
-                      {t('profile.security.sendCode')}
-                    </Button>
-                    <Button variant="ghost" onClick={() => { setEmailSetupStep('idle'); setEmailInput(''); setEmailCode(''); }}>{t('common.cancel')}</Button>
-                  </div>
-                </div>
+              {!tfaStatus?.emailOtpEnabled && emailSetupStep === 'idle' && proofAction === null && (
+                <p className="text-xs text-text-muted">
+                  {originalEmail
+                    ? t('profile.security.emailOtpTarget', { email: originalEmail, defaultValue: 'Codes are sent to {{email}} (the address of your profile).' })
+                    : t('profile.security.emailOtpNoAddress', 'Set an e-mail address in your profile first.')}
+                </p>
               )}
+
+              {(proofAction === 'emailSetup' || proofAction === 'emailDisable') && renderProofForm()}
 
               {!tfaStatus?.emailOtpEnabled && emailSetupStep === 'sent' && (
                 <div className="space-y-3">
-                  <p className="text-xs text-text-muted">{t('profile.security.enterCode', { email: emailInput })}</p>
+                  <p className="text-xs text-text-muted">{t('profile.security.enterCode', { email: emailSentTo })}</p>
                   <div className="flex items-end gap-2">
                     <div className="flex-1">
                       <Input
@@ -604,16 +701,16 @@ export function ProfilePage() {
                           const status = await twoFactorApi.getStatus();
                           setTfaStatus(status);
                           setEmailSetupStep('idle');
-                          setEmailInput('');
                           setEmailCode('');
                           toast.success(t('profile.security.emailOtpEnabled'));
-                        } catch { toast.error(t('profile.security.invalidCode')); }
+                          await afterFactorChange();
+                        } catch (err) { toast.error(serverError(err, t('profile.security.invalidCode'))); }
                         finally { setEmailSaving(false); }
                       }}
                     >
                       {t('common.confirm')}
                     </Button>
-                    <Button variant="ghost" onClick={() => { setEmailSetupStep('idle'); setEmailInput(''); setEmailCode(''); }}>{t('common.cancel')}</Button>
+                    <Button variant="ghost" onClick={() => { setEmailSetupStep('idle'); setEmailCode(''); }}>{t('common.cancel')}</Button>
                   </div>
                 </div>
               )}
@@ -628,7 +725,7 @@ export function ProfilePage() {
           <div className="flex items-center gap-2 mb-2">
             <Palette size={18} className="text-accent" />
             <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide">
-              Apparence
+              {t('profile.appearance', { defaultValue: 'Appearance' })}
             </h2>
           </div>
           <ThemePicker

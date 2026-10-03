@@ -1,10 +1,10 @@
 import type { Request, Response, NextFunction } from 'express';
 import { isIP } from 'net';
 import { MASTER_TENANT_ID } from '@obliview/shared';
-import { db } from '../db';
 import { banService } from '../services/ban.service';
 import { verifyDelegationToken, verifyFailureToHttp } from '../services/delegationAuth.service';
 import { logger } from '../utils/logger';
+import { auditService } from '../services/audit.service';
 
 /**
  * Middleware — verifies the incoming Bearer JWT is a valid Obligate delegation token whose
@@ -112,6 +112,12 @@ export async function postExternalBan(req: Request, res: Response, next: NextFun
     });
 
     logger.info({ ip, sourceApp: delegated.sourceAppType, banId: ban.id, isNew, expiresAt }, 'external ban recorded');
+    // Actor = the sibling app (no session user); filed in the Default tenant that owns the ban.
+    await auditService.logReq(req, {
+      action: 'bans.external_created', targetType: 'ban', targetId: ban.id,
+      tenantId: MASTER_TENANT_ID, userId: null, username: `app:${delegated.sourceAppType}`,
+      details: { ip: ban.ip, sourceApp: delegated.sourceAppType, isNew, reason, expiresAt: expiresAt.toISOString() },
+    });
     res.status(isNew ? 201 : 200).json({ success: true, data: { banId: ban.id, isNew, ip: ban.ip } });
   } catch (err) { next(err); }
 }
@@ -141,12 +147,15 @@ export async function deleteExternalBan(req: Request, res: Response, next: NextF
       res.status(400).json({ success: false, error: 'ip required (single IPv4/IPv6 address)' });
       return;
     }
-    // Only the active external rows this app pushed. ip_bans has no updated_at column.
-    const deleted = await db('ip_bans')
-      .whereRaw('ip = ?::inet', [ip])
-      .where({ origin_app: delegated.sourceAppType, ban_type: 'external', is_active: true })
-      .update({ is_active: false });
+    // Only the active external rows this app pushed, through the single
+    // deactivation path (lifted_at, ban:lifted, MikroTik unban).
+    const deleted = await banService.withdrawExternal(ip, delegated.sourceAppType);
     logger.info({ ip, sourceApp: delegated.sourceAppType, deleted }, 'external ban withdrawn');
+    await auditService.logReq(req, {
+      action: 'bans.external_withdrawn', targetType: 'ban',
+      tenantId: MASTER_TENANT_ID, userId: null, username: `app:${delegated.sourceAppType}`,
+      details: { ip, sourceApp: delegated.sourceAppType, deleted },
+    });
     res.json({ success: true, data: { ip, deleted } });
   } catch (err) { next(err); }
 }

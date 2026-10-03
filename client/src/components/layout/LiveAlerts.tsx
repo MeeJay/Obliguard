@@ -1,10 +1,12 @@
 import { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { X } from 'lucide-react';
-import { useLiveAlertsStore } from '@/store/liveAlertsStore';
+import { useTranslation } from 'react-i18next';
+import { useLiveAlertsStore, openAlertLink } from '@/store/liveAlertsStore';
 import type { LiveAlert, AlertSeverity } from '@/store/liveAlertsStore';
 import { useTenantStore } from '@/store/tenantStore';
 import { cn } from '@/utils/cn';
+import { AlertKindIcon } from './NotificationCenter';
 
 const TOAST_LIFETIME_MS     = 60_000;  // bottom-right: 1 min from alert.createdAt
 const TOP_CENTER_LIFETIME_MS = 10_000; // top-center: 10 s (user sees only the latest)
@@ -25,9 +27,10 @@ interface AlertCardProps {
 }
 
 function AlertCard({ alert, opacity = 1, lifetimeMs }: AlertCardProps) {
+  const { t } = useTranslation();
   const { dismissToast } = useLiveAlertsStore();
   const navigate = useNavigate();
-  const styles = SEVERITY_STYLES[alert.severity];
+  const styles = SEVERITY_STYLES[alert.severity] ?? SEVERITY_STYLES.info;
 
   // Per-notification independent timer — respects elapsed time since createdAt.
   // If the page reloads after the window has already elapsed, the toast is
@@ -45,23 +48,26 @@ function AlertCard({ alert, opacity = 1, lifetimeMs }: AlertCardProps) {
     return () => clearTimeout(timer);
   }, [alert.id, alert.createdAt, lifetimeMs, dismissToast]);
 
+  // Deep link of the incident; an alert of another tenant switches tenant first.
   const handleCardClick = () => {
-    if (alert.navigateTo) {
-      navigate(alert.navigateTo);
-    }
+    dismissToast(alert.id);
+    void openAlertLink(alert, navigate);
   };
 
   return (
     <div
       className={cn(
         'relative flex items-stretch rounded-xl border border-border/50 backdrop-blur-md bg-bg-secondary/80 shadow-lg overflow-hidden transition-opacity duration-300',
-        alert.navigateTo && 'cursor-pointer hover:bg-bg-secondary/90',
+        'cursor-pointer hover:bg-bg-secondary/90',
         `border-l-4 ${styles.bar}`,
       )}
       style={{ opacity }}
       onClick={handleCardClick}
     >
-      <div className="flex-1 p-3 pr-8 min-w-0">
+      <div className="pl-3 pt-3">
+        <AlertKindIcon alert={alert} />
+      </div>
+      <div className="flex-1 p-3 pl-2 pr-8 min-w-0">
         <p className={cn('text-sm font-semibold leading-tight truncate', styles.title)}>
           {alert.title}
         </p>
@@ -77,7 +83,7 @@ function AlertCard({ alert, opacity = 1, lifetimeMs }: AlertCardProps) {
           e.stopPropagation();
           dismissToast(alert.id);
         }}
-        aria-label="Dismiss"
+        aria-label={t('common.dismiss', { defaultValue: 'Dismiss' })}
       >
         <X size={13} />
       </button>

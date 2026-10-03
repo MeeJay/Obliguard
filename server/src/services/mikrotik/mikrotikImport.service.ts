@@ -2,7 +2,8 @@
  * MikroTik Address-List Import Service.
  *
  * Periodically polls MikroTik address-lists (e.g. "blacklist", "honeypot") via
- * the RouterOS API and imports new IPs as global auto-bans in Obliguard.
+ * the RouterOS API and imports new IPs as global 'remote' bans in Obliguard
+ * (origin_ref 'mikrotik:<deviceId>': never re-shared to obli.tools).
  *
  * This enables bidirectional sync: MikroTik honeypot/trap rules that add IPs
  * to address-lists on a single router get propagated as bans to ALL agents
@@ -12,16 +13,20 @@
  *   1. Every 60s, iterate all MikroTik devices with import_address_lists set
  *   2. Connect via RouterOS API and fetch each configured address-list
  *   3. Compare with last known state (in-memory cache)
- *   4. New IPs → create global auto-ban + ip_event (auth_failure)
- *   5. Ban engine propagates to all agents via existing mechanisms
+ *   4. New IPs → global 'remote' bans (batchImportIPs: whitelist, evaluate-only
+ *      and operator Lifts respected)
+ *   5. Delivered to every agent by the ban delta, to routers by the MikroTik
+ *      sync (per-ban push, or the periodic reconciliation for big batches)
  */
 
 import { db } from '../../db';
 import { logger } from '../../utils/logger';
 import { createRouterOSClient } from './routerosClient';
 import { decryptSecret } from '../../utils/crypto';
-import { mikrotikBanSync } from './mikrotikBanSync.service';
+import { reportMikrotikSyncFailure, resolveMikrotikSyncFailure } from './mikrotikBanSync.service';
 import { checkBanTarget } from '../../utils/protectedIps';
+import type { BanTarget } from '../../utils/ipValidation';
+import { banService } from '../ban.service';
 
 const POLL_INTERVAL_MS = 60_000; // 60 seconds
 
@@ -77,11 +82,17 @@ async function getImportDevices(): Promise<ImportDevice[]> {
 }
 
 async function pollDevice(device: ImportDevice): Promise<void> {
+  // Evaluate-only routers observe: no import (and no cache update, so the
+  // whole list is imported once the flag is cleared).
+  const ctx = await importContext(device.deviceId);
+  if (!ctx || ctx.evaluateOnly) return;
+
   let password: string;
   try {
     password = decryptSecret(device.apiPasswordEnc);
   } catch {
     logger.warn({ deviceId: device.deviceId }, 'MikroTik import: cannot decrypt password');
+    await reportMikrotikSyncFailure(device.deviceId, 'import', 'stored API password cannot be decrypted');
     return;
   }
 
@@ -93,9 +104,15 @@ async function pollDevice(device: ImportDevice): Promise<void> {
       useTls: device.apiUseTls,
       username: device.apiUsername,
       password,
+      deviceId: device.deviceId,
     });
   } catch (err) {
     logger.warn({ err, deviceId: device.deviceId }, 'MikroTik import: connection failed');
+    // Shown on the device (a pinned-certificate refusal in particular).
+    await db('mikrotik_credentials').where('device_id', device.deviceId).update({
+      last_api_error: err instanceof Error ? err.message : String(err),
+    }).catch(() => {});
+    await reportMikrotikSyncFailure(device.deviceId, 'import', `connection failed: ${err instanceof Error ? err.message : String(err)}`);
     return;
   }
 
@@ -124,7 +141,7 @@ async function pollDevice(device: ImportDevice): Promise<void> {
         'MikroTik import: new IPs detected in address-list',
       );
 
-      // Batch import as global auto-bans
+      // Batch import as global remote bans
       await batchImportIPs(newIPs, listName, device);
     }
 
@@ -133,121 +150,97 @@ async function pollDevice(device: ImportDevice): Promise<void> {
       last_api_connected_at: new Date(),
       last_api_error: null,
     });
+    await resolveMikrotikSyncFailure(device.deviceId, 'import');
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logger.warn({ err, deviceId: device.deviceId }, `MikroTik import poll failed: ${msg}`);
     await db('mikrotik_credentials').where('device_id', device.deviceId).update({
       last_api_error: msg,
     }).catch(() => {});
+    await reportMikrotikSyncFailure(device.deviceId, 'import', msg);
   } finally {
     client.close();
   }
 }
 
 /**
- * Batch import IPs as global auto-bans.
- * Optimized for large imports (30K+ IPs): filters already-banned in bulk,
- * batch-inserts bans and events in chunks of 500.
+ * The router's group ancestry and evaluate-only state (own flag, or any
+ * ancestor group's flag, like the BanEngine). Null when the device is gone.
+ */
+async function importContext(deviceId: number): Promise<{ groupIds: number[]; evaluateOnly: boolean } | null> {
+  const dev = await db('agent_devices').where({ id: deviceId })
+    .first('group_id', 'evaluate_only') as { group_id: number | null; evaluate_only: boolean } | undefined;
+  if (!dev) return null;
+  const groupIds = dev.group_id == null ? [] : await db('group_closure')
+    .where('descendant_id', dev.group_id)
+    .pluck('ancestor_id') as number[];
+  const evalGroup = groupIds.length === 0 ? undefined : await db('monitor_groups')
+    .whereIn('id', groupIds).where('evaluate_only', true).first('id');
+  return { groupIds, evaluateOnly: !!dev.evaluate_only || !!evalGroup };
+}
+
+/**
+ * Import address-list entries as global 'remote' bans (origin_ref
+ * 'mikrotik:<deviceId>', BROKEN-15). Never as 'auto': an imported address is
+ * not a local detection and is never contributed to obli.tools (owner
+ * decision 7). Skipped:
+ *   - a router in evaluate-only (own flag or an ancestor group's): it
+ *     observes, it never creates bans;
+ *   - invalid, reserved, too broad and protected entries (checkBanTarget);
+ *   - entries contained in a whitelist entry applying to the router (global,
+ *     its tenant's, its groups', its own; real containment >>=);
+ *   - entries an active global ban already covers, and entries of this
+ *     router an operator lifted (an import would undo the Lift).
+ * The insert is INSERT ... SELECT ... WHERE NOT EXISTS against the active
+ * bans (banService.createRemoteBans); a concurrent ban of the same target is
+ * absorbed by the partial unique index of migration 032.
+ * Returns the number of bans created.
  */
 export async function batchImportIPs(
   rawIps: string[],
   listName: string,
   device: ImportDevice,
-): Promise<void> {
-  if (rawIps.length === 0) return;
+): Promise<number> {
+  if (rawIps.length === 0) return 0;
+
+  const ctx = await importContext(device.deviceId);
+  if (!ctx) return 0;
+  if (ctx.evaluateOnly) {
+    logger.info({ deviceId: device.deviceId, list: listName, entries: rawIps.length }, 'MikroTik import: router in evaluate-only, nothing imported');
+    return 0;
+  }
 
   // Same contract as every ban path (B9-1 must keep it): refuse invalid,
-  // reserved, too broad and protected entries. Subnets at or under the floor
-  // are still imported as today (masked inet form). The CANONICAL target is
-  // stored (e.g. '::ffff:1.2.3.4' -> '1.2.3.4'), so the duplicate check below
-  // and agent delivery see the same text as every other ban path.
-  const seen = new Set<string>();
+  // reserved, too broad and protected entries. The CANONICAL target is stored
+  // like every other ban path: network address in `ip` plus `cidr_prefix` for
+  // a subnet (NULL for a host), e.g. '::ffff:1.2.3.4' -> '1.2.3.4'.
+  const seen = new Map<string, BanTarget>();
   let refused = 0;
   for (const ip of rawIps) {
     const c = await checkBanTarget(ip, { allowCidr: true });
-    if (c.ok) seen.add(c.target.cidr); else refused++;
+    if (c.ok) seen.set(c.target.cidr, c.target); else refused++;
   }
-  const ips = [...seen];
+  const targets = [...seen.values()];
   if (refused) {
     logger.warn({ deviceId: device.deviceId, list: listName, refused }, 'MikroTik import: refused reserved/protected/too-broad/invalid entries');
   }
-  if (ips.length === 0) return;
+  if (targets.length === 0) return 0;
 
-  const reason = `MikroTik import: detected in "${listName}" address-list`;
-  const CHUNK_SIZE = 500;
-
-  // 1. Filter out IPs that are already actively banned (bulk query)
-  const alreadyBanned = new Set<string>();
-  for (let i = 0; i < ips.length; i += CHUNK_SIZE) {
-    const chunk = ips.slice(i, i + CHUNK_SIZE);
-    const rows = await db('ip_bans')
-      .whereIn('ip', chunk)
-      .where('is_active', true)
-      .select('ip');
-    for (const r of rows) alreadyBanned.add(r.ip);
-  }
-
-  const toImport = ips.filter((ip) => !alreadyBanned.has(ip));
-  if (toImport.length === 0) {
-    logger.info(
-      { deviceId: device.deviceId, list: listName, total: ips.length, skipped: ips.length },
-      'MikroTik import: all IPs already banned',
-    );
-    return;
-  }
-
-  // 2. Batch insert bans
-  const now = new Date();
-  for (let i = 0; i < toImport.length; i += CHUNK_SIZE) {
-    const chunk = toImport.slice(i, i + CHUNK_SIZE);
-
-    const banRows = chunk.map((ip) => ({
-      ip,
-      scope: 'global',
-      ban_type: 'auto',
-      origin_tenant_id: device.tenantId,
-      reason,
-      is_active: true,
-      banned_at: now,
-    }));
-
-    // Use onConflict to skip IPs that got banned between our check and insert
-    await db('ip_bans').insert(banRows).onConflict(['ip', 'is_active']).ignore().catch(() => {
-      // Fallback: insert one by one if bulk fails (e.g., no unique constraint)
-      return Promise.allSettled(banRows.map((r) => db('ip_bans').insert(r).catch(() => {})));
-    });
-
-    // 3. Batch insert events
-    const crypto = await import('crypto');
-    const eventRows = chunk.map((ip) => ({
-      id: `${crypto.randomUUID()}-${Date.now()}`,
-      ip,
-      username: '',
-      service: `mikrotik_import:${listName}`,
-      event_type: 'auth_failure',
-      raw_log: reason,
-      device_id: device.deviceId,
-      tenant_id: device.tenantId,
-      source_ip_type: 'public',
-      timestamp: now,
-    }));
-    await db('ip_events').insert(eventRows).catch(() => {});
-
-    if (i % 5000 === 0 && i > 0) {
-      logger.info(
-        { deviceId: device.deviceId, list: listName, progress: `${i}/${toImport.length}` },
-        'MikroTik import: batch progress',
-      );
-    }
-  }
+  // Whitelist, active-ban coverage and operator Lifts are applied in SQL by
+  // the insert itself (no check-then-insert window).
+  const created = await banService.createRemoteBans(targets, {
+    originRef: `mikrotik:${device.deviceId}`,
+    originTenantId: device.tenantId,
+    reason: `MikroTik import: detected in "${listName}" address-list`,
+    whitelist: { tenantId: device.tenantId, groupIds: ctx.groupIds, deviceId: device.deviceId },
+    respectLifts: true,
+  });
 
   logger.info(
-    { deviceId: device.deviceId, list: listName, imported: toImport.length, skipped: alreadyBanned.size },
+    { deviceId: device.deviceId, list: listName, entries: targets.length, imported: created, skipped: targets.length - created },
     'MikroTik import: batch complete',
   );
-
-  // 4. Propagate to all MikroTik devices (fire-and-forget, done by ban engine on next cycle)
-  // Don't push 30K individual bans — the ban engine's delta sync handles this.
+  return created;
 }
 
 async function runPollCycle(): Promise<void> {

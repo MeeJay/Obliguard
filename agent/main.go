@@ -61,6 +61,13 @@ type Config struct {
 	BackoffUntil         int64                         `json:"-"` // never persisted — in-memory only
 	// Cached service configs received from server (restored on restart)
 	ServiceConfigs       map[string]AgentServiceConfig `json:"serviceConfigs,omitempty"`
+	// Enrolled is set once the server accepted this agent (first config
+	// frame). From then on serverUrl / apiKey of this file win over the
+	// --url / --key flags (see resolveConfigPrecedence).
+	Enrolled bool `json:"enrolled,omitempty"`
+	// FirewallBackend is the last Windows backend preference received from
+	// the server ("auto", "wfp", "netsh"; empty = auto), applied at start-up.
+	FirewallBackend string `json:"firewallBackend,omitempty"`
 }
 
 func loadConfig() (*Config, error) {
@@ -83,7 +90,13 @@ func saveConfig(cfg *Config) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(configFile, data, 0644)
+	// config.json holds the agent API key: owner-only (root / SYSTEM). WriteFile
+	// keeps the mode of an existing file, so files written 0644 by older agents
+	// are tightened too (on Windows Chmod only toggles the read-only bit).
+	if err := os.WriteFile(configFile, data, 0600); err != nil {
+		return err
+	}
+	return os.Chmod(configFile, 0600)
 }
 
 // setupConfig loads or creates config from file, registry (Windows), or CLI flags.
@@ -134,12 +147,24 @@ func setupConfig(urlArg, keyArg string) *Config {
 	setTLSPolicy(skip)
 	logTLSPolicy(skip, source)
 
-	// CLI flags override config file (useful for updates)
-	if urlArg != "" {
-		cfg.ServerURL = strings.TrimRight(urlArg, "/")
+	// --url / --key versus config.json: the flags only fill what the file
+	// lacks once the agent is enrolled (MSI service arguments and installer
+	// re-runs must not re-home an enrolled agent), unless --force-config.
+	d := resolveConfigPrecedence(cfg.ServerURL, cfg.APIKey, cfg.Enrolled, urlArg, keyArg, forceConfigFlag)
+	for _, line := range d.logLines() {
+		log.Printf("Config: %s", line)
 	}
-	if keyArg != "" {
-		cfg.APIKey = keyArg
+	if d.URL != cfg.ServerURL || d.Key != cfg.APIKey {
+		cfg.ServerURL, cfg.APIKey = d.URL, d.Key
+		// New server or key: enrolment starts over, so the flags keep winning
+		// until that server accepts the agent. A mere normalization of the
+		// file's URL (trailing slash) keeps the enrolment.
+		if d.URLSource == configSourceFlag || d.KeySource == configSourceFlag {
+			cfg.Enrolled = false
+		}
+		if err := saveConfig(cfg); err != nil {
+			log.Printf("Warning: could not save serverUrl/apiKey in config: %v", err)
+		}
 	}
 
 	// Resolve the best available device UUID using the shared Obli* cascade:
@@ -166,6 +191,97 @@ func setupConfig(urlArg, keyArg string) *Config {
 	}
 
 	return cfg
+}
+
+// forceConfigFlag (--force-config) lets --url / --key replace the values of an
+// enrolled agent's config.json (re-homing an agent on purpose).
+var forceConfigFlag bool
+
+// configDecision is the outcome of resolveConfigPrecedence: the values to use
+// and, per field, where they come from.
+type configDecision struct {
+	URL, Key             string
+	URLSource, KeySource string // "config.json" | "flag"
+	// URLIgnored / KeyIgnored: a flag was given with a different value and
+	// config.json won.
+	URLIgnored, KeyIgnored bool
+	Forced                 bool // --force-config made a flag win
+}
+
+const (
+	configSourceFile = "config.json"
+	configSourceFlag = "flag"
+)
+
+// resolveConfigPrecedence decides between config.json and the --url / --key
+// flags (decision 25: config.json wins after enrolment):
+//   - a flag that is empty, or a config.json field that is empty, leaves the
+//     other side;
+//   - before the first successful enrolment the flags win (first install,
+//     re-install with a corrected key while the agent is still pending);
+//   - after it config.json wins, unless force (--force-config).
+//
+// URLs are compared without their trailing slash. Pure function (tested).
+func resolveConfigPrecedence(fileURL, fileKey string, enrolled bool, flagURL, flagKey string, force bool) configDecision {
+	d := configDecision{}
+	pick := func(file, flag string) (value, source string, ignored, forced bool) {
+		switch {
+		case flag == "" || flag == file:
+			return file, configSourceFile, false, false
+		case file == "":
+			return flag, configSourceFlag, false, false
+		case !enrolled:
+			return flag, configSourceFlag, false, false
+		case force:
+			return flag, configSourceFlag, false, true
+		}
+		return file, configSourceFile, true, false
+	}
+	var fu, fk bool
+	d.URL, d.URLSource, d.URLIgnored, fu = pick(strings.TrimRight(fileURL, "/"), strings.TrimRight(flagURL, "/"))
+	d.Key, d.KeySource, d.KeyIgnored, fk = pick(fileKey, flagKey)
+	d.Forced = fu || fk
+	return d
+}
+
+// logLines describes the decision for the agent log (the key is never
+// printed). Empty when no flag played a part.
+func (d configDecision) logLines() []string {
+	var out []string
+	if d.URLIgnored {
+		out = append(out, "--url ignored: the agent is enrolled, serverUrl from config.json is kept ("+d.URL+"); pass --force-config to replace it")
+	} else if d.URLSource == configSourceFlag {
+		out = append(out, "serverUrl from --url ("+d.URL+")"+forcedSuffix(d.Forced))
+	}
+	if d.KeyIgnored {
+		out = append(out, "--key ignored: the agent is enrolled, apiKey from config.json is kept; pass --force-config to replace it")
+	} else if d.KeySource == configSourceFlag {
+		out = append(out, "apiKey from --key"+forcedSuffix(d.Forced))
+	}
+	return out
+}
+
+func forcedSuffix(forced bool) string {
+	if forced {
+		return " (--force-config)"
+	}
+	return ""
+}
+
+// applyAgentConfigFrame handles the config-frame parts owned by this file and
+// firewall.go, from the config worker (cmd_ws.go applyOGConfig): the first
+// frame marks the agent enrolled (the server only sends config to approved
+// agents), and the Windows firewallBackend preference is applied.
+func applyAgentConfigFrame(cfg *Config, fw FirewallManager, firewallBackend *string) {
+	if !cfg.Enrolled {
+		cfg.Enrolled = true
+		if err := saveConfig(cfg); err != nil {
+			log.Printf("Warning: could not save the enrolment state in config: %v", err)
+		} else {
+			log.Printf("Config: enrolment confirmed by the server — config.json now wins over --url/--key")
+		}
+	}
+	applyFirewallBackendFrame(cfg, fw, firewallBackend)
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -665,8 +781,9 @@ func mainLoop(cfg *Config) {
 	log.Printf("Server: %s", cfg.ServerURL)
 	log.Printf("Device UUID: %s", cfg.DeviceUUID)
 
-	// Detect and initialise the local firewall backend
-	fw := DetectFirewall()
+	// Detect and initialise the local firewall backend (Windows: with the
+	// backend preference last received from the server).
+	fw := DetectFirewallFor(cfg.FirewallBackend)
 	log.Printf("Firewall backend: %s", fw.Name())
 
 	// Start log watcher with any cached service configs
@@ -695,6 +812,8 @@ func main() {
 	keyFlag := flag.String("key", "", "API key (required on first run)")
 	flag.Var(&tlsInsecureFlag, "tls-insecure",
 		"Skip TLS certificate verification on every server connection (persisted as tlsInsecureSkipVerify; =0 turns it off, empty leaves config.json unchanged)")
+	flag.BoolVar(&forceConfigFlag, "force-config", false,
+		"Let --url / --key replace the values of config.json once the agent is enrolled (by default config.json wins after enrolment)")
 	flag.Parse()
 
 	// On Windows: detect service mode and hand off to SCM handler.

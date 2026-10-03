@@ -49,6 +49,9 @@ type NftablesFirewall struct {
 	// legacy is true while the pre-interval set still exists (migration failed
 	// or pending); its elements stay enforced and reported.
 	legacy bool
+	// rlExempt holds the IPv4 addresses kept out of rate limiting (the
+	// ban-safety protected addresses, see SetRateLimitExempt).
+	rlExempt []string
 }
 
 func (f *NftablesFirewall) Name() string { return "nftables" }
@@ -339,7 +342,8 @@ func (f *NftablesFirewall) GetBannedIPs() ([]string, error) {
 
 // ── nftables rate limiting ──────────────────────────────────────────────────
 //
-// Strategy (declarative, rebuilt on every ApplyRateLimits call):
+// Strategy (declarative, rebuilt in one transaction when the rule set changes;
+// the caller skips an identical set, so meters are not reset every heartbeat):
 //   - one timeout set "obliguard_rl_bans" holds IPs auto-banned for blowing
 //     past the limit; elements expire on their own (ban_ttl) via the set's
 //     `flags timeout`. This set is SEPARATE from the server-managed ban set so
@@ -347,9 +351,12 @@ func (f *NftablesFirewall) GetBannedIPs() ([]string, error) {
 //   - two chains hooked at input AND forward (priority -15, before the ban
 //     chains at -10) so both host-bound traffic and traffic forwarded to Docker
 //     containers are rate limited.
-//   - each chain drops anything already in the ban set, then evaluates the
-//     per-rule meters: a high-threshold meter (maxValue × banMultiplier) that
-//     records a timeout ban, followed by the soft meter (maxValue) that drops.
+//   - each chain first accepts the ban-safety protected addresses (server,
+//     own interfaces, gateway: never rate limited nor escalated to a ban),
+//     drops anything already in the ban set, then evaluates the per-rule
+//     meters: a high-threshold meter (maxValue × banMultiplier) that records a
+//     timeout ban, followed by the soft meter (maxValue) that drops.
+//   - an empty rule set deletes both chains and the ban set.
 
 const nftRLBanSet = "obliguard_rl_bans"
 const nftRLChainIn = "ratelimit_in"
@@ -357,40 +364,85 @@ const nftRLChainFwd = "ratelimit_fwd"
 
 func (f *NftablesFirewall) IsRateLimitSupported() bool { return true }
 
+// SetRateLimitExempt sets the IPv4 addresses kept out of rate limiting, used by
+// the next ApplyRateLimits. Anything that is not a plain IPv4 address is dropped.
+func (f *NftablesFirewall) SetRateLimitExempt(addrs []string) {
+	var out []string
+	for _, a := range addrs {
+		if ip, err := netip.ParseAddr(a); err == nil && ip.Is4() {
+			out = append(out, ip.String())
+		}
+	}
+	f.mu.Lock()
+	f.rlExempt = out
+	f.mu.Unlock()
+}
+
 func (f *NftablesFirewall) ApplyRateLimits(rules []RateLimitRule) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
+	if len(rules) == 0 {
+		f.clearRateLimitsLocked()
+		return nil
+	}
 	if err := f.ensureTable(); err != nil {
 		return err
 	}
 
-	run := func(c string) { fwRun("nft", strings.Fields(c)...) }
+	script := f.nftRateLimitScript(rules)
+	if err := fwRunStdin(script, "nft", "-f", "-"); err != nil {
+		// Older nft without stdin scripts: statement by statement.
+		log.Printf("Firewall: nft rate-limit script refused (%v) — applying statement by statement", err)
+		for _, line := range strings.Split(strings.TrimSpace(script), "\n") {
+			fwRun("nft", strings.Fields(line)...)
+		}
+	}
+	return nil
+}
 
-	// Timeout-backed ban set (idempotent) and the two rate-limit chains.
-	run(fmt.Sprintf("add set inet %s %s { type ipv4_addr; flags timeout; }", nftTable, nftRLBanSet))
-	run(fmt.Sprintf("add chain inet %s %s { type filter hook input priority -15; policy accept; }", nftTable, nftRLChainIn))
-	run(fmt.Sprintf("add chain inet %s %s { type filter hook forward priority -15; policy accept; }", nftTable, nftRLChainFwd))
-
-	// Rebuild both chains from scratch each time so config is declarative.
-	run(fmt.Sprintf("flush chain inet %s %s", nftTable, nftRLChainIn))
-	run(fmt.Sprintf("flush chain inet %s %s", nftTable, nftRLChainFwd))
+// nftRateLimitScript builds the transaction that (re)creates the ban set and
+// the two rate-limit chains and fills them with rules. Called with f.mu held.
+func (f *NftablesFirewall) nftRateLimitScript(rules []RateLimitRule) string {
+	lines := []string{
+		// Timeout-backed ban set (idempotent) and the two rate-limit chains.
+		fmt.Sprintf("add set inet %s %s { type ipv4_addr; flags timeout; }", nftTable, nftRLBanSet),
+		fmt.Sprintf("add chain inet %s %s { type filter hook input priority -15; policy accept; }", nftTable, nftRLChainIn),
+		fmt.Sprintf("add chain inet %s %s { type filter hook forward priority -15; policy accept; }", nftTable, nftRLChainFwd),
+		// Rebuild both chains from scratch so the config is declarative.
+		fmt.Sprintf("flush chain inet %s %s", nftTable, nftRLChainIn),
+		fmt.Sprintf("flush chain inet %s %s", nftTable, nftRLChainFwd),
+	}
 
 	for _, chain := range []struct{ name, tag string }{
 		{nftRLChainIn, "i"}, {nftRLChainFwd, "f"},
 	} {
+		// Protected addresses leave this chain before any meter (an accept in
+		// a base chain only ends this chain: the ban chains still apply).
+		if len(f.rlExempt) > 0 {
+			lines = append(lines, fmt.Sprintf("add rule inet %s %s ip saddr { %s } accept",
+				nftTable, chain.name, strings.Join(f.rlExempt, ", ")))
+		}
 		// Drop anything currently rate-limit-banned.
-		run(fmt.Sprintf("add rule inet %s %s ip saddr @%s drop", nftTable, chain.name, nftRLBanSet))
+		lines = append(lines, fmt.Sprintf("add rule inet %s %s ip saddr @%s drop", nftTable, chain.name, nftRLBanSet))
 
 		for _, r := range rules {
 			if r.MaxValue < 1 || (r.Type != "connection" && r.Type != "rate" && r.Type != "volume") {
 				continue
 			}
-			for _, cmd := range f.nftRateRules(chain.name, chain.tag, r) {
-				run(cmd)
-			}
+			lines = append(lines, f.nftRateRules(chain.name, chain.tag, r)...)
 		}
 	}
-	return nil
+	return strings.Join(lines, "\n") + "\n"
+}
+
+// clearRateLimitsLocked removes the rate-limit chains and their ban set (the
+// chains first: they reference the set). Absent objects are not an error.
+// Called with f.mu held.
+func (f *NftablesFirewall) clearRateLimitsLocked() {
+	fwRun("nft", "delete", "chain", "inet", nftTable, nftRLChainIn)
+	fwRun("nft", "delete", "chain", "inet", nftTable, nftRLChainFwd)
+	fwRun("nft", "delete", "set", "inet", nftTable, nftRLBanSet)
 }
 
 // nftRateRules builds the nft rule command(s) for one rule on one chain:
@@ -428,7 +480,8 @@ func (f *NftablesFirewall) nftRateRules(chainName, chainTag string, r RateLimitR
 	}
 
 	// gauge produces the meter body for a threshold in the rule's native unit.
-	gauge := func(threshold int) string {
+	// int64: maxValue × banMultiplier × 125 overflows int on 32-bit builds.
+	gauge := func(threshold int64) string {
 		switch r.Type {
 		case "rate":
 			return fmt.Sprintf("{ ip saddr limit rate over %d/second }", threshold)
@@ -450,7 +503,7 @@ func (f *NftablesFirewall) nftRateRules(chainName, chainTag string, r RateLimitR
 	// Escalation tier first: blowing past maxValue × banMultiplier records a
 	// timeout ban (then drops). Soft-tier traffic falls through to the next rule.
 	if r.BanMultiplier != nil && *r.BanMultiplier >= 2 {
-		banThreshold := r.MaxValue * (*r.BanMultiplier)
+		banThreshold := int64(r.MaxValue) * int64(*r.BanMultiplier)
 		ttl := ""
 		if r.BanTTLSeconds != nil && *r.BanTTLSeconds > 0 {
 			ttl = fmt.Sprintf(" timeout %ds", *r.BanTTLSeconds)
@@ -466,7 +519,7 @@ func (f *NftablesFirewall) nftRateRules(chainName, chainTag string, r RateLimitR
 	cmds = append(cmds, fmt.Sprintf(
 		"add rule inet %s %s %s %smeter og_%s_%s_%s %s %s",
 		nftTable, chainName, portMatch, stateMatch, chainTag, typeTag, portTag,
-		gauge(r.MaxValue), verdict,
+		gauge(int64(r.MaxValue)), verdict,
 	))
 
 	return cmds

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"net/netip"
 	"os"
 	"regexp"
 	"strings"
@@ -16,6 +17,12 @@ import (
 // "obliguard_net" (a separate set, so the long-standing host set needs no
 // migration). Each ipset is referenced by two drop rich-rules. Ban/unban =
 // add/delete set entries.
+//
+// firewalld >= 1.2 refuses overlapping entries in a hash:net ipset ("INVALID_ENTRY:
+// Entry '1.2.0.0/16' overlaps with existing entry '1.2.3.0/24'"), at runtime and
+// when it loads the permanent XML on --reload. Network adds are therefore planned
+// with planIntervalSet, as for the nftables interval sets: a network inside a
+// banned network is tracked as covered, never inserted.
 // Fallback to individual rich-rules (one per entry, CIDR accepted) if ipset is
 // not available.
 
@@ -34,6 +41,9 @@ type FirewalldFirewall struct {
 	initialized bool
 	pendingAdd  []string
 	pendingDel  []string
+	// coveredNets holds requested networks kept out of obliguard_net because a
+	// banned network already contains them (see planIntervalSet).
+	coveredNets map[string]netip.Prefix
 	// entriesFromFile caches the firewalld capability probe for
 	// --add-entries-from-file / --remove-entries-from-file: 0=unknown, 1=yes, -1=no.
 	entriesFromFile int
@@ -439,9 +449,40 @@ func (f *FirewalldFirewall) applyDelta(adds, dels []string, permanent bool) {
 	f.applyEntries(fwdSetName, addHosts, true, permanent)
 	f.applyEntries(fwdSetName, delHosts, false, permanent)
 	if f.hasNetSet {
-		f.applyEntries(fwdNetSetName, addNets, true, permanent)
+		// Removals first: a network that retires the narrower ones it contains
+		// is refused while they are still in the set (overlap).
 		f.applyEntries(fwdNetSetName, delNets, false, permanent)
+		f.applyEntries(fwdNetSetName, addNets, true, permanent)
 	}
+}
+
+// netPresent returns the runtime entries of the network set (key → prefix).
+func (f *FirewalldFirewall) netPresent() (map[string]netip.Prefix, error) {
+	out, err := fwOutput("firewall-cmd", "--ipset="+fwdNetSetName, "--get-entries")
+	if err != nil {
+		return nil, err
+	}
+	present := make(map[string]netip.Prefix)
+	for _, k := range parseBanEntries(string(out)) {
+		if _, p, perr := canonicalBanEntry(k); perr == nil {
+			present[k] = p
+		}
+	}
+	return present, nil
+}
+
+// planNets resolves overlaps of the network delta against the live network set
+// (firewalld refuses overlapping hash:net entries). When the set cannot be read
+// the delta is returned unchanged.
+func (f *FirewalldFirewall) planNets(addNets, delNets []string) (toDel, toAdd []string) {
+	if f.coveredNets == nil {
+		f.coveredNets = make(map[string]netip.Prefix)
+	}
+	present, err := f.netPresent()
+	if err != nil {
+		return delNets, addNets
+	}
+	return planIntervalSet(present, f.coveredNets, addNets, delNets)
 }
 
 func (f *FirewalldFirewall) Flush() error {
@@ -458,6 +499,20 @@ func (f *FirewalldFirewall) Flush() error {
 	dels := f.pendingDel
 	f.pendingAdd = nil
 	f.pendingDel = nil
+
+	if f.hasNetSet {
+		addHosts, addNets := splitBySet(adds)
+		delHosts, delNets := splitBySet(dels)
+		if len(addNets) > 0 || len(delNets) > 0 {
+			// Requested removals are always sent as well (per-entry and
+			// idempotent), so a permanent entry missing from the runtime set
+			// cannot come back on the next --reload.
+			planDel, planAdd := f.planNets(addNets, delNets)
+			delNets, addNets = canonicalBanList(append(planDel, delNets...)), planAdd
+		}
+		adds = append(addHosts, addNets...)
+		dels = append(delHosts, delNets...)
+	}
 
 	// 1) Enforce on the RUNTIME ipsets — immediate, no --reload, no permanent
 	//    reparse. Adds batch into a tiny constant number of firewall-cmd
@@ -484,13 +539,15 @@ func (f *FirewalldFirewall) GetBannedIPs() ([]string, error) {
 		if err != nil {
 			return nil, nil
 		}
-		text := string(out)
+		entries := parseBanEntries(string(out))
 		if f.hasNetSet {
-			if netOut, nerr := fwOutput("firewall-cmd", "--ipset="+fwdNetSetName, "--get-entries"); nerr == nil {
-				text += "\n" + string(netOut)
+			if present, nerr := f.netPresent(); nerr == nil {
+				// Networks plus the covered ones a present network still contains.
+				entries = append(entries, reportWithCovered(present, f.coveredNets)...)
+				entries = canonicalBanList(entries)
 			}
 		}
-		return parseBanEntries(text), nil
+		return entries, nil
 	}
 	out, err := fwOutput("firewall-cmd", "--list-rich-rules")
 	if err != nil {

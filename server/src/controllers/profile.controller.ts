@@ -9,6 +9,7 @@ import { AppError } from '../middleware/errorHandler';
 import { appConfigService } from '../services/appConfig.service';
 import { smtpServerService } from '../services/smtpServer.service';
 import { userSessionsService } from '../services/userSessions.service';
+import { auditService } from '../services/audit.service';
 import type { UpdateProfileInput, ChangePasswordInput } from '../validators/profile.schema';
 
 /** Cap of the stored preferences JSON (Obliance profileWrite.service). */
@@ -174,6 +175,7 @@ export const profileController = {
           }
           if (!(await comparePassword(data.currentPassword, current.password_hash))) {
             res.locals.currentPasswordRejected = true; // counted by currentPasswordLimiter
+            await auditService.logReq(req, { action: 'profile.email_changed', targetType: 'user', targetId: userId, success: false, details: { reason: 'wrong_current_password' } });
             throw new AppError(400, 'Current password is incorrect');
           }
           if (nextEmail) {
@@ -199,6 +201,10 @@ export const profileController = {
 
       if ('email' in updatePayload) {
         logger.info({ userId }, 'Profile: email address changed');
+        await auditService.logReq(req, {
+          action: 'profile.email_changed', targetType: 'user', targetId: userId,
+          details: { previousEmail: previousEmail ?? null, newEmail: updatePayload.email ?? null },
+        });
         if (previousEmail) notifyEmailChanged(previousEmail, current.username);
       }
 
@@ -223,6 +229,7 @@ export const profileController = {
       const valid = await comparePassword(currentPassword, user.password_hash);
       if (!valid) {
         res.locals.currentPasswordRejected = true; // counted by currentPasswordLimiter
+        await auditService.logReq(req, { action: 'profile.password_changed', targetType: 'user', targetId: userId, success: false, details: { reason: 'wrong_current_password' } });
         throw new AppError(400, 'Current password is incorrect');
       }
 
@@ -235,6 +242,7 @@ export const profileController = {
       await regenerateKeepingIdentity(req);
       const revoked = await userSessionsService.destroyForUser(userId, { exceptSid: req.sessionID });
       logger.info({ userId, revokedSessions: revoked }, 'Profile: password changed, other sessions revoked');
+      await auditService.logReq(req, { action: 'profile.password_changed', targetType: 'user', targetId: userId, details: { revokedSessions: revoked } });
 
       res.json({ success: true, message: 'Password changed successfully' });
     } catch (err) {

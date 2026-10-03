@@ -25,6 +25,12 @@ export default defineConfig({
         target: 'http://localhost:3001',
         changeOrigin: true,
       },
+      // Desktop app builds (DownloadPage probes them with HEAD): without this
+      // proxy Vite answers with its HTML fallback and every file shows as missing.
+      '/downloads': {
+        target: 'http://localhost:3001',
+        changeOrigin: true,
+      },
       '/socket.io': {
         target: 'http://localhost:3001',
         ws: true,

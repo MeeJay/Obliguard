@@ -73,6 +73,15 @@ export function useSocket() {
       useLiveAlertsStore.getState().addAlertFromServer(alert);
     };
     socket.on(SOCKET_EVENTS.NOTIFICATION_NEW, onNotification);
+    // Incident resolved server-side → drop it; read in another tab/session → mark it read.
+    const onNotificationResolved = (data: { tenantId?: number; ids?: number[] }) => {
+      if (Array.isArray(data?.ids)) useLiveAlertsStore.getState().applyResolvedFromServer(data.ids);
+    };
+    const onNotificationRead = (data: { tenantId?: number; ids?: number[]; readAt?: string | null }) => {
+      if (Array.isArray(data?.ids)) useLiveAlertsStore.getState().applyReadFromServer(data.ids, data.readAt);
+    };
+    socket.on(SOCKET_EVENTS.NOTIFICATION_RESOLVED, onNotificationResolved);
+    socket.on(SOCKET_EVENTS.NOTIFICATION_READ, onNotificationRead);
 
     // ── Group events ──────────────────────────────────────────────────────────
     const onGroupCreated = (data: { group: MonitorGroup }) => {
@@ -138,6 +147,8 @@ export function useSocket() {
     return () => {
       socket.off('connect', onConnect);
       socket.off(SOCKET_EVENTS.NOTIFICATION_NEW, onNotification);
+      socket.off(SOCKET_EVENTS.NOTIFICATION_RESOLVED, onNotificationResolved);
+      socket.off(SOCKET_EVENTS.NOTIFICATION_READ, onNotificationRead);
       socket.off(SOCKET_EVENTS.GROUP_CREATED, onGroupCreated);
       socket.off(SOCKET_EVENTS.GROUP_UPDATED, onGroupUpdated);
       socket.off(SOCKET_EVENTS.GROUP_DELETED, onGroupDeleted);

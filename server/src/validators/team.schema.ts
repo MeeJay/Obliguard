@@ -16,15 +16,23 @@ export const setTeamMembersSchema = z.object({
   userIds: z.array(z.number().int().positive()),
 });
 
-/** Team permission scopes (matches PermissionScope in @obliview/shared). */
-export const TEAM_PERMISSION_SCOPES = ['group', 'agent'] as const;
+/**
+ * Team permission scopes: 'group' (a group and its subtree), 'agent' (one
+ * agent) and 'ungrouped' (every agent of the team's tenant without a group;
+ * scopeId 0 by convention, as in Obliance).
+ */
+export const TEAM_PERMISSION_SCOPES = ['group', 'agent', 'ungrouped'] as const;
 
 export const setTeamPermissionsSchema = z.object({
   permissions: z.array(
     z.object({
       scope: z.enum(TEAM_PERMISSION_SCOPES),
-      scopeId: z.number().int().positive(),
+      // 'ungrouped' has no entity: any id is accepted and stored as 0.
+      scopeId: z.number().int().nonnegative(),
       level: z.enum(['ro', 'rw']),
+    }).refine((p) => p.scope === 'ungrouped' || p.scopeId > 0, {
+      message: 'scopeId must be a positive id',
+      path: ['scopeId'],
     }),
   ),
 });

@@ -1,13 +1,55 @@
 // ── 3D NetMap Constants ──────────────────────────────────────────────────────
 
+import { NETMAP_PALETTE, rgba } from '../netmap/constants';
+
+/** `#rrggbb` palette entry → Three.js colour number. */
+const hexNum = (hex: string): number => parseInt(hex.replace('#', ''), 16);
+
+/**
+ * 3D palette. Every colour of the Three.js scene lives here (the 2D palette
+ * of netmap/constants.ts is the source where both views share a colour); the
+ * 3D variants are brighter because bloom and tone mapping dim them.
+ */
+export const PALETTE_3D = {
+  /** Scene background, fog and the container behind the canvas. */
+  space:       hexNum(NETMAP_PALETTE.chrome.space3d),
+  spaceCss:    NETMAP_PALETTE.chrome.space3d,
+  /** Non-emissive base of the agent and IP spheres (bloom does the glow). */
+  black:       0x000000,
+  /** Emissive base of the instanced IP spheres (tinted per instance). */
+  white:       0xffffff,
+  orbitRing:   0x3388cc,
+  /** Agent tint toward which heavily targeted agents drift. */
+  threat:      0xff3333,
+  /** Evaluate-only marker (labels). */
+  evaluateCss: rgba(NETMAP_PALETTE.amber, 0.85),
+  lights: {
+    ambient:   0x0a1530,
+    sun:       0xffeedd,
+    fillBelow: 0x2244aa,
+    key:       0xaaccff,
+  },
+  label: {
+    name:    rgba(NETMAP_PALETTE.label, 0.75),
+    shadow:  rgba(NETMAP_PALETTE.shadow, 1),
+    online:  rgba(NETMAP_PALETTE.mint, 0.5),
+    offline: rgba(NETMAP_PALETTE.threat, 0.5),
+  },
+  tooltip: {
+    bg:     NETMAP_PALETTE.chrome.tooltip,
+    border: NETMAP_PALETTE.chrome.tooltipBorder,
+    shadow: NETMAP_PALETTE.chrome.tooltipShadow,
+  },
+} as const;
+
 /** Device type colors — same as 2D but more vivid for 3D */
 export const DEVICE_COLORS: Record<string, number> = {
-  firewall: 0xF5A623,
-  router:   0x00cfff,
-  server:   0x7F77DD,
+  firewall: hexNum(NETMAP_PALETTE.device.firewall),
+  router:   hexNum(NETMAP_PALETTE.device.router),
+  server:   hexNum(NETMAP_PALETTE.device.server),
   windows:  0x4a9eff,
-  desktop:  0x5DCAA5,
-  default:  0x90c8f0,
+  desktop:  hexNum(NETMAP_PALETTE.device.desktop),
+  default:  hexNum(NETMAP_PALETTE.device.default),
 };
 
 /** IP status colors — brighter for emissive glow */
@@ -20,8 +62,8 @@ export const STATUS_COLORS = {
 
 /** Peer link colors */
 export const PEER_COLORS = {
-  lan: 0x3b82f6,
-  wan: 0xf97316,
+  lan: hexNum(NETMAP_PALETTE.peer.lan),
+  wan: hexNum(NETMAP_PALETTE.peer.wan),
 } as const;
 
 /** Spatial scale — how 2D pixel coords map to 3D units */
@@ -34,8 +76,20 @@ export const AGENT_RADIUS = 3.0;
 export const IP_RADIUS_MIN = 0.25;
 export const IP_RADIUS_MAX = 0.9;
 
+/** IP instance pool: initial capacity, doubled on demand up to the hard cap. */
+export const IP_POOL_INITIAL = 1024;
+export const IP_POOL_MAX = 32768;
+
 /** Orbit ring spacing in 3D units */
 export const ORBIT_RING_GAP_3D = 2.5;
+
+/** Threat IPs (banned + suspicious) at which an agent reaches its full threat tint. */
+export const THREAT_TINT_FULL = 60;
+/** Strongest share of the threat colour in an agent's emissive colour. */
+export const THREAT_TINT_MAX = 0.6;
+
+/** Hover raycast throttle (ms). */
+export const HOVER_THROTTLE_MS = 80;
 
 /** Camera defaults */
 export const CAM_INITIAL_DIST = 180;

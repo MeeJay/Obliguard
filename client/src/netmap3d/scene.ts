@@ -4,7 +4,7 @@ import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { CSS2DRenderer } from 'three/examples/jsm/renderers/CSS2DRenderer.js';
-import { CAM_INITIAL_DIST, CAM_MIN_DIST, CAM_MAX_DIST, BLOOM_STRENGTH, BLOOM_RADIUS, BLOOM_THRESHOLD } from './constants3d';
+import { CAM_INITIAL_DIST, CAM_MIN_DIST, CAM_MAX_DIST, BLOOM_STRENGTH, BLOOM_RADIUS, BLOOM_THRESHOLD, PALETTE_3D } from './constants3d';
 
 export interface SceneContext {
   scene: THREE.Scene;
@@ -24,8 +24,8 @@ export function createScene(container: HTMLElement): SceneContext {
 
   // Scene — deep space black
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x000206);
-  scene.fog = new THREE.FogExp2(0x000206, 0.00015);
+  scene.background = new THREE.Color(PALETTE_3D.space);
+  scene.fog = new THREE.FogExp2(PALETTE_3D.space, 0.00015);
 
   // Camera — wider FOV for immersion
   const camera = new THREE.PerspectiveCamera(60, w / h, 0.1, 12000);
@@ -74,20 +74,20 @@ export function createScene(container: HTMLElement): SceneContext {
   // ── Lighting ──────────────────────────────────────────────────────────────
 
   // Soft ambient fill — cold blue tint
-  scene.add(new THREE.AmbientLight(0x0a1530, 1.2));
+  scene.add(new THREE.AmbientLight(PALETTE_3D.lights.ambient, 1.2));
 
   // Main "sun" — warm white at origin
-  const sun = new THREE.PointLight(0xffeedd, 2.0, 800);
+  const sun = new THREE.PointLight(PALETTE_3D.lights.sun, 2.0, 800);
   sun.position.set(0, 30, 0);
   scene.add(sun);
 
   // Secondary fill light — cool blue from below for rim lighting
-  const fillBelow = new THREE.PointLight(0x2244aa, 0.6, 600);
+  const fillBelow = new THREE.PointLight(PALETTE_3D.lights.fillBelow, 0.6, 600);
   fillBelow.position.set(0, -50, 0);
   scene.add(fillBelow);
 
   // Distant directional for key shadows
-  const dirLight = new THREE.DirectionalLight(0xaaccff, 0.4);
+  const dirLight = new THREE.DirectionalLight(PALETTE_3D.lights.key, 0.4);
   dirLight.position.set(100, 80, 60);
   scene.add(dirLight);
 

@@ -2,7 +2,7 @@
   "name": "obliview",
   "private": true,
   "version": "0.1.0",
-  "description": "Advanced monitoring application with multi-user support and hierarchical groups",
+  "description": "Self-hosted, agent-based network intrusion prevention system (IPS): multi-tenant, hierarchical groups, fleet-wide firewall bans",
   "scripts": {
     "dev": "docker compose -f docker-compose.build.yml -f docker-compose.dev.yml up --build",
     "dev:server": "cd server && npm run dev",
@@ -16,15 +16,12 @@
     "docker:logs": "docker compose logs -f",
     "docker:build": "docker compose -f docker-compose.build.yml up -d --build",
     "verify": "npm run verify -w server",
-    "typecheck": "tsc -p shared && tsc -p server --noEmit && tsc -p client --noEmit && tsc -p server/test/tsconfig.json"
+    "typecheck": "tsc -p shared && tsc -p server --noEmit && tsc -p client --noEmit && tsc -p server/test/tsconfig.json",
+    "audit": "node -e \"const {spawnSync}=require('child_process');let rc=0;const n=spawnSync('npm',['audit','--omit=dev','--workspaces','--include-workspace-root'],{stdio:'inherit',shell:true});if(n.status!==0)rc=1;const g=spawnSync('govulncheck',['./...'],{cwd:'agent',stdio:'inherit'});if(g.error&&g.error.code==='ENOENT'){console.log('[audit] govulncheck not installed: agent/ check skipped (go install golang.org/x/vuln/cmd/govulncheck@latest)')}else if(g.status!==0){rc=1}process.exit(rc)\""
   },
   "workspaces": [
     "shared",
     "server",
-    "client",
-    "agent"
-  ],
-  "dependencies": {
-    "lucide-react": "^0.577.0"
-  }
+    "client"
+  ]
 }

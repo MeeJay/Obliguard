@@ -3,7 +3,7 @@ import path from 'path';
 import type { Request, Response } from 'express';
 import { logger } from '../utils/logger';
 import { requestAuthority, requestProto } from '../utils/publicOrigin';
-import { checkDeviceAccess } from '../services/deviceAccess.service';
+import { checkRequestDeviceAccess } from '../services/deviceAccess.service';
 import { m365TenantService } from '../services/m365/m365Tenant.service';
 import { certificateToBase64 } from '../services/m365/certificate';
 import { enrolmentPermissionPlan, EXO_READ_ROLE, EXO_WRITE_ROLE } from '../services/m365/permissions';
@@ -44,7 +44,7 @@ function inferServerUrl(req: Request): string {
  * Renvoie l'identifiant de l'équipement, ou null si la réponse a déjà été émise.
  */
 async function requireOwnM365(req: Request, res: Response): Promise<number | null> {
-  const r = await checkDeviceAccess(req.params.id, req.tenantId, 'write');
+  const r = await checkRequestDeviceAccess(req, req.params.id, 'write');
   if (!r.ok) {
     res.status(r.status).json({ error: r.error });
     return null;

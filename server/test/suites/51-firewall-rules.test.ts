@@ -147,7 +147,7 @@ describe('51 firewall rules (W3-3)', () => {
     const c = await h.adminIn(2);
     const url = (ruleId: string) => `/api/agent/devices/${id}/firewall/rules/${encodeURIComponent(ruleId)}`;
 
-    for (const ruleId of ['x"y', 'a\nb', 'a\\b', '-F', 'Obliguard-Block-in::in', 'all', 'x'.repeat(257)]) {
+    for (const ruleId of ['x"y', 'a\nb', 'a\\b', '-F', 'Obliguard-Block-in::in', 'all', 'all ::in', ' ALL', ' Obliguard-Block-1', 'x'.repeat(257)]) {
       assert.equal((await c.del(url(ruleId))).status, 400, `DELETE ${JSON.stringify(ruleId)}`);
       assert.equal((await c.patch(url(ruleId), { enabled: false })).status, 400, `PATCH ${JSON.stringify(ruleId)}`);
     }

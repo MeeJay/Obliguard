@@ -1,6 +1,18 @@
 import { db } from '../db';
 import type { MonitorGroup, GroupTreeNode, AgentThresholds, AgentGroupConfig } from '@obliview/shared';
 import { isMasterTenant } from '@obliview/shared';
+import { settingsService, legacyTypesToFlags, writableDefinition, normalizeSettingValue } from './settings.service';
+import { agentConfigService } from './agentConfig.service';
+
+/**
+ * agentGroupConfig keys that are IPS settings cascade keys (W13-1): written as
+ * group settings rows, the column keeping a mirror for its legacy readers.
+ */
+const CASCADE_GROUP_KEYS: ReadonlyArray<{ legacy: 'pushIntervalSeconds' | 'maxMissedPushes' | 'notificationTypes'; key: string }> = [
+  { legacy: 'pushIntervalSeconds', key: 'checkIntervalSeconds' },
+  { legacy: 'maxMissedPushes', key: 'maxMissedPushes' },
+  { legacy: 'notificationTypes', key: 'notificationTypes' },
+];
 
 interface GroupRow {
   id: number;
@@ -124,6 +136,8 @@ export const groupService = {
       );
     }
 
+    // The settings resolver walks the closure: a new chain is visible at once.
+    agentConfigService.invalidate();
     return rowToGroup(row);
   },
 
@@ -153,6 +167,14 @@ export const groupService = {
       .update(updateData)
       .returning('*');
 
+    // Name (inheritance source label) or evaluate-only (cascade) changed.
+    if (data.name !== undefined || data.evaluateOnly !== undefined) {
+      agentConfigService.invalidate();
+      if (data.evaluateOnly !== undefined) {
+        const { invalidateEvaluateOnlyCache } = await import('./agent.service');
+        invalidateEvaluateOnlyCache();
+      }
+    }
     return row ? rowToGroup(row) : null;
   },
 
@@ -203,12 +225,17 @@ export const groupService = {
       .update({ parent_id: newParentId, updated_at: new Date() })
       .returning('*');
 
+    // New ancestors: the subtree now inherits another chain.
+    agentConfigService.invalidate();
     return row ? rowToGroup(row) : null;
   },
 
   async delete(id: number): Promise<boolean> {
+    // The sub-groups go too (CASCADE): their settings rows have no FK.
+    const subtree = await db('group_closure').where({ ancestor_id: id }).pluck('descendant_id') as number[];
     // CASCADE in the DB handles closure table and child groups
     const count = await db('monitor_groups').where({ id }).del();
+    if (count > 0) await settingsService.removeScopes('group', [...new Set([id, ...subtree])]);
     return count > 0;
   },
 
@@ -284,8 +311,26 @@ export const groupService = {
     return row ? rowToGroup(row) : null;
   },
 
-  /** Update the agent-group config (push interval, max missed pushes, notification types, update policy) */
+  /**
+   * Update the agent-group config (push interval, max missed pushes,
+   * notification types, update policy) — compat endpoint of the IPS settings
+   * cascade (W13-1). The cascade keys are validated (AppError 400) and written
+   * as group settings rows; the column is still merged as before (mirror for
+   * its legacy readers, and the C17 updatePolicy that stays there).
+   */
   async updateAgentGroupConfig(id: number, config: Partial<AgentGroupConfig>): Promise<MonitorGroup | null> {
+    const group = await db('monitor_groups').where({ id }).first('tenant_id') as { tenant_id: number } | undefined;
+    if (!group) return null;
+    const writes: Array<{ key: string; value: unknown }> = [];
+    for (const { legacy, key } of CASCADE_GROUP_KEYS) {
+      if (!(legacy in config)) continue;
+      const raw = config[legacy];
+      writes.push({ key, value: legacy === 'notificationTypes' ? legacyTypesToFlags(raw ?? null) : (raw ?? null) });
+    }
+    for (const w of writes) {
+      if (w.value !== null) normalizeSettingValue(writableDefinition(w.key, 'group'), w.value);
+    }
+
     // Merge with existing config
     const existing = await db('monitor_groups').where({ id }).select('agent_group_config').first() as
       { agent_group_config: AgentGroupConfig | null } | undefined;
@@ -304,6 +349,9 @@ export const groupService = {
       .where({ id })
       .update({ agent_group_config: JSON.stringify(merged), updated_at: new Date() } as Record<string, unknown>)
       .returning('*') as Promise<GroupRow[]>);
+    if (writes.length > 0) {
+      await settingsService.writeMany({ level: 'group', scopeId: id, tenantId: group.tenant_id }, writes, { mirror: false });
+    }
     return row ? rowToGroup(row) : null;
   },
 };

@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // ── FirewallManager interface ─────────────────────────────────────────────────
@@ -61,39 +62,295 @@ type cidrSupporter interface {
 // bare network address (older agents only understand single addresses).
 const capCIDR = "cidr"
 
+// capWFP tells the server that the WFP-native backend is the one enforcing the
+// bans of this (Windows) agent. Absent on the netsh backend, including after a
+// WFP init failure.
+const capWFP = "wfp"
+
 // firewallCapabilities lists the ban-enforcement features of the active
 // backend, appended to the heartbeat capabilities.
 func firewallCapabilities(fw FirewallManager) []string {
-	if c, ok := fw.(cidrSupporter); ok && !c.SupportsCIDR() {
-		return nil
+	var caps []string
+	if c, ok := fw.(cidrSupporter); !ok || c.SupportsCIDR() {
+		caps = append(caps, capCIDR)
 	}
-	return []string{capCIDR}
+	if firewallBackendKind(fw) == fwBackendWFP {
+		caps = append(caps, capWFP)
+	}
+	return caps
+}
+
+// ── Windows backend preference ────────────────────────────────────────────────
+//
+// The server config frame may carry "firewallBackend": "auto" | "wfp" |
+// "netsh" (Windows agents only). auto and wfp both select the WFP-native
+// backend with the netsh fallback when WFP cannot be opened; netsh keeps WFP
+// off. An absent field leaves the current preference unchanged: older servers
+// never send it, so those agents stay on auto (the behaviour before the
+// setting existed). The preference is persisted in config.json
+// (firewallBackend) and applied before the first connection at the next start.
+
+const (
+	fwBackendAuto  = "auto"
+	fwBackendWFP   = "wfp"
+	fwBackendNetsh = "netsh"
+)
+
+// normalizeFirewallBackend validates a preference ("" = auto). ok is false for
+// an unknown value, which the agent ignores (a newer server may add values).
+func normalizeFirewallBackend(s string) (pref string, ok bool) {
+	switch v := strings.ToLower(strings.TrimSpace(s)); v {
+	case "", fwBackendAuto:
+		return fwBackendAuto, true
+	case fwBackendWFP, fwBackendNetsh:
+		return v, true
+	}
+	return fwBackendAuto, false
+}
+
+// firewallKindFor maps a preference to the backend it selects first.
+func firewallKindFor(pref string) string {
+	if pref == fwBackendNetsh {
+		return fwBackendNetsh
+	}
+	return fwBackendWFP
+}
+
+// backendKinder is implemented by the Windows backends that report which of
+// WFP and netsh actually enforces ("wfp", "netsh", "" otherwise).
+type backendKinder interface {
+	BackendKind() string
+}
+
+func firewallBackendKind(fw FirewallManager) string {
+	if k, ok := fw.(backendKinder); ok {
+		return k.BackendKind()
+	}
+	return ""
+}
+
+// fwBackendSwitcher is the platform half of the Windows backend switch, set by
+// firewall_wfp_windows.go (nil on other platforms). It sits behind an
+// interface so the switch sequencing below is testable on every OS.
+type fwBackendSwitcher interface {
+	// kindOf reports "wfp", "netsh" or "none" for a backend.
+	kindOf(fw FirewallManager) string
+	// migrate builds the backend of kind `to`, enforces on it the entries the
+	// old backend enforces, verifies them, then removes the old backend's
+	// rules (apply new, then clean old). On error the old backend is left
+	// enforcing, untouched, and whatever the new one wrote is removed.
+	migrate(old FirewallManager, to string) (FirewallManager, error)
+	// activate starts the background work of a backend that became active.
+	activate(fw FirewallManager)
+	// armWFPPurge makes the first netsh Flush remove the WFP filters an
+	// earlier run left behind (netsh cannot see them).
+	armWFPPurge()
+}
+
+var fwSwitchOps fwBackendSwitcher
+
+// switchableFirewall wraps the Windows backend so the server can switch it at
+// runtime: every caller (ban worker, heartbeat, config worker) keeps the same
+// FirewallManager while the backend underneath changes.
+//
+// Writes (BanIP, UnbanIP, Flush, ApplyRateLimits) and a switch are serialized
+// by opMu, so no delta is applied to a backend that is being replaced. Reads
+// (GetBannedIPs for the heartbeat) only take curMu and keep reporting the old
+// backend, which still enforces, while a long migration runs.
+type switchableFirewall struct {
+	ops fwBackendSwitcher
+
+	opMu  sync.Mutex
+	curMu sync.RWMutex
+	cur   FirewallManager
+
+	// Requested preference, applied by one goroutine at a time (latest wins).
+	reqMu   sync.Mutex
+	want    string
+	applied string
+	running bool
+	// idle is closed when no switch is pending (tests wait on it).
+	idle chan struct{}
+}
+
+func newSwitchableFirewall(fw FirewallManager, pref string, ops fwBackendSwitcher) *switchableFirewall {
+	idle := make(chan struct{})
+	close(idle)
+	return &switchableFirewall{ops: ops, cur: fw, want: pref, applied: pref, idle: idle}
+}
+
+func (s *switchableFirewall) current() FirewallManager {
+	s.curMu.RLock()
+	defer s.curMu.RUnlock()
+	return s.cur
+}
+
+func (s *switchableFirewall) Name() string                    { return s.current().Name() }
+func (s *switchableFirewall) IsAvailable() bool               { return s.current().IsAvailable() }
+func (s *switchableFirewall) GetBannedIPs() ([]string, error) { return s.current().GetBannedIPs() }
+func (s *switchableFirewall) IsRateLimitSupported() bool      { return s.current().IsRateLimitSupported() }
+func (s *switchableFirewall) BackendKind() string             { return s.ops.kindOf(s.current()) }
+
+func (s *switchableFirewall) SupportsCIDR() bool {
+	if c, ok := s.current().(cidrSupporter); ok {
+		return c.SupportsCIDR()
+	}
+	return true
+}
+
+func (s *switchableFirewall) BanIP(ip string) error {
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+	return s.current().BanIP(ip)
+}
+
+func (s *switchableFirewall) UnbanIP(ip string) error {
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+	return s.current().UnbanIP(ip)
+}
+
+func (s *switchableFirewall) Flush() error {
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+	return s.current().Flush()
+}
+
+func (s *switchableFirewall) ApplyRateLimits(rules []RateLimitRule) error {
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+	return s.current().ApplyRateLimits(rules)
+}
+
+// requestPreference records the preference received from the server and
+// starts the switch in the background when it changed: a migration of a large
+// ban set can take minutes on netsh, and the config worker must keep going.
+func (s *switchableFirewall) requestPreference(pref string) {
+	s.reqMu.Lock()
+	defer s.reqMu.Unlock()
+	s.want = pref
+	if s.running || s.want == s.applied {
+		return
+	}
+	s.running = true
+	s.idle = make(chan struct{})
+	go s.switchLoop()
+}
+
+func (s *switchableFirewall) switchLoop() {
+	for {
+		s.reqMu.Lock()
+		if s.want == s.applied {
+			s.running = false
+			close(s.idle)
+			s.reqMu.Unlock()
+			return
+		}
+		pref := s.want
+		s.reqMu.Unlock()
+
+		s.applyPreference(pref)
+
+		s.reqMu.Lock()
+		s.applied = pref
+		s.reqMu.Unlock()
+	}
+}
+
+// waitIdle blocks until no switch is pending.
+func (s *switchableFirewall) waitIdle() {
+	s.reqMu.Lock()
+	idle := s.idle
+	s.reqMu.Unlock()
+	<-idle
+}
+
+// applyPreference switches to the backend the preference selects, when it is
+// not the one enforcing. A failed switch keeps the current backend: it is
+// retried at the next start, or when the preference changes again.
+func (s *switchableFirewall) applyPreference(pref string) {
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+	old := s.current()
+	from, to := s.ops.kindOf(old), firewallKindFor(pref)
+	if from == to {
+		log.Printf("Firewall: backend preference %s — %s already enforces", pref, from)
+		return
+	}
+	log.Printf("Firewall: backend preference %s — switching %s → %s", pref, from, to)
+	nw, err := s.ops.migrate(old, to)
+	if err != nil {
+		log.Printf("Firewall: switch to %s failed (%v) — %s keeps enforcing", to, err, from)
+		return
+	}
+	s.curMu.Lock()
+	s.cur = nw
+	s.curMu.Unlock()
+	s.ops.activate(nw)
+	log.Printf("Firewall: now enforcing with %s", s.ops.kindOf(nw))
+}
+
+// applyFirewallBackendFrame applies the firewallBackend field of a config
+// frame: nil (absent) changes nothing, an unknown value is ignored, a new
+// preference is persisted to config.json and applied in the background.
+// Called from the config worker (the only writer of cfg after start-up).
+// Agents on other platforms ignore the field.
+func applyFirewallBackendFrame(cfg *Config, fw FirewallManager, raw *string) {
+	if raw == nil {
+		return
+	}
+	sw, ok := fw.(*switchableFirewall)
+	if !ok {
+		return
+	}
+	pref, valid := normalizeFirewallBackend(*raw)
+	if !valid {
+		log.Printf("Firewall: ignoring unknown firewallBackend %q from the server", *raw)
+		return
+	}
+	if stored, _ := normalizeFirewallBackend(cfg.FirewallBackend); stored != pref || cfg.FirewallBackend == "" {
+		cfg.FirewallBackend = pref
+		if err := saveConfig(cfg); err != nil {
+			log.Printf("Warning: could not save firewallBackend in config: %v", err)
+		}
+	}
+	sw.requestPreference(pref)
 }
 
 // ── Auto-detection ────────────────────────────────────────────────────────────
 
-// DetectFirewall probes available firewall backends and returns the best one.
+// flushAtStartup runs the first Flush of a Windows backend right away: the
+// netsh rebuild from obliguard-banlist.txt, the stale group/filter cleanup and
+// the WFP purge after a netsh fallback all happen on the first Flush, and the
+// server sends no delta while the reported ban set already matches the
+// banlist. A failure is retried by the next Flush (the state stays dirty).
+func flushAtStartup(fw FirewallManager) {
+	if err := fw.Flush(); err != nil {
+		log.Printf("Firewall: initial %s flush failed (retried on the next ban change): %v", fw.Name(), err)
+	}
+}
+
+// DetectFirewall probes available firewall backends and returns the best one,
+// with the default Windows backend preference (auto).
 // Priority on Linux: nftables → firewalld → ufw → iptables
-// Windows: Windows Defender Firewall (netsh)
-// macOS: pf
+// Windows: WFP-native, netsh fallback (see DetectFirewallFor)
+// macOS / FreeBSD: pf
 func DetectFirewall() FirewallManager {
+	return DetectFirewallFor(fwBackendAuto)
+}
+
+// DetectFirewallFor is DetectFirewall with the persisted Windows backend
+// preference (config.json firewallBackend; ignored on other platforms). On
+// Windows the backend is wrapped so the server can switch it at runtime.
+func DetectFirewallFor(pref string) FirewallManager {
 	switch runtime.GOOS {
 	case "windows":
-		// Prefer the WFP-native backend (persistent kernel filters, scales to
-		// 30K–100K bans with a flat working set). Fall back to the netsh
-		// grouped-rule backend if WFP init fails (e.g. not enough privilege).
-		if wfp, err := newWFPFirewall(); err == nil && wfp.IsAvailable() {
-			log.Printf("Firewall: using %s (WFP-native)", wfp.Name())
-			return wfp
-		} else if err != nil {
-			log.Printf("Firewall: WFP init failed (%v) — falling back to netsh", err)
-		}
-		fw := &WindowsFirewall{}
-		if fw.IsAvailable() {
-			log.Printf("Firewall: using %s (netsh)", fw.Name())
+		pref, _ = normalizeFirewallBackend(pref)
+		fw := detectWindowsBackend(pref)
+		if fwSwitchOps == nil {
 			return fw
 		}
-		return &NoOpFirewall{}
+		return newSwitchableFirewall(fw, pref, fwSwitchOps)
 
 	case "darwin":
 		fw := &PFFirewall{}
@@ -127,6 +384,36 @@ func DetectFirewall() FirewallManager {
 		log.Printf("Firewall: no supported backend found — bans will not be enforced locally")
 		return &NoOpFirewall{}
 	}
+}
+
+// detectWindowsBackend opens the backend the preference selects at start-up.
+// auto / wfp: the WFP-native backend (persistent kernel filters, scales to
+// 30K–100K bans with a flat working set), with the netsh grouped-rule backend
+// as fallback when WFP init fails (e.g. not enough privilege). netsh: WFP is
+// not opened, and the filters of an earlier WFP run are purged once netsh
+// enforces the banlist.
+func detectWindowsBackend(pref string) FirewallManager {
+	if firewallKindFor(pref) == fwBackendWFP {
+		if wfp, err := newWFPFirewall(); err == nil && wfp.IsAvailable() {
+			log.Printf("Firewall: using %s (WFP-native, preference %s)", wfp.Name(), pref)
+			flushAtStartup(wfp)
+			return wfp
+		} else if err != nil {
+			log.Printf("Firewall: WFP init failed (%v) — falling back to netsh", err)
+		}
+	} else {
+		log.Printf("Firewall: WFP disabled by the backend preference (%s)", pref)
+		if fwSwitchOps != nil {
+			fwSwitchOps.armWFPPurge()
+		}
+	}
+	fw := &WindowsFirewall{}
+	if fw.IsAvailable() {
+		log.Printf("Firewall: using %s (netsh)", fw.Name())
+		flushAtStartup(fw)
+		return fw
+	}
+	return &NoOpFirewall{}
 }
 
 // ── No-op (fallback when no firewall is available) ────────────────────────────

@@ -1,0 +1,25 @@
+@@ parser iis
+# No header seen yet: the IIS 7.x default layout (14 fields, no cs(Referer)) is assumed.
+@@ expect {"ip":"203.0.113.70","user":"admin"}
+2024-01-15 10:20:30 10.0.0.5 GET /secure/ - 443 admin 203.0.113.70 Mozilla/5.0 401 1 1326 15
+
+# A custom #Fields header reorders the columns: c-ip first, X-Forwarded-For added.
+#Software: Microsoft Internet Information Services 10.0
+#Version: 1.0
+#Date: 2024-01-15 10:00:00
+#Fields: c-ip date time cs-method cs-uri-stem sc-status sc-substatus sc-win32-status cs-username X-Forwarded-For cs(User-Agent)
+
+@@ expect {"ip":"203.0.113.71","user":"root"}
+203.0.113.71 2024-01-15 10:20:31 POST /login 401 1 1326 root - Mozilla/5.0
+
+@@ none
+203.0.113.72 2024-01-15 10:20:32 GET / 200 0 0 - - Mozilla/5.0
+
+# Default-order line after a custom header: column count differs, ignored.
+@@ none
+2024-01-15 10:20:33 10.0.0.5 GET /secure/ - 443 admin 203.0.113.73 Mozilla/5.0 - 401 1 1326 15
+
+# A header without sc-status: nothing can be a 401.
+#Fields: date time c-ip cs-method cs-uri-stem
+@@ none
+2024-01-15 10:20:34 203.0.113.74 GET /

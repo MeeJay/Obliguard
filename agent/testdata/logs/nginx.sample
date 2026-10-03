@@ -1,0 +1,45 @@
+@@ parser nginx
+# nginx access log (default "combined") and error log (auth_basic).
+
+@@ expect {"ip":"203.0.113.30","user":"admin"}
+203.0.113.30 - admin [15/Jan/2024:10:20:30 +0100] "GET /admin/ HTTP/1.1" 401 179 "-" "Mozilla/5.0 (X11; Linux x86_64)"
+
+@@ expect {"ip":"203.0.113.31","user":""}
+203.0.113.31 - - [15/Jan/2024:10:20:31 +0100] "POST /api/login HTTP/2.0" 401 0 "https://example.com/" "curl/8.4.0"
+
+@@ expect {"ip":"2001:db8:1::77","user":"root"}
+2001:db8:1::77 - root [15/Jan/2024:10:20:32 +0100] "GET /wp-admin/ HTTP/1.1" 401 590 "-" "python-requests/2.31"
+
+# Usernames may contain spaces (nginx does not escape them).
+@@ expect {"ip":"203.0.113.32","user":"john smith"}
+203.0.113.32 - john smith [15/Jan/2024:10:20:33 +0100] "GET /private HTTP/1.1" 401 179 "-" "Mozilla/5.0"
+
+@@ none
+203.0.113.33 - admin [15/Jan/2024:10:20:34 +0100] "GET /admin/ HTTP/1.1" 200 5120 "-" "Mozilla/5.0"
+@@ none
+203.0.113.34 - - [15/Jan/2024:10:20:35 +0100] "GET /missing HTTP/1.1" 404 153 "-" "Mozilla/5.0"
+@@ none
+203.0.113.35 - - [15/Jan/2024:10:20:36 +0100] "GET /x HTTP/1.1" 4010 12 "-" "Mozilla/5.0"
+
+# Injection: a crafted request target (escaped quote, \x22) cannot fake the status.
+@@ none
+203.0.113.36 - - [15/Jan/2024:10:20:37 +0100] "GET /a\x22 401 HTTP/1.1" 200 12 "-" "Mozilla/5.0"
+# Injection: a forged user field cannot move the client address.
+@@ expect {"ip":"203.0.113.37","user":"198.51.100.66 - x"}
+203.0.113.37 - 198.51.100.66 - x [15/Jan/2024:10:20:38 +0100] "GET / HTTP/1.1" 401 179 "-" "-"
+
+# Error log.
+@@ expect {"ip":"203.0.113.38","user":"admin"}
+2024/01/15 10:20:39 [error] 1234#1234: *56 user "admin": password mismatch, client: 203.0.113.38, server: example.com, request: "GET /admin/ HTTP/1.1", host: "example.com"
+
+@@ expect {"ip":"2001:db8::38","user":"bob"}
+2024/01/15 10:20:40 [error] 1234#1234: *57 user "bob" was not found in "/etc/nginx/.htpasswd", client: 2001:db8::38, server: example.com, request: "GET / HTTP/1.1", host: "example.com"
+
+@@ none
+2024/01/15 10:20:41 [error] 1234#1234: *58 no user/password was provided for basic authentication, client: 203.0.113.39, server: example.com, request: "GET / HTTP/1.1", host: "example.com"
+@@ none
+2024/01/15 10:20:42 [error] 1234#1234: *59 open() "/var/www/html/favicon.ico" failed (2: No such file or directory), client: 203.0.113.40, server: example.com, request: "GET /favicon.ico HTTP/1.1", host: "example.com"
+
+# Injection through the username in the error log: ambiguous, dropped.
+@@ none
+2024/01/15 10:20:43 [error] 1234#1234: *60 user "x": password mismatch, client: 198.51.100.66, server: y": password mismatch, client: 203.0.113.41, server: example.com, request: "GET / HTTP/1.1", host: "example.com"

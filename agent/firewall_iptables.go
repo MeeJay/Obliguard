@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/netip"
 	"strings"
 	"sync"
 )
@@ -31,6 +32,9 @@ type IptablesFirewall struct {
 	cidrOK     bool
 	pendingAdd []string
 	pendingDel []string
+	// rlExempt: IPv4 addresses kept out of rate limiting (the ban-safety
+	// protected addresses, see SetRateLimitExempt).
+	rlExempt []string
 }
 
 func (f *IptablesFirewall) Name() string { return "iptables" }
@@ -318,9 +322,14 @@ func migrateIpsetToNet(name string, rebind func(from, to string)) error {
 		return fmt.Errorf("%w: %s is still in use: %v", errIpsetMigration, name, err)
 	}
 	if err := fwRun("ipset", "create", name, "hash:net", "maxelem", ipsetMaxElem); err != nil {
-		// The bans stay enforced through the temporary set; the next start
-		// creates name again.
-		return fmt.Errorf("%w: re-create %s: %v (bans kept in %s)", errIpsetMigration, name, err, tmp)
+		// Give the temporary hash:net set the final name instead: the rules
+		// follow it (the kernel references sets by index), so the caller's
+		// rules on name keep matching the migrated bans.
+		if rerr := fwRun("ipset", "rename", tmp, name); rerr != nil {
+			return fmt.Errorf("%w: re-create %s: %v (bans kept in %s)", errIpsetMigration, name, err, tmp)
+		}
+		log.Printf("Firewall: ipset %s migrated to hash:net by rename (%d entries, CIDR enabled)", name, len(members))
+		return nil
 	}
 	ipsetApply(name, members, nil)
 	rebind(tmp, name)
@@ -348,8 +357,31 @@ const iptRLBanSet = "obliguard_rl_bans"
 
 func (f *IptablesFirewall) IsRateLimitSupported() bool { return true }
 
+// SetRateLimitExempt sets the IPv4 addresses kept out of rate limiting, used by
+// the next ApplyRateLimits.
+func (f *IptablesFirewall) SetRateLimitExempt(addrs []string) {
+	f.mu.Lock()
+	f.rlExempt = iptRLExemptV4(addrs)
+	f.mu.Unlock()
+}
+
 func (f *IptablesFirewall) ApplyRateLimits(rules []RateLimitRule) error {
-	return applyIptablesRateLimits(rules)
+	f.mu.Lock()
+	exempt := append([]string(nil), f.rlExempt...)
+	f.mu.Unlock()
+	return applyIptablesRateLimits(rules, exempt)
+}
+
+// iptRLExemptV4 keeps the plain IPv4 addresses of addrs (OBLIGUARD_RL is an
+// iptables, i.e. IPv4, chain); anything else is dropped.
+func iptRLExemptV4(addrs []string) []string {
+	var out []string
+	for _, a := range addrs {
+		if ip, err := netip.ParseAddr(a); err == nil && ip.Is4() {
+			out = append(out, ip.String())
+		}
+	}
+	return out
 }
 
 // iptHasDockerUserChain reports whether Docker's DOCKER-USER chain exists.
@@ -370,8 +402,11 @@ func ensureRLJump(parent string) {
 //
 // Note: only 'connection' and 'rate' types are enforceable here — iptables has
 // no per-IP byte-rate match, so 'volume' limits are skipped (handled by
-// nftables/WinDivert, or tc in a future pass).
-func applyIptablesRateLimits(rules []RateLimitRule) error {
+// nftables, or tc in a future pass).
+//
+// exempt addresses (server, own interfaces, gateways) RETURN at the top of the
+// chain: they are never rate limited nor escalated into obliguard_rl_bans.
+func applyIptablesRateLimits(rules []RateLimitRule, exempt []string) error {
 	hasIpset := false
 	if fwHave("ipset") {
 		hasIpset = true
@@ -393,6 +428,11 @@ func applyIptablesRateLimits(rules []RateLimitRule) error {
 
 	// Rebuild the chain declaratively.
 	fwRun("iptables", "-F", iptRLChain)
+
+	// Ban-safety protected addresses first: never throttled nor escalated.
+	for _, addr := range exempt {
+		fwRun("iptables", "-A", iptRLChain, "-s", addr, "-j", "RETURN")
+	}
 
 	// Drop anything currently rate-limit-banned (first packet after escalation
 	// adds the IP; subsequent packets are dropped here).

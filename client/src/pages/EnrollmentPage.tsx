@@ -41,7 +41,7 @@ function Stepper({ currentStep, steps }: { currentStep: Step; steps: Step[] }) {
     language:   t('enrollment.stepLanguage'),
     profile:    t('enrollment.stepProfile'),
     alerts:     t('enrollment.stepAlerts'),
-    appearance: 'Apparence',
+    appearance: t('enrollment.stepAppearance', { defaultValue: 'Appearance' }),
     security:   t('enrollment.stepSecurity'),
   };
   const currentIdx = steps.indexOf(currentStep);
@@ -253,10 +253,12 @@ function AlertsStep({
 
 // ── Step 4: Security (TOTP) ──────────────────────────────────────────────────
 function SecurityStep({
-  totpAlreadyEnabled, totpSetup, totpCode, totpLoading,
+  totpAlreadyEnabled, emailOtpEnabled, totpSetup, totpCode, totpLoading,
   onSetupTotp, onTotpCode, onSkip,
 }: {
   totpAlreadyEnabled: boolean;
+  /** E-mail codes already on: adding TOTP then needs a proof, done from the Profile page. */
+  emailOtpEnabled: boolean;
   totpSetup: TotpSetupData | null;
   totpCode: string;
   totpLoading: boolean;
@@ -266,15 +268,21 @@ function SecurityStep({
 }) {
   const { t } = useTranslation();
 
-  if (totpAlreadyEnabled) {
+  if (totpAlreadyEnabled || emailOtpEnabled) {
     return (
       <div>
         <h2 className="text-xl font-semibold text-text-primary mb-1">{t('enrollment.security.title')}</h2>
         <p className="text-sm text-text-muted mb-5">{t('enrollment.security.subtitle')}</p>
         <div className="flex items-center gap-2 rounded-lg border border-status-up/30 bg-status-up-bg p-4 text-sm text-status-up">
-          <Check size={16} /> {t('enrollment.security.totpAlreadyEnabled')}
+          <Check size={16} /> {totpAlreadyEnabled
+            ? t('enrollment.security.totpAlreadyEnabled')
+            : t('enrollment.security.emailOtpAlreadyEnabled')}
         </div>
-        <p className="mt-3 text-xs text-text-muted">{t('enrollment.security.emailOtpAvailable')}</p>
+        <p className="mt-3 text-xs text-text-muted">
+          {totpAlreadyEnabled
+            ? t('enrollment.security.emailOtpAvailable')
+            : t('enrollment.security.totpFromProfile')}
+        </p>
       </div>
     );
   }
@@ -310,7 +318,7 @@ function SecurityStep({
       ) : (
         <div className="space-y-4">
           <div className="flex justify-center">
-            <img src={totpSetup.qrDataUrl} alt="TOTP QR code" className="w-44 h-44 rounded border border-border" />
+            <img src={totpSetup.qrDataUrl} alt={t('profile.security.totpQrAlt', { defaultValue: 'TOTP QR Code' })} className="w-44 h-44 rounded border border-border" />
           </div>
           <p className="text-xs text-text-muted text-center">{t('profile.security.totpScanDesc')}</p>
           <p className="text-xs text-text-muted text-center font-mono">{t('profile.security.totpSecret', { secret: totpSetup.secret })}</p>
@@ -352,6 +360,7 @@ export function EnrollmentPage() {
 
   const [emailError, setEmailError] = useState('');
   const [totpAlreadyEnabled, setTotpAlreadyEnabled] = useState(false);
+  const [emailOtpEnabled, setEmailOtpEnabled] = useState(false);
   const [totpSetup, setTotpSetup] = useState<TotpSetupData | null>(null);
   const [totpCode, setTotpCode] = useState('');
   const [totpLoading, setTotpLoading] = useState(false);
@@ -366,6 +375,7 @@ export function EnrollmentPage() {
     try {
       const status = await twoFactorApi.getStatus();
       setTotpAlreadyEnabled(status.totpEnabled);
+      setEmailOtpEnabled(status.emailOtpEnabled);
     } catch {
       // ignore — show setup option
     }
@@ -508,8 +518,8 @@ export function EnrollmentPage() {
           )}
           {step === 'appearance' && (
             <div>
-              <h2 className="text-xl font-semibold text-text-primary mb-1">Apparence</h2>
-              <p className="text-sm text-text-muted mb-5">Choisissez votre thème d'interface.</p>
+              <h2 className="text-xl font-semibold text-text-primary mb-1">{t('enrollment.appearance.title', { defaultValue: 'Appearance' })}</h2>
+              <p className="text-sm text-text-muted mb-5">{t('enrollment.appearance.subtitle', { defaultValue: 'Choose your interface theme.' })}</p>
               <ThemePicker
                 value={data.preferredTheme}
                 onChange={(theme) => setData((d) => ({ ...d, preferredTheme: theme }))}
@@ -519,6 +529,7 @@ export function EnrollmentPage() {
           {step === 'security' && (
             <SecurityStep
               totpAlreadyEnabled={totpAlreadyEnabled}
+              emailOtpEnabled={emailOtpEnabled}
               totpSetup={totpSetup}
               totpCode={totpCode}
               totpLoading={totpLoading}

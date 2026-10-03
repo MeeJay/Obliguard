@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { notificationsController } from '../controllers/notifications.controller';
 import { requireAuth } from '../middleware/auth';
-import { requireRole } from '../middleware/rbac';
+import { requireCapability } from '../middleware/rbac';
 import { validate } from '../middleware/validate';
 import {
   createChannelSchema,
@@ -16,7 +16,9 @@ import {
 const router = Router();
 
 router.use(requireAuth);
-router.use(requireRole('admin'));
+// Notification channels and bindings are tenant-owned (controller): delegated
+// through the tenant capability notifications.manage (W7-2).
+router.use(requireCapability('notifications.manage'));
 
 // Plugin info
 router.get('/plugins', notificationsController.plugins);

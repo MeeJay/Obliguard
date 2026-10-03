@@ -107,7 +107,7 @@ func parseNftRuleset(output string) []FwRule {
 				ID:        fmt.Sprintf("%s:%s:%s:%s", currentFamily, currentTable, currentChain, handle),
 				Platform:  "nftables",
 				Enabled:   true,
-				Source:     "system",
+				Source:    "system",
 				Protocol:  "any",
 				LocalPort: "any",
 				RemoteIP:  "any",
@@ -378,7 +378,7 @@ func (m *IptablesRuleManager) ListRules() ([]FwRule, error) {
 				LocalPort: "any",
 				RemoteIP:  "any",
 				Enabled:   true,
-				Source:     "system",
+				Source:    "system",
 				Platform:  "iptables",
 			}
 			if target == "DROP" || target == "REJECT" {

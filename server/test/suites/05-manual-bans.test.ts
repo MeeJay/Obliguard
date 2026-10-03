@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { startHarness, hostOf } from '../harness';
 import type { Harness } from '../harness';
 import { lotIt } from '../lots';
-import { insertBan, insertWhitelist, banRow, nextIp, litIp } from '../seed';
+import { insertBan, insertWhitelist, banRow, nextIp, litIp, createUser } from '../seed';
 
 describe('05 manual bans', () => {
   let h: Harness;
@@ -112,10 +112,13 @@ describe('05 manual bans', () => {
     assert.equal((await banRow(h.db, inactive))!.scope, 'tenant');
   });
 
-  lotIt('A2', '05.8b any Default member holding bans may promote a tenant ban to global', async () => {
+  // Owner decision 12 (_defaults.txt): the protected 'user' set no longer holds
+  // bans.promote, so the Default member here is a tenant admin (W7-2 re-gating).
+  lotIt('A2', '05.8b a Default member holding bans.promote may promote a tenant ban to global', async () => {
     const id = await insertBan(h.db, { ip: nextIp(), scope: 'tenant', tenantId: 2, originTenantId: 2 });
-    const r = await (await h.as('default_member')).post(`/api/bans/${id}/promote-global`);
-    assert.equal(r.status, 200, `default_member promote answered ${r.status}`);
+    const ta = await createUser(h.db, { tenants: [1], tenantRole: 'admin' });
+    const r = await (await h.login(ta.username)).post(`/api/bans/${id}/promote-global`);
+    assert.equal(r.status, 200, `Default tenant admin promote answered ${r.status}`);
     const row = (await banRow(h.db, id))!;
     assert.equal(row.scope, 'global');
     assert.equal(row.tenant_id, null);

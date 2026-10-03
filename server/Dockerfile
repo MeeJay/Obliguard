@@ -2,7 +2,9 @@
 FROM node:24-alpine AS builder
 WORKDIR /app
 
-COPY package.json ./
+# The root lockfile pins the dependency tree: without it every image build
+# resolves the newest semver-compatible versions (a newer knex breaks tsc).
+COPY package.json package-lock.json ./
 COPY shared/ ./shared/
 RUN cd shared && npm install && npm run build
 
@@ -44,14 +46,14 @@ RUN { \
 FROM node:24-alpine AS production
 WORKDIR /app
 
-RUN apk add --no-cache openssh-client
-
 COPY --from=builder /app/shared/package.json ./shared/
 COPY --from=builder /app/shared/dist/ ./shared/dist/
 
 COPY --from=builder /app/server/package.json ./server/
-COPY package.json ./
-RUN cd server && npm install --omit=dev
+COPY package.json package-lock.json ./
+# Production dependencies only (no typescript / tsx / @types in the final image);
+# the npm cache is dropped from the layer.
+RUN cd server && npm install --omit=dev --no-audit --no-fund && npm cache clean --force
 
 COPY --from=builder /app/server/dist/ ./server/dist/
 
@@ -76,14 +78,17 @@ RUN mkdir -p ./obli.tools && printf '%s' "${OBLTOOLS_VER}" > ./obli.tools/VERSIO
 RUN mkdir -p ./obli.tools/dist
 COPY _oblitools_dist_stage/ ./obli.tools/dist/
 
-COPY server/docker-entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
-
 EXPOSE ${PORT:-3001}
 
+# GET /health answers 503 when the database check fails or takes over 3 s.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
     CMD sh -c "wget --no-verbose --tries=1 --spider http://localhost:${PORT:-3001}/health || exit 1"
 
+# Run unprivileged. Everything above is owned by root and only READ at runtime
+# (dist, agent artifacts, obli.tools files); the server writes nothing to disk
+# (logs go to stdout) and listens on an unprivileged port (PORT, default 3001).
+# The old root entrypoint (symlink of /custom/.ssh into /root/.ssh for the
+# Obliview SSH features) is gone with openssh-client: nothing used those keys.
+USER node
 WORKDIR /app/server
-ENTRYPOINT ["/entrypoint.sh"]
 CMD ["node", "dist/src/index.js"]

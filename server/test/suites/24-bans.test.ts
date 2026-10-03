@@ -30,7 +30,6 @@ import { AppError } from '../../src/middleware/errorHandler';
 import { logger } from '../../src/utils/logger';
 
 const PROT = '198.18.24.250';
-const NOT_ENFORCED = /not enforced by the agents yet/i;
 
 interface PushCall { ip: string; action: string; aud: unknown }
 
@@ -55,6 +54,13 @@ describe('24 bans (A2)', () => {
   const bm = () => h.as('member_b');
   const cm = () => h.as('member_c');
   const dm = () => h.as('default_member');
+  // Owner decision 12 (_defaults.txt): the protected 'user' set (default_member)
+  // no longer holds bans.promote; promotions run as a Default tenant admin.
+  let promoter: string | null = null;
+  const dp = async () => {
+    promoter ??= (await createUser(h.db, { tenants: [1], tenantRole: 'admin' })).username;
+    return h.login(promoter);
+  };
   const pushed = (ip: string) => pushes.filter((p) => p.ip === ip);
 
   const withWarnSpy = async <T>(fn: (warns: Array<{ obj: unknown; msg: unknown }>) => Promise<T>): Promise<T> => {
@@ -151,16 +157,18 @@ describe('24 bans (A2)', () => {
 
   // ── validation / protection ────────────────────────────────────────────────
 
-  lotIt('A2', '24.4 validation: floor, subnets refused, strict parsing, expiry', async () => {
+  lotIt('A2', '24.4 validation: floor, protected subnets, strict parsing, expiry', async () => {
     const d = await dm();
     const before = await count();
     const tooBroad = await d.post('/api/bans', { ip: '198.18.24.0', cidrPrefix: 8 });
     assert.equal(tooBroad.status, 400);
     assert.match(String(tooBroad.json?.error), /too broad/i);
+    // Amended by D4.1 (owner answer 4): subnets are no longer refused as "not
+    // enforced"; these two still are, because they contain PROT.
     for (const body of [{ ip: '198.18.24.3', cidrPrefix: 16 }, { ip: '198.18.24.0/24' }]) {
       const r = await d.post('/api/bans', body);
-      assert.equal(r.status, 400);
-      assert.match(String(r.json?.error), NOT_ENFORCED);
+      assert.equal(r.status, 400, JSON.stringify(body));
+      assert.equal(r.json?.error, RESERVED_OR_PROTECTED_MESSAGE);
     }
     assert.equal((await d.post('/api/bans', { ip: '198.18.24.3/24', cidrPrefix: 24 })).status, 400);
     const loop = await d.post('/api/bans', { ip: '::1' });
@@ -190,7 +198,7 @@ describe('24 bans (A2)', () => {
     assert.equal(b.json.invalidEntries[0].reason, RESERVED_OR_PROTECTED_MESSAGE);
     assert.equal(await count(), before);
     const legacy = await insertBan(h.db, { ip: PROT, scope: 'tenant', tenantId: 2, originTenantId: 2 });
-    const p = await (await dm()).post(`/api/bans/${legacy}/promote-global`);
+    const p = await (await dp()).post(`/api/bans/${legacy}/promote-global`);
     assert.equal(p.status, 400);
     assert.equal((await banRow(h.db, legacy))!.scope, 'tenant');
     await h.db('ip_bans').where({ id: legacy }).update({ is_active: false });
@@ -326,7 +334,7 @@ describe('24 bans (A2)', () => {
     assert.equal((await (await h.adminIn(2)).post(`/api/bans/${id}/promote-global`)).status, 403);
     assert.equal((await banRow(h.db, id))!.scope, 'tenant');
 
-    const ok = await (await dm()).post(`/api/bans/${id}/promote-global`);
+    const ok = await (await dp()).post(`/api/bans/${id}/promote-global`);
     assert.equal(ok.status, 200);
     const row = (await banRow(h.db, id))!;
     assert.equal(row.scope, 'global');
@@ -334,38 +342,41 @@ describe('24 bans (A2)', () => {
     assert.equal(row.origin_tenant_id, 2);
     await waitFor(() => pushed(row.ip).length > 0, 3000);
     assert.equal(pushed(row.ip)[0].aud, undefined);
-    assert.equal((await (await dm()).post(`/api/bans/${id}/promote-global`)).status, 409);
+    assert.equal((await (await dp()).post(`/api/bans/${id}/promote-global`)).status, 409);
 
     const inactive = await insertBan(h.db, { ip: nextIp(), scope: 'tenant', tenantId: 2, originTenantId: 2, isActive: false });
-    assert.equal((await (await dm()).post(`/api/bans/${inactive}/promote-global`)).status, 409);
-    assert.equal((await (await dm()).post('/api/bans/99999999/promote-global')).status, 404);
+    assert.equal((await (await dp()).post(`/api/bans/${inactive}/promote-global`)).status, 409);
+    assert.equal((await (await dp()).post('/api/bans/99999999/promote-global')).status, 404);
 
     const z = nextIp();
     await insertBan(h.db, { ip: z, scope: 'global', originTenantId: 1 });
     const shadow = await bBan(z);
-    assert.equal((await (await dm()).post(`/api/bans/${shadow}/promote-global`)).status, 409);
+    assert.equal((await (await dp()).post(`/api/bans/${shadow}/promote-global`)).status, 409);
     assert.equal((await banRow(h.db, shadow))!.scope, 'tenant');
 
     const wl = nextIp();
     await insertWhitelist(h.db, { ip: `${wl}/32`, scope: 'global' });
     const wlBan = await bBan(wl);
-    const wr = await (await dm()).post(`/api/bans/${wlBan}/promote-global`);
+    const wr = await (await dp()).post(`/api/bans/${wlBan}/promote-global`);
     assert.equal(wr.status, 409);
     assert.equal(wr.json.error, 'This IP is whitelisted');
     assert.equal((await banRow(h.db, wlBan))!.scope, 'tenant');
 
     const m = nextIp();
     const mapped = await bBan(`::ffff:${m}`);
-    assert.equal((await (await dm()).post(`/api/bans/${mapped}/promote-global`)).status, 200);
+    assert.equal((await (await dp()).post(`/api/bans/${mapped}/promote-global`)).status, 200);
     const mr = (await banRow(h.db, mapped))!;
     assert.equal(mr.ip, m);
     assert.equal(mr.cidr_prefix, null);
 
     const net = await insertBan(h.db, { ip: '2001:db8:24:1::', cidrPrefix: 64, scope: 'tenant', tenantId: 2, originTenantId: 2 });
-    const nr = await (await dm()).post(`/api/bans/${net}/promote-global`);
-    assert.equal(nr.status, 400);
-    assert.match(String(nr.json?.error), /subnet/i);
-    assert.equal((await banRow(h.db, net))!.scope, 'tenant');
+    // Amended by D4.1 (owner answer 4): a subnet ban can be promoted, and
+    // keeps its prefix.
+    const nr = await (await dp()).post(`/api/bans/${net}/promote-global`);
+    assert.equal(nr.status, 200, JSON.stringify(nr.json));
+    const nrow = (await banRow(h.db, net))!;
+    assert.equal(nrow.scope, 'global');
+    assert.equal(nrow.cidr_prefix, 64);
   });
 
   // ── reads / lift / exclude ─────────────────────────────────────────────────
@@ -386,12 +397,14 @@ describe('24 bans (A2)', () => {
     assert.equal((await (await bm()).get('/api/bans/abc')).status, 400);
   });
 
-  lotIt('A2', '24.13 lift / exclude of another tenant ban: 404, or 403 when visible', async () => {
+  lotIt('A2', '24.13 lift / exclude of another tenant ban: 404 (not visible)', async () => {
     const id = await insertBan(h.db, { ip: nextIp(), scope: 'tenant', tenantId: 2, originTenantId: 2 });
     assert.equal((await (await cm()).del(`/api/bans/${id}`)).status, 404);
-    const adm = await (await h.adminIn(3)).del(`/api/bans/${id}`);
-    assert.equal(adm.status, 403);
-    assert.equal(adm.json.error, 'This ban belongs to another tenant');
+    // Adapted for W10-5 (owner default 'decision 5', W10.json W10-5 spec; see
+    // audit-2026-09-26/waves/_defaults.txt): the god view exists only on
+    // Default, so a platform admin standing on tenant 3 no longer sees tenant
+    // 2's local ban (was 403 'This ban belongs to another tenant').
+    assert.equal((await (await h.adminIn(3)).del(`/api/bans/${id}`)).status, 404);
     assert.equal((await (await cm()).post(`/api/bans/${id}/exclude`)).status, 404);
     assert.equal((await banRow(h.db, id))!.is_active, true);
     assert.equal((await exclusions(h.db, id)).length, 0);

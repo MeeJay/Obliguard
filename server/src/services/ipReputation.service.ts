@@ -1,10 +1,50 @@
+import type { Knex } from 'knex';
 import { db } from '../db';
 import type { IpReputation, IpEvent, IpStatus } from '@obliview/shared';
 import { isMasterTenant } from '@obliview/shared';
-import { seesAllBans, canSeeBanAuthor } from './banVisibility';
+import { applyBanReadTenants, canSeeBanAuthor } from './banVisibility';
+import { readTenantsFor, whereReadTenants } from '../middleware/tenant';
+import type { ReadTenants } from '../middleware/tenant';
 import { parseIpSearch, ipSearchSql } from '../utils/pagination';
+import { logger } from '../utils/logger';
+import { geoipService, geoLookupCandidate } from './geoip.service';
+import type { GeoInfo } from './geoip.service';
 
-/** Per-IP totals computed from ONE tenant's own ip_events (restricted callers). */
+// ── GeoIP enrichment queue ───────────────────────────────────────────────────
+
+/** Delay between enrichment batches (ADMIN-FEATURES-14). */
+const GEO_FLUSH_MS = 5000;
+/** IPs per enrichment batch. */
+const GEO_BATCH_MAX = 100;
+/** Pending IPs kept in memory; the periodic backfill picks up any overflow. */
+const GEO_QUEUE_MAX = 10_000;
+/** Rows scanned per backfill pass, and the backfill period. */
+const GEO_BACKFILL_ROWS = 500;
+/** Pages of GEO_BACKFILL_ROWS scanned per pass when rows cannot be resolved. */
+const GEO_BACKFILL_SCAN_PAGES = 20;
+const GEO_BACKFILL_FIRST_MS = 60_000;
+const GEO_BACKFILL_EVERY_MS = 15 * 60_000;
+
+/**
+ * A reputation list row with its tenant attribution (W10-5):
+ *   - tenantIds: the tenants (within the caller's read scope) whose agents
+ *     logged events from this IP, ascending;
+ *   - tenantId / tenantName: on the banned list the owner of the ban (null =
+ *     global ban); elsewhere the attacked tenant when there is exactly one
+ *     (null = several tenants, or none).
+ */
+export type IpReputationListItem = IpReputation & {
+  tenantId: number | null;
+  tenantName: string | null;
+  tenantIds: number[];
+};
+
+/** `IN (?, ?, …)` placeholders of a non-empty id list. */
+function inList(ids: readonly number[]): string {
+  return `(${ids.map(() => '?').join(', ')})`;
+}
+
+/** Per-IP totals computed from the read tenants' own ip_events (restricted callers). */
 interface TenantAgg {
   failures: number;
   successes: number;
@@ -17,9 +57,9 @@ interface TenantAgg {
 }
 
 /**
- * Totals shown to a restricted caller (customer tenant): from its own events
- * only (tenantId set), or zeroed (no tenant). Default / platform admins keep
- * the global ip_reputation values (god view).
+ * Totals shown to a restricted caller (customer tenant, or Default narrowed by
+ * tenant chips): from the read tenants' own events only, or zeroed (no
+ * tenant). The unnarrowed Default view keeps the global ip_reputation values.
  */
 function applyTenantTotals<T extends IpReputation>(rep: T, agg: TenantAgg | undefined): T {
   return {
@@ -157,32 +197,33 @@ export type ReputationSortKey = typeof REPUTATION_SORT_KEYS[number];
 function reputationOrderBy(
   key: ReputationSortKey,
   order: 'asc' | 'desc',
-  o: { banned: boolean; tenantOnly: number | null },
+  o: { banned: boolean; tenantOnly: number[] | null },
 ): { sql: string; bindings: number[] } {
   const ipCol = o.banned ? 'b.ip' : 'r.ip';
   const tail = o.banned ? `, ${ipCol} ASC, b.id ASC` : `, ${ipCol} ASC`;
+  const only = o.tenantOnly && o.tenantOnly.length > 0 ? o.tenantOnly : null;
   const tenantAgg = (agg: string, extra = '') =>
-    `(SELECT ${agg} FROM ip_events se WHERE se.ip = ${ipCol} AND se.tenant_id = ?${extra})`;
+    `(SELECT ${agg} FROM ip_events se WHERE se.ip = ${ipCol} AND se.tenant_id IN ${inList(only ?? [])}${extra})`;
   const num = (col: string) => (o.banned ? `COALESCE(${col}, 0)` : col);
 
   let expr: string;
   const bindings: number[] = [];
-  const t = o.tenantOnly;
+  const t = only;
   // No ban column on the reputation list: bannedAt falls back to the default.
   switch (key === 'bannedAt' && !o.banned ? 'lastSeen' : key) {
     case 'failures':
-      if (t != null) { expr = tenantAgg('count(*)', " AND se.event_type = 'auth_failure'"); bindings.push(t); }
+      if (t != null) { expr = tenantAgg('count(*)', " AND se.event_type = 'auth_failure'"); bindings.push(...t); }
       else expr = num('r.total_failures');
       break;
     case 'agents':
-      if (t != null) { expr = tenantAgg('count(DISTINCT se.device_id)'); bindings.push(t); }
+      if (t != null) { expr = tenantAgg('count(DISTINCT se.device_id)'); bindings.push(...t); }
       else expr = num('r.affected_agents_count');
       break;
     case 'country':
       expr = 'r.geo_country_code';
       break;
     case 'firstSeen':
-      if (t != null) { expr = tenantAgg('min(se.timestamp)'); bindings.push(t); }
+      if (t != null) { expr = tenantAgg('min(se.timestamp)'); bindings.push(...t); }
       else expr = 'r.first_seen';
       break;
     case 'bannedAt':
@@ -190,7 +231,7 @@ function reputationOrderBy(
       break;
     case 'lastSeen':
     default:
-      if (t != null) { expr = tenantAgg('max(se.timestamp)'); bindings.push(t); }
+      if (t != null) { expr = tenantAgg('max(se.timestamp)'); bindings.push(...t); }
       else expr = 'r.last_seen';
   }
   return { sql: `${expr} ${order} NULLS LAST${tail}`, bindings };
@@ -354,6 +395,8 @@ class IpReputationService {
         ],
       );
     }
+
+    this.enqueueGeo(byIp.keys());
   }
 
   /**
@@ -381,20 +424,197 @@ class IpReputationService {
       })
       .onConflict('ip')
       .ignore();
+    this.enqueueGeo([ip]);
+  }
+
+  // ── GeoIP enrichment ───────────────────────────────────────────────────────
+
+  private geoQueue = new Set<string>();
+  private geoTimer: NodeJS.Timeout | null = null;
+  private geoFlushing: Promise<number> | null = null;
+  private geoBackfillTimer: NodeJS.Timeout | null = null;
+
+  /**
+   * Queue public IPs for country / city / ASN enrichment. Cheap and
+   * synchronous: private / reserved IPs and IPs the provider is known not to
+   * resolve are dropped here; IPs whose row already has geo are dropped by the
+   * flush (one indexed read per batch).
+   */
+  enqueueGeo(ips: Iterable<string>): void {
+    if (!geoipService.isEnabled()) return;
+    for (const raw of ips) {
+      if (this.geoQueue.size >= GEO_QUEUE_MAX) break;
+      const ip = geoLookupCandidate(raw);
+      if (!ip || geoipService.isKnownMiss(ip)) continue;
+      this.geoQueue.add(ip);
+    }
+    if (this.geoQueue.size > 0) this.scheduleGeoFlush();
+  }
+
+  /** Number of IPs waiting for enrichment (diagnostics, tests). */
+  get geoQueueSize(): number {
+    return this.geoQueue.size;
+  }
+
+  private scheduleGeoFlush(): void {
+    if (this.geoTimer) return;
+    this.geoTimer = setTimeout(() => {
+      this.geoTimer = null;
+      this.flushGeoEnrichment().catch((err) => logger.warn({ err }, 'GeoIP enrichment batch failed'));
+    }, GEO_FLUSH_MS);
+    this.geoTimer.unref?.();
+  }
+
+  /**
+   * Run one enrichment batch now (the timer calls it every GEO_FLUSH_MS while
+   * the queue is not empty): at most GEO_BATCH_MAX IPs, only rows whose geo
+   * columns are all still null, written back in one UPDATE. IPs the provider
+   * could not resolve yet (rate limit, outage) go back to the queue.
+   * Returns the number of rows written.
+   */
+  flushGeoEnrichment(): Promise<number> {
+    if (this.geoFlushing) return this.geoFlushing;
+    this.geoFlushing = this.runGeoBatch().finally(() => {
+      this.geoFlushing = null;
+      if (this.geoQueue.size > 0) this.scheduleGeoFlush();
+    });
+    return this.geoFlushing;
+  }
+
+  private async runGeoBatch(): Promise<number> {
+    // Provider turned off since the IPs were queued (e.g. unreadable mmdb):
+    // drop the queue instead of re-queuing it every GEO_FLUSH_MS forever.
+    if (!geoipService.isEnabled()) {
+      this.geoQueue.clear();
+      return 0;
+    }
+    const batch: string[] = [];
+    for (const ip of this.geoQueue) {
+      batch.push(ip);
+      if (batch.length >= GEO_BATCH_MAX) break;
+    }
+    for (const ip of batch) this.geoQueue.delete(ip);
+    if (batch.length === 0) return 0;
+
+    let missing: string[];
+    try {
+      const rows = await db.raw(
+        `SELECT host(ip) AS ip FROM ip_reputation
+          WHERE ip = ANY(?::inet[])
+            AND geo_country_code IS NULL AND geo_city IS NULL AND asn IS NULL`,
+        [batch],
+      ) as { rows: Array<{ ip: string }> };
+      missing = rows.rows.map((r) => r.ip);
+    } catch (err) {
+      for (const ip of batch) this.geoQueue.add(ip);
+      throw err;
+    }
+    if (missing.length === 0) return 0;
+
+    const found = await geoipService.lookupMany(missing);
+    if (!geoipService.isEnabled()) return 0;
+    for (const raw of missing) {
+      const ip = geoLookupCandidate(raw);
+      if (ip && !found.has(ip) && this.geoQueue.size < GEO_QUEUE_MAX) this.geoQueue.add(ip);
+    }
+    return this.persistGeo(found);
+  }
+
+  /**
+   * Write lookup results into ip_reputation. Only rows whose three geo
+   * columns are still null are touched (never overwrites), and updated_at is
+   * left alone (it tracks attack activity, not enrichment).
+   */
+  async persistGeo(results: Map<string, GeoInfo | null>): Promise<number> {
+    const ips: string[] = [];
+    const cc: Array<string | null> = [];
+    const city: Array<string | null> = [];
+    const asn: Array<string | null> = [];
+    for (const [ip, info] of results) {
+      if (!info) continue;
+      ips.push(ip);
+      cc.push(info.countryCode);
+      city.push(info.city);
+      asn.push(info.asn);
+    }
+    if (ips.length === 0) return 0;
+    const res = await db.raw(
+      `UPDATE ip_reputation r
+          SET geo_country_code = v.cc, geo_city = v.city, asn = v.asn
+         FROM unnest(?::inet[], ?::text[], ?::text[], ?::text[]) AS v(ip, cc, city, asn)
+        WHERE r.ip = v.ip
+          AND r.geo_country_code IS NULL AND r.geo_city IS NULL AND r.asn IS NULL`,
+      // Array bindings (unnest): typed as RawBinding so knex > 3.1.0 still compiles.
+      [ips, cc, city, asn] as unknown as Knex.RawBinding[],
+    ) as { rowCount?: number };
+    return Number(res.rowCount ?? 0);
+  }
+
+  /**
+   * Queue the most recently active rows that still have no geo (rows created
+   * before GeoIP existed, queue overflow, earlier provider outages). Rows that
+   * can never resolve (private / reserved addresses, cached misses) stay null
+   * forever, so the scan pages past them (up to GEO_BACKFILL_SCAN_PAGES pages)
+   * instead of letting them fill every pass and starve older public rows.
+   */
+  async backfillGeo(limit = GEO_BACKFILL_ROWS): Promise<number> {
+    if (!geoipService.isEnabled()) return 0;
+    const before = this.geoQueue.size;
+    for (let page = 0; page < GEO_BACKFILL_SCAN_PAGES; page++) {
+      const rows = await db.raw(
+        `SELECT host(ip) AS ip FROM ip_reputation
+          WHERE geo_country_code IS NULL AND geo_city IS NULL AND asn IS NULL
+            AND masklen(ip) = CASE family(ip) WHEN 4 THEN 32 ELSE 128 END
+          ORDER BY last_seen DESC NULLS LAST, ip
+          LIMIT ? OFFSET ?`,
+        [GEO_BACKFILL_ROWS, page * GEO_BACKFILL_ROWS],
+      ) as { rows: Array<{ ip: string }> };
+      this.enqueueGeo(rows.rows.map((r) => r.ip));
+      if (rows.rows.length < GEO_BACKFILL_ROWS) break;
+      if (this.geoQueue.size - before >= limit || this.geoQueue.size >= GEO_QUEUE_MAX) break;
+    }
+    return this.geoQueue.size - before;
+  }
+
+  /** Periodic backfill (index.ts starts it once at boot). Idempotent. */
+  startGeoBackfill(): void {
+    if (this.geoBackfillTimer || !geoipService.isEnabled()) return;
+    const run = () => {
+      this.backfillGeo().catch((err) => logger.warn({ err }, 'GeoIP backfill failed'));
+    };
+    const first = setTimeout(() => {
+      run();
+      this.geoBackfillTimer = setInterval(run, GEO_BACKFILL_EVERY_MS);
+      this.geoBackfillTimer.unref?.();
+    }, GEO_BACKFILL_FIRST_MS);
+    first.unref?.();
+    this.geoBackfillTimer = first;
+    logger.info({ provider: geoipService.providerName }, 'GeoIP enrichment enabled');
+  }
+
+  stopGeoBackfill(): void {
+    if (this.geoBackfillTimer) {
+      clearTimeout(this.geoBackfillTimer);
+      clearInterval(this.geoBackfillTimer);
+    }
+    this.geoBackfillTimer = null;
+    if (this.geoTimer) clearTimeout(this.geoTimer);
+    this.geoTimer = null;
   }
 
   /**
    * LATERAL joins picking at most ONE active ban and ONE whitelist entry per
    * IP (an IP is never listed twice, even when several tenants hold local
-   * bans on it). Restricted callers only see global rows and their own.
+   * bans on it). Restricted callers only see global rows and the rows of
+   * their read tenants.
    */
-  private lateralJoins(restrict: boolean, tenantId: number | null | undefined): {
+  private lateralJoins(tenants: ReadTenants, tenantId: number | null | undefined): {
     banSql: string; banBindings: unknown[]; wlSql: string; wlBindings: unknown[];
   } {
     const vis = (alias: string): { sql: string; bindings: unknown[] } => {
-      if (!restrict) return { sql: '', bindings: [] };
-      if (tenantId == null) return { sql: `AND ${alias}.scope = 'global'`, bindings: [] };
-      return { sql: `AND (${alias}.scope = 'global' OR ${alias}.tenant_id = ?)`, bindings: [tenantId] };
+      if (tenants === 'all') return { sql: '', bindings: [] };
+      if (tenants.length === 0) return { sql: `AND ${alias}.scope = 'global'`, bindings: [] };
+      return { sql: `AND (${alias}.scope = 'global' OR ${alias}.tenant_id IN ${inList(tenants)})`, bindings: [...tenants] };
     };
     const banVis = vis('bb');
     const wlVis = vis('ww');
@@ -406,13 +626,13 @@ class IpReputationService {
     };
   }
 
-  /** Per-IP totals from one tenant's own ip_events (keyed by the ip text). */
-  private async tenantEventAggregates(ips: string[], tenantId: number): Promise<Map<string, TenantAgg>> {
+  /** Per-IP totals from the given tenants' own ip_events (keyed by the ip text). */
+  private async tenantEventAggregates(ips: string[], tenants: number[]): Promise<Map<string, TenantAgg>> {
     const out = new Map<string, TenantAgg>();
-    if (ips.length === 0) return out;
+    if (ips.length === 0 || tenants.length === 0) return out;
     const rows = await db('ip_events as e')
       .whereIn('e.ip', ips)
-      .where('e.tenant_id', tenantId)
+      .whereIn('e.tenant_id', tenants)
       .groupBy('e.ip')
       .select(
         'e.ip',
@@ -444,12 +664,57 @@ class IpReputationService {
     return out;
   }
 
-  /** Restricted callers: override the global totals with the tenant's own (or zero them). */
-  private async scopeTotals<T extends IpReputation>(items: T[], restrict: boolean, tenantId: number | null | undefined): Promise<T[]> {
-    if (!restrict) return items;
-    if (tenantId == null) return items.map((it) => applyTenantTotals(it, undefined));
-    const aggs = await this.tenantEventAggregates([...new Set(items.map((it) => String(it.ip)))], tenantId);
+  /** Restricted callers: override the global totals with the read tenants' own (or zero them). */
+  private async scopeTotals<T extends IpReputation>(items: T[], tenants: ReadTenants): Promise<T[]> {
+    if (tenants === 'all') return items;
+    if (tenants.length === 0) return items.map((it) => applyTenantTotals(it, undefined));
+    const aggs = await this.tenantEventAggregates([...new Set(items.map((it) => String(it.ip)))], tenants);
     return items.map((it) => applyTenantTotals(it, aggs.get(String(it.ip))));
+  }
+
+  /** Tenants (within the read scope) whose agents logged events from each IP, ascending. */
+  private async eventTenants(ips: string[], tenants: ReadTenants): Promise<Map<string, number[]>> {
+    const out = new Map<string, number[]>();
+    if (ips.length === 0 || (tenants !== 'all' && tenants.length === 0)) return out;
+    const q = db('ip_events as e')
+      .whereIn('e.ip', ips)
+      .whereNotNull('e.tenant_id')
+      .groupBy('e.ip')
+      .select('e.ip', db.raw('array_agg(DISTINCT e.tenant_id ORDER BY e.tenant_id) AS tenant_ids'));
+    whereReadTenants(q, 'e.tenant_id', tenants);
+    const rows = await q as Array<{ ip: string; tenant_ids: Array<number | string> | null }>;
+    for (const r of rows) out.set(String(r.ip), (r.tenant_ids ?? []).map(Number));
+    return out;
+  }
+
+  /**
+   * Tenant attribution of reputation rows (see IpReputationListItem). `owners`
+   * (same order as `items`) sets tenantId explicitly: the ban owner on the
+   * banned list.
+   */
+  private async attribute<T extends IpReputation>(
+    items: T[],
+    tenants: ReadTenants,
+    owners?: Array<number | null>,
+  ): Promise<Array<T & { tenantId: number | null; tenantName: string | null; tenantIds: number[] }>> {
+    const byIp = await this.eventTenants([...new Set(items.map((it) => String(it.ip)))], tenants);
+    const resolved = items.map((it, i) => {
+      const ids = byIp.get(String(it.ip)) ?? [];
+      const owner = owners ? owners[i] : (ids.length === 1 ? ids[0] : null);
+      return { it, ids, owner: owner == null ? null : Number(owner) };
+    });
+    const nameIds = [...new Set(resolved.map((r) => r.owner).filter((v): v is number => v != null))];
+    const names = new Map<number, string>();
+    if (nameIds.length > 0) {
+      const rows = await db('tenants').whereIn('id', nameIds).select('id', 'name') as Array<{ id: number; name: string }>;
+      for (const r of rows) names.set(Number(r.id), r.name);
+    }
+    return resolved.map(({ it, ids, owner }) => ({
+      ...it,
+      tenantId: owner,
+      tenantName: owner != null ? names.get(owner) ?? null : null,
+      tenantIds: ids,
+    }));
   }
 
   /**
@@ -462,18 +727,24 @@ class IpReputationService {
    *
    * For status='suspicious'/'clean'/'all': queries from ip_reputation, one row
    * per IP (LATERAL ban / whitelist joins).
-   *   - When tenantId is provided, restricts to IPs that have ip_events for
-   *     that tenant's agents.
-   *   - Suspicious threshold is adjusted by per-tenant clears: an IP is
-   *     suspicious for a tenant only when total_failures > baseline_failures
-   *     (the counter value at the time of their last "clear suspicious" action).
    *
-   * Restricted callers (customer tenants) only see global bans / whitelist
-   * entries and their own, and their totals come from their own ip_events.
+   * Read scope (readTenantsFor, W10-5): the Default tenant sees every tenant,
+   * optionally narrowed by `tenantIds` (tenant chips); any other tenant only
+   * reads itself, whatever the platform role. A restricted scope:
+   *   - only lists IPs with ip_events for the read tenants' agents, with
+   *     totals computed from those events;
+   *   - only sees global bans / whitelist entries and the read tenants' own;
+   *   - on a customer tenant, follows its clears: an IP is suspicious only
+   *     when total_failures > baseline_failures (the counter value at the
+   *     time of its last "clear suspicious" action).
+   * Every row carries its tenant attribution (IpReputationListItem).
    */
   async list(filters: {
     tenantId?: number;
+    /** Kept for the callers; the platform role no longer widens the view. */
     isAdmin?: boolean;
+    /** God view only (Default): narrow to these tenants (`?tenants=`). */
+    tenantIds?: number[];
     status?: IpStatus;
     search?: string;
     limit?: number;
@@ -481,15 +752,17 @@ class IpReputationService {
     /** Whitelisted key; omitted = lastSeen (bannedAt on the banned list). */
     sortBy?: ReputationSortKey;
     sortOrder?: 'asc' | 'desc';
-  }): Promise<{ data: IpReputation[]; total: number }> {
+  }): Promise<{ data: IpReputationListItem[]; total: number }> {
     // Bounded even when called without the controller's parsing.
     const limit  = Math.min(Math.max(filters.limit ?? 50, 1), 500);
     const offset = Math.max(filters.offset ?? 0, 0);
     const tenantId = filters.tenantId;
     const isAdmin  = filters.isAdmin ?? false;
-    const restrict = !seesAllBans(tenantId, isAdmin);
+    const tenants = readTenantsFor(tenantId, filters.tenantIds);
     const sortOrder = filters.sortOrder ?? 'desc';
-    const tenantOnly = restrict && tenantId != null ? tenantId : null;
+    const tenantOnly = tenants === 'all' ? null : tenants;
+    // Per-tenant "clear suspicious" baselines only apply on a customer tenant.
+    const clearTenant = tenantId != null && !isMasterTenant(tenantId) ? tenantId : null;
 
     // ── "Banned" uses ip_bans as the driving table ──────────────────────────
     // This guarantees IPs that are banned but have no reputation row still appear.
@@ -523,10 +796,7 @@ class IpReputationService {
         });
 
       // Restricted callers never see another tenant's local bans.
-      if (restrict) {
-        if (tenantId == null) q = q.where('b.scope', 'global');
-        else q = q.where(function () { this.where('b.scope', 'global').orWhere('b.tenant_id', tenantId); });
-      }
+      q = applyBanReadTenants(q, tenants, 'b');
 
       // Has THIS tenant already overridden the ban locally? (unique(ban_id,tenant_id)
       // ⇒ at most one match, so the row count / total stays correct)
@@ -576,14 +846,15 @@ class IpReputationService {
         ) ? (row.banned_by_user_id ?? null) : null,
       }));
 
-      return { data: await this.scopeTotals(data, restrict, tenantId), total };
+      const scoped = await this.scopeTotals(data, tenants);
+      return { data: await this.attribute(scoped, tenants, rows.map((r) => r.active_ban_tenant_id)), total };
     }
 
     // ── All other statuses: ip_reputation as driving table ───────────────────
 
     // Suspicious case: per-tenant clear baseline
     // CASE expression is different depending on whether we have a tenant context.
-    const suspiciousExpr = tenantId && !isAdmin && !isMasterTenant(tenantId)
+    const suspiciousExpr = clearTenant != null
       ? `r.total_failures > COALESCE(clr.baseline_failures, 0)`
       : `r.total_failures > 0`;
 
@@ -594,7 +865,18 @@ class IpReputationService {
       ELSE 'clean'
     END)`;
 
-    const { banSql, banBindings, wlSql, wlBindings } = this.lateralJoins(restrict, tenantId);
+    const { banSql, banBindings, wlSql, wlBindings } = this.lateralJoins(tenants, tenantId);
+
+    // Restricted scope: only IPs with ip_events for the read tenants' agents.
+    const hasTenantEvents = (q: Knex.QueryBuilder): void => {
+      if (tenants === 'all') return;
+      q.whereExists(
+        db('ip_events as e')
+          .where('e.ip', db.raw('r.ip'))
+          .whereIn('e.tenant_id', tenants)
+          .select(db.raw('1')),
+      );
+    };
 
     // Joins stay in this order: the bex join below resolves b.id.
     const baseQuery = db
@@ -619,24 +901,17 @@ class IpReputationService {
         .select(db.raw('bex.id IS NOT NULL AS active_ban_excluded'));
     }
 
-    // Per-tenant clear baseline — join only for non-admin tenant users
-    if (tenantId && !isAdmin && !isMasterTenant(tenantId)) {
+    // Per-tenant clear baseline (customer tenants only)
+    if (clearTenant != null) {
       baseQuery.leftJoin('ip_reputation_tenant_clears as clr', function () {
         // clr.ip is text, r.ip is inet — cast to compare, else Postgres throws
         // "operator does not exist: text = inet" (500 on the non-admin path).
-        this.on(db.raw('clr.ip::inet = r.ip')).andOnVal('clr.tenant_id', '=', tenantId);
+        this.on(db.raw('clr.ip::inet = r.ip')).andOnVal('clr.tenant_id', '=', clearTenant);
       });
       // Also expose whether this tenant has a clear record
       baseQuery.select(db.raw('clr.baseline_failures IS NOT NULL AS cleared_for_tenant'));
-
-      // Restrict to IPs that have events for THIS tenant's agents
-      baseQuery.whereExists(
-        db('ip_events as e')
-          .where('e.ip', db.raw('r.ip'))
-          .where('e.tenant_id', tenantId)
-          .select(db.raw('1')),
-      );
     }
+    hasTenantEvents(baseQuery);
 
     const search = filters.search ? ipSearchSql('r.ip', parseIpSearch(filters.search)) : null;
     if (search) {
@@ -654,18 +929,13 @@ class IpReputationService {
       .joinRaw(wlSql, wlBindings as any[])
       .count<Array<{ count: string }>>({ count: 'r.ip' });
 
-    if (tenantId && !isAdmin && !isMasterTenant(tenantId)) {
+    if (clearTenant != null) {
       countQuery.leftJoin('ip_reputation_tenant_clears as clr', function () {
         // clr.ip is text, r.ip is inet — cast to compare (see baseQuery above).
-        this.on(db.raw('clr.ip::inet = r.ip')).andOnVal('clr.tenant_id', '=', tenantId);
+        this.on(db.raw('clr.ip::inet = r.ip')).andOnVal('clr.tenant_id', '=', clearTenant);
       });
-      countQuery.whereExists(
-        db('ip_events as e')
-          .where('e.ip', db.raw('r.ip'))
-          .where('e.tenant_id', tenantId)
-          .select(db.raw('1')),
-      );
     }
+    hasTenantEvents(countQuery);
 
     if (search) {
       countQuery.whereRaw(search.sql, search.bindings);
@@ -703,15 +973,15 @@ class IpReputationService {
       activeBanExcluded: row.active_ban_excluded ?? false,
     }));
 
-    return { data: await this.scopeTotals(data, restrict, tenantId), total };
+    return { data: await this.attribute(await this.scopeTotals(data, tenants), tenants), total };
   }
 
-  /** Active ban / whitelist lookups for one IP, scoped for restricted callers. */
-  private async statusRows(ip: string, restrict: boolean, tenantId: number | null | undefined): Promise<{ ban: unknown; wl: unknown }> {
+  /** Active ban / whitelist lookups for one IP, scoped to the read tenants. */
+  private async statusRows(ip: string, tenants: ReadTenants): Promise<{ ban: unknown; wl: unknown }> {
     const scoped = (q: ReturnType<typeof db>) => {
-      if (!restrict) return q;
-      if (tenantId == null) return q.where('scope', 'global');
-      return q.where(function () { this.where('scope', 'global').orWhere('tenant_id', tenantId); });
+      if (tenants === 'all') return q;
+      if (tenants.length === 0) return q.where('scope', 'global');
+      return q.where(function () { this.where('scope', 'global').orWhereIn('tenant_id', tenants); });
     };
     const ban = await scoped(
       db('ip_bans')
@@ -726,81 +996,57 @@ class IpReputationService {
   }
 
   /**
-   * Fetches a single IP reputation record by IP address.
+   * Status of one IP for the caller (banned > whitelisted > suspicious >
+   * clean); a customer tenant's clear baseline can hide the suspicious state.
    */
-  async getByIp(ip: string, tenantId?: number, isAdmin?: boolean): Promise<IpReputation | null> {
+  private async statusFor(
+    ip: string,
+    row: IpReputationRow | undefined,
+    tenants: ReadTenants,
+    clearTenant: number | null,
+  ): Promise<{ status: IpStatus; cleared: boolean }> {
+    const { ban, wl } = await this.statusRows(ip, tenants);
+    if (ban) return { status: 'banned', cleared: false };
+    if (wl) return { status: 'whitelisted', cleared: false };
+    if (!row || Number(row.total_failures) <= 0) return { status: 'clean', cleared: false };
+    if (clearTenant == null) return { status: 'suspicious', cleared: false };
+    const clr = await db('ip_reputation_tenant_clears')
+      .where({ ip, tenant_id: clearTenant })
+      .first() as { baseline_failures: number } | undefined;
+    if (!clr) return { status: 'suspicious', cleared: false };
+    return { status: Number(row.total_failures) > clr.baseline_failures ? 'suspicious' : 'clean', cleared: true };
+  }
+
+  /**
+   * Fetches a single IP reputation record by IP address, in the operating
+   * tenant's read scope (the platform role grants nothing extra).
+   */
+  async getByIp(ip: string, tenantId?: number, _isAdmin?: boolean): Promise<IpReputation | null> {
     const row = await db<IpReputationRow>('ip_reputation').where({ ip }).first();
     if (!row) return null;
-    const restrict = !seesAllBans(tenantId, isAdmin ?? false);
-
-    // Compute status
-    const { ban, wl } = await this.statusRows(ip, restrict, tenantId);
-
-    let status: IpStatus = 'clean';
-    let cleared = false;
-
-    if (ban) {
-      status = 'banned';
-    } else {
-      if (wl) {
-        status = 'whitelisted';
-      } else if (Number(row.total_failures) > 0) {
-        if (tenantId && !isAdmin && !isMasterTenant(tenantId)) {
-          // Check per-tenant baseline
-          const clr = await db('ip_reputation_tenant_clears')
-            .where({ ip, tenant_id: tenantId })
-            .first() as { baseline_failures: number } | undefined;
-          if (clr) {
-            cleared = true;
-            status = Number(row.total_failures) > clr.baseline_failures ? 'suspicious' : 'clean';
-          } else {
-            status = 'suspicious';
-          }
-        } else {
-          status = 'suspicious';
-        }
-      }
-    }
-
-    const [rep] = await this.scopeTotals([rowToReputation(row, status, cleared)], restrict, tenantId);
+    const tenants = readTenantsFor(tenantId);
+    const clearTenant = tenantId != null && !isMasterTenant(tenantId) ? tenantId : null;
+    const { status, cleared } = await this.statusFor(ip, row, tenants, clearTenant);
+    const [rep] = await this.scopeTotals([rowToReputation(row, status, cleared)], tenants);
     return rep;
   }
 
   /**
-   * Returns detailed info about a specific IP: reputation + recent events.
+   * Returns detailed info about a specific IP, in the operating tenant's read
+   * scope: reputation (with its tenant attribution) + recent events.
    */
-  async getIpDetail(ip: string, tenantId?: number, isAdmin?: boolean): Promise<{ reputation: IpReputation | null; recentEvents: IpEvent[] } | null> {
+  async getIpDetail(
+    ip: string,
+    tenantId?: number,
+    _isAdmin?: boolean,
+  ): Promise<{ reputation: IpReputationListItem | null; recentEvents: IpEvent[] } | null> {
     const row = await db<IpReputationRow>('ip_reputation').where({ ip }).first();
-    const restrict = !seesAllBans(tenantId, isAdmin ?? false);
-    const { ban, wl } = await this.statusRows(ip, restrict, tenantId);
-
-    let status: IpStatus = 'clean';
-    let cleared = false;
-
-    if (ban) {
-      status = 'banned';
-    } else {
-      if (wl) {
-        status = 'whitelisted';
-      } else if (row && Number(row.total_failures) > 0) {
-        if (tenantId && !isAdmin && !isMasterTenant(tenantId)) {
-          const clr = await db('ip_reputation_tenant_clears')
-            .where({ ip, tenant_id: tenantId })
-            .first() as { baseline_failures: number } | undefined;
-          if (clr) {
-            cleared = true;
-            status = Number(row.total_failures) > clr.baseline_failures ? 'suspicious' : 'clean';
-          } else {
-            status = 'suspicious';
-          }
-        } else {
-          status = 'suspicious';
-        }
-      }
-    }
+    const tenants = readTenantsFor(tenantId);
+    const clearTenant = tenantId != null && !isMasterTenant(tenantId) ? tenantId : null;
+    const { status, cleared } = await this.statusFor(ip, row, tenants, clearTenant);
 
     const reputation = row
-      ? (await this.scopeTotals([rowToReputation(row, status, cleared)], restrict, tenantId))[0]
+      ? (await this.attribute(await this.scopeTotals([rowToReputation(row, status, cleared)], tenants), tenants))[0]
       : null;
 
     const eventQ = db<IpEventRow>('ip_events as e')
@@ -809,7 +1055,7 @@ class IpReputationService {
       .select('e.*', 'd.hostname')
       .orderBy('e.timestamp', 'desc')
       .limit(50);
-    if (tenantId && !isAdmin && !isMasterTenant(tenantId)) { eventQ.where('e.tenant_id', tenantId); }
+    whereReadTenants(eventQ, 'e.tenant_id', tenants);
     const eventRows = await eventQ;
     const recentEvents = eventRows.map(rowToEvent);
 
@@ -904,6 +1150,7 @@ class IpReputationService {
         total_failures: db.raw('GREATEST(ip_reputation.total_failures, 1)'),
         updated_at: now,
       });
+    this.enqueueGeo([ip]);
 
     // Drop any tenant baselines that would hide the new suspicious state
     await db('ip_reputation_tenant_clears').where({ ip }).delete();

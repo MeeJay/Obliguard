@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { ChevronRight, ChevronDown, Folder, Cpu, Check, Minus } from 'lucide-react';
 import type { GroupTreeNode, AgentDevice } from '@obliview/shared';
 import { cn } from '@/utils/cn';
+import { useTranslation } from 'react-i18next';
 
 interface TargetTreePickerProps {
   tree: GroupTreeNode[];
@@ -23,6 +24,7 @@ type CheckState = 'checked' | 'indeterminate' | 'unchecked';
  *     "–" state.
  */
 export function TargetTreePicker({ tree, devices, selGroups, selAgents, onChange }: TargetTreePickerProps) {
+  const { t } = useTranslation();
   // ── Build lookup maps ──────────────────────────────────────────────────────
   const childrenOf = new Map<number, number[]>();
   const parentOf = new Map<number, number>();
@@ -145,12 +147,12 @@ export function TargetTreePicker({ tree, devices, selGroups, selAgents, onChange
   return (
     <div className="rounded-md border border-border bg-bg-tertiary/40 max-h-72 overflow-y-auto p-1">
       {tree.length === 0 && ungrouped.length === 0 && (
-        <p className="px-2 py-3 text-sm text-text-muted text-center">No groups or agents</p>
+        <p className="px-2 py-3 text-sm text-text-muted text-center">{t('groups.picker.noTargets', { defaultValue: 'No groups or agents' })}</p>
       )}
       {tree.map(node => renderGroup(node, 0))}
       {ungrouped.length > 0 && (
         <div>
-          <div className="px-2 py-1.5 text-xs font-medium uppercase tracking-wide text-text-muted">Ungrouped agents</div>
+          <div className="px-2 py-1.5 text-xs font-medium uppercase tracking-wide text-text-muted">{t('groups.picker.ungroupedAgents', { defaultValue: 'Ungrouped agents' })}</div>
           {ungrouped.map(d => (
             <DeviceRow key={d.id} device={d} depth={1} checked={agentChecked(d)} onToggle={() => toggleAgent(d)} />
           ))}

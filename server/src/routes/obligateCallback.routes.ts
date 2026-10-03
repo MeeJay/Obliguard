@@ -1,16 +1,20 @@
 import { Router } from 'express';
 import type { Request } from 'express';
+import type { Knex } from 'knex';
 import crypto from 'crypto';
+import { MASTER_TENANT_ID, TENANT_ROLE_ADMIN, TENANT_ROLE_VIEWER, normalizeTenantRole } from '@obliview/shared';
 import { db } from '../db';
 import { requireAuth } from '../middleware/auth';
 import { obligateService } from '../services/obligate.service';
 import { tenantService } from '../services/tenant.service';
+import { permissionSetService } from '../services/permissionSet.service';
 import { appConfigService } from '../services/appConfig.service';
 import { userSessionsService } from '../services/userSessions.service';
 import { logger } from '../utils/logger';
+import { auditService } from '../services/audit.service';
 import { regenerateSession } from '../utils/regenerateSession';
 import { invalidateUserState } from '../middleware/sessionUserGuard';
-import { requireTenant, invalidateTenantAccess } from '../middleware/tenant';
+import { requireTenant, invalidateTenantAccess, invalidateUserTenantCache } from '../middleware/tenant';
 import { isDeviceUuidFormat } from '../utils/agentIdentity';
 import { deviceAccessVerdict } from '../utils/tenantWriteRules';
 import { configuredPublicOrigins, requestAuthority, requestProto } from '../utils/publicOrigin';
@@ -129,6 +133,187 @@ function isAuthMount(req: Request): boolean {
 }
 
 /**
+ * Owner decision 9: Obligate is the exclusive source of the tenant / team
+ * memberships of og_ accounts — what an assertion no longer grants is removed
+ * at sign-in. OBLIGATE_PRUNE_MEMBERSHIPS=false (or 0 / no / off) restores the
+ * additive-only sync. Read on every sign-in.
+ */
+function pruneMembershipsEnabled(): boolean {
+  const raw = (process.env.OBLIGATE_PRUNE_MEMBERSHIPS ?? '').trim().toLowerCase();
+  return !['false', '0', 'no', 'off'].includes(raw);
+}
+
+/**
+ * Tenant role of an asserted tenant (RBAC-5). Obligate sends the slug of a
+ * permission set: it is stored as-is when known locally ('admin' or an
+ * existing permission_sets slug; the legacy 'member' reads as 'user'). A
+ * missing or unknown slug fails closed to 'viewer' (logged): it must never
+ * grant more than read-only access.
+ */
+async function ssoTenantRole(trx: Knex.Transaction, raw: unknown, userId: number, tenantSlug: string): Promise<string> {
+  if (typeof raw === 'string' && raw.length > 0 && raw.length <= 64) {
+    const role = normalizeTenantRole(raw);
+    if (role === TENANT_ROLE_ADMIN) return role;
+    if (await trx('permission_sets').where({ slug: role }).first('id')) return role;
+  }
+  logger.warn({ userId, tenant: tenantSlug, assertedRole: typeof raw === 'string' ? raw.slice(0, 64) : raw ?? null },
+    `Obligate SSO: unknown tenant role — mapped to '${TENANT_ROLE_VIEWER}'`);
+  return TENANT_ROLE_VIEWER;
+}
+
+/**
+ * Tenant + team memberships of an SSO identity as the verified assertion
+ * grants them (port of Obliance's applySsoMemberships).
+ *
+ * Upserts a user_tenants row for each asserted tenant known locally (by slug)
+ * and adds the asserted teams of that tenant, matched by NAME within the
+ * tenant (Obligate sends a flat list of team names across the user's tenants,
+ * so the same name in another tenant must not cross-contaminate).
+ *
+ * With `prune` (og_ accounts, whose access Obligate owns) it also removes what
+ * Obligate no longer grants: in each asserted tenant the team memberships not
+ * asserted, then the user_tenants rows and team memberships of every tenant
+ * that is not asserted. Accounts linked to a local account are never pruned:
+ * their memberships are managed here.
+ *
+ * The tenant role is the asserted permission-set slug (ssoTenantRole). A
+ * platform admin also gets an 'admin' membership of the Default tenant (as in
+ * Obliance), so it shows in Default's member list; it is kept by the prune.
+ * A demoted platform admin loses that membership unless Default is asserted.
+ *
+ * Returns true when anything was removed (the caller drops the cached
+ * tenant-access decisions and closes the live sockets).
+ */
+/** What a membership sync removed (audit trail of the prune). */
+interface MembershipRemovals {
+  tenantIds: number[];
+  teams: Array<{ tenantId: number; teamId: number }>;
+}
+
+async function reconcileTenantsAndTeams(
+  localUserId: number,
+  assertion: { tenants: unknown; teams: unknown },
+  prune: boolean,
+  platformAdmin = false,
+  platformDemoted = false,
+  removals: MembershipRemovals = { tenantIds: [], teams: [] },
+): Promise<boolean> {
+  const tenants = Array.isArray(assertion.tenants)
+    ? assertion.tenants as Array<{ slug?: unknown; role?: unknown } | null>
+    : [];
+  const teams = Array.isArray(assertion.teams)
+    ? (assertion.teams as unknown[]).filter((n): n is string => typeof n === 'string' && n.length > 0)
+    : [];
+
+  return db.transaction(async (trx) => {
+    const keep = new Set<number>();
+    let removed = false;
+
+    for (const t of tenants) {
+      if (!t || typeof t.slug !== 'string') continue;
+      const tenant = await trx('tenants').where({ slug: t.slug }).first('id') as { id: number } | undefined;
+      if (!tenant) {
+        logger.warn({ userId: localUserId, slug: t.slug }, 'Obligate SSO: asserted tenant has no local tenant with this slug — skipped');
+        continue;
+      }
+      keep.add(tenant.id);
+      const role = await ssoTenantRole(trx, t.role, localUserId, t.slug);
+      await trx('user_tenants')
+        .insert({ user_id: localUserId, tenant_id: tenant.id, role })
+        .onConflict(['user_id', 'tenant_id'])
+        .merge({ role });
+
+      // Capabilities are NOT synced: they derive from the tenant role
+      // (permission.service.getTenantCapabilities) and team permissions.
+      const wantedTeamIds = teams.length > 0
+        ? await trx('user_teams').where({ tenant_id: tenant.id }).whereIn('name', teams).pluck('id') as number[]
+        : [];
+      const currentTeamIds = await trx('team_memberships')
+        .join('user_teams', 'user_teams.id', 'team_memberships.team_id')
+        .where({ 'team_memberships.user_id': localUserId, 'user_teams.tenant_id': tenant.id })
+        .pluck('team_memberships.team_id') as number[];
+      const toAdd = wantedTeamIds.filter((id) => !currentTeamIds.includes(id));
+      if (toAdd.length > 0) {
+        await trx('team_memberships')
+          .insert(toAdd.map((team_id) => ({ team_id, user_id: localUserId })))
+          .onConflict(['team_id', 'user_id'])
+          .ignore();
+        logger.info({ userId: localUserId, tenant: t.slug, teamIds: toAdd }, 'Obligate SSO: synced team membership(s)');
+      }
+      if (prune) {
+        const toRemove = currentTeamIds.filter((id) => !wantedTeamIds.includes(id));
+        if (toRemove.length > 0) {
+          await trx('team_memberships').where({ user_id: localUserId }).whereIn('team_id', toRemove).del();
+          removed = true;
+          for (const teamId of toRemove) {
+            removals.teams.push({ tenantId: tenant.id, teamId });
+            logger.info({ userId: localUserId, tenantId: tenant.id, teamId },
+              'Obligate SSO: team membership no longer granted by Obligate — removed');
+          }
+        }
+      }
+      if (teams.length > 0 && wantedTeamIds.length === 0) {
+        logger.debug({ userId: localUserId, tenant: t.slug, asserted: teams },
+          'Obligate SSO: no local team of this tenant matches the asserted team names');
+      }
+    }
+
+    // Platform admin: Default-tenant 'admin' membership (Obliance parity).
+    if (platformAdmin) {
+      keep.add(MASTER_TENANT_ID);
+      await trx('user_tenants')
+        .insert({ user_id: localUserId, tenant_id: MASTER_TENANT_ID, role: TENANT_ROLE_ADMIN })
+        .onConflict(['user_id', 'tenant_id'])
+        .merge({ role: TENANT_ROLE_ADMIN });
+    } else if (platformDemoted && !keep.has(MASTER_TENANT_ID)) {
+      // Demoted from platform admin: the Default membership this sync granted
+      // must not outlive the role (Default = god view), even without prune
+      // (accounts linked to a local account). An asserted Default stays.
+      const n = await trx('user_tenants').where({ user_id: localUserId, tenant_id: MASTER_TENANT_ID }).del();
+      if (n > 0) {
+        removed = true;
+        removals.tenantIds.push(MASTER_TENANT_ID);
+        logger.info({ userId: localUserId }, 'Obligate SSO: platform admin role revoked — Default tenant membership removed');
+      }
+    }
+
+    if (!prune) return removed;
+
+    // Tenants Obligate no longer grants: their team memberships, then the
+    // tenant rows themselves.
+    const keepIds = [...keep];
+    const staleTeamIds = await trx('team_memberships')
+      .join('user_teams', 'user_teams.id', 'team_memberships.team_id')
+      .where({ 'team_memberships.user_id': localUserId })
+      .modify((q) => { if (keepIds.length > 0) q.whereNotIn('user_teams.tenant_id', keepIds); })
+      .select('team_memberships.team_id', 'user_teams.tenant_id') as Array<{ team_id: number; tenant_id: number }>;
+    if (staleTeamIds.length > 0) {
+      await trx('team_memberships').where({ user_id: localUserId }).whereIn('team_id', staleTeamIds.map((r) => r.team_id)).del();
+      removed = true;
+      for (const r of staleTeamIds) {
+        removals.teams.push({ tenantId: r.tenant_id, teamId: r.team_id });
+        logger.info({ userId: localUserId, tenantId: r.tenant_id, teamId: r.team_id },
+          'Obligate SSO: team membership of a tenant no longer granted by Obligate — removed');
+      }
+    }
+    const staleTenantIds = await trx('user_tenants')
+      .where({ user_id: localUserId })
+      .modify((q) => { if (keepIds.length > 0) q.whereNotIn('tenant_id', keepIds); })
+      .pluck('tenant_id') as number[];
+    if (staleTenantIds.length > 0) {
+      await trx('user_tenants').where({ user_id: localUserId }).whereIn('tenant_id', staleTenantIds).del();
+      removed = true;
+      for (const tenantId of staleTenantIds) {
+        removals.tenantIds.push(tenantId);
+        logger.info({ userId: localUserId, tenantId },
+          'Obligate SSO: tenant access no longer granted by Obligate — removed');
+      }
+    }
+    return removed;
+  });
+}
+
+/**
  * GET /auth/callback?code=xxx&state=xxx
  * Called by Obligate after successful authentication.
  * Exchanges the code for user info, auto-provisions, creates session, redirects.
@@ -152,6 +337,7 @@ router.get('/callback', async (req, res) => {
     delete req.session.oauthRedirectUri;
     if (!expectedState || typeof state !== 'string' || !state || state !== expectedState) {
       logger.warn({ receivedState: state, hasExpected: !!expectedState }, 'Obligate callback: state mismatch — possible CSRF');
+      await auditService.logReq(req, { action: 'auth.sso_login', tenantId: null, userId: null, username: null, success: false, details: { reason: 'state_mismatch' } });
       res.redirect('/login?error=sso_failed');
       return;
     }
@@ -171,6 +357,7 @@ router.get('/callback', async (req, res) => {
     const assertion = await obligateService.exchangeCode(code, redirectUri);
     if (!assertion) {
       logger.warn('Obligate callback: exchange returned null — code invalid/expired or redirect_uri mismatch');
+      await auditService.logReq(req, { action: 'auth.sso_login', tenantId: null, userId: null, username: null, success: false, details: { reason: 'exchange_failed' } });
       res.redirect('/login?error=sso_failed');
       return;
     }
@@ -189,6 +376,8 @@ router.get('/callback', async (req, res) => {
     // rewritten value must not open a session on an unrelated local account
     // (e.g. a local admin).
     let localUserId = await obligateService.getLinkedLocalUserId(assertion.obligateUserId) ?? 0;
+    /** Platform role before this login (undefined for a new account). */
+    let prevRole: string | undefined;
     const needsProvision = localUserId === 0;
 
     if (assertion.linkedLocalUserId && assertion.linkedLocalUserId !== localUserId) {
@@ -204,7 +393,7 @@ router.get('/callback', async (req, res) => {
       // successful exchange therefore re-enables the local account — a disable
       // pushed through sso-user-sync (legitimate, missed 'reactivate', or forged
       // with the browser-exposed key) can't lock the user out for good.
-      const prevRole = (await db('users').where({ id: localUserId }).first('role') as { role: string } | undefined)?.role;
+      prevRole = (await db('users').where({ id: localUserId }).first('role') as { role: string } | undefined)?.role;
       await db('users').where({ id: localUserId }).update({
         is_active: true,
         role: assertion.role === 'admin' ? 'admin' : 'user',
@@ -272,53 +461,35 @@ router.get('/callback', async (req, res) => {
       obligateService.reportProvision(assertion.obligateUserId, localUserId).catch(() => {});
     }
 
-    // Sync tenant + team memberships from Obligate (every SSO login).
-    // Capabilities are NOT synced: they derive from tenant membership
-    // (permission.service.getUserCapabilities).
-    for (const t of Array.isArray(assertion.tenants) ? assertion.tenants : []) {
-      const tenant = await db('tenants').where({ slug: t.slug }).first() as { id: number } | undefined;
-      if (tenant) {
-        await db('user_tenants')
-          .insert({ user_id: localUserId, tenant_id: tenant.id, role: t.role === 'admin' ? 'admin' : 'member' })
-          .onConflict(['user_id', 'tenant_id'])
-          .merge({ role: t.role === 'admin' ? 'admin' : 'member' });
-
-        // ── Sync local team memberships from the Obligate assertion ───────────
-        // Previously SSO created tenant access but NOT team memberships, so the
-        // user landed in a tenant with no group visibility — empty sidebar tree
-        // and no group-scoped permissions — until an admin ticked the box by
-        // hand. Match each asserted team to a local team in THIS tenant by id OR
-        // name and ensure a membership row exists. Additive only (never removes)
-        // so manually-granted memberships are preserved.
-        const assertedTeams = new Set((assertion.teams ?? []).map((s) => String(s)));
-        if (assertedTeams.size > 0) {
-          const localTeams = await db('user_teams')
-            .where({ tenant_id: tenant.id })
-            .select('id', 'name') as Array<{ id: number; name: string }>;
-          const matchedTeamIds = localTeams
-            .filter((lt) => assertedTeams.has(String(lt.id)) || assertedTeams.has(lt.name))
-            .map((lt) => lt.id);
-          for (const teamId of matchedTeamIds) {
-            await db('team_memberships')
-              .insert({ user_id: localUserId, team_id: teamId })
-              .onConflict(['team_id', 'user_id'])
-              .ignore();
-          }
-          if (matchedTeamIds.length > 0) {
-            logger.info(
-              { userId: localUserId, tenant: t.slug, teamIds: matchedTeamIds },
-              'Obligate SSO: synced team membership(s)',
-            );
-          } else {
-            logger.warn(
-              { userId: localUserId, tenant: t.slug, asserted: [...assertedTeams] },
-              'Obligate SSO: no local team matched the asserted teams (check team name/id mapping)',
-            );
-          }
-        }
-      } else {
-        logger.warn({ userId: localUserId, slug: t.slug }, 'Obligate SSO: asserted tenant has no local tenant with this slug — skipped');
-      }
+    // Sync tenant + team memberships from Obligate (every SSO login). For an
+    // og_ account Obligate is the source of truth: memberships it no longer
+    // grants are removed (OBLIGATE_PRUNE_MEMBERSHIPS=false keeps them). An
+    // account linked to a local account keeps the additive sync.
+    const ssoOwned = (await db('users').where({ id: localUserId }).first('foreign_source') as
+      { foreign_source: string | null } | undefined)?.foreign_source === 'obligate';
+    const removals: MembershipRemovals = { tenantIds: [], teams: [] };
+    const membershipsRemoved = await reconcileTenantsAndTeams(
+      localUserId, { tenants: assertion.tenants, teams: assertion.teams }, ssoOwned && pruneMembershipsEnabled(),
+      assertion.role === 'admin', prevRole === 'admin' && assertion.role !== 'admin', removals,
+    );
+    if (membershipsRemoved) {
+      // One row per tenant that lost something (filed in that tenant), actor = Obligate.
+      const touched = new Set<number>([...removals.tenantIds, ...removals.teams.map((t) => t.tenantId)]);
+      await auditService.logReqMany(req, [...touched].map((tenantId) => ({
+        action: 'sso.memberships_pruned', targetType: 'user', targetId: localUserId, tenantId,
+        userId: null, username: 'app:obligate',
+        details: {
+          account: assertion.username,
+          tenantAccessRemoved: removals.tenantIds.includes(tenantId),
+          teamsRemoved: removals.teams.filter((t) => t.tenantId === tenantId).map((t) => t.teamId),
+        },
+      })));
+      // Other sessions of this user may sit on a removed tenant: requireTenant
+      // re-checks membership (once the cached decisions are dropped) and
+      // /auth/me moves them to a remaining tenant. Live sockets keep their
+      // tenant / team rooms until they reconnect: close them.
+      invalidateUserTenantCache(localUserId);
+      userSessionsService.disconnectSockets(localUserId);
     }
 
     // Sync preferences from Obligate (theme, language, toast settings)
@@ -355,6 +526,10 @@ router.get('/callback', async (req, res) => {
     const user = await db('users').where({ id: localUserId }).first() as { username: string; role: string; is_active: boolean } | undefined;
     if (!user?.is_active) {
       logger.warn({ userId: localUserId, obligateUserId: assertion.obligateUserId }, 'Obligate callback: local account is disabled — no session');
+      await auditService.logReq(req, {
+        action: 'auth.sso_login', tenantId: null, userId: localUserId, username: user?.username ?? assertion.username,
+        targetType: 'user', targetId: localUserId, success: false, details: { reason: 'account_disabled' },
+      });
       res.redirect('/login?error=account_disabled');
       return;
     }
@@ -416,6 +591,10 @@ router.get('/callback', async (req, res) => {
     }
 
     logger.info(`Obligate SSO: user ${assertion.username} (obligate #${assertion.obligateUserId}) → local #${localUserId}`);
+    await auditService.logReq(req, {
+      action: 'auth.sso_login', targetType: 'user', targetId: localUserId,
+      details: { method: 'obligate', obligateUserId: assertion.obligateUserId, platformRole: assertion.role === 'admin' ? 'admin' : 'user' },
+    });
 
     // Save session, then redirect via HTML meta refresh to ensure Set-Cookie header
     // is fully processed by the browser before navigation occurs.
@@ -561,14 +740,18 @@ router.get('/app-info', async (req, res) => {
       .select('id', 'name', 'slug')
       .orderBy('name') as Array<{ id: number; name: string; slug: string }>;
 
-    // Capabilities derive from local tenant membership; per-tenant capabilities
-    // in the SSO assertion are ignored, so permissionSets are not advertised.
+    // Permission sets: Obligate offers them as tenant-role choices (the slug
+    // is what comes back as the asserted tenant role; RBAC-5).
+    const permissionSets = (await permissionSetService.getAll())
+      .map((p) => ({ slug: p.slug, name: p.name, isDefault: p.isDefault }));
+
     res.json({
       success: true,
       data: {
         roles: ['admin', 'user'],
         teams: teams.map(t => ({ id: t.id, name: t.name, tenantSlug: t.tenant_slug, tenantName: t.tenant_name })),
         tenants: tenants.map(t => ({ slug: t.slug, name: t.name })),
+        permissionSets,
       },
     });
   } catch (err) {
@@ -758,6 +941,12 @@ router.post('/sso-user-sync', async (req, res) => {
         logger.warn({ action, localUserId: localId }, 'SSO sync: unknown action — ignored');
         break;
     }
+    // Instance-level row: pushed by Obligate (bearer-authenticated), no session.
+    await auditService.logReq(req, {
+      action: 'sso.user_sync', targetType: 'user', targetId: localId, tenantId: null,
+      userId: null, username: 'app:obligate',
+      details: { syncAction: action.slice(0, 64), obligateUserId: obligateId, ...(action === 'update-role' ? { role: role === 'admin' ? 'admin' : 'user' } : {}) },
+    });
 
     res.json({ success: true });
   } catch (err) {

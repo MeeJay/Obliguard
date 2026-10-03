@@ -24,6 +24,7 @@ type UFWFirewall struct {
 	cidrOK      bool
 	pendingAdd  []string
 	pendingDel  []string
+	rlExempt    []string // see IptablesFirewall.rlExempt
 }
 
 func (f *UFWFirewall) Name() string { return "ufw" }
@@ -201,6 +202,18 @@ func (f *UFWFirewall) migrateLegacyUfwRules() {
 // UFW sits on iptables and already injects raw iptables rules for its bans, so
 // rate limiting reuses the shared iptables path (connection/rate; volume needs tc).
 func (f *UFWFirewall) IsRateLimitSupported() bool { return true }
+
+// SetRateLimitExempt sets the IPv4 addresses kept out of rate limiting, used by
+// the next ApplyRateLimits.
+func (f *UFWFirewall) SetRateLimitExempt(addrs []string) {
+	f.mu.Lock()
+	f.rlExempt = iptRLExemptV4(addrs)
+	f.mu.Unlock()
+}
+
 func (f *UFWFirewall) ApplyRateLimits(rules []RateLimitRule) error {
-	return applyIptablesRateLimits(rules)
+	f.mu.Lock()
+	exempt := append([]string(nil), f.rlExempt...)
+	f.mu.Unlock()
+	return applyIptablesRateLimits(rules, exempt)
 }

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { X, Download } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import apiClient from '@/api/client';
 
 // ── Types injected by the Go overlay ─────────────────────────────────────────
@@ -31,6 +32,7 @@ function isOutdated(candidate: string, latest: string): boolean {
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export function DesktopUpdateBanner() {
+  const { t } = useTranslation();
   const [latestVersion, setLatestVersion] = useState<string | null>(null);
   const [dismissed, setDismissed] = useState(false);
 
@@ -73,30 +75,29 @@ export function DesktopUpdateBanner() {
     <div className="flex items-center gap-3 bg-accent/10 border-b border-accent/30 px-4 py-2 text-sm shrink-0">
       <Download size={15} className="text-accent shrink-0" />
       <span className="text-text-primary flex-1">
-        Desktop app{' '}
+        {t('nav.desktopUpdate.available', { defaultValue: 'A new desktop app version is available:' })}{' '}
         <span className="font-semibold text-accent">v{latestVersion}</span>
-        {' '}is available
         {currentVersion
-          ? <> (you have <span className="font-mono">{currentVersion}</span>)</>
-          : <> — please update to get the latest features</>
+          ? <> {t('nav.desktopUpdate.youHave', { version: currentVersion, defaultValue: '(you have {{version}})' })}</>
+          : <> — {t('nav.desktopUpdate.pleaseUpdate', { defaultValue: 'please update to get the latest features' })}</>
         }.
       </span>
       <Link
         to="/download"
         className="shrink-0 rounded-md bg-accent px-3 py-1 text-xs font-semibold text-white hover:bg-accent/80 transition-colors"
       >
-        Download update
+        {t('nav.desktopUpdate.download', { defaultValue: 'Download update' })}
       </Link>
       <button
         onClick={handleSkip}
-        title="Skip this version"
+        title={t('nav.desktopUpdate.skipVersion', { defaultValue: 'Skip this version' })}
         className="shrink-0 text-text-secondary hover:text-text-primary transition-colors text-xs underline underline-offset-2"
       >
-        Skip
+        {t('common.skip')}
       </button>
       <button
         onClick={() => setDismissed(true)}
-        title="Dismiss"
+        title={t('common.dismiss', { defaultValue: 'Dismiss' })}
         className="shrink-0 text-text-secondary hover:text-text-primary transition-colors"
       >
         <X size={14} />

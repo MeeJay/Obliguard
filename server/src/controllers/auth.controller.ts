@@ -9,8 +9,9 @@ import { canUseTenant } from '../middleware/tenant';
 import { invalidateUserState } from '../middleware/sessionUserGuard';
 import { obligateService } from '../services/obligate.service';
 import { db } from '../db';
-import { config } from '../config';
 import { regenerateSession } from '../utils/regenerateSession';
+import { needs2faSetup } from '../middleware/require2faSetup';
+import { auditService } from '../services/audit.service';
 import type { LoginInput } from '../validators/auth.schema';
 
 /**
@@ -34,6 +35,22 @@ export const authController = {
       const user = await authService.authenticate(username, password);
 
       if (!user) {
+        // Instance-level row (no tenant): the attempted name, and the account
+        // it designates when one exists. Never the password.
+        const attempted = typeof username === 'string' ? username.slice(0, 255) : null;
+        const known = attempted
+          ? await db('users').where({ username: attempted }).first('id') as { id: number } | undefined
+          : undefined;
+        await auditService.logReq(req, {
+          action: 'auth.login',
+          tenantId: null,
+          userId: known?.id ?? null,
+          username: attempted,
+          targetType: 'user',
+          targetId: known?.id ?? null,
+          success: false,
+          details: { method: 'password', reason: known ? 'invalid_credentials' : 'unknown_account' },
+        });
         throw new AppError(401, 'Invalid username or password');
       }
 
@@ -50,8 +67,9 @@ export const authController = {
         if (user.emailOtpEnabled && user.email) {
           const cfg = await appConfigService.getAll();
           if (cfg.otp_smtp_server_id) {
-            const code = twoFactorService.generateEmailOtp();
-            req.session.pendingEmailOtp = { code, email: user.email, expires: Date.now() + 10 * 60 * 1000 };
+            // Only the code's SHA-256 is kept in the session (W4-1).
+            const { code, pending } = twoFactorService.newEmailOtp(user.email);
+            req.session.pendingEmailOtp = pending;
             await twoFactorService.sendEmailOtp(cfg.otp_smtp_server_id, user.email, code);
           }
         }
@@ -71,6 +89,12 @@ export const authController = {
       req.session.username = user.username;
       req.session.role = user.role;
       await setSessionTenant(req, user.id, user.role);
+      await auditService.logReq(req, {
+        action: 'auth.login',
+        targetType: 'user',
+        targetId: user.id,
+        details: { method: 'password' },
+      });
 
       res.json({ success: true, data: { user } });
     } catch (err) {
@@ -80,6 +104,9 @@ export const authController = {
 
   async logout(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
+      if (req.session.userId) {
+        await auditService.logReq(req, { action: 'auth.logout', targetType: 'user', targetId: req.session.userId });
+      }
       req.session.destroy((err) => {
         if (err) {
           next(new AppError(500, 'Failed to logout'));
@@ -124,20 +151,19 @@ export const authController = {
       const isAdmin = user.role === 'admin';
       const permissions = await permissionService.getUserPermissions(user.id, isAdmin, tenantId ?? undefined);
 
-      // Check if force 2FA applies to this user
-      let requires2faSetup = false;
-      if (!config.disable2faForce) {
-        const cfg = await appConfigService.getAll();
-        if (cfg.force_2fa && !user.totpEnabled && !user.emailOtpEnabled) {
-          requires2faSetup = true;
-        }
-      }
+      // force_2fa: same rule as the server-side gate (require2faSetup): no
+      // factor yet, not an Obligate account, DISABLE_2FA_FORCE unset.
+      const requires2faSetup = await needs2faSetup(user.id);
 
       res.json({
         success: true,
         data: {
           user,
           permissions,
+          // Role in the current tenant (permission-set slug) and the tenant
+          // capabilities it grants (also inside `permissions`; W6-1).
+          tenantRole: permissions.tenantRole ?? null,
+          tenantCapabilities: permissions.tenantCapabilities ?? [],
           requires2faSetup,
           currentTenantId: tenantId,
           noTenantAccess: tenantId === null,

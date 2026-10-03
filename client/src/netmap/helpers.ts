@@ -1,5 +1,9 @@
 import type { IpNode, WlEntry } from './types';
-import { SVC_COLORS, DANGEROUS_SVCS, BADGE_H, BADGE_FONT, RING_INNER_R, RING_GAP, PER_RING } from './constants';
+import {
+  SVC_COLORS, DANGEROUS_SVCS, BADGE_H, BADGE_FONT, RING_INNER_R, RING_GAP, PER_RING,
+  NETMAP_PALETTE, DEVICE_TYPE_COLORS, EVENT_COLORS, ORBIT_RING_GAP, IPS_PER_ORBIT_RING,
+  IP_TTL, IP_TTL_BANNED, IP_TTL_CLEAN, IP_TTL_SUSPICIOUS, rgba, type Rgb,
+} from './constants';
 
 // ── Pure helpers ───────────────────────────────────────────────────────────────
 
@@ -13,7 +17,7 @@ export function flagEmoji(code: string): string {
 export function svcColor(s: string): string {
   const lc = (s ?? '').toLowerCase();
   for (const [k, v] of Object.entries(SVC_COLORS)) if (lc.includes(k)) return v;
-  return '#f43f5e';
+  return NETMAP_PALETTE.serviceUnknown;
 }
 
 export function isDangerousSvc(s: string): boolean {
@@ -21,10 +25,10 @@ export function isDangerousSvc(s: string): boolean {
 }
 
 export function statusColor(st: string): string {
-  if (st === 'banned')      return '#ef4444';
-  if (st === 'suspicious')  return '#f97316';
-  if (st === 'whitelisted') return '#22c55e';
-  return '#475569';
+  if (st === 'banned')      return NETMAP_PALETTE.status.banned;
+  if (st === 'suspicious')  return NETMAP_PALETTE.status.suspicious;
+  if (st === 'whitelisted') return NETMAP_PALETTE.status.whitelisted;
+  return NETMAP_PALETTE.status.clean;
 }
 
 /** Seeded pseudo-random 0–1 from an IP string + salt integer. */
@@ -160,7 +164,7 @@ export function drawBadgeAt(
   ctx.font = BADGE_FONT;
 
   // Background with subtle gradient
-  ctx.fillStyle = 'rgba(5,3,1,0.88)';
+  ctx.fillStyle = NETMAP_PALETTE.badge.bg;
   ctx.beginPath();
   if (typeof ctx.roundRect === 'function') ctx.roundRect(bx, by, bw, BADGE_H, 4);
   else ctx.rect(bx, by, bw, BADGE_H);
@@ -176,9 +180,107 @@ export function drawBadgeAt(
   ctx.fillRect(bx + 1.5, by + 3, 1.5, BADGE_H - 6);
 
   // Text with slight shadow for contrast
-  ctx.shadowBlur = 3; ctx.shadowColor = 'rgba(0,0,0,0.8)';
-  ctx.fillStyle = '#dbe4ef';
+  ctx.shadowBlur = 3; ctx.shadowColor = rgba(NETMAP_PALETTE.shadow, 0.8);
+  ctx.fillStyle = NETMAP_PALETTE.badge.text;
   ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
   ctx.fillText(text, bx + 7, by + BADGE_H / 2);
   ctx.restore();
+}
+
+// ── Device type ───────────────────────────────────────────────────────────────
+
+/** Minimal /agent/devices row read by the device type detection. */
+export interface DeviceTypeSource {
+  deviceType?: string | null;
+  hostname?: string | null;
+  osInfo?: { platform?: string; os?: string } | null;
+}
+
+/** Visual device type of an agent (firewall / server / windows / desktop / default). */
+export function detectDeviceType(d: DeviceTypeSource): string {
+  if (d.deviceType === 'mikrotik') return 'firewall';
+  const os = (d.osInfo?.os ?? d.osInfo?.platform ?? '').toLowerCase();
+  const host = (d.hostname ?? '').toLowerCase();
+  if (os.includes('opnsense') || os.includes('pfsense') || host.includes('opn') || host.includes('pfsense')) return 'firewall';
+  if (os.includes('routeros') || os.includes('mikrotik') || host.includes('mikrotik')) return 'firewall';
+  if (os.includes('linux')) return 'server';
+  if (os.includes('windows server') || os.includes('windows_server')) return 'server';
+  if (os.includes('windows')) return 'windows';
+  if (os.includes('darwin') || os.includes('macos')) return 'desktop';
+  if (os.includes('freebsd')) return 'server';
+  return 'default';
+}
+
+export function detectDeviceColor(d: DeviceTypeSource): string {
+  return DEVICE_TYPE_COLORS[detectDeviceType(d)] ?? DEVICE_TYPE_COLORS.default;
+}
+
+// ── Status / event colours ────────────────────────────────────────────────────
+
+/** IP TTL on the map, by status. */
+export function ipTtlForStatus(status: string): number {
+  if (status === 'banned') return IP_TTL_BANNED;
+  if (status === 'suspicious') return IP_TTL_SUSPICIOUS;
+  if (status === 'clean') return IP_TTL_CLEAN;
+  return IP_TTL;
+}
+
+type DotStatus = keyof typeof NETMAP_PALETTE.dot;
+const asDotStatus = (status: string): DotStatus =>
+  (status === 'banned' || status === 'suspicious' || status === 'whitelisted') ? status : 'clean';
+
+/** Canvas dot triplet of an IP status. */
+export function dotRgb(status: string): Rgb {
+  return NETMAP_PALETTE.dot[asDotStatus(status)];
+}
+
+/** Comet-tail triplet of an IP status. */
+export function trailRgb(status: string): Rgb {
+  return NETMAP_PALETTE.trail[asDotStatus(status)];
+}
+
+/** Line / orbit-path colour of an IP: threat colours, else the given neutral. */
+export function threatLineColor(status: string, neutral: string): string {
+  if (status === 'banned') return NETMAP_PALETTE.status.banned;
+  if (status === 'suspicious') return NETMAP_PALETTE.status.suspicious;
+  return neutral;
+}
+
+/** Live-feed / particle colour of an auth event (dangerous services stand out). */
+export function liveEventColor(service: string | null | undefined, eventType: string): string {
+  if (isDangerousSvc(service ?? '')) return NETMAP_PALETTE.event.dangerous;
+  return eventType === 'auth_success' ? EVENT_COLORS.auth_success : EVENT_COLORS.auth_failure;
+}
+
+/** #rrggbb to an RGB triplet (grey on a malformed value). */
+export function hexRgb(h: string): Rgb {
+  const m = h.match(/#(..)(..)(..)/);
+  return m ? [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)] : [128, 128, 128];
+}
+
+// ── Orbit rings ───────────────────────────────────────────────────────────────
+
+/** How many orbit rings an agent needs for N IPs (IPS_PER_ORBIT_RING per ring). */
+export function orbitRingCount(ipCount: number): number {
+  if (ipCount <= 0) return 0;
+  return Math.max(1, Math.ceil(ipCount / IPS_PER_ORBIT_RING));
+}
+
+/** Radius of orbit ring N (0-indexed) around an agent of radius nodeR. */
+export function orbitRingRadius(nodeR: number, ringIndex: number): number {
+  return nodeR + 18 + ringIndex * ORBIT_RING_GAP;
+}
+
+/** Total exclusion radius for an agent (outermost ring + margin). */
+export function agentOrbitOuterR(nodeR: number, ipCount: number): number {
+  const rings = orbitRingCount(ipCount);
+  if (rings === 0) return nodeR + 10;
+  return orbitRingRadius(nodeR, rings - 1) + 8;
+}
+
+/** Orbit radius of an IP slot among totalSlots (slots go round-robin over the rings). */
+export function orbRadius(nodeR: number, slot: number, totalSlots: number): number {
+  if (totalSlots <= 0) return nodeR + 18;
+  const rings = orbitRingCount(totalSlots);
+  return orbitRingRadius(nodeR, slot % rings);
 }

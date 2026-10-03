@@ -27,7 +27,9 @@ const PATHS = [
   '/api/remote-blocklists/stats', '/api/rate-limit-policies', '/api/live-alerts', '/api/admin/config',
   '/api/admin/config/agent-global', '/api/system', '/api/permission-sets', '/api/profile',
   '/api/profile/2fa/status', '/api/admin/smtp-servers',
-  '/api/ip-events/stats', '/api/dashboard/summary', '/api/agent/devices/versions',
+  '/api/ip-events/stats', '/api/dashboard/summary',
+  '/api/dashboard/timeseries', '/api/dashboard/hourly', '/api/dashboard/breakdown', '/api/dashboard/groups',
+  '/api/agent/devices/versions',
   '/api/agent/update-policy/tenant',
 ];
 

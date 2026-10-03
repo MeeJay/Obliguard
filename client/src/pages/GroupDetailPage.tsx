@@ -1,9 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
-  Pencil, Trash2, ArrowLeft, FolderOpen,
-  Server, Bell, Globe, RotateCcw,
-  Plus, X, ChevronDown, ChevronUp, Shield, EyeOff, ArrowUpCircle,
+  Pencil, Trash2, ArrowLeft, Server, Globe, ArrowUpCircle, ChevronRight, ChevronDown,
+  FileCode2, Gauge, Bell, Eye, SlidersHorizontal,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { cn } from '@/utils/cn';
@@ -13,655 +12,318 @@ import { useAuthStore } from '@/store/authStore';
 import { useTenantStore } from '@/store/tenantStore';
 import { useAgentDevices, useAgentDevicesLoaded } from '@/store/agentStore';
 import { SOCKET_RESYNC_EVENT } from '@/hooks/useSocket';
-import {
-  agentUpdateErrorMessage, ancestorUpdatePolicyChain, findGroupInTree, resolveUpdatePolicyView, updatePolicySourceLabel,
-} from '@/utils/agentUpdate';
+import { useCan } from '@/hooks/usePermission';
+import { agentUpdateErrorMessage, findGroupInTree, visibleUpdateAttempt } from '@/utils/agentUpdate';
 import { groupsApi } from '@/api/groups.api';
 import { agentApi } from '@/api/agent.api';
 import { serviceTemplatesApi } from '@/api/serviceTemplates.api';
+import { rateLimitPoliciesApi } from '@/api/rateLimitPolicies.api';
+import { notificationsApi } from '@/api/notifications.api';
 import type {
-  MonitorGroup, AgentDevice, AgentGroupConfig, GroupTreeNode,
-  NotificationTypeConfig, ServiceTemplate, ServiceType, ServiceTemplateMode,
-  AgentTenantUpdatePolicyInfo,
+  MonitorGroup, AgentDevice, GroupTreeNode, ResolvedServiceConfig, RateLimitPolicy, ServiceTemplate,
 } from '@obliview/shared';
-import { CAPABILITIES } from '@obliview/shared';
 import { Button } from '@/components/common/Button';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
-import { NotificationBindingsPanel } from '@/components/notifications/NotificationBindingsPanel';
-import { NotificationTypesPanel } from '@/components/agent/NotificationTypesPanel';
-import { ServiceTemplatesPanel } from '@/components/agent/ServiceTemplatesPanel';
-import { NetworkLimitsPanel } from '@/pages/RateLimitPage';
+import { PageContainer } from '@/components/common/PageContainer';
+import { PageHeader } from '@/components/common/PageHeader';
+import { TenantBadge } from '@/components/common/TenantBadge';
+import { EvaluateOnlyBanner } from '@/components/common/EvaluateOnlyBanner';
+import { useConfirm } from '@/components/common/ConfirmDialog';
+import { resolveAgentStatus } from '@/components/status/AgentStatusBadge';
+import { AgentTable } from '@/components/agents/AgentTable';
+import { useGroupUpdatePolicyView, type GroupEditTab, type GroupUpdatePolicyView } from '@/pages/GroupEditPage';
 import toast from 'react-hot-toast';
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Agent Group Settings Panel
-// ─────────────────────────────────────────────────────────────────────────────
+// Mirrors Obliance GroupDetailPage: header (name, path, tenant, badges, edit /
+// delete), an "Attached policies" summary and the group's agents. Every
+// setting is edited on /group/:id/edit (tabbed): nothing is edited here.
 
-function AgentGroupSettingsPanel({ group, onUpdate, readOnly = false }: {
-  group: MonitorGroup;
-  onUpdate: (g: MonitorGroup) => void;
-  /** Another tenant's group (Default god view): the server refuses every write. */
-  readOnly?: boolean;
-}) {
-  const { t } = useTranslation();
-
-  const cfg: AgentGroupConfig = group.agentGroupConfig ?? {
-    pushIntervalSeconds: null,
-    maxMissedPushes: null,
-    notificationTypes: null,
-  };
-
-  const [intervalVal, setIntervalVal] = useState<string>(
-    cfg.pushIntervalSeconds !== null ? String(cfg.pushIntervalSeconds) : '',
-  );
-  const [maxMissedVal, setMaxMissedVal] = useState<string>(
-    cfg.maxMissedPushes !== null ? String(cfg.maxMissedPushes) : '',
-  );
-  const [savingInterval, setSavingInterval] = useState(false);
-  const [savingMaxMissed, setSavingMaxMissed] = useState(false);
-  const [savingEval, setSavingEval] = useState(false);
-  const [savingPolicy, setSavingPolicy] = useState(false);
-
-  const isOverridingInterval = cfg.pushIntervalSeconds !== null;
-  const isOverridingMaxMissed = cfg.maxMissedPushes !== null;
-
-  // ── Update policy inherited from above (global -> tenant -> ancestor groups) ──
-  // Tenant level of the operating tenant; another tenant's group (read-only)
-  // cannot be resolved from here, so its "Inherit" option stays bare.
-  const currentTenantId = useTenantStore(s => s.currentTenantId);
-  const tenantName = useTenantStore(s => s.tenants.find(tn => tn.id === (group.tenantId ?? s.currentTenantId))?.name ?? null);
-  const groupTree = useGroupStore(s => s.tree);
-  const [tenantPolicy, setTenantPolicy] = useState<AgentTenantUpdatePolicyInfo | null>(null);
-  useEffect(() => {
-    if (readOnly) { setTenantPolicy(null); return; }
-    let cancelled = false;
-    agentApi.getTenantUpdatePolicy()
-      .then(i => { if (!cancelled) setTenantPolicy(i); })
-      .catch(() => { if (!cancelled) setTenantPolicy(null); });
-    return () => { cancelled = true; };
-  }, [readOnly, currentTenantId]);
-  const inheritedPolicy = useMemo(() => {
-    if (!tenantPolicy) return null;
-    const chain = ancestorUpdatePolicyChain(groupTree, group);
-    if (chain === null) return null;
-    return resolveUpdatePolicyView(
-      null, chain, tenantPolicy.updatePolicy, tenantPolicy.globalPolicyIsDefault ? null : tenantPolicy.globalPolicy,
-    );
-  }, [tenantPolicy, groupTree, group]);
-  const inheritedSourceText = inheritedPolicy
-    ? updatePolicySourceLabel(inheritedPolicy.source, t, {
-        tenantName,
-        groupName: inheritedPolicy.sourceGroupId != null ? (findGroupInTree(groupTree, inheritedPolicy.sourceGroupId)?.name ?? null) : null,
-      })
-    : null;
-
-  async function toggleEvaluateOnly() {
-    setSavingEval(true);
-    try {
-      const updated = await groupsApi.update(group.id, { evaluateOnly: !group.evaluateOnly });
-      onUpdate(updated);
-      toast.success(updated.evaluateOnly ? t('evaluateOnly.enabled') : t('evaluateOnly.disabled'));
-    } catch {
-      toast.error(t('groups.failedUpdate'));
-    } finally {
-      setSavingEval(false);
-    }
-  }
-
-  async function saveConfig(patch: Partial<AgentGroupConfig>, setSaving: (v: boolean) => void) {
-    setSaving(true);
-    try {
-      const updated = await groupsApi.updateAgentGroupConfig(group.id, {
-        agentGroupConfig: {
-          pushIntervalSeconds: cfg.pushIntervalSeconds,
-          maxMissedPushes: cfg.maxMissedPushes,
-          notificationTypes: cfg.notificationTypes,
-          ...patch,
-        },
-      });
-      onUpdate(updated);
-    } catch (err) {
-      toast.error((err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? t('groups.failedUpdate'));
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  // ── Push Interval handlers ──
-
-  const handleOverrideInterval = () => {
-    setIntervalVal('60');
-    void saveConfig({ pushIntervalSeconds: 60 }, setSavingInterval);
-  };
-
-  const handleResetInterval = () => {
-    setIntervalVal('');
-    void saveConfig({ pushIntervalSeconds: null }, setSavingInterval);
-  };
-
-  const handleSaveInterval = () => {
-    void saveConfig({ pushIntervalSeconds: Number(intervalVal) || 60 }, setSavingInterval);
-  };
-
-  // ── Max Missed Pushes handlers ──
-
-  const handleOverrideMaxMissed = () => {
-    setMaxMissedVal('2');
-    void saveConfig({ maxMissedPushes: 2 }, setSavingMaxMissed);
-  };
-
-  const handleResetMaxMissed = () => {
-    setMaxMissedVal('');
-    void saveConfig({ maxMissedPushes: null }, setSavingMaxMissed);
-  };
-
-  const handleSaveMaxMissed = () => {
-    void saveConfig({ maxMissedPushes: Number(maxMissedVal) || 2 }, setSavingMaxMissed);
-  };
-
-  return (
-    <div className="rounded-lg border border-border bg-bg-secondary p-5">
-      <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide mb-1">
-        {t('groups.detail.agentSettings')}
-      </h2>
-      <p className="text-xs text-text-muted mb-4">{t('groups.detail.agentSettingsDesc')}</p>
-      {readOnly && (
-        <p className="text-xs text-amber-400 mb-3">
-          {t('agentUpdate.readOnlyOtherTenant', 'Read-only: this group belongs to another tenant')}
-        </p>
-      )}
-
-      <fieldset disabled={readOnly} className="min-w-0 border-0 p-0 m-0">
-      <div className="divide-y divide-border">
-
-        {/* ── Push Interval ── */}
-        <div className="flex items-center gap-4 py-3">
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-medium text-text-primary">{t('groups.detail.pushInterval')}</span>
-              {isOverridingInterval ? (
-                <span className="inline-flex items-center rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-500">
-                  Override
-                </span>
-              ) : (
-                <span className="text-xs text-text-muted">Default</span>
-              )}
-            </div>
-            <p className="text-xs text-text-muted mt-0.5">{t('groups.detail.pushIntervalDesc')}</p>
-          </div>
-
-          {isOverridingInterval ? (
-            <div className="flex items-center gap-2 shrink-0">
-              <input
-                type="number"
-                value={intervalVal}
-                min={1}
-                max={86400}
-                onChange={e => setIntervalVal(e.target.value)}
-                className="w-20 rounded-md border border-border bg-bg-tertiary px-2 py-1 text-sm text-text-primary focus:outline-none focus:ring-1 focus:ring-accent text-right"
-              />
-              <span className="text-xs text-text-muted">s</span>
-              <button
-                onClick={handleSaveInterval}
-                disabled={savingInterval}
-                className="rounded-md px-2 py-1 text-xs font-medium bg-accent text-white hover:bg-accent/90 disabled:opacity-50 transition-colors"
-              >
-                {t('common.save')}
-              </button>
-              <button
-                onClick={handleResetInterval}
-                disabled={savingInterval}
-                className="shrink-0 rounded-md px-2 py-1 text-xs font-medium text-amber-500 hover:bg-amber-500/10 disabled:opacity-50 transition-colors flex items-center gap-1"
-              >
-                <RotateCcw size={12} />
-                {t('common.reset')}
-              </button>
-            </div>
-          ) : (
-            <button
-              onClick={handleOverrideInterval}
-              disabled={savingInterval}
-              className="shrink-0 rounded-md px-2 py-1 text-xs font-medium text-text-muted hover:bg-bg-hover hover:text-text-primary disabled:opacity-50 transition-colors"
-            >
-              {t('common.override')}
-            </button>
-          )}
-        </div>
-
-        {/* ── Max Missed Pushes ── */}
-        <div className="flex items-center gap-4 py-3">
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-medium text-text-primary">{t('groups.detail.maxMissedPushes')}</span>
-              {isOverridingMaxMissed ? (
-                <span className="inline-flex items-center rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-500">
-                  Override
-                </span>
-              ) : (
-                <span className="text-xs text-text-muted">Default</span>
-              )}
-            </div>
-            <p className="text-xs text-text-muted mt-0.5">{t('groups.detail.maxMissedPushesDesc')}</p>
-          </div>
-
-          {isOverridingMaxMissed ? (
-            <div className="flex items-center gap-2 shrink-0">
-              <input
-                type="number"
-                value={maxMissedVal}
-                min={1}
-                max={20}
-                onChange={e => setMaxMissedVal(e.target.value)}
-                className="w-16 rounded-md border border-border bg-bg-tertiary px-2 py-1 text-sm text-text-primary focus:outline-none focus:ring-1 focus:ring-accent text-right"
-              />
-              <button
-                onClick={handleSaveMaxMissed}
-                disabled={savingMaxMissed}
-                className="rounded-md px-2 py-1 text-xs font-medium bg-accent text-white hover:bg-accent/90 disabled:opacity-50 transition-colors"
-              >
-                {t('common.save')}
-              </button>
-              <button
-                onClick={handleResetMaxMissed}
-                disabled={savingMaxMissed}
-                className="shrink-0 rounded-md px-2 py-1 text-xs font-medium text-amber-500 hover:bg-amber-500/10 disabled:opacity-50 transition-colors flex items-center gap-1"
-              >
-                <RotateCcw size={12} />
-                {t('common.reset')}
-              </button>
-            </div>
-          ) : (
-            <button
-              onClick={handleOverrideMaxMissed}
-              disabled={savingMaxMissed}
-              className="shrink-0 rounded-md px-2 py-1 text-xs font-medium text-text-muted hover:bg-bg-hover hover:text-text-primary disabled:opacity-50 transition-colors"
-            >
-              {t('common.override')}
-            </button>
-          )}
-        </div>
-
-        {/* ── Agent updates (C17-1) ── */}
-        <div className="flex items-center gap-4 py-3">
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-medium text-text-primary">{t('agentUpdate.policyLabel', 'Agent updates')}</span>
-              {cfg.updatePolicy ? (
-                <span className="inline-flex items-center rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-500">
-                  Override
-                </span>
-              ) : (
-                <span className="text-xs text-text-muted">Default</span>
-              )}
-            </div>
-            <p className="text-xs text-text-muted mt-0.5">
-              {t('agentUpdate.groupPolicyDesc', "Update policy of this group's agents and sub-groups. 'Off' freezes them whatever is set below.")}
-            </p>
-            {inheritedPolicy?.policy === 'off' && inheritedSourceText && (
-              <p className="text-[11px] text-amber-400 mt-0.5">
-                {t('agentUpdate.frozenBy', { defaultValue: 'Frozen by {{source}}', source: inheritedSourceText })}
-              </p>
-            )}
-          </div>
-          <select
-            value={cfg.updatePolicy ?? 'inherit'}
-            onChange={e => {
-              const v = e.target.value;
-              void saveConfig({ updatePolicy: v === 'inherit' ? null : v as 'auto' | 'manual' | 'off' }, setSavingPolicy);
-            }}
-            disabled={savingPolicy}
-            className="shrink-0 rounded-md border border-border bg-bg-tertiary px-2 py-1 text-sm text-text-primary focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50"
-          >
-            <option value="inherit">
-              {inheritedPolicy && inheritedSourceText
-                ? `${t('agentUpdate.policy.inherit', 'Inherit')} (${t(`agentUpdate.policy.${inheritedPolicy.policy}`, inheritedPolicy.policy)} — ${inheritedSourceText})`
-                : t('agentUpdate.policy.inherit', 'Inherit')}
-            </option>
-            <option value="auto">{t('agentUpdate.policy.auto', 'Automatic')}</option>
-            <option value="manual">{t('agentUpdate.policy.manual', 'Manual')}</option>
-            <option value="off">{t('agentUpdate.policy.off', 'Off (frozen)')}</option>
-          </select>
-        </div>
-
-        {/* ── Evaluate-only (dry-run) mode ── */}
-        <div className="flex items-center gap-4 py-3">
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-medium text-text-primary">{t('evaluateOnly.groupTitle')}</span>
-              {group.evaluateOnly && (
-                <span className="inline-flex items-center rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-500">
-                  {t('evaluateOnly.badge')}
-                </span>
-              )}
-            </div>
-            <p className="text-xs text-text-muted mt-0.5">{t('evaluateOnly.groupDesc')}</p>
-          </div>
-          <button
-            type="button"
-            role="switch"
-            aria-checked={group.evaluateOnly ?? false}
-            onClick={toggleEvaluateOnly}
-            disabled={savingEval}
-            className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 ${
-              group.evaluateOnly ? 'bg-amber-500' : 'bg-bg-tertiary border border-border'
-            }`}
-          >
-            <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
-              group.evaluateOnly ? 'translate-x-[18px]' : 'translate-x-0.5'
-            }`} />
-          </button>
-        </div>
-
-      </div>
-      </fieldset>
-    </div>
-  );
+function apiError(err: unknown): string | undefined {
+  return (err as { response?: { data?: { error?: string } } })?.response?.data?.error;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Group Templates Panel
+// Tree helpers
 // ─────────────────────────────────────────────────────────────────────────────
-
-const BUILTIN_TYPES: ServiceType[] = ['ssh', 'rdp', 'nginx', 'apache', 'iis', 'ftp', 'mail', 'mysql'];
-
-interface CreateGroupTemplateForm {
-  name: string;
-  serviceType: ServiceType;
-  mode: ServiceTemplateMode;
-  defaultLogPath: string;
-  threshold: number;
-  windowSeconds: number;
-}
-
-const FORM_DEFAULTS: CreateGroupTemplateForm = {
-  name: '',
-  serviceType: 'custom',
-  mode: 'ban',
-  defaultLogPath: '',
-  threshold: 5,
-  windowSeconds: 300,
-};
-
-function GroupTemplatesPanel({ groupId }: { groupId: number }) {
-  const [templates, setTemplates] = useState<ServiceTemplate[]>([]);
-  const [loading, setLoading]     = useState(true);
-  const [expanded, setExpanded]   = useState(true);
-  const [showForm, setShowForm]   = useState(false);
-  const [form, setForm]           = useState<CreateGroupTemplateForm>(FORM_DEFAULTS);
-  const [saving, setSaving]       = useState(false);
-  const [deleting, setDeleting]   = useState<Record<number, boolean>>({});
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const data = await serviceTemplatesApi.listLocal('group', groupId);
-      setTemplates(data);
-    } finally {
-      setLoading(false);
-    }
-  }, [groupId]);
-
-  useEffect(() => { void load(); }, [load]);
-
-  async function handleCreate(e: React.FormEvent) {
-    e.preventDefault();
-    setSaving(true);
-    try {
-      await serviceTemplatesApi.create({
-        name: form.name.trim(),
-        serviceType: form.serviceType,
-        mode: form.mode,
-        defaultLogPath: form.defaultLogPath.trim() || null,
-        threshold: form.threshold,
-        windowSeconds: form.windowSeconds,
-        ownerScope: 'group',
-        ownerScopeId: groupId,
-      });
-      setForm(FORM_DEFAULTS);
-      setShowForm(false);
-      await load();
-      toast.success('Group template created');
-    } catch {
-      toast.error('Failed to create group template');
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function handleDelete(id: number) {
-    if (!confirm('Delete this group template? This cannot be undone.')) return;
-    setDeleting(d => ({ ...d, [id]: true }));
-    try {
-      await serviceTemplatesApi.delete(id);
-      await load();
-      toast.success('Group template deleted');
-    } catch {
-      toast.error('Failed to delete group template');
-    } finally {
-      setDeleting(d => ({ ...d, [id]: false }));
-    }
-  }
-
-  return (
-    <div className="rounded-lg border border-border bg-bg-secondary">
-
-      {/* Header */}
-      <div
-        className="px-4 py-3 border-b border-border flex items-center justify-between cursor-pointer select-none"
-        onClick={() => setExpanded(v => !v)}
-      >
-        <div className="flex items-center gap-2">
-          {expanded
-            ? <ChevronUp size={14} className="text-text-muted" />
-            : <ChevronDown size={14} className="text-text-muted" />}
-          <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide">
-            Group Templates
-          </h2>
-          {!loading && (
-            <span className="text-xs text-text-muted">
-              {templates.length} template{templates.length !== 1 ? 's' : ''} — visible to all agents in this group
-            </span>
-          )}
-        </div>
-        <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
-          <button
-            onClick={() => setShowForm(v => !v)}
-            className="inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] text-accent hover:bg-accent/10 transition-colors"
-          >
-            <Plus size={11} /> New template
-          </button>
-        </div>
-      </div>
-
-      {/* Create form */}
-      {expanded && showForm && (
-        <form onSubmit={e => void handleCreate(e)} className="border-b border-border px-4 py-4 bg-bg-tertiary/40">
-          <div className="grid gap-3 sm:grid-cols-2">
-
-            {/* Name */}
-            <div className="sm:col-span-2">
-              <label className="block text-xs font-medium text-text-muted mb-1">Template name</label>
-              <input
-                required
-                value={form.name}
-                onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
-                placeholder="e.g. Custom App Auth"
-                className="w-full rounded-md border border-border bg-bg-secondary px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:ring-1 focus:ring-accent"
-              />
-            </div>
-
-            {/* Service type */}
-            <div>
-              <label className="block text-xs font-medium text-text-muted mb-1">Service type</label>
-              <select
-                value={form.serviceType}
-                onChange={e => setForm(f => ({ ...f, serviceType: e.target.value as ServiceType }))}
-                className="w-full rounded-md border border-border bg-bg-secondary px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:ring-1 focus:ring-accent"
-              >
-                {BUILTIN_TYPES.map(t => (
-                  <option key={t} value={t}>{t}</option>
-                ))}
-                <option value="custom">custom</option>
-              </select>
-            </div>
-
-            {/* Mode */}
-            <div>
-              <label className="block text-xs font-medium text-text-muted mb-1">Mode</label>
-              <select
-                value={form.mode}
-                onChange={e => setForm(f => ({ ...f, mode: e.target.value as ServiceTemplateMode }))}
-                className="w-full rounded-md border border-border bg-bg-secondary px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:ring-1 focus:ring-accent"
-              >
-                <option value="ban">Ban</option>
-                <option value="track">Track only</option>
-              </select>
-            </div>
-
-            {/* Log path */}
-            <div className="sm:col-span-2">
-              <label className="block text-xs font-medium text-text-muted mb-1">Default log path (optional)</label>
-              <input
-                value={form.defaultLogPath}
-                onChange={e => setForm(f => ({ ...f, defaultLogPath: e.target.value }))}
-                placeholder="/var/log/myapp/auth.log"
-                className="w-full rounded-md border border-border bg-bg-secondary px-3 py-1.5 text-sm font-mono text-text-primary focus:outline-none focus:ring-1 focus:ring-accent"
-              />
-            </div>
-
-            {/* Threshold */}
-            <div>
-              <label className="block text-xs font-medium text-text-muted mb-1">Threshold (events)</label>
-              <input
-                type="number"
-                min={1}
-                value={form.threshold}
-                onChange={e => setForm(f => ({ ...f, threshold: Number(e.target.value) }))}
-                className="w-full rounded-md border border-border bg-bg-secondary px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:ring-1 focus:ring-accent"
-              />
-            </div>
-
-            {/* Window */}
-            <div>
-              <label className="block text-xs font-medium text-text-muted mb-1">Window (seconds)</label>
-              <input
-                type="number"
-                min={1}
-                value={form.windowSeconds}
-                onChange={e => setForm(f => ({ ...f, windowSeconds: Number(e.target.value) }))}
-                className="w-full rounded-md border border-border bg-bg-secondary px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:ring-1 focus:ring-accent"
-              />
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2 mt-4">
-            <button
-              type="submit"
-              disabled={saving || !form.name.trim()}
-              className="rounded-md px-3 py-1.5 text-sm font-medium bg-accent text-white hover:bg-accent/90 disabled:opacity-50 transition-colors"
-            >
-              {saving ? 'Creating…' : 'Create'}
-            </button>
-            <button
-              type="button"
-              onClick={() => { setShowForm(false); setForm(FORM_DEFAULTS); }}
-              className="rounded-md px-3 py-1.5 text-sm font-medium text-text-muted hover:bg-bg-hover transition-colors"
-            >
-              Cancel
-            </button>
-          </div>
-        </form>
-      )}
-
-      {/* List */}
-      {expanded && (
-        <div>
-          {loading ? (
-            <div className="py-6 text-center text-sm text-text-muted">Loading…</div>
-          ) : templates.length === 0 && !showForm ? (
-            <div className="py-6 text-center text-sm text-text-muted">
-              No group-level templates yet. Click "New template" to create one.
-            </div>
-          ) : (
-            <div className="divide-y divide-border">
-              {templates.map(tpl => (
-                <div key={tpl.id} className="flex items-center gap-3 px-4 py-3">
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-sm font-medium text-text-primary">{tpl.name}</span>
-                      <span className="inline-flex items-center rounded bg-bg-tertiary px-1.5 py-0.5 text-[10px] font-mono text-text-muted border border-border">
-                        {tpl.serviceType}
-                      </span>
-                      <span className={cn(
-                        'inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold',
-                        tpl.mode === 'ban' ? 'bg-red-500/10 text-red-400' : 'bg-amber-500/10 text-amber-400',
-                      )}>
-                        {tpl.mode === 'ban' ? <Shield size={8} /> : <EyeOff size={8} />}
-                        {tpl.mode === 'ban' ? 'Ban' : 'Track'}
-                      </span>
-                    </div>
-                    <div className="mt-0.5 text-[11px] text-text-muted">
-                      Threshold: {tpl.threshold} / {tpl.windowSeconds}s
-                      {tpl.defaultLogPath && (
-                        <span className="ml-3 font-mono truncate" title={tpl.defaultLogPath}>
-                          {tpl.defaultLogPath}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                  <button
-                    onClick={() => void handleDelete(tpl.id)}
-                    disabled={deleting[tpl.id]}
-                    title="Delete this group template"
-                    className="shrink-0 p-1.5 rounded-md text-text-muted hover:text-red-400 hover:bg-red-500/10 disabled:opacity-50 transition-colors"
-                  >
-                    <X size={14} />
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Live agent status
-// ─────────────────────────────────────────────────────────────────────────────
-
-type AgentLiveState = 'online' | 'offline' | 'suspended' | 'pending';
-
-/** Operational state shown for an agent (not its approval status). */
-function agentLiveState(d: AgentDevice): AgentLiveState {
-  if (d.status === 'suspended') return 'suspended';
-  if (d.status === 'pending') return 'pending';
-  return d.wsConnected ? 'online' : 'offline';
-}
-
-const LIVE_STATE_CLASSES: Record<AgentLiveState, string> = {
-  online:    'bg-green-500/10 text-green-400',
-  offline:   'bg-red-500/10 text-red-400',
-  suspended: 'bg-gray-500/10 text-gray-400',
-  pending:   'bg-yellow-500/10 text-yellow-400',
-};
 
 /** Ids of `groupId` and all its descendants in the tree (just the id when absent). */
 function subtreeIds(tree: GroupTreeNode[], groupId: number): Set<number> {
-  const find = (nodes: GroupTreeNode[]): GroupTreeNode | null => {
-    for (const n of nodes) {
-      if (n.id === groupId) return n;
-      const hit = find(n.children);
-      if (hit) return hit;
-    }
-    return null;
-  };
   const ids = new Set<number>([groupId]);
   const collect = (n: GroupTreeNode) => { ids.add(n.id); n.children.forEach(collect); };
-  const root = find(tree);
+  const root = findGroupInTree(tree, groupId);
   if (root) collect(root);
   return ids;
+}
+
+/** Ancestors of a group, root first (stops at a group missing from the tree). */
+function ancestorPath(tree: GroupTreeNode[], group: MonitorGroup): GroupTreeNode[] {
+  const path: GroupTreeNode[] = [];
+  const seen = new Set<number>([group.id]);
+  let parentId = group.parentId;
+  while (parentId != null && !seen.has(parentId)) {
+    seen.add(parentId);
+    const g = findGroupInTree(tree, parentId);
+    if (!g) break;
+    path.unshift(g);
+    parentId = g.parentId;
+  }
+  return path;
+}
+
+/** Nearest ancestor (group itself excluded) in evaluate-only mode. */
+function evaluateOnlyAncestor(path: GroupTreeNode[]): GroupTreeNode | null {
+  for (let i = path.length - 1; i >= 0; i--) {
+    if (path[i].evaluateOnly) return path[i];
+  }
+  return null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Attached policies (read-only summary, links to the edit page tabs)
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface PolicyChip {
+  key: string;
+  label: string;
+  hint?: string;
+  muted?: boolean;
+}
+
+/** null = not loaded yet, 'error' = could not be loaded, else the rows. */
+type Loaded<T> = T | null | 'error';
+
+function PolicyRow({ icon, label, editHref, count, chips, empty, children }: {
+  icon: ReactNode;
+  label: string;
+  /** Edit page tab, when the user may edit the group. */
+  editHref?: string;
+  count?: number | null;
+  chips?: Loaded<PolicyChip[]>;
+  empty?: string;
+  children?: ReactNode;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="flex items-start gap-3 py-3 max-sm:flex-col max-sm:gap-1.5">
+      <div className="flex w-48 shrink-0 items-center gap-2 max-sm:w-auto">
+        <span className="text-accent" aria-hidden="true">{icon}</span>
+        <span className="text-xs font-medium uppercase tracking-wide text-text-muted">{label}</span>
+        {count != null && <span className="text-xs text-text-muted/70">({count})</span>}
+      </div>
+      <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
+        {children}
+        {chips === null && <span className="text-xs text-text-muted">…</span>}
+        {chips === 'error' && (
+          <span className="text-xs text-amber-400">{t('groups.policies.loadFailed', { defaultValue: 'Could not be loaded' })}</span>
+        )}
+        {Array.isArray(chips) && chips.length === 0 && empty && (
+          <span className="text-xs text-text-muted">{empty}</span>
+        )}
+        {Array.isArray(chips) && chips.map(c => (
+          <span
+            key={c.key}
+            className={cn(
+              'inline-flex max-w-full items-center gap-1 rounded bg-bg-tertiary/60 px-2 py-0.5 text-xs coarse:min-h-8',
+              c.muted ? 'text-text-muted line-through' : 'text-text-secondary',
+            )}
+          >
+            <span className="truncate">{c.label}</span>
+            {c.hint && <span className="shrink-0 font-mono text-[10px] text-text-muted/80">{c.hint}</span>}
+          </span>
+        ))}
+      </div>
+      {editHref && (
+        <Link
+          to={editHref}
+          className="shrink-0 text-xs font-medium text-accent hover:underline coarse:min-h-8 coarse:inline-flex coarse:items-center"
+        >
+          {t('groups.policies.manage', { defaultValue: 'Manage' })}
+        </Link>
+      )}
+    </div>
+  );
+}
+
+function GroupPoliciesPanel({ group, canEdit, updatePolicy, evaluateOnlySource }: {
+  group: MonitorGroup;
+  canEdit: boolean;
+  updatePolicy: GroupUpdatePolicyView;
+  /** Group whose evaluate-only flag applies (this group or an ancestor). */
+  evaluateOnlySource: { id: number; name: string } | null;
+}) {
+  const { t } = useTranslation();
+  const canSeeBindings = useCan('notifications.manage');
+  const [open, setOpen] = useState(true);
+  const [templates, setTemplates] = useState<Loaded<ResolvedServiceConfig[]>>(null);
+  const [localTemplates, setLocalTemplates] = useState<Loaded<ServiceTemplate[]>>(null);
+  const [limits, setLimits] = useState<Loaded<RateLimitPolicy[]>>(null);
+  const [bindings, setBindings] = useState<Loaded<Awaited<ReturnType<typeof notificationsApi.getResolvedBindings>>>>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const settle = <T,>(p: Promise<T>, set: (v: Loaded<T>) => void) => {
+      set(null);
+      p.then(v => { if (!cancelled) set(v); }, () => { if (!cancelled) set('error'); });
+    };
+    settle(serviceTemplatesApi.getResolvedForGroup(group.id), setTemplates);
+    settle(serviceTemplatesApi.listLocal('group', group.id), setLocalTemplates);
+    settle(rateLimitPoliciesApi.list('group', group.id), setLimits);
+    if (canSeeBindings) settle(notificationsApi.getResolvedBindings('group', group.id), setBindings);
+    return () => { cancelled = true; };
+  }, [group.id, canSeeBindings]);
+
+  const edit = (tab: GroupEditTab) => (canEdit ? `/group/${group.id}/edit?tab=${tab}` : undefined);
+
+  const templateChips: Loaded<PolicyChip[]> = Array.isArray(templates)
+    ? templates.filter(c => c.enabled).map(c => ({
+        key: `t${c.templateId}`,
+        label: c.name,
+        hint: `${c.mode === 'ban' ? t('groups.policies.modeBan', { defaultValue: 'ban' }) : t('groups.policies.modeTrack', { defaultValue: 'track' })} ${c.threshold}/${c.windowSeconds}s`,
+      }))
+    : templates;
+  const ownTemplates = Array.isArray(localTemplates) ? localTemplates.length : null;
+
+  const limitChips: Loaded<PolicyChip[]> = Array.isArray(limits)
+    ? limits.map(p => ({
+        key: `l${p.id}`,
+        label: t(`networkLimiting.types.${p.type}`, { defaultValue: p.type }),
+        hint: `${p.port != null ? `:${p.port} ` : ''}${p.maxValue}${p.type === 'volume' ? ' Mbit/s' : p.type === 'rate' ? '/s' : ''}`,
+        muted: !p.enabled,
+      }))
+    : limits;
+
+  const bindingChips: Loaded<PolicyChip[]> = Array.isArray(bindings)
+    ? bindings.map(b => ({
+        key: `n${b.channelId}`,
+        label: b.channelName,
+        hint: b.isDirect
+          ? t('groups.policies.direct', { defaultValue: 'direct' })
+          : t('groups.policies.inheritedFrom', { defaultValue: 'from {{name}}', name: anonHostname(b.sourceName) }),
+        muted: b.isExcluded,
+      }))
+    : bindings;
+
+  const cfg = group.agentGroupConfig;
+  const policy = updatePolicy.effective;
+  const ownPolicy = cfg?.updatePolicy ?? null;
+  const enabledTemplates = Array.isArray(templateChips) ? templateChips.length : null;
+
+  return (
+    <section className="rounded-lg border border-border bg-bg-secondary">
+      <button
+        type="button"
+        onClick={() => setOpen(v => !v)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-2 px-4 py-3 text-left hover:bg-bg-tertiary/40 transition-colors coarse:min-h-11"
+      >
+        {open ? <ChevronDown size={16} className="text-text-muted" /> : <ChevronRight size={16} className="text-text-muted" />}
+        <h2 className="text-sm font-semibold text-text-primary">
+          {t('groups.policies.title', { defaultValue: 'Attached policies' })}
+        </h2>
+      </button>
+      {open && (
+        <div className="divide-y divide-border border-t border-border px-4">
+          <PolicyRow
+            icon={<FileCode2 size={14} />}
+            label={t('groups.tabs.serviceTemplates', { defaultValue: 'Service templates' })}
+            count={enabledTemplates}
+            chips={templateChips}
+            empty={t('groups.policies.noTemplates', { defaultValue: 'No active template' })}
+            editHref={edit('templates')}
+          >
+            {ownTemplates != null && ownTemplates > 0 && (
+              <span className="text-xs text-text-muted">
+                {t('groups.policies.ownTemplates', { defaultValue: '{{count}} owned by this group ·', count: ownTemplates })}
+              </span>
+            )}
+          </PolicyRow>
+
+          <PolicyRow
+            icon={<Gauge size={14} />}
+            label={t('groups.tabs.networkLimits', { defaultValue: 'Network limits' })}
+            count={Array.isArray(limits) ? limits.length : null}
+            chips={limitChips}
+            empty={t('groups.policies.noLimits', { defaultValue: 'No limit set on this group' })}
+            editHref={edit('limits')}
+          />
+
+          {canSeeBindings && (
+            <PolicyRow
+              icon={<Bell size={14} />}
+              label={t('groups.tabs.notifications', { defaultValue: 'Notifications' })}
+              count={Array.isArray(bindings) ? bindings.filter(b => !b.isExcluded).length : null}
+              chips={bindingChips}
+              empty={t('groups.policies.noChannels', { defaultValue: 'No channel' })}
+              editHref={edit('notifications')}
+            />
+          )}
+
+          <PolicyRow
+            icon={<Eye size={14} />}
+            label={t('evaluateOnly.groupTitle')}
+            editHref={edit('agent')}
+          >
+            {evaluateOnlySource ? (
+              <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/10 px-2 py-0.5 text-xs font-medium text-amber-500">
+                {evaluateOnlySource.id === group.id
+                  ? t('groups.policies.evaluateOnlyOn', { defaultValue: 'On' })
+                  : t('groups.policies.evaluateOnlyInherited', {
+                      defaultValue: 'On (inherited from {{name}})',
+                      name: anonHostname(evaluateOnlySource.name),
+                    })}
+              </span>
+            ) : (
+              <span className="text-xs text-text-muted">{t('groups.policies.evaluateOnlyOff', { defaultValue: 'Off: bans are enforced' })}</span>
+            )}
+          </PolicyRow>
+
+          <PolicyRow
+            icon={<ArrowUpCircle size={14} />}
+            label={t('agentUpdate.policyLabel', 'Agent updates')}
+            editHref={edit('agent')}
+          >
+            {policy ? (
+              <span
+                className={cn(
+                  'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium',
+                  policy.policy === 'off' ? 'bg-amber-500/10 text-amber-500' : 'bg-bg-tertiary text-text-secondary',
+                )}
+              >
+                {t(`agentUpdate.policy.${policy.policy}`, policy.policy)}
+                {updatePolicy.effectiveSourceText && (
+                  <span className="text-text-muted">· {updatePolicy.effectiveSourceText}</span>
+                )}
+              </span>
+            ) : (
+              <span className="text-xs text-text-secondary">
+                {ownPolicy
+                  ? t(`agentUpdate.policy.${ownPolicy}`, ownPolicy)
+                  : t('agentUpdate.policy.inherit', 'Inherit')}
+              </span>
+            )}
+          </PolicyRow>
+
+          <PolicyRow
+            icon={<SlidersHorizontal size={14} />}
+            label={t('groups.tabs.agentSettings', { defaultValue: 'Agent settings' })}
+            editHref={edit('agent')}
+          >
+            <span className="text-xs text-text-secondary">
+              {t('groups.detail.pushInterval')}:{' '}
+              {cfg?.pushIntervalSeconds != null
+                ? `${cfg.pushIntervalSeconds}${t('groups.detail.seconds')}`
+                : t('groups.settings.default', { defaultValue: 'Default' })}
+            </span>
+            <span className="text-xs text-text-muted" aria-hidden="true">·</span>
+            <span className="text-xs text-text-secondary">
+              {t('groups.detail.maxMissedPushes')}:{' '}
+              {cfg?.maxMissedPushes != null ? cfg.maxMissedPushes : t('groups.settings.default', { defaultValue: 'Default' })}
+            </span>
+          </PolicyRow>
+        </div>
+      )}
+    </section>
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -670,14 +332,21 @@ function subtreeIds(tree: GroupTreeNode[], groupId: number): Set<number> {
 
 export function GroupDetailPage() {
   const { id } = useParams<{ id: string }>();
+  // Keyed on the id: following a path link to another group starts from a clean state.
+  return <GroupDetailView key={id} id={id!} />;
+}
+
+function GroupDetailView({ id }: { id: string }) {
   const navigate = useNavigate();
   const { t } = useTranslation();
-  const { isAdmin, canWriteGroup } = useAuthStore();
+  const confirmAction = useConfirm();
+  const { canWriteGroup } = useAuthStore();
   const { getGroup, removeGroup, fetchGroups, fetchTree } = useGroupStore();
 
-  const groupId = parseInt(id!, 10);
+  const groupId = parseInt(id, 10);
   const storeGroup = getGroup(groupId);
   const canWrite = canWriteGroup(groupId);
+  const canUpdateAgents = useCan('agents.update');
 
   const [group, setGroup] = useState<MonitorGroup | null>(storeGroup ?? null);
   const [deviceRows, setDeviceRows] = useState<AgentDevice[]>([]);
@@ -688,48 +357,26 @@ export function GroupDetailPage() {
   const liveDevices = useAgentDevices();
   const liveLoaded = useAgentDevicesLoaded();
 
-  const isAgentGroup = group?.kind === 'agent';
-  // Agent updates (C17-1): writes follow the operating tenant; "Update outdated
-  // agents" is open to monitor_rw members (admins hold every capability).
+  // Writes follow the operating tenant: another tenant's group (Default god
+  // view) is read-only here.
   const currentTenantId = useTenantStore(s => s.currentTenantId);
   const isOwnTenantGroup = group?.tenantId === undefined || group.tenantId === currentTenantId;
-  const canManage = useAuthStore(s => s.user?.role === 'admin' || (s.permissions?.capabilities?.includes(CAPABILITIES.MONITOR_RW) ?? false));
   const [requestingUpdate, setRequestingUpdate] = useState(false);
-
-  const handleGroupUpdate = async () => {
-    if (!group) return;
-    if (!confirm(t('agentUpdate.groupConfirm', 'Request an update for every outdated agent of this group and its sub-groups?'))) return;
-    setRequestingUpdate(true);
-    try {
-      const r = await agentApi.requestGroupUpdate(group.id);
-      const skipped = r.skipped.off + r.skipped.current + r.skipped.notUpdatable + r.skipped.notFound;
-      toast.success(t('agentUpdate.bulkResult', {
-        defaultValue: '{{requested}} update(s) requested, {{skipped}} skipped',
-        requested: r.requested,
-        skipped,
-      }));
-    } catch (err) {
-      toast.error(agentUpdateErrorMessage(err, t, t('groups.failedUpdate')));
-    } finally {
-      setRequestingUpdate(false);
-    }
-  };
+  const updatePolicy = useGroupUpdatePolicyView(group, !isOwnTenantGroup);
 
   // Fetch group + agent devices (whole sub-tree, every status but refused)
   const loadData = useCallback(async () => {
-    try {
-      const g = await groupsApi.getById(groupId);
-      setGroup(g);
-
-      if (g.kind === 'agent') {
-        const rows = await agentApi.listDevices({ groupId, recursive: true });
-        setDeviceRows(rows.filter(d => d.status !== 'refused'));
-      }
-    } catch {
-      // group may come from store
-    }
+    // Settled separately: a failed device list never hides the group itself.
+    const [g, rows] = await Promise.allSettled([
+      groupsApi.getById(groupId),
+      agentApi.listDevices({ groupId, recursive: true }),
+    ]);
+    if (g.status === 'fulfilled') setGroup(g.value);
+    if (rows.status === 'fulfilled') setDeviceRows(rows.value.filter(d => d.status !== 'refused'));
+    const failed = g.status === 'rejected' ? g : rows.status === 'rejected' ? rows : null;
+    if (failed) toast.error(apiError(failed.reason) ?? t('groups.failedLoad', 'Failed to load the group'));
     setLoading(false);
-  }, [groupId]);
+  }, [groupId, t]);
 
   useEffect(() => { void loadData(); }, [loadData]);
 
@@ -762,6 +409,23 @@ export function GroupDetailPage() {
       .filter(d => d.status !== 'refused' && d.groupId != null && ids.has(d.groupId));
   }, [deviceRows, liveDevices, tree, groupId]);
 
+  const stats = useMemo(() => {
+    const s = { total: devices.length, online: 0, offline: 0, pending: 0, updateFailed: 0 };
+    for (const d of devices) {
+      // Live presence of approved agents (an agent restarting for an update
+      // counts as neither online nor offline).
+      if (d.status === 'approved' && d.wsConnected) s.online++;
+      const status = resolveAgentStatus(d);
+      if (status === 'offline') s.offline++;
+      if (status === 'pending') s.pending++;
+      const attempt = visibleUpdateAttempt({ update: d.update ?? null, agentVersion: d.agentVersion ?? null });
+      if (attempt?.phase === 'failed') s.updateFailed++;
+    }
+    return s;
+  }, [devices]);
+
+  const path = useMemo(() => (group ? ancestorPath(tree, group) : []), [tree, group]);
+
   if (loading && !group) {
     return (
       <div className="flex h-full items-center justify-center">
@@ -773,16 +437,17 @@ export function GroupDetailPage() {
   if (!group) {
     return (
       <div className="flex h-full flex-col items-center justify-center">
-        <p className="text-text-muted">{t('monitors.notFound')}</p>
+        <p className="text-text-muted">{t('groups.notFound', { defaultValue: 'Group not found' })}</p>
         <Link to="/" className="mt-4">
-          <Button variant="secondary">{t('monitors.backToDashboard')}</Button>
+          <Button variant="secondary">{t('groups.backToDashboard', { defaultValue: 'Back to dashboard' })}</Button>
         </Link>
       </div>
     );
   }
 
   const handleDelete = async () => {
-    if (!confirm(t('groups.confirmDelete', { name: group.name }))) return;
+    const ok = await confirmAction({ message: t('groups.confirmDelete', { name: group.name }), danger: true });
+    if (!ok) return;
     try {
       await groupsApi.delete(groupId);
       removeGroup(groupId);
@@ -790,196 +455,159 @@ export function GroupDetailPage() {
       fetchTree();
       toast.success(t('groups.deleted'));
       navigate('/');
-    } catch {
-      toast.error(t('groups.failedDelete'));
+    } catch (err) {
+      toast.error(apiError(err) ?? t('groups.failedDelete'));
     }
   };
 
-  // Agent device stats: connected approved agents (live presence)
-  const onlineCount = devices.filter(d => agentLiveState(d) === 'online').length;
-  const liveStateLabel = (s: AgentLiveState): string => ({
-    online: t('groups.detail.online'),
-    offline: t('groups.detail.offline'),
-    pending: t('groups.detail.pending'),
-    suspended: t('groups.detail.suspended', { defaultValue: 'Suspended' }),
-  })[s];
+  const handleGroupUpdate = async () => {
+    const ok = await confirmAction(t('agentUpdate.groupConfirm', 'Request an update for every outdated agent of this group and its sub-groups?'));
+    if (!ok) return;
+    setRequestingUpdate(true);
+    try {
+      const r = await agentApi.requestGroupUpdate(group.id);
+      const skipped = r.skipped.off + r.skipped.current + r.skipped.notUpdatable + r.skipped.notFound;
+      toast.success(t('agentUpdate.bulkResult', {
+        defaultValue: '{{requested}} update(s) requested, {{skipped}} skipped',
+        requested: r.requested,
+        skipped,
+      }));
+    } catch (err) {
+      toast.error(agentUpdateErrorMessage(err, t, t('groups.failedUpdate')));
+    } finally {
+      setRequestingUpdate(false);
+    }
+  };
+
+  const evalAncestor = evaluateOnlyAncestor(path);
+  const evaluateOnlySource = group.evaluateOnly
+    ? { id: group.id, name: group.name }
+    : evalAncestor ? { id: evalAncestor.id, name: evalAncestor.name } : null;
+  const frozen = updatePolicy.effective?.policy === 'off';
+
+  const statCards: { key: string; label: string; value: number; className?: string }[] = [
+    { key: 'total', label: t('groups.detail.totalAgents'), value: stats.total },
+    { key: 'online', label: t('groups.detail.online'), value: stats.online, className: 'text-status-up' },
+    { key: 'offline', label: t('groups.detail.offline'), value: stats.offline, className: stats.offline > 0 ? 'text-red-400' : undefined },
+    { key: 'pending', label: t('groups.detail.pending'), value: stats.pending, className: stats.pending > 0 ? 'text-blue-400' : undefined },
+    { key: 'updateFailed', label: t('groups.detail.updateFailed', { defaultValue: 'Update failed' }), value: stats.updateFailed, className: stats.updateFailed > 0 ? 'text-orange-400' : undefined },
+  ];
 
   return (
-    <div className="p-6">
-      {/* Back button */}
-      <Link to="/" className="inline-flex items-center gap-1 text-sm text-text-secondary hover:text-text-primary mb-4">
+    <PageContainer className="space-y-6">
+      <Link to="/" className="inline-flex items-center gap-1 text-sm text-text-secondary hover:text-text-primary coarse:min-h-10">
         <ArrowLeft size={14} />
-        {t('monitors.backToDashboard')}
+        {t('groups.backToDashboard', { defaultValue: 'Back to dashboard' })}
       </Link>
 
-      {/* Header */}
-      <div className="flex items-start justify-between mb-6">
-        <div className="flex items-center gap-4">
-          <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-accent/10">
-            {isAgentGroup
-              ? <Server size={24} className="text-accent" />
-              : <FolderOpen size={24} className="text-accent" />
-            }
-          </div>
-          <div>
-            <h1 className="text-2xl font-semibold text-text-primary">{anonHostname(group.name)}</h1>
-            <div className="flex items-center gap-2 mt-1">
-              {isAgentGroup && (
-                <span className="inline-flex items-center gap-1 rounded-full bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-accent">
-                  <Server size={10} />
-                  {t('groups.agentGroup')}
-                </span>
-              )}
-              {group.isGeneral && (
-                <span className="inline-flex items-center gap-1 rounded-full bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-accent">
-                  <Globe size={10} />
-                  {t('groups.generalBadge')}
-                </span>
-              )}
-              {group.groupNotifications && (
-                <span className="inline-flex items-center gap-1 rounded-full bg-yellow-500/10 px-2 py-0.5 text-[10px] font-medium text-yellow-500">
-                  <Bell size={10} />
-                  {t('groups.groupedBadge')}
-                </span>
-              )}
-              {group.description && (
-                <span className="text-sm text-text-muted">{group.description}</span>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {isAgentGroup && canManage && isOwnTenantGroup && (
-          <div className="flex items-center gap-2 ml-auto mr-2">
-            <Button variant="secondary" size="sm" onClick={handleGroupUpdate} loading={requestingUpdate}>
-              <ArrowUpCircle size={14} className="mr-1.5" />
-              {t('agentUpdate.groupUpdate', 'Update outdated agents')}
-            </Button>
-          </div>
+      <PageHeader
+        icon={<Server size={22} className="text-accent" />}
+        title={anonHostname(group.name)}
+        badge={(
+          <span className="inline-flex flex-wrap items-center gap-1.5">
+            <TenantBadge tenantId={group.tenantId} size="md" />
+            {group.isGeneral && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-accent">
+                <Globe size={10} />
+                {t('groups.generalBadge')}
+              </span>
+            )}
+            {evaluateOnlySource && (
+              <span
+                className="inline-flex items-center gap-1 rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-500"
+                title={t('evaluateOnly.badgeTooltip')}
+              >
+                <Eye size={10} />
+                {t('evaluateOnly.badge')}
+              </span>
+            )}
+          </span>
         )}
-        {canWrite && (
-          <div className="flex items-center gap-2">
-            <Link to={`/group/${groupId}/edit`}>
-              <Button variant="secondary" size="sm">
-                <Pencil size={14} className="mr-1.5" />
-                {t('common.edit')}
+        description={(
+          <span className="flex flex-col gap-1">
+            {path.length > 0 && (
+              <nav aria-label={t('groups.path', { defaultValue: 'Group path' })} className="flex flex-wrap items-center gap-1 text-xs">
+                {path.map(p => (
+                  <span key={p.id} className="inline-flex items-center gap-1">
+                    <Link to={`/group/${p.id}`} className="text-text-secondary hover:text-text-primary hover:underline">
+                      {anonHostname(p.name)}
+                    </Link>
+                    <ChevronRight size={12} className="text-text-muted" aria-hidden="true" />
+                  </span>
+                ))}
+                <span className="text-text-muted">{anonHostname(group.name)}</span>
+              </nav>
+            )}
+            {group.description && <span>{group.description}</span>}
+          </span>
+        )}
+        actions={(
+          <>
+            {canUpdateAgents && isOwnTenantGroup && (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={handleGroupUpdate}
+                loading={requestingUpdate}
+                disabled={frozen}
+                title={frozen && updatePolicy.effectiveSourceText
+                  ? t('agentUpdate.frozenBy', { defaultValue: 'Frozen by {{source}}', source: updatePolicy.effectiveSourceText })
+                  : undefined}
+              >
+                <ArrowUpCircle size={14} className="mr-1.5" />
+                {t('agentUpdate.groupUpdate', 'Update outdated agents')}
               </Button>
-            </Link>
-            <Button variant="danger" size="sm" onClick={handleDelete}>
-              <Trash2 size={14} className="mr-1.5" />
-              {t('common.delete')}
-            </Button>
-          </div>
+            )}
+            {canWrite && (
+              <>
+                <Link to={`/group/${groupId}/edit`}>
+                  <Button variant="secondary" size="sm">
+                    <Pencil size={14} className="mr-1.5" />
+                    {t('common.edit')}
+                  </Button>
+                </Link>
+                {/* The server refuses deleting another tenant's group (read-only). */}
+                {isOwnTenantGroup && (
+                  <Button variant="danger" size="sm" onClick={handleDelete}>
+                    <Trash2 size={14} className="mr-1.5" />
+                    {t('common.delete')}
+                  </Button>
+                )}
+              </>
+            )}
+          </>
         )}
+      />
+
+      {evaluateOnlySource && (
+        <EvaluateOnlyBanner source={evaluateOnlySource.id === group.id ? null : 'group'} />
+      )}
+
+      {/* ── Stats of the sub-tree's agents (live presence) ── */}
+      <div className="grid gap-3 grid-cols-2 sm:grid-cols-3 lg:grid-cols-5">
+        {statCards.map(c => (
+          <div key={c.key} className="rounded-lg border border-border bg-bg-secondary p-4 max-sm:p-3">
+            <div className="text-sm text-text-secondary mb-1 truncate">{c.label}</div>
+            <div className={cn('text-xl font-mono font-semibold text-text-primary', c.className)}>{c.value}</div>
+          </div>
+        ))}
       </div>
 
-      {/* ── Agent group stats ── */}
-      {isAgentGroup && (
-        <div className="grid gap-4 mb-6" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))' }}>
-          <div className="rounded-lg border border-border bg-bg-secondary p-4">
-            <div className="text-sm text-text-secondary mb-1">{t('groups.detail.totalAgents')}</div>
-            <div className="text-xl font-mono font-semibold text-text-primary">{devices.length}</div>
-          </div>
-          <div className="rounded-lg border border-status-up/30 bg-bg-secondary p-4">
-            <div className="text-sm text-text-secondary mb-1">{t('groups.detail.online')}</div>
-            <div className="text-xl font-mono font-semibold text-status-up">{onlineCount}</div>
-          </div>
-        </div>
-      )}
+      <GroupPoliciesPanel
+        group={group}
+        canEdit={canWrite}
+        updatePolicy={updatePolicy}
+        evaluateOnlySource={evaluateOnlySource}
+      />
 
-      {/* ── Agent devices list ── */}
-      {isAgentGroup && devices.length > 0 && (
-        <div className="mb-6 rounded-lg border border-border bg-bg-secondary">
-          <div className="px-4 py-3 border-b border-border">
-            <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wide">
-              {t('groups.detail.agentList', { count: devices.length })}
-            </h3>
-          </div>
-          <div className="divide-y divide-border">
-            {devices.map(device => (
-              <Link
-                key={device.id}
-                to={`/agents/${device.id}`}
-                className="flex items-center gap-3 px-4 py-2.5 hover:bg-bg-hover transition-colors"
-              >
-                <span
-                  data-status={agentLiveState(device)}
-                  className={cn(
-                    'inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase',
-                    LIVE_STATE_CLASSES[agentLiveState(device)],
-                  )}
-                >
-                  {liveStateLabel(agentLiveState(device))}
-                </span>
-                <span className="flex-1 text-sm text-text-primary truncate">
-                  {anonHostname(device.name ?? device.hostname)}
-                </span>
-                <span className="text-xs text-text-muted">{anonHostname(device.hostname)}</span>
-              </Link>
-            ))}
-          </div>
-        </div>
-      )}
+      {/* Agent grid: same table as /agents, pre-filtered on this group + its sub-groups. */}
+      <section className="space-y-3">
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-text-secondary">
+          {t('groups.detail.agentList', { count: devices.length })}
+        </h2>
+        <AgentTable groupId={groupId} recursive embedded />
+      </section>
 
-      {/* ── Notification Bindings (admin only) ── */}
-      {isAdmin() && (
-        <div className="mt-6">
-          <NotificationBindingsPanel
-            scope="group"
-            scopeId={groupId}
-            title={t('monitors.sectionNotifications')}
-          />
-        </div>
-      )}
-
-      {/* ── Agent group: Notification Types ── */}
-      {isAdmin() && isAgentGroup && (
-        <div className="mt-6">
-          <NotificationTypesPanel
-            config={group.agentGroupConfig?.notificationTypes ?? null}
-            scope="group"
-            onSave={async (notifTypes: NotificationTypeConfig | null) => {
-              const cfg: AgentGroupConfig = group.agentGroupConfig ?? {
-                pushIntervalSeconds: null,
-                maxMissedPushes: null,
-                notificationTypes: null,
-              };
-              const updated = await groupsApi.updateAgentGroupConfig(group.id, {
-                agentGroupConfig: { ...cfg, notificationTypes: notifTypes },
-              });
-              setGroup(updated);
-            }}
-          />
-        </div>
-      )}
-
-      {/* ── Service Templates — bind/unbind global templates at group level ── */}
-      {isAdmin() && isAgentGroup && (
-        <div className="mt-6">
-          <ServiceTemplatesPanel scope="group" scopeId={groupId} />
-        </div>
-      )}
-
-      {/* ── Group Templates — templates owned by this group, auto-apply to its agents ── */}
-      {isAdmin() && isAgentGroup && (
-        <div className="mt-6">
-          <GroupTemplatesPanel groupId={groupId} />
-        </div>
-      )}
-
-      {/* ── Network limits scoped to this group ── */}
-      {isAdmin() && isAgentGroup && (
-        <div className="mt-6 rounded-lg border border-border bg-bg-secondary p-4">
-          <NetworkLimitsPanel scope="group" scopeId={groupId} label={group.name} title="Network limits" />
-        </div>
-      )}
-
-      {/* ── Agent group settings (push interval, max missed pushes) ── */}
-      {isAdmin() && isAgentGroup && (
-        <div className="mt-6">
-          <AgentGroupSettingsPanel group={group} onUpdate={setGroup} readOnly={!isOwnTenantGroup} />
-        </div>
-      )}
-    </div>
+    </PageContainer>
   );
 }

@@ -68,6 +68,15 @@ describe('52 Obliview leftovers removed (W3-4)', () => {
     assert.equal(listed.status, 200);
     assert.ok(!('heartbeatMonitoring' in listed.json.data));
 
+    // A global value stored by an older version is neither returned nor kept.
+    await h.db('app_config')
+      .insert({ key: 'agent_global_config', value: JSON.stringify({ checkIntervalSeconds: null, maxMissedPushes: 2, notificationTypes: null, heartbeatMonitoring: true }) })
+      .onConflict('key').merge();
+    const globRead = await admin.get('/api/admin/config/agent-global');
+    assert.equal(globRead.status, 200, globRead.text);
+    assert.equal(globRead.json.data.maxMissedPushes, 2);
+    assert.ok(!('heartbeatMonitoring' in globRead.json.data), 'GET agent-global still returns a stored heartbeatMonitoring');
+
     const glob = await admin.patch('/api/admin/config/agent-global', { heartbeatMonitoring: false, maxMissedPushes: 4 });
     assert.equal(glob.status, 200, glob.text);
     assert.equal(glob.json.data.maxMissedPushes, 4);

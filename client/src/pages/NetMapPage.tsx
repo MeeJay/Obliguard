@@ -6,20 +6,31 @@
  * - Faint orbital ring circles drawn at each ring radius around agents
  * - Multi-agent IPs at weighted centroid between agents, outside all rings
  * - Event particles ONLY on real socket events (no simulation)
- * - IPs refreshed via background API poll to stay alive while traffic continues
+ * - Live data from the batched ip:events frames and the ban events; a 90 s
+ *   soft refresh keeps statuses and counters in step
  *
- * Pure Canvas 2D — no WebGL, no extra dependencies.
+ * Pure Canvas 2D — no WebGL, no extra dependencies. The map keeps a fixed dark
+ * "space" look whatever the app theme; its colours come from NETMAP_PALETTE.
  */
 
-import { useEffect, useRef, useState, useCallback, lazy, Suspense } from 'react';
-import { Shield, Ban, Activity, RefreshCw, Zap, X, ExternalLink, Box, Grid2x2 } from 'lucide-react';
+import { useEffect, useRef, useState, useCallback, lazy, Suspense, type CSSProperties } from 'react';
+import { Shield, Ban, Activity, RefreshCw, Zap, X, ExternalLink, Box, Grid2x2, Eye } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { isMasterTenant } from '@obliview/shared';
+import { SOCKET_EVENTS } from '@obliview/shared';
+import type {
+  BanAutoEvent, BanBulkLiftedEvent, BanExclusionEvent, BanLiftedEvent, IpBan, IpEventsFrame, IpFlowEvent,
+} from '@obliview/shared';
+import { useIpsPermissions } from '@/hooks/useIpsPermissions';
+import { useConfirm } from '@/components/common/ConfirmDialog';
+import { useIpActions } from '@/components/ip/IpDetailDrawer';
+import { useIpDrawer, useIpChanged, notifyIpChanged } from '@/hooks/useIpDrawer';
 import { useTenantStore } from '@/store/tenantStore';
+import { ipReputationApi, apiErrorMessage } from '@/api/ipReputation.api';
 
 const NetMap3D = lazy(() => import('../netmap3d/NetMap3D'));
+import type { NetMap3DLabels } from '../netmap3d/NetMap3D';
 import { getSocket } from '../socket/socketClient';
 import { useSocketStore } from '../store/socketStore';
 import { SOCKET_RESYNC_EVENT } from '../hooks/useSocket';
@@ -29,94 +40,77 @@ import { anonHostname, anonIp } from '../utils/anonymize';
 
 import type { AgentNode, IpNode, Particle, Ripple, LiveEvent, AgentPeerLink, WlEntry } from '../netmap/types';
 import {
-  IP_TTL, IP_FADE_AGE, IP_TTL_CLEAN, IP_TTL_SUSPICIOUS, IP_TTL_BANNED,
-  PEER_LINK_TTL, RING_INNER_R,
-  EVENT_COLORS, DANGEROUS_SVCS, PEER_LINK_COLOR, DEVICE_TYPE_COLORS,
+  IP_FADE_AGE, PEER_LINK_TTL, RING_INNER_R,
+  EVENT_COLORS, PEER_LINK_COLOR, NETMAP_PALETTE, NETMAP_CSS_VARS, rgba,
 } from '../netmap/constants';
 import {
   flagEmoji, svcColor, isDangerousSvc, statusColor,
   ipToInt, matchWhitelist, makeOrbitalFields,
+  detectDeviceType, detectDeviceColor, ipTtlForStatus, dotRgb, trailRgb, threatLineColor,
+  liveEventColor, hexRgb, orbitRingCount, orbitRingRadius, agentOrbitOuterR, orbRadius,
 } from '../netmap/helpers';
 import {
   placeIp, distributeIpsAroundAgents, relayoutIps, layoutAgents,
 } from '../netmap/layout';
+import {
+  type FlowRow, flowRowFromStream, flowRowFromLegacy, feedType, liveEventFromRest,
+  mergeLiveEvents, appendOlderEvents, SEEN_EVENT_IDS_CAP,
+} from '../netmap/liveEvents';
 import { ForceSimulation } from '../netmap/physics';
-import { useNetMapTabStore } from '../netmap/tabStore';
+import { useNetMapTabStore, type NetMapTab } from '../netmap/tabStore';
+import { NetMapTabDialog } from '../netmap/NetMapTabDialog';
 
+const P = NETMAP_PALETTE;
+const FONT_UI = '"Inter", "Segoe UI", ui-sans-serif, sans-serif';
+const FONT_MONO = '"Inconsolata", "JetBrains Mono", monospace';
 
-// ── Device type detection ─────────────────────────────────────────────────────
+/** Status order of the live path: an event never downgrades banned. */
+const STATUS_RANK: Record<string, number> = { clean: 0, suspicious: 1, banned: 2 };
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function detectDeviceType(d: any): string {
-  if (d.deviceType === 'mikrotik') return 'firewall';
-  const os = (d.osInfo?.os ?? d.osInfo?.platform ?? '').toLowerCase();
-  const host = (d.hostname ?? '').toLowerCase();
-  if (os.includes('opnsense') || os.includes('pfsense') || host.includes('opn') || host.includes('pfsense')) return 'firewall';
-  if (os.includes('routeros') || os.includes('mikrotik') || host.includes('mikrotik')) return 'firewall';
-  if (os.includes('linux')) return 'server';
-  if (os.includes('windows server') || os.includes('windows_server')) return 'server';
-  if (os.includes('windows')) return 'windows';
-  if (os.includes('darwin') || os.includes('macos')) return 'desktop';
-  if (os.includes('freebsd')) return 'server';
-  return 'default';
+/** /agent/devices row as read by the map. */
+interface MapDevice {
+  id: number;
+  hostname: string;
+  name: string | null;
+  status: string;
+  updatedAt: string;
+  wsConnected: boolean;
+  groupId: number | null;
+  groupName: string | null;
+  deviceType?: string;
+  evaluateOnly?: boolean;
+  osInfo?: { platform?: string; os?: string; hostname?: string } | null;
+  resolvedSettings: { checkIntervalSeconds: number; maxMissedPushes: number };
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function detectDeviceColor(d: any): string {
-  return DEVICE_TYPE_COLORS[detectDeviceType(d)] ?? DEVICE_TYPE_COLORS.default;
-}
-
-/** Get IP TTL based on status. */
-function ipTtlForStatus(status: string): number {
-  if (status === 'banned') return IP_TTL_BANNED;
-  if (status === 'suspicious') return IP_TTL_SUSPICIOUS;
-  if (status === 'clean') return IP_TTL_CLEAN;
-  return IP_TTL;
-}
-
-/** Compute orbit radius — spread IPs as an asteroid belt around agent.
- *  Each IP gets its own orbit lane with enough spacing to not overlap. */
-/** How many orbit rings an agent needs for N IPs. ~20 IPs per ring. */
-function orbitRingCount(ipCount: number): number {
-  if (ipCount <= 0) return 0;
-  return Math.max(1, Math.ceil(ipCount / 20));
-}
-
-/** Spacing between orbit rings (px). */
-const ORBIT_RING_GAP = 10;
-
-/** Radius of orbit ring N (0-indexed) around an agent of radius nodeR. */
-function orbitRingRadius(nodeR: number, ringIndex: number): number {
-  return nodeR + 18 + ringIndex * ORBIT_RING_GAP;
-}
-
-/** Total exclusion radius for an agent (outermost ring + margin). */
-function agentOrbitOuterR(nodeR: number, ipCount: number): number {
-  const rings = orbitRingCount(ipCount);
-  if (rings === 0) return nodeR + 10;
-  return orbitRingRadius(nodeR, rings - 1) + 8;
-}
-
-function orbRadius(nodeR: number, slot: number, totalSlots: number): number {
-  if (totalSlots <= 0) return nodeR + 18;
-  const rings = orbitRingCount(totalSlots);
-  // Assign each slot to a ring (round-robin)
-  const ringIndex = slot % rings;
-  return orbitRingRadius(nodeR, ringIndex);
-}
-
-function hexRgb(h: string): [number, number, number] {
-  const m = h.match(/#(..)(..)(..)/);
-  return m ? [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)] : [128, 128, 128];
+interface UpsertIpOpts {
+  /** Country code when known ('??' otherwise). */
+  country?: string;
+  /** Observed status: raises clean → suspicious → banned, never lowers it. */
+  status: string;
+  /** Known absolute failure count (max-merged). */
+  failures?: number;
+  /** Live failures to add to the node's count. */
+  addFailures?: number;
+  services?: string[];
+  evtCount?: number;
+  glow?: boolean;
 }
 
 // ── Component ──────────────────────────────────────────────────────────────────
 
 export function NetMapPage() {
   const { t } = useTranslation();
-  // Manual bans follow the operating tenant (Default = global, else local).
+  // Manual bans follow the operating tenant (Default = global, else local);
+  // the ban / whitelist actions are shown only with their capability.
+  const { canBan, canWhitelist, isGodView } = useIpsPermissions();
+  const confirm = useConfirm();
+  const ipActions = useIpActions();
+  const { open: openIpDrawer } = useIpDrawer();
   const currentTenantId = useTenantStore(s => s.currentTenantId);
-  const isGodView = currentTenantId != null && isMasterTenant(currentTenantId);
+  const currentTenantIdRef = useRef(currentTenantId);
+  currentTenantIdRef.current = currentTenantId;
+
   const canvasRef    = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const bgRef        = useRef<HTMLCanvasElement | null>(null);
@@ -146,12 +140,16 @@ export function NetMapPage() {
   const filtersRef   = useRef<Set<string>>(new Set(['auth_success', 'auth_failure', 'ban']));
   const sizeRef      = useRef({ w: 800, h: 600 });
 
-  /** Debounce handles for per-agent mini-refresh triggered on pushHeartbeat. */
-  const agentRefreshTimersRef = useRef(new Map<number, ReturnType<typeof setTimeout>>());
   /** Debounce handle for IP relayout after dynamic additions. */
   const relayoutTimerRef      = useRef<ReturnType<typeof setTimeout> | null>(null);
-  /** Event IDs already added to live feed — deduplicates socket vs heartbeat. */
+  /** Debounce handle for the geo lookup of new IPs. */
+  const geoTimerRef           = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Event IDs already in the live feed — deduplicates the initial load vs. socket frames. */
   const processedEventIdsRef      = useRef(new Set<number>());
+  /** Set by the first ip:events frame: the legacy ip:flow pings are then ignored. */
+  const ipEventsSeenRef           = useRef(false);
+  /** Ban id → IP, learnt from the ban events (a Lift only carries the id). */
+  const banIpsRef                 = useRef(new Map<number, string>());
   /** Timestamp of the oldest event in liveEvents — used as `to` cursor for scroll-load. */
   const oldestLiveTimestampRef    = useRef<string | undefined>(undefined);
   const liveEventsHasMoreRef      = useRef(true);
@@ -171,16 +169,20 @@ export function NetMapPage() {
   const [orbitPaused,   setOrbitPaused]   = useState(false);
   const [clickedIp,     setClickedIp]     = useState<IpNode | null>(null);
   const [threatOnly,    setThreatOnly]    = useState(false);
-  const [viewMode,      setViewMode]      = useState<'2d' | '3d'>(() => (localStorage.getItem('obliguard-netmap-viewmode') as '2d' | '3d') ?? '2d');
+  const [viewMode,      setViewMode]      = useState<'2d' | '3d'>(() => {
+    try { return localStorage.getItem('obliguard-netmap-viewmode') === '3d' ? '3d' : '2d'; } catch { return '2d'; }
+  });
   const [searchIp,      setSearchIp]      = useState('');
   const [searchHit,     setSearchHit]     = useState<string | null>(null);
   const orbitPausedRef  = useRef(false);
   const threatOnlyRef   = useRef(false);
   const searchHitRef    = useRef<string | null>(null);
+  const clickedIpRef    = useRef<IpNode | null>(null);
   // Keep refs in sync
   orbitPausedRef.current = orbitPaused;
   threatOnlyRef.current = threatOnly;
   searchHitRef.current = searchHit;
+  clickedIpRef.current = clickedIp;
   const [liveLoadingMore, setLiveLoadingMore] = useState(false);
   const [tooltip, setTooltip] = useState<{
     x: number; y: number;
@@ -188,16 +190,53 @@ export function NetMapPage() {
     status: string; failures: number; services: string[]; color: string;
   } | null>(null);
 
+  // ── Translated labels ──────────────────────────────────────────────────────
+  // The canvas and the 3D view are drawn outside React renders: they read the
+  // current language's strings from this ref.
+  const statusLabel = useCallback((status: string) => {
+    switch (status) {
+      case 'banned':      return t('netmap.status.banned', { defaultValue: 'Banned' });
+      case 'suspicious':  return t('netmap.status.suspicious', { defaultValue: 'Suspicious' });
+      case 'whitelisted': return t('netmap.status.whitelisted', { defaultValue: 'Whitelisted' });
+      default:            return t('netmap.status.clean', { defaultValue: 'Clean' });
+    }
+  }, [t]);
+  const deviceTypeLabel = useCallback((type: string) => {
+    switch (type) {
+      case 'firewall': return t('netmap.deviceType.firewall', { defaultValue: 'Firewall' });
+      case 'router':   return t('netmap.deviceType.router', { defaultValue: 'Router' });
+      case 'server':   return t('netmap.deviceType.server', { defaultValue: 'Server' });
+      case 'windows':  return t('netmap.deviceType.windows', { defaultValue: 'Windows' });
+      case 'desktop':  return t('netmap.deviceType.desktop', { defaultValue: 'Desktop' });
+      default:         return t('netmap.deviceType.default', { defaultValue: 'Agent' });
+    }
+  }, [t]);
+  // Filled on every render below, before the draw loop reads it.
+  const canvasTextRef = useRef<{ offline: string; evaluateOnly: string; ips: (n: number) => string }>({
+    offline: '', evaluateOnly: '', ips: () => '',
+  });
+  canvasTextRef.current = {
+    offline: t('netmap.canvas.offline', { defaultValue: 'Offline' }),
+    evaluateOnly: t('evaluateOnly.badge', { defaultValue: 'Evaluate-only' }),
+    ips: (n: number) => t('netmap.canvas.ips', { count: n, defaultValue: '{{count}} IPs' }),
+  };
+  const labels3d: NetMap3DLabels = {
+    offline: t('netmap.canvas.offline', { defaultValue: 'Offline' }),
+    online: t('netmap.agent.online', { defaultValue: 'Online' }),
+    evaluateOnly: t('evaluateOnly.badge', { defaultValue: 'Evaluate-only' }),
+    evaluateOnlyTooltip: t('evaluateOnly.badgeTooltip', { defaultValue: 'Evaluate-only mode: events are observed but no bans are created or enforced.' }),
+    status: statusLabel,
+    deviceType: deviceTypeLabel,
+    hiddenIps: (n: number) => t('netmap.hiddenIps', { count: n, defaultValue: '{{count}} IPs not rendered' }),
+  };
+
   // ── Tab store ──────────────────────────────────────────────────────────────
   const { tabs, activeTabId, load: loadTabs, setActiveTab, addTab, updateTab, deleteTab } = useNetMapTabStore();
-  const [showTabModal, setShowTabModal] = useState(false);
-  const [tabFormName, setTabFormName] = useState('');
-  const [tabFormAgentIds, setTabFormAgentIds] = useState<Set<number>>(new Set());
-  const [editingTabId, setEditingTabId] = useState<string | null>(null);
+  const [tabDialog, setTabDialog] = useState<{ tab: NetMapTab | null } | null>(null);
 
   useEffect(() => { void loadTabs(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const activeTab = tabs.find(t => t.id === activeTabId) ?? null;
+  const activeTab = tabs.find(tab => tab.id === activeTabId) ?? null;
   const visibleAgentIdsRef = useRef<Set<number> | null>(null);
   visibleAgentIdsRef.current = activeTab ? new Set(activeTab.agentIds) : null;
 
@@ -208,16 +247,16 @@ export function NetMapPage() {
     const oc = bgRef.current;
     oc.width = w; oc.height = h;
     const ctx = oc.getContext('2d')!;
-    ctx.fillStyle = '#06090f';
+    ctx.fillStyle = P.chrome.space;
     ctx.fillRect(0, 0, w, h);
     // Nebulae (Oblimap style)
     const neb1 = ctx.createRadialGradient(w * 0.5, h * 0.4, 0, w * 0.5, h * 0.4, w * 0.5);
-    neb1.addColorStop(0, 'rgba(20,40,70,0.15)');
-    neb1.addColorStop(0.5, 'rgba(15,25,50,0.08)');
+    neb1.addColorStop(0, rgba(P.nebulaCold, 0.15));
+    neb1.addColorStop(0.5, rgba(P.nebulaDeep, 0.08));
     neb1.addColorStop(1, 'transparent');
     ctx.fillStyle = neb1; ctx.fillRect(0, 0, w, h);
     const neb2 = ctx.createRadialGradient(w * 0.75, h * 0.6, 0, w * 0.75, h * 0.6, w * 0.35);
-    neb2.addColorStop(0, 'rgba(60,30,20,0.1)');
+    neb2.addColorStop(0, rgba(P.nebulaWarm, 0.1));
     neb2.addColorStop(1, 'transparent');
     ctx.fillStyle = neb2; ctx.fillRect(0, 0, w, h);
     // Generate star positions (drawn animated per-frame, not baked into bg)
@@ -233,25 +272,31 @@ export function NetMapPage() {
 
   // ── Upsert IP ─────────────────────────────────────────────────────────────
 
-  const upsertIp = useCallback((
-    ip: string, country: string, agentId: number,
-    status: string, failures: number, services: string[],
-    evtCount = 0, glow = false,
-  ) => {
+  const upsertIp = useCallback((ip: string, agentId: number, opts: UpsertIpOpts): { node: IpNode | null; created: boolean } => {
     const agents = agentsRef.current;
-    if (!agents.find(a => a.id === agentId)) return;
+    if (!agents.find(a => a.id === agentId)) return { node: null, created: false };
     const map = ipsRef.current;
     const now = Date.now();
+    const {
+      country = '??', status, failures = 0, addFailures = 0,
+      services = [], evtCount = 0, glow = false,
+    } = opts;
 
-    if (map.has(ip)) {
-      const node = map.get(ip)!;
+    const existing = map.get(ip);
+    if (existing) {
+      const node = existing;
       // Never downgrade a whitelisted node on live events — the whitelist
-      // takes permanent precedence over transient auth-failure/success events.
-      if (node.status !== 'whitelisted') {
+      // takes permanent precedence over transient auth-failure/success events —
+      // nor a banned one (only a Lift / the soft refresh lowers a status).
+      if (node.status !== 'whitelisted' && (STATUS_RANK[status] ?? 0) > (STATUS_RANK[node.status] ?? 0)) {
         node.status = status;
         node.color  = statusColor(status);
       }
-      node.failures   = Math.max(node.failures, failures);
+      if ((!node.country || node.country === '??') && country !== '??') {
+        node.country = country;
+        node.flag    = flagEmoji(country);
+      }
+      node.failures   = Math.max(node.failures + addFailures, failures);
       node.services   = [...new Set([...node.services, ...services])];
       node.dotR       = 2.5 + Math.min(node.failures / 8, 5);
       node.lastSeen   = now;
@@ -262,48 +307,64 @@ export function NetMapPage() {
         node.agentIds.push(agentId);
         placeIp(node, new Map(agents.map(a => [a.id, a])));
       }
-    } else {
-      const agentMap = new Map(agents.map(a => [a.id, a]));
-      const ag = agentMap.get(agentId)!;
-      const { w: cW, h: cH } = sizeRef.current;
-      const node: IpNode = {
-        key: ip, ip,
-        country, flag: flagEmoji(country),
-        agentIds: [agentId],
-        agentWeights: { [agentId]: evtCount },
-        x: ag.x, y: ag.y,
-        dotR: 2.5 + Math.min(failures / 8, 5),
-        color: statusColor(status),
-        status, failures, services, eventCount: evtCount,
-        lastSeen: now,
-        glowUntil: glow ? now + 2500 : 0,
-        ...makeOrbitalFields(ip, cW, cH),
-      };
-      // Assign orbit slot with golden angle spacing
-      const slotMap = slotCountersRef.current;
-      const slot = slotMap.get(agentId) ?? 0;
-      node.orbitSlot = slot;
-      node.orbitAngle = slot * 2.399963;
-      slotMap.set(agentId, slot + 1);
-
-      placeIp(node, agentMap);
-      map.set(ip, node);
-      setIpCount(map.size);
-
-      // Add to force simulation
-      const sim = simRef.current;
-      if (sim) {
-        sim.addNode({
-          id: `ip:${ip}`, x: node.x, y: node.y, vx: 0, vy: 0,
-          pinned: false, mass: 0.5, kind: 'ip', radius: 0,
-        });
-        sim.upsertLink({
-          sourceId: `ip:${ip}`, targetId: `a:${agentId}`,
-          strength: 0.25, idealLength: RING_INNER_R + 10,
-        });
-        sim.reheat(0.15);
-      }
+      return { node, created: false };
     }
+
+    const agentMap = new Map(agents.map(a => [a.id, a]));
+    const ag = agentMap.get(agentId)!;
+    const { w: cW, h: cH } = sizeRef.current;
+    const startFailures = Math.max(failures, addFailures);
+    const node: IpNode = {
+      key: ip, ip,
+      country, flag: flagEmoji(country),
+      agentIds: [agentId],
+      agentWeights: { [agentId]: evtCount },
+      x: ag.x, y: ag.y,
+      dotR: 2.5 + Math.min(startFailures / 8, 5),
+      color: statusColor(status),
+      status, failures: startFailures, services: [...services], eventCount: evtCount,
+      lastSeen: now,
+      glowUntil: glow ? now + 2500 : 0,
+      ...makeOrbitalFields(ip, cW, cH),
+    };
+    // Assign orbit slot with golden angle spacing
+    const slotMap = slotCountersRef.current;
+    const slot = slotMap.get(agentId) ?? 0;
+    node.orbitSlot = slot;
+    node.orbitAngle = slot * 2.399963;
+    slotMap.set(agentId, slot + 1);
+
+    placeIp(node, agentMap);
+    map.set(ip, node);
+    setIpCount(map.size);
+
+    // Add to force simulation
+    const sim = simRef.current;
+    if (sim) {
+      sim.addNode({
+        id: `ip:${ip}`, x: node.x, y: node.y, vx: 0, vy: 0,
+        pinned: false, mass: 0.5, kind: 'ip', radius: 0,
+      });
+      sim.upsertLink({
+        sourceId: `ip:${ip}`, targetId: `a:${agentId}`,
+        strength: 0.25, idealLength: RING_INNER_R + 10,
+      });
+      sim.reheat(0.15);
+    }
+    return { node, created: true };
+  }, []);
+
+  /** Set a node's status from an authoritative source (ban event, refresh, action). */
+  const setIpStatus = useCallback((ip: string, status: string, glow = false) => {
+    const node = ipsRef.current.get(ip);
+    if (!node) return null;
+    node.status = status;
+    node.color  = statusColor(status);
+    if (glow) {
+      node.glowUntil = Date.now() + 3000;
+      node.lastSeen  = Date.now();
+    }
+    return node;
   }, []);
 
   // ── Event particle (real socket events only) ──────────────────────────────
@@ -375,33 +436,54 @@ export function NetMapPage() {
     }
   }, []);
 
-  // ── Quick ban ─────────────────────────────────────────────────────────────
+  // ── IP drawer ─────────────────────────────────────────────────────────────
+
+  /** Show an IP: map summary panel (when on the map) + the shared IP drawer. */
+  const showIp = useCallback((ip: string) => {
+    setClickedIp(ipsRef.current.get(ip) ?? null);
+    openIpDrawer(ip);
+  }, [openIpDrawer]);
+  // Canvas / socket handlers are bound once: they call the latest showIp.
+  const showIpRef = useRef(showIp);
+  showIpRef.current = showIp;
+
+  // ── Quick ban / whitelist ─────────────────────────────────────────────────
 
   const quickBan = useCallback(async (ip: string) => {
-    if (!window.confirm(isGodView
-      ? t('bans.confirmBanGlobal', { ip, defaultValue: 'Ban IP {{ip}}?\n\nIt will be blocked on every agent of every tenant.' })
-      : t('bans.confirmBanLocal', { ip, defaultValue: 'Ban IP {{ip}}?\n\nIt will be blocked on the agents of this tenant.' }))) return;
+    if (!canBan) return;
+    const shownIp = anonIp(ip);
+    const ok = await confirm({
+      title: t('bans.banIpTitle', { defaultValue: 'Ban IP' }),
+      message: isGodView
+        ? t('bans.confirmBanGlobal', { ip: shownIp, defaultValue: 'Ban IP {{ip}}?\n\nIt will be blocked on every agent of every tenant.' })
+        : t('bans.confirmBanLocal', { ip: shownIp, defaultValue: 'Ban IP {{ip}}?\n\nIt will be blocked on the agents of this tenant.' }),
+      confirmLabel: t('bans.banIpTitle', { defaultValue: 'Ban IP' }),
+      danger: true,
+    });
+    if (!ok) return;
     setBanningIp(ip);
     try {
-      // No scope: the server derives it from the operating tenant.
-      const res = await apiClient.post<{ data: { scope?: string } }>('/bans', { ip, reason: 'Manual ban from NetMap' });
-      const node = ipsRef.current.get(ip);
-      if (node) {
-        node.status    = 'banned';
-        node.color     = EVENT_COLORS.ban;
-        node.glowUntil = Date.now() + 3000;
-        ripplesRef.current.push({ id: Math.random().toString(36).slice(2), x: node.x, y: node.y, t: 0 });
-      }
-      setStats(s => ({ ...s, banned: s.banned + 1 }));
-      toast.success(res.data?.data?.scope === 'global'
-        ? t('bans.bannedGlobal', { defaultValue: '{{ip}} banned globally', ip })
-        : t('bans.bannedLocal', { defaultValue: '{{ip}} banned on this tenant', ip }));
+      // No scope: the server derives it from the operating tenant. The ban
+      // counters follow the ban:created event.
+      const created = await ipReputationApi.ban(ip, t('netmap.banReason', { defaultValue: 'Manual ban from NetMap' }));
+      if (created?.id != null) banIpsRef.current.set(created.id, ip);
+      const node = setIpStatus(ip, 'banned', true);
+      if (node) ripplesRef.current.push({ id: Math.random().toString(36).slice(2), x: node.x, y: node.y, t: 0 });
+      toast.success(created?.scope === 'global'
+        ? t('bans.bannedGlobal', { defaultValue: '{{ip}} banned globally', ip: shownIp })
+        : t('bans.bannedLocal', { defaultValue: '{{ip}} banned on this tenant', ip: shownIp }));
+      notifyIpChanged(ip);
     } catch (err) {
-      const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error;
-      toast.error(msg || `Failed to ban ${ip}`);
+      toast.error(apiErrorMessage(err, t('ipReputation.errors.ban', { defaultValue: 'Failed to ban the IP' })));
     }
     finally { setBanningIp(null); }
-  }, [isGodView, t]);
+  }, [canBan, confirm, isGodView, t, setIpStatus]);
+
+  const quickWhitelist = useCallback(async (ip: string) => {
+    if (!canWhitelist) return;
+    // Label prompt, scope hint, toast and change notification: the drawer's flow.
+    if (await ipActions.whitelist({ ip })) setIpStatus(ip, 'whitelisted', true);
+  }, [canWhitelist, ipActions, setIpStatus]);
 
   // ── Relayout IPs (debounced) ──────────────────────────────────────────────
 
@@ -421,44 +503,24 @@ export function NetMapPage() {
     setLiveLoadingMore(true);
     const to = oldestLiveTimestampRef.current;
     try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const res = await apiClient.get<{ data: any[] }>(
+      const res = await apiClient.get<{ data: Record<string, unknown>[] }>(
         '/ip-events',
         { params: { pageSize: 100, ...(to ? { to } : {}) } },
       ).catch(() => null);
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const events = ((res?.data as any)?.data ?? []) as any[];
+      const events = res?.data?.data ?? [];
       if (events.length < 100) liveEventsHasMoreRef.current = false;
 
-      const mapped: LiveEvent[] = events.map(ev => {
-        const evType = (ev.event_type ?? ev.eventType ?? 'auth_success') as string;
-        const svcKey = (ev.service ?? '').toLowerCase().split('/')[0];
-        const col = DANGEROUS_SVCS.has(svcKey) ? '#ef4444'
-          : evType === 'auth_success' ? EVENT_COLORS.auth_success : EVENT_COLORS.auth_failure;
-        return {
-          id: String(ev.id ?? Math.random()),
-          ip: ev.ip as string,
-          service: (ev.service ?? '') as string,
-          country: '??',
-          agentName: (ev.hostname ?? 'Agent') as string,
-          time: new Date(ev.timestamp ?? ev.created_at),
-          color: col,
-          eventType: (evType === 'auth_success' ? 'auth_success' : 'auth_failure') as 'auth_success' | 'auth_failure',
-        };
-      });
-
+      const fallback = t('netmap.agentFallback', { defaultValue: 'Agent' });
+      const mapped = events.map(ev => liveEventFromRest(ev, fallback));
       if (mapped.length > 0) {
         oldestLiveTimestampRef.current = mapped[mapped.length - 1].time.toISOString();
-        setLiveEvents(prev => {
-          const existingIds = new Set(prev.map(e => e.id));
-          return [...prev, ...mapped.filter(e => !existingIds.has(e.id))];
-        });
+        setLiveEvents(prev => appendOlderEvents(prev, mapped));
       }
     } finally {
       liveEventsLoadingMoreRef.current = false;
       setLiveLoadingMore(false);
     }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [t]);
 
   // ── Geo lookup ────────────────────────────────────────────────────────────
 
@@ -481,70 +543,88 @@ export function NetMapPage() {
     } catch { /* ignore */ }
   }, []);
 
-  // ── Background refresh (keeps IPs alive while traffic continues) ──────────
+  /** Geo lookup of the IPs that just arrived (debounced: one batch per burst). */
+  const scheduleGeoLookup = useCallback(() => {
+    if (geoTimerRef.current) return;
+    geoTimerRef.current = setTimeout(() => {
+      geoTimerRef.current = null;
+      void fetchGeoForUnknownIps();
+    }, 3000);
+  }, [fetchGeoForUnknownIps]);
+
+  // ── Soft refresh (keeps IPs alive while traffic continues) ────────────────
+
+  const softRefresh = useCallback(async () => {
+    const agArr = agentsRef.current;
+    if (!agArr.length) return;
+    try {
+      const now = Date.now();
+
+      // 1. Events — refresh TTLs, merge services, upsert new IPs (no glow)
+      const evRes = await apiClient.get<{ data: Record<string, unknown>[] }>('/ip-events', { params: { pageSize: 300 } }).catch(() => null);
+      for (const ev of evRes?.data?.data ?? []) {
+        const evIp = ev.ip as string | undefined;
+        const aid  = (ev.deviceId ?? ev.device_id) as number | undefined;
+        if (!evIp || ev.source_agent_id || ev.sourceAgentId) continue;
+        const node = ipsRef.current.get(evIp);
+        if (node) {
+          node.lastSeen = now;
+          const svc = (ev.service ?? '') as string;
+          if (svc && !node.services.includes(svc)) node.services = [...node.services, svc];
+        } else if (aid && agArr.some(a => a.id === aid)) {
+          const failure = feedType(String(ev.eventType ?? ev.event_type)) === 'auth_failure';
+          upsertIp(evIp, aid, {
+            status: failure ? 'suspicious' : 'clean', failures: failure ? 1 : 0,
+            services: ev.service ? [ev.service as string] : [], evtCount: 1,
+          });
+        }
+      }
+
+      // 2. Reputation — authoritative statuses + merged services
+      const repRes = await apiClient.get<{
+        data: { ip: string; status: string; totalFailures: number; affectedServices?: string[] }[]
+      }>('/ip-reputation?limit=200').catch(() => null);
+      for (const r of repRes?.data?.data ?? []) {
+        const node = ipsRef.current.get(r.ip);
+        if (!node) continue;
+        if (node.status !== 'whitelisted' || r.status === 'whitelisted') { node.status = r.status; node.color = statusColor(r.status); }
+        node.failures = r.totalFailures;
+        node.lastSeen = now;
+        if (r.affectedServices?.length) node.services = [...new Set([...node.services, ...r.affectedServices])];
+      }
+
+      // 3. Ban counters (corrects the event-driven deltas)
+      const banRes = await apiClient.get<{ data: { active: number; today: number } }>('/bans/stats').catch(() => null);
+      const bs = banRes?.data?.data;
+      if (bs) setStats(s => ({ ...s, banned: bs.active, today: bs.today }));
+
+      // 4. Agents — online state, evaluate-only mode, last push
+      const devRes = await apiClient.get<{ data: MapDevice[] }>('/agent/devices').catch(() => null);
+      for (const d of devRes?.data?.data ?? []) {
+        const ag = agArr.find(a => a.id === d.id);
+        if (!ag) continue;
+        ag.wsConnected  = d.wsConnected;
+        ag.evaluateOnly = d.evaluateOnly === true;
+        if (d.updatedAt) {
+          const ts = new Date(d.updatedAt).getTime();
+          if (ts > ag.lastPushAt) ag.lastPushAt = ts;
+        }
+      }
+
+      setIpCount(ipsRef.current.size);
+    } catch { /* ignore */ }
+  }, [upsertIp]);
+
+  // Socket handlers are bound once per socket: they call the latest softRefresh.
+  const softRefreshRef = useRef(softRefresh);
+  softRefreshRef.current = softRefresh;
 
   useEffect(() => {
-    const interval = setInterval(async () => {
-      const agArr = agentsRef.current;
-      if (!agArr.length) return;
-      try {
-        const now = Date.now();
-
-        // 1. Events — refresh TTLs, merge services, upsert new IPs (no glow)
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const evRes = await apiClient.get<{ data: any[] }>('/ip-events', { params: { pageSize: 300 } }).catch(() => null);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        for (const ev of ((evRes?.data as any)?.data ?? []) as any[]) {
-          const evIp = ev.ip as string | undefined;
-          const aid  = (ev.deviceId ?? ev.device_id) as number | undefined;
-          if (!evIp) continue;
-          const node = ipsRef.current.get(evIp);
-          if (node) {
-            node.lastSeen = now;
-            const svc = (ev.service ?? '') as string;
-            if (svc && !node.services.includes(svc)) node.services = [...node.services, svc];
-          } else if (aid && agArr.some(a => a.id === aid)) {
-            const evType = (ev.eventType ?? ev.event_type) as string;
-            const status = evType === 'auth_failure' ? 'suspicious' : 'clean';
-            upsertIp(evIp, '??', aid, status, status === 'suspicious' ? 1 : 0,
-              ev.service ? [ev.service as string] : [], 1, false);
-          }
-        }
-
-        // 2. Reputation — update statuses + merge services
-        const repRes = await apiClient.get<{
-          data: { ip: string; status: string; totalFailures: number; affectedServices?: string[] }[]
-        }>('/ip-reputation?limit=200').catch(() => null);
-        for (const r of repRes?.data?.data ?? []) {
-          const node = ipsRef.current.get(r.ip);
-          if (!node) continue;
-          if (node.status !== 'whitelisted') { node.status = r.status; node.color = statusColor(r.status); }
-          node.failures = r.totalFailures;
-          node.lastSeen = now;
-          if (r.affectedServices?.length) node.services = [...new Set([...node.services, ...r.affectedServices])];
-        }
-
-        // 3. Ban stats
-        const banRes = await apiClient.get<{ data: { active: number; today: number } }>('/bans/stats').catch(() => null);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const bs = (banRes?.data as any)?.data;
-        if (bs) setStats(s => ({ ...s, banned: bs.active, today: bs.today }));
-
-        // 4. Agent online status — sync lastPushAt from updatedAt
-        const devRes = await apiClient.get<{ data: { id: number; updatedAt: string }[] }>('/agent/devices').catch(() => null);
-        for (const d of devRes?.data?.data ?? []) {
-          const ag = agArr.find(a => a.id === d.id);
-          if (ag && d.updatedAt) {
-            const ts = new Date(d.updatedAt).getTime();
-            if (ts > ag.lastPushAt) ag.lastPushAt = ts;
-          }
-        }
-
-        setIpCount(ipsRef.current.size);
-      } catch { /* ignore */ }
-    }, 90_000); // every 90 s — full soft refresh (reputation, status); real-time updates via pushHeartbeat
+    // Every 90 s — full soft refresh (reputation, status, counters); real-time
+    // updates come from the ip:events / ban socket events.
+    const interval = setInterval(() => { void softRefresh(); }, 90_000);
     return () => clearInterval(interval);
-  }, [upsertIp]);
+  }, [softRefresh]);
 
   // ── Init ──────────────────────────────────────────────────────────────────
 
@@ -558,28 +638,24 @@ export function NetMapPage() {
 
     try {
       const [devRes, evRes, banRes] = await Promise.all([
-        apiClient.get<{ data: { id: number; hostname: string; name: string | null; status: string; updatedAt: string; wsConnected: boolean; groupId: number | null; groupName: string | null; deviceType?: string; osInfo?: { platform?: string; os?: string; hostname?: string } | null; resolvedSettings: { checkIntervalSeconds: number; maxMissedPushes: number } }[] }>('/agent/devices'),
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        apiClient.get<{ data: any[] }>('/ip-events', { params: { pageSize: 500 } })
-          .catch(() => ({ data: { data: [] } })),
+        apiClient.get<{ data: MapDevice[] }>('/agent/devices'),
+        apiClient.get<{ data: Record<string, unknown>[] }>('/ip-events', { params: { pageSize: 500 } })
+          .catch(() => ({ data: { data: [] as Record<string, unknown>[] } })),
         apiClient.get<{ data: { active: number; today: number } }>('/bans/stats')
           .catch(() => ({ data: { data: { active: 0, today: 0 } } })),
       ]);
 
       const devs = (devRes.data?.data ?? []).filter(d => d.status === 'approved');
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const evts = (evRes.data as any)?.data ?? [];
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const bs   = (banRes.data as any)?.data ?? { active: 0, today: 0 };
+      const evts = evRes.data?.data ?? [];
+      const bs   = banRes.data?.data ?? { active: 0, today: 0 };
       setStats({ agents: devs.length, banned: bs.active, today: bs.today });
 
       const agentEvtCount = new Map<number, number>();
       const ipToAgents    = new Map<string, Map<number, { count: number; failures: number; services: string[] }>>();
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      for (const ev of evts as any[]) {
-        const aid  = ev.deviceId ?? ev.device_id;
-        const evIp = ev.ip;
+      for (const ev of evts) {
+        const aid  = (ev.deviceId ?? ev.device_id) as number | undefined;
+        const evIp = ev.ip as string | undefined;
         if (!aid || !evIp) continue;
 
         // Agent-to-agent peer event: record as a directed link, not as an IP node
@@ -609,15 +685,16 @@ export function NetMapPage() {
         const e = m.get(aid)!;
         e.count++;
         if ((ev.eventType ?? ev.event_type) === 'auth_failure') e.failures++;
-        const svc = ev.service ?? '';
+        const svc = (ev.service ?? '') as string;
         if (svc && !e.services.includes(svc)) e.services.push(svc);
       }
 
       const { w, h } = sizeRef.current;
-      const placed = devs.length > 0
+      const placed: MapDevice[] = devs.length > 0
         ? devs
-        : [{ id: -1, hostname: 'Server', name: null, status: 'approved',
-             updatedAt: '', wsConnected: true, groupId: null, groupName: null, deviceType: 'agent', osInfo: null, resolvedSettings: { checkIntervalSeconds: 60, maxMissedPushes: 2 } }];
+        : [{ id: -1, hostname: t('netmap.server', { defaultValue: 'Server' }), name: null, status: 'approved',
+             updatedAt: '', wsConnected: true, groupId: null, groupName: null, deviceType: 'agent', osInfo: null,
+             resolvedSettings: { checkIntervalSeconds: 60, maxMissedPushes: 2 } }];
 
       agentsRef.current = placed.map(d => {
         const lastPushAt      = d.updatedAt ? new Date(d.updatedAt).getTime() : 0;
@@ -638,19 +715,18 @@ export function NetMapPage() {
           groupName:       d.groupName ?? null,
           deviceColor:     detectDeviceColor(d),
           deviceType:      detectDeviceType(d),
+          evaluateOnly:    d.evaluateOnly === true,
         };
       });
       layoutAgents(agentsRef.current, w, h);
       const agentMap = new Map(agentsRef.current.map(a => [a.id, a]));
 
       // IP reputation + whitelist labels + custom display names (parallel)
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const [repRes, wlRes, displayNamesRaw] = await Promise.all([
         apiClient.get<{
           data: { ip: string; geoCountryCode?: string | null; totalFailures: number; status: string; affectedServices?: string[] }[]
         }>('/ip-reputation?limit=200').catch(() => ({ data: { data: [] } })),
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        apiClient.get<{ data: any[] }>('/whitelist').catch(() => ({ data: { data: [] } })),
+        apiClient.get<{ data: { ip?: unknown; label?: string | null }[] }>('/whitelist').catch(() => ({ data: { data: [] } })),
         ipLabelsApi.list().catch(() => [] as import('../api/ipLabels.api').IpDisplayName[]),
       ]);
       // Build display-name lookup: ip → label
@@ -670,8 +746,7 @@ export function NetMapPage() {
       // Build whitelist CIDR entries for matching.
       // Supports exact IPs, /32 single-host, and broader CIDRs like /24.
       const wlEntries: WlEntry[] = [];
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      for (const wl of (wlRes.data as any)?.data ?? []) {
+      for (const wl of wlRes.data?.data ?? []) {
         if (typeof wl.ip !== 'string') continue;
         const label = wl.label ?? null;
         if (!wl.ip.includes('/')) {
@@ -718,7 +793,7 @@ export function NetMapPage() {
           status, failures: rep?.failures ?? allFailures,
           services: allServices, eventCount: totalCount,
           lastSeen: Date.now(), glowUntil: 0,
-          whitelistLabel: matchWhitelist(evIp, wlEntries)?.label,
+          whitelistLabel: wlMatch?.label,
           displayLabel:   displayNameMap.get(evIp) ?? null,
           ...makeOrbitalFields(evIp, w, h),
         };
@@ -726,16 +801,22 @@ export function NetMapPage() {
         cnt++;
       }
 
-      // Fill remaining from reputation
-      for (const [repIp, rep] of repMap) {
-        if (cnt >= 250) break;
-        if (ipsRef.current.has(repIp)) continue;
-        if (rep.status === 'clean') continue; // clean IPs only via live events
+      /** Agent with the fewest single-agent IPs (spread of reputation-only IPs). */
+      const leastLoadedAgent = (): number => {
         let targetId = agArr[0]?.id ?? -1, minCnt = Infinity;
         for (const ag of agArr) {
           const c = [...ipsRef.current.values()].filter(n => n.agentIds[0] === ag.id).length;
           if (c < minCnt) { minCnt = c; targetId = ag.id; }
         }
+        return targetId;
+      };
+
+      // Fill remaining from reputation
+      for (const [repIp, rep] of repMap) {
+        if (cnt >= 250) break;
+        if (ipsRef.current.has(repIp)) continue;
+        if (rep.status === 'clean') continue; // clean IPs only via live events
+        const targetId = leastLoadedAgent();
         if (!agentMap.has(targetId)) continue;
         const node: IpNode = {
           key: repIp, ip: repIp,
@@ -759,18 +840,14 @@ export function NetMapPage() {
         if (!wle.plainIp || wle.mask !== 0xFFFFFFFF) continue; // skip broader CIDRs
         if (cnt >= 250) break;
         if (ipsRef.current.has(wle.plainIp)) continue; // handled by post-process pass below
-        let targetId = agArr[0]?.id ?? -1, minCnt = Infinity;
-        for (const ag of agArr) {
-          const c = [...ipsRef.current.values()].filter(n => n.agentIds[0] === ag.id).length;
-          if (c < minCnt) { minCnt = c; targetId = ag.id; }
-        }
+        const targetId = leastLoadedAgent();
         if (!agentMap.has(targetId)) continue;
         const node: IpNode = {
           key: wle.plainIp, ip: wle.plainIp,
           country: '??', flag: flagEmoji('??'),
           agentIds: [targetId], agentWeights: { [targetId]: 0 },
           x: agentMap.get(targetId)!.x, y: agentMap.get(targetId)!.y,
-          dotR: 3, color: '#22c55e',
+          dotR: 3, color: P.status.whitelisted,
           status: 'whitelisted', failures: 0, services: [],
           eventCount: 0, lastSeen: Date.now(), glowUntil: 0,
           whitelistLabel: wle.label,
@@ -787,7 +864,7 @@ export function NetMapPage() {
         if (wlMatch) {
           if (!node.whitelistLabel) node.whitelistLabel = wlMatch.label;
           node.status = 'whitelisted';
-          node.color  = '#22c55e';
+          node.color  = P.status.whitelisted;
         }
         if (!node.displayLabel) node.displayLabel = displayNameMap.get(node.ip) ?? null;
       }
@@ -865,7 +942,7 @@ export function NetMapPage() {
 
     setLoading(false);
     void fetchGeoForUnknownIps();
-  }, [fetchGeoForUnknownIps]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [fetchGeoForUnknownIps, t]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Animation loop ────────────────────────────────────────────────────────
 
@@ -898,7 +975,7 @@ export function NetMapPage() {
       }
     }
 
-    const paused = orbitPausedRef.current || clickedIp !== null;
+    const paused = orbitPausedRef.current || clickedIpRef.current !== null;
     for (const ip of ipsRef.current.values()) {
       // Arrival: fly from spawn point toward orbit target
       if (ip.arriveT < 1) ip.arriveT = Math.min(1, ip.arriveT + 0.0025);
@@ -1010,6 +1087,7 @@ export function NetMapPage() {
     if (!canvas) { rafRef.current = requestAnimationFrame(animate); return; }
     const ctx = canvas.getContext('2d')!;
     const { w, h } = sizeRef.current;
+    const text = canvasTextRef.current;
 
     ctx.clearRect(0, 0, w, h);
     const bg = bgRef.current;
@@ -1018,7 +1096,7 @@ export function NetMapPage() {
     // Animated flickering stars (Oblimap style)
     for (const star of starsRef.current) {
       const flicker = 0.6 + 0.4 * Math.sin(ts * 0.002 + star.b * 100);
-      ctx.fillStyle = `rgba(180,200,230,${flicker * 0.5})`;
+      ctx.fillStyle = rgba(P.star, flicker * 0.5);
       ctx.fillRect(star.x, star.y, star.s, star.s);
     }
 
@@ -1058,8 +1136,8 @@ export function NetMapPage() {
       aliveRipples.push(rip);
       ctx.save();
       ctx.globalAlpha = (1 - rip.t) * 0.50;
-      ctx.strokeStyle = '#ef4444';
-      ctx.shadowBlur  = 10; ctx.shadowColor = '#ef4444';
+      ctx.strokeStyle = P.status.banned;
+      ctx.shadowBlur  = 10; ctx.shadowColor = P.status.banned;
       ctx.lineWidth   = 1.5 / k;
       ctx.beginPath(); ctx.arc(rip.x, rip.y, rip.t * 60, 0, Math.PI * 2);
       ctx.stroke(); ctx.restore();
@@ -1085,7 +1163,7 @@ export function NetMapPage() {
       if (!a || !b) continue;
       ctx.save();
       ctx.globalAlpha = selId !== null ? 0.04 : 0.14;
-      ctx.strokeStyle = '#5588a0'; ctx.lineWidth = 0.9 / k;
+      ctx.strokeStyle = P.sharedEdge; ctx.lineWidth = 0.9 / k;
       ctx.setLineDash([4, 8]); ctx.lineDashOffset = -(ts / 80) % 12;
       ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
       ctx.stroke(); ctx.setLineDash([]); ctx.restore();
@@ -1136,17 +1214,17 @@ export function NetMapPage() {
         const mx   = (src.x + tgt.x) / 2;
         const my   = (src.y + tgt.y) / 2;
         const lfs  = Math.round(Math.max(7, 9 * Math.min(k, 1.2)));
-        ctx.font          = `600 ${lfs}px "Inter", "Segoe UI", ui-sans-serif, sans-serif`;
+        ctx.font          = `600 ${lfs}px ${FONT_UI}`;
         ctx.globalAlpha   = 0.9 * ageFade;
         ctx.fillStyle     = color;
         ctx.textAlign     = 'center'; ctx.textBaseline = 'middle';
-        ctx.shadowBlur    = 5; ctx.shadowColor = 'rgba(0,0,0,0.9)';
+        ctx.shadowBlur    = 5; ctx.shadowColor = rgba(P.shadow, 0.9);
         ctx.fillText(link.type.toUpperCase(), mx, my - 8);
         // Event count badge
         if (link.count > 1) {
           const cfs = Math.round(Math.max(6, 7.5 * Math.min(k, 1.2)));
-          ctx.font      = `500 ${cfs}px "Inter", "Segoe UI", ui-sans-serif, sans-serif`;
-          ctx.fillStyle = 'rgba(200,200,200,0.5)';
+          ctx.font      = `500 ${cfs}px ${FONT_UI}`;
+          ctx.fillStyle = P.peerCount;
           ctx.fillText(`${link.count}×`, mx, my + 4);
         }
       }
@@ -1171,7 +1249,7 @@ export function NetMapPage() {
           : (dimmed ? 0.04 : 0.10);
         ctx.save();
         ctx.globalAlpha = ringAlpha;
-        ctx.strokeStyle = ag.wsConnected ? '#4a8abb' : '#2a3a4a';
+        ctx.strokeStyle = ag.wsConnected ? P.orbitOnline : P.orbitOffline;
         ctx.lineWidth = 0.5 / k;
         ctx.beginPath(); ctx.arc(ag.x, ag.y, r, 0, Math.PI * 2); ctx.stroke();
         ctx.restore();
@@ -1198,7 +1276,7 @@ export function NetMapPage() {
           const dist = Math.sqrt(dx * dx + dy * dy) || 80;
           const linkAngle = Math.atan2(dy, dx);
           const ex = Math.max(dist * 0.35, 30), ey = Math.max(dist * 0.15, 15);
-          const orbitCol = ip.status === 'banned' ? '#ef4444' : ip.status === 'suspicious' ? '#f97316' : '#5a9abb';
+          const orbitCol = threatLineColor(ip.status, P.orbitClean);
 
           // Orbit ellipse
           ctx.save();
@@ -1226,7 +1304,7 @@ export function NetMapPage() {
       }
 
       // Thin line from IP to each connected agent (always visible)
-      const lineCol = ip.status === 'banned' ? '#ef4444' : ip.status === 'suspicious' ? '#f97316' : '#3a6a8a';
+      const lineCol = threatLineColor(ip.status, P.linkClean);
       const lineAlpha = (dimmed ? 0.04 : 0.15) * ageFade * ip.arriveT;
       for (const aid of ip.agentIds) {
         const ag = agMap.get(aid);
@@ -1242,6 +1320,7 @@ export function NetMapPage() {
 
     // ── IP dots ──────────────────────────────────────────────────────────
 
+    const focusedIp = clickedIpRef.current?.ip ?? null;
     for (const ip of ipNodes) {
       const dimmed  = selId !== null && !ip.agentIds.includes(selId);
       const glow    = now < ip.glowUntil;
@@ -1253,9 +1332,10 @@ export function NetMapPage() {
 
       // Trail (comet tail)
       if (ip.trail.length > 1 && !dimmed && alpha > 0.1) {
+        const tc = trailRgb(ip.status);
         for (let ti = 0; ti < ip.trail.length - 1; ti++) {
           const ta = (ti / ip.trail.length) * alpha * 0.2;
-          ctx.fillStyle = `rgba(${ip.status === 'banned' ? '226,75,74' : ip.status === 'suspicious' ? '249,115,22' : ip.status === 'whitelisted' ? '93,202,165' : '130,160,195'},${ta})`;
+          ctx.fillStyle = rgba(tc, ta);
           ctx.beginPath(); ctx.arc(ip.trail[ti].x, ip.trail[ti].y, 0.6 / k, 0, Math.PI * 2); ctx.fill();
         }
       }
@@ -1265,8 +1345,8 @@ export function NetMapPage() {
         const pulse = (Math.sin(ts / 800) + 1) / 2;
         ctx.save();
         ctx.globalAlpha = 0.08 + 0.10 * pulse;
-        ctx.shadowBlur  = ip.dotR * 4; ctx.shadowColor = '#ef4444';
-        ctx.fillStyle   = '#ef444430';
+        ctx.shadowBlur  = ip.dotR * 4; ctx.shadowColor = P.status.banned;
+        ctx.fillStyle   = rgba(hexRgb(P.status.banned), 0.19);
         ctx.beginPath(); ctx.arc(ip.x, ip.y, ip.dotR * 2.5 + pulse * 3, 0, Math.PI * 2); ctx.fill();
         ctx.restore();
       }
@@ -1275,11 +1355,11 @@ export function NetMapPage() {
       if (ip.status === 'suspicious' && ip.failures > 10 && !dimmed) {
         const cycle = (ts % 3000) / 3000;
         if (cycle < 0.4) {
-          const t = cycle / 0.4;
+          const tt = cycle / 0.4;
           ctx.save();
-          ctx.globalAlpha = (1 - t) * 0.15;
-          ctx.strokeStyle = '#f97316'; ctx.lineWidth = 0.8 / k;
-          ctx.beginPath(); ctx.arc(ip.x, ip.y, ip.dotR + t * 15, 0, Math.PI * 2); ctx.stroke();
+          ctx.globalAlpha = (1 - tt) * 0.15;
+          ctx.strokeStyle = P.status.suspicious; ctx.lineWidth = 0.8 / k;
+          ctx.beginPath(); ctx.arc(ip.x, ip.y, ip.dotR + tt * 15, 0, Math.PI * 2); ctx.stroke();
           ctx.restore();
         }
       }
@@ -1289,19 +1369,16 @@ export function NetMapPage() {
         ctx.save();
         ctx.globalAlpha = 0.20 * pulse;
         ctx.shadowBlur  = ip.dotR * 5; ctx.shadowColor = ip.color;
-        ctx.fillStyle   = ip.color + '40';
+        ctx.fillStyle   = rgba(hexRgb(ip.color), 0.25);
         ctx.beginPath(); ctx.arc(ip.x, ip.y, ip.dotR * 2.8, 0, Math.PI * 2); ctx.fill();
         ctx.restore();
       }
 
       // IP dot — small and subtle, mockup v5 style
-      const bc = ip.status === 'banned' ? [226, 75, 74]
-               : ip.status === 'suspicious' ? [249, 168, 37]
-               : ip.status === 'whitelisted' ? [93, 202, 165]
-               : [130, 160, 195]; // clean = neutral blue-gray
+      const bc = dotRgb(ip.status);
       ctx.save();
-      ctx.shadowBlur = 1.5 * Math.min(k, 2); ctx.shadowColor = `rgba(${bc[0]},${bc[1]},${bc[2]},${alpha * 0.25})`;
-      ctx.fillStyle = `rgba(${bc[0]},${bc[1]},${bc[2]},${alpha * 0.95})`;
+      ctx.shadowBlur = 1.5 * Math.min(k, 2); ctx.shadowColor = rgba(bc, alpha * 0.25);
+      ctx.fillStyle = rgba(bc, alpha * 0.95);
       ctx.beginPath(); ctx.arc(ip.x, ip.y, ip.dotR, 0, Math.PI * 2); ctx.fill();
       ctx.shadowBlur = 0;
       ctx.restore();
@@ -1309,22 +1386,29 @@ export function NetMapPage() {
       // IP label — only for IPs with a custom display label
       if (ip.displayLabel && !dimmed && alpha > 0.2 && k > 0.5) {
         ctx.save();
-        ctx.font = `500 ${Math.round(7 * Math.min(k, 1.3))}px "Inter", "Segoe UI", ui-sans-serif, sans-serif`;
-        ctx.fillStyle = `rgba(${bc[0]},${bc[1]},${bc[2]},${alpha * 0.6})`;
+        ctx.font = `500 ${Math.round(7 * Math.min(k, 1.3))}px ${FONT_UI}`;
+        ctx.fillStyle = rgba(bc, alpha * 0.6);
         ctx.textAlign = 'center';
-        ctx.shadowBlur = 4; ctx.shadowColor = 'rgba(0,0,0,0.8)';
+        ctx.shadowBlur = 4; ctx.shadowColor = rgba(P.shadow, 0.8);
         ctx.fillText(ip.displayLabel, ip.x, ip.y - ip.dotR - 3 * Math.min(k, 1.3));
         ctx.restore();
       }
 
-      // Search highlight — pulsing ring on matched IP
+      // Search highlight — pulsing ring on matched IP; steady ring on the shown IP
       if (searchHitRef.current === ip.ip) {
         const sp = (Math.sin(ts / 200) + 1) / 2;
         ctx.save();
         ctx.globalAlpha = 0.5 + sp * 0.3;
-        ctx.strokeStyle = '#ffffff';
+        ctx.strokeStyle = rgbaWhite(1);
         ctx.lineWidth = 2 / k;
         ctx.beginPath(); ctx.arc(ip.x, ip.y, ip.dotR + 6 + sp * 4, 0, Math.PI * 2); ctx.stroke();
+        ctx.restore();
+      } else if (focusedIp === ip.ip) {
+        ctx.save();
+        ctx.globalAlpha = 0.6;
+        ctx.strokeStyle = rgbaWhite(1);
+        ctx.lineWidth = 1.2 / k;
+        ctx.beginPath(); ctx.arc(ip.x, ip.y, ip.dotR + 5, 0, Math.PI * 2); ctx.stroke();
         ctx.restore();
       }
     }
@@ -1344,8 +1428,8 @@ export function NetMapPage() {
       if (conns > 25) {
         const heatR = effR + Math.min(conns, 120) * 1.2;
         const hg = ctx.createRadialGradient(sx, sy, effR, sx, sy, heatR);
-        hg.addColorStop(0, `rgba(226,75,74,${Math.min(0.06, conns * 0.0005)})`);
-        hg.addColorStop(0.6, `rgba(245,166,35,${Math.min(0.03, conns * 0.0003)})`);
+        hg.addColorStop(0, rgba(P.threat, Math.min(0.06, conns * 0.0005)));
+        hg.addColorStop(0.6, rgba(P.amber, Math.min(0.03, conns * 0.0003)));
         hg.addColorStop(1, 'transparent');
         ctx.fillStyle = hg; ctx.beginPath(); ctx.arc(sx, sy, heatR, 0, Math.PI * 2); ctx.fill();
       }
@@ -1357,18 +1441,31 @@ export function NetMapPage() {
           const rot = ts * 0.0004 * (i % 2 ? 1 : -1);
           ctx.save(); ctx.translate(sx, sy); ctx.rotate(rot);
           ctx.beginPath(); ctx.arc(0, 0, rr, -0.2, Math.PI * 0.35);
-          ctx.strokeStyle = `rgba(245,166,35,${0.03 / i})`; ctx.lineWidth = 0.5; ctx.stroke();
+          ctx.strokeStyle = rgba(P.amber, 0.03 / i); ctx.lineWidth = 0.5; ctx.stroke();
           ctx.beginPath(); ctx.arc(0, 0, rr, Math.PI * 0.7, Math.PI * 1.1);
-          ctx.strokeStyle = `rgba(245,166,35,${0.02 / i})`; ctx.stroke();
+          ctx.strokeStyle = rgba(P.amber, 0.02 / i); ctx.stroke();
           ctx.restore();
         }
       }
 
+      // Evaluate-only marker: slowly turning dashed amber ring
+      if (agent.evaluateOnly) {
+        ctx.save();
+        ctx.globalAlpha = dimmed ? 0.2 : 0.75;
+        ctx.strokeStyle = rgba(P.amber, 0.9);
+        ctx.lineWidth = 1.2 / Math.max(k, 0.5);
+        ctx.setLineDash([3, 4]);
+        ctx.lineDashOffset = -(ts / 120) % 7;
+        ctx.beginPath(); ctx.arc(sx, sy, effR + 3.5, 0, Math.PI * 2); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+      }
+
       // Body — gradient with bright core (mockup style)
       const grd = ctx.createRadialGradient(sx - effR * 0.2, sy - effR * 0.2, effR * 0.05, sx, sy, effR);
-      grd.addColorStop(0, 'rgba(255,255,255,0.25)');
+      grd.addColorStop(0, rgbaWhite(0.25));
       grd.addColorStop(0.3, col);
-      grd.addColorStop(1, `rgba(${rgb[0]},${rgb[1]},${rgb[2]},0.1)`);
+      grd.addColorStop(1, rgba(rgb, 0.1));
       ctx.globalAlpha = dimmed ? 0.2 : (isOnline ? 1 : 0.35);
       ctx.fillStyle = grd; ctx.beginPath(); ctx.arc(sx, sy, effR, 0, Math.PI * 2); ctx.fill();
 
@@ -1380,7 +1477,7 @@ export function NetMapPage() {
 
       // Hover ring
       if (isSel) {
-        ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1.5;
+        ctx.strokeStyle = rgbaWhite(0.35); ctx.lineWidth = 1.5;
         ctx.beginPath(); ctx.arc(sx, sy, agent.r + 5, 0, Math.PI * 2); ctx.stroke();
       }
 
@@ -1391,31 +1488,38 @@ export function NetMapPage() {
         const labelY = sy + effR + 8;
         const kk = Math.min(k, 1.3);
         const fs = Math.round((agent.r >= 15 ? 10 : 8.5) * kk);
-        ctx.font = `500 ${fs}px "Inter", "Segoe UI", ui-sans-serif, sans-serif`;
-        ctx.fillStyle = dimmed ? 'rgba(200,220,240,0.2)' : 'rgba(200,220,240,0.8)';
+        ctx.font = `500 ${fs}px ${FONT_UI}`;
+        ctx.fillStyle = rgba(P.label, dimmed ? 0.2 : 0.8);
         ctx.textAlign = 'center';
         ctx.fillText(agent.label, sx, labelY);
 
         // IP count + group name
         if (conns > 0 && k > 0.5 && !dimmed) {
-          ctx.font = `${Math.round(7.5 * Math.min(k, 1.2))}px "Inconsolata", "JetBrains Mono", monospace`;
-          ctx.fillStyle = conns > 50 ? 'rgba(226,75,74,0.55)' : conns > 15 ? 'rgba(245,166,35,0.45)' : 'rgba(93,202,165,0.4)';
-          ctx.fillText(conns + ' IPs', sx, labelY + 9 * kk);
+          ctx.font = `${Math.round(7.5 * Math.min(k, 1.2))}px ${FONT_MONO}`;
+          ctx.fillStyle = conns > 50 ? rgba(P.threat, 0.55) : conns > 15 ? rgba(P.amber, 0.45) : rgba(P.mint, 0.4);
+          ctx.fillText(text.ips(conns), sx, labelY + 9 * kk);
         }
 
         // Group name (subtle)
         if (agent.groupName && k > 0.6 && !dimmed) {
           const gOff = conns > 0 ? 17 : 9;
-          ctx.font = `${Math.round(6.5 * Math.min(k, 1.2))}px "Inter", "Segoe UI", ui-sans-serif, sans-serif`;
-          ctx.fillStyle = 'rgba(100,140,190,0.28)';
+          ctx.font = `${Math.round(6.5 * Math.min(k, 1.2))}px ${FONT_UI}`;
+          ctx.fillStyle = rgba(P.groupLabel, 0.28);
           ctx.fillText(agent.groupName.toUpperCase(), sx, labelY + gOff * kk);
         }
 
-        // Offline label
+        // State labels above the body: offline, evaluate-only
+        let topY = sy - effR - 6;
         if (!isOnline) {
-          ctx.font = `500 ${Math.round(7 * Math.min(k, 1.2))}px "Inter", ui-sans-serif, sans-serif`;
-          ctx.fillStyle = 'rgba(226,75,74,0.5)';
-          ctx.fillText('OFFLINE', sx, sy - effR - 6);
+          ctx.font = `500 ${Math.round(7 * Math.min(k, 1.2))}px ${FONT_UI}`;
+          ctx.fillStyle = rgba(P.threat, 0.5);
+          ctx.fillText(text.offline.toUpperCase(), sx, topY);
+          topY -= 9 * Math.min(k, 1.2);
+        }
+        if (agent.evaluateOnly && k > 0.5 && !dimmed) {
+          ctx.font = `600 ${Math.round(6.5 * Math.min(k, 1.2))}px ${FONT_UI}`;
+          ctx.fillStyle = rgba(P.amber, 0.75);
+          ctx.fillText(text.evaluateOnly.toUpperCase(), sx, topY);
         }
       }
     }
@@ -1431,7 +1535,7 @@ export function NetMapPage() {
       const fade = part.t < 0.8 ? 1 : (1 - part.t) / 0.2;
       ctx.save();
       ctx.globalAlpha = fade; ctx.shadowBlur = 14; ctx.shadowColor = part.color;
-      ctx.fillStyle = '#ffffff';
+      ctx.fillStyle = rgbaWhite(1);
       ctx.beginPath(); ctx.arc(px, py, 2.8, 0, Math.PI * 2); ctx.fill();
       ctx.restore();
     }
@@ -1459,8 +1563,8 @@ export function NetMapPage() {
 
       // Background
       ctx.save();
-      ctx.fillStyle = 'rgba(3,2,2,0.75)';
-      ctx.strokeStyle = 'rgba(80,60,30,0.3)';
+      ctx.fillStyle = P.minimap.bg;
+      ctx.strokeStyle = P.minimap.border;
       ctx.lineWidth = 1;
       ctx.fillRect(mmX, mmY, mmW, mmH);
       ctx.strokeRect(mmX, mmY, mmW, mmH);
@@ -1468,7 +1572,7 @@ export function NetMapPage() {
       // Agent dots only (no IPs on minimap)
       for (const ag of agents) {
         ctx.globalAlpha = 0.9;
-        ctx.fillStyle = ag.wsConnected ? '#22d3ee' : '#64748b';
+        ctx.fillStyle = ag.wsConnected ? P.minimap.online : P.minimap.offline;
         ctx.beginPath(); ctx.arc(toMmX(ag.x), toMmY(ag.y), 2.5, 0, Math.PI * 2); ctx.fill();
       }
 
@@ -1478,7 +1582,7 @@ export function NetMapPage() {
       const vpWidth  = (w / k) * mmScale;
       const vpHeight = (h / k) * mmScale;
       ctx.globalAlpha = 0.5;
-      ctx.strokeStyle = '#ffffff';
+      ctx.strokeStyle = rgbaWhite(1);
       ctx.lineWidth = 1;
       ctx.strokeRect(mmX + vpLeft, mmY + vpTop, vpWidth, vpHeight);
 
@@ -1502,7 +1606,11 @@ export function NetMapPage() {
     void init();
     lastTsRef.current = performance.now();
     rafRef.current = requestAnimationFrame(animate);
-    return () => cancelAnimationFrame(rafRef.current);
+    return () => {
+      cancelAnimationFrame(rafRef.current);
+      if (relayoutTimerRef.current) clearTimeout(relayoutTimerRef.current);
+      if (geoTimerRef.current) clearTimeout(geoTimerRef.current);
+    };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Resize ────────────────────────────────────────────────────────────────
@@ -1544,36 +1652,23 @@ export function NetMapPage() {
     });
     obs.observe(el);
     return () => { obs.disconnect(); clearTimeout(timer); };
-  }, [drawBg]);
+  }, [drawBg, viewMode]);
 
   // ── Initial live events load ───────────────────────────────────────────────
 
   useEffect(() => {
     let cancelled = false;
-    apiClient.get('/ip-events', { params: { pageSize: 100 } })
+    apiClient.get<{ data: Record<string, unknown>[] }>('/ip-events', { params: { pageSize: 100 } })
       .then(res => {
         if (cancelled) return;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const events = ((res.data as any).data ?? []) as any[];
-        const mapped: LiveEvent[] = events.map(ev => {
-          const evId   = ev.id as number | undefined;
-          if (evId) processedEventIdsRef.current.add(evId);
-          const evType = (ev.event_type ?? ev.eventType ?? 'auth_success') as string;
-          const svcKey = (ev.service ?? '').toLowerCase().split('/')[0];
-          const col = DANGEROUS_SVCS.has(svcKey) ? '#ef4444'
-            : evType === 'auth_success' ? EVENT_COLORS.auth_success : EVENT_COLORS.auth_failure;
-          return {
-            id: String(evId ?? Math.random()),
-            ip: ev.ip as string,
-            service: (ev.service ?? '') as string,
-            country: '??',
-            agentName: (ev.hostname ?? 'Agent') as string,
-            time: new Date(ev.timestamp ?? ev.created_at),
-            color: col,
-            eventType: (evType === 'auth_success' ? 'auth_success' : 'auth_failure') as 'auth_success' | 'auth_failure',
-          };
+        const events = res.data?.data ?? [];
+        const fallback = t('netmap.agentFallback', { defaultValue: 'Agent' });
+        const mapped = events.map(ev => {
+          const evId = ev.id as number | undefined;
+          if (evId) processedEventIdsRef.current.add(Number(evId));
+          return liveEventFromRest(ev, fallback);
         });
-        setLiveEvents(mapped);
+        setLiveEvents(prev => mergeLiveEvents(prev, mapped));
         if (mapped.length > 0) {
           oldestLiveTimestampRef.current = mapped[mapped.length - 1].time.toISOString();
         }
@@ -1589,195 +1684,178 @@ export function NetMapPage() {
   // effects below re-bind to the new instance.
   const socketGeneration = useSocketStore(s => s.generation);
 
+  /** Remember a stored event id; false when it was already seen. */
+  const rememberEventId = useCallback((id: number): boolean => {
+    const seen = processedEventIdsRef.current;
+    if (seen.has(id)) return false;
+    seen.add(id);
+    if (seen.size > SEEN_EVENT_IDS_CAP) seen.delete(seen.values().next().value!);
+    return true;
+  }, []);
+
+  /** Rows of a flush (newest first): IP nodes, peer links, particles, live feed. */
+  const ingestFlow = useCallback((rows: FlowRow[]) => {
+    const agents = agentsRef.current;
+    const now    = Date.now();
+    const fresh: LiveEvent[] = [];
+    let added = false;
+
+    // Oldest first, so particles and the feed keep the agent's order
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const row = rows[i];
+      if (!row.ip) continue;
+      if (row.id != null && !rememberEventId(row.id)) continue;
+      const agent = agents.find(a => a.id === row.deviceId);
+      if (!agent) continue; // not on the map (pending, other view)
+      agent.lastPushAt = now;
+      const evType = feedType(row.eventType);
+      const flowOn = filtersRef.current.has(evType);
+      const id     = row.id != null ? String(row.id) : Math.random().toString(36).slice(2);
+      const time   = new Date(row.timestamp);
+
+      // Agent-to-agent peer traffic: draw a directed link, don't show as IP node
+      if (row.sourceAgentId) {
+        const type = row.sourceIpType === 'wan' ? 'wan' : 'lan';
+        const col  = PEER_LINK_COLOR[type];
+        upsertPeerLink(row.sourceAgentId, row.deviceId, type, row.service);
+        if (flowOn) spawnPeerParticle(row.sourceAgentId, row.deviceId, col);
+        const srcAgent = agents.find(a => a.id === row.sourceAgentId);
+        fresh.push({
+          id, ip: row.ip, service: row.service, country: type.toUpperCase(),
+          agentName: `${srcAgent?.label ?? '?'} → ${agent.label}`,
+          time, color: col, eventType: evType,
+        });
+        continue;
+      }
+
+      const failure = evType === 'auth_failure';
+      const col = liveEventColor(row.service, evType);
+      const { node, created } = upsertIp(row.ip, agent.id, {
+        status: failure ? 'suspicious' : 'clean',
+        addFailures: failure ? 1 : 0,
+        services: row.service ? [row.service] : [],
+        evtCount: 1,
+        glow: true,
+      });
+      if (created) added = true;
+      if (node && flowOn) spawnParticle(node, agent.id, col);
+      fresh.push({
+        id, ip: row.ip, service: row.service, country: node?.country ?? '??',
+        agentName: agent.label,
+        time, color: col, eventType: evType,
+      });
+    }
+
+    if (fresh.length > 0) setLiveEvents(prev => mergeLiveEvents(fresh.reverse(), prev));
+    if (added) { scheduleRelayout(); scheduleGeoLookup(); }
+  }, [rememberEventId, upsertIp, upsertPeerLink, spawnParticle, spawnPeerParticle, scheduleRelayout, scheduleGeoLookup]);
+
   useEffect(() => {
     const socket = getSocket();
     if (!socket) return;
-    const ccs = ['US', 'CN', 'RU', 'DE', 'FR', 'BR', 'IN', 'KR', 'IR', 'UA', 'TR', 'PL'];
 
-    const onIpFlow = (data: {
-      ip: string; service: string; eventType: 'auth_success' | 'auth_failure'; deviceId: number;
-      sourceAgentId?: number | null; sourceIpType?: 'lan' | 'wan' | null;
-    }) => {
-      const agents = agentsRef.current;
-      const agent  = agents.find(a => a.id === data.deviceId) ?? agents[0];
-      if (!agent) return;
-      if (!filtersRef.current.has(data.eventType)) return;
-
-      // Agent-to-agent peer traffic: draw a directed link, don't show as IP node
-      if (data.sourceAgentId) {
-        const type    = (data.sourceIpType ?? 'lan') as 'lan' | 'wan';
-        const col     = PEER_LINK_COLOR[type];
-        upsertPeerLink(data.sourceAgentId, data.deviceId, type, data.service ?? '');
-        spawnPeerParticle(data.sourceAgentId, data.deviceId, col);
-        const srcAgent = agents.find(a => a.id === data.sourceAgentId);
-        setLiveEvents(prev => [{
-          id: Math.random().toString(36).slice(2),
-          ip: data.ip, service: data.service, country: type.toUpperCase(),
-          agentName: `${srcAgent?.label ?? '?'} → ${agent.label}`,
-          time: new Date(), color: col, eventType: data.eventType,
-        }, ...prev].slice(0, 100));
-        return;
-      }
-
-      const svcKey = (data.service ?? '').toLowerCase().split('/')[0];
-      const col = DANGEROUS_SVCS.has(svcKey)
-        ? '#ef4444' // red for dangerous services (SSH, RDP, MySQL…) regardless of success/failure
-        : data.eventType === 'auth_success' ? EVENT_COLORS.auth_success : EVENT_COLORS.auth_failure;
-      const cc  = ccs[Math.floor(Math.random() * ccs.length)];
-      upsertIp(data.ip, cc, agent.id,
-        data.eventType === 'auth_failure' ? 'suspicious' : 'clean',
-        data.eventType === 'auth_failure' ? 1 : 0,
-        [data.service], 1, true);
-      const node = ipsRef.current.get(data.ip);
-      if (node) spawnParticle(node, agent.id, col);
-      scheduleRelayout();
-      setLiveEvents(prev => [{
-        id: Math.random().toString(36).slice(2),
-        ip: data.ip, service: data.service, country: cc,
-        agentName: agent.label,
-        time: new Date(), color: col, eventType: data.eventType,
-      }, ...prev].slice(0, 100));
+    // Batched rows of one agent flush (with their ids: no refetch needed).
+    const onIpEvents = (frame: IpEventsFrame) => {
+      ipEventsSeenRef.current = true;
+      ingestFlow((frame?.events ?? []).map(flowRowFromStream));
     };
 
-    const onBanAuto = (data: { ip: string; service: string; failureCount: number; deviceId?: number }) => {
-      const agents = agentsRef.current;
-      const agent  = agents.find(a => a.id === data.deviceId) ?? agents[0];
-      let node = ipsRef.current.get(data.ip);
-      if (!node && agents[0]) {
-        upsertIp(data.ip, '??', agents[0].id, 'banned', data.failureCount, [data.service], 1, true);
-        node = ipsRef.current.get(data.ip);
-      } else if (node) {
-        node.status    = 'banned'; node.color = EVENT_COLORS.ban;
-        node.glowUntil = Date.now() + 3000; node.lastSeen = Date.now();
-      }
+    // Legacy thin ping: only until this server proves it sends ip:events.
+    const onIpFlow = (data: IpFlowEvent) => {
+      if (ipEventsSeenRef.current) return;
+      ingestFlow([flowRowFromLegacy(data)]);
+    };
+
+    const onBanAuto = (data: BanAutoEvent) => {
+      banIpsRef.current.set(data.id, data.ip);
+      const node = setIpStatus(data.ip, 'banned', true);
       if (node) {
         ripplesRef.current.push({ id: Math.random().toString(36).slice(2), x: node.x, y: node.y, t: 0 });
         if (filtersRef.current.has('ban')) spawnParticle(node, node.agentIds[0], EVENT_COLORS.ban);
       }
-      setLiveEvents(prev => [{
-        id: Math.random().toString(36).slice(2),
+      const agent = node ? agentsRef.current.find(a => a.id === node.agentIds[0]) : undefined;
+      setLiveEvents(prev => mergeLiveEvents([{
+        id: `ban-${data.id}`,
         ip: data.ip, service: data.service, country: node?.country ?? '??',
-        agentName: agent?.label ?? 'Server',
+        agentName: agent?.label ?? t('netmap.server', { defaultValue: 'Server' }),
         time: new Date(), color: EVENT_COLORS.ban, eventType: 'ban' as const,
         failures: data.failureCount,
-      }, ...prev].slice(0, 100));
+      }], prev));
       setStats(s => ({ ...s, today: s.today + 1, banned: s.banned + 1 }));
     };
 
+    const onBanCreated = (ban: IpBan) => {
+      if (!ban?.ip) return;
+      banIpsRef.current.set(ban.id, ban.ip);
+      if (ban.isActive !== false) setIpStatus(ban.ip, 'banned', true);
+      setStats(s => ({ ...s, today: s.today + 1, banned: s.banned + (ban.isActive !== false ? 1 : 0) }));
+    };
+
+    /** A ban stopped applying here: its IP falls back to its failure-based status. */
+    const unban = (banId: number) => {
+      const ip = banIpsRef.current.get(banId);
+      const node = ip ? ipsRef.current.get(ip) : undefined;
+      if (node && node.status === 'banned') setIpStatus(node.ip, node.failures > 0 ? 'suspicious' : 'clean');
+    };
+
+    const onBanLifted = (data: BanLiftedEvent) => {
+      unban(data.id);
+      setStats(s => ({ ...s, banned: Math.max(0, s.banned - 1) }));
+    };
+
+    // A bulk lift carries a count only (no ids, every tenant's bans counted):
+    // the soft refresh re-reads the statuses and the counters.
+    const onBanBulkLifted = (_data: BanBulkLiftedEvent) => {
+      void softRefreshRef.current();
+    };
+
+    // A tenant exclusion only changes the counters of that tenant's view.
+    const onBanExcluded = (data: BanExclusionEvent) => {
+      if (data?.tenantId !== currentTenantIdRef.current) return;
+      unban(data.banId);
+      setStats(s => ({ ...s, banned: Math.max(0, s.banned - 1) }));
+    };
+    const onBanExclusionRemoved = (data: BanExclusionEvent) => {
+      if (data?.tenantId !== currentTenantIdRef.current) return;
+      const ip = banIpsRef.current.get(data.banId);
+      if (ip) setIpStatus(ip, 'banned', true);
+      setStats(s => ({ ...s, banned: s.banned + 1 }));
+    };
+
+    // Online pulse only: the IP activity itself arrives through ip:events.
     const onPushHeartbeat = (data: { deviceId: number }) => {
-      // 1. Immediately update lastPushAt so online indicator is accurate
-      const agent = agentsRef.current.find(a => a.id === data.deviceId);
+      const agent = agentsRef.current.find(a => a.id === data?.deviceId);
       if (agent) agent.lastPushAt = Date.now();
-
-      // 2. Debounced mini-refresh per agent (1.5 s cooldown so a 2 s push cycle
-      //    results in one fetch per agent shortly after each push, not per-event).
-      const prev = agentRefreshTimersRef.current.get(data.deviceId);
-      if (prev) clearTimeout(prev);
-      const t = setTimeout(async () => {
-        agentRefreshTimersRef.current.delete(data.deviceId);
-        const tsNow = Date.now();
-        const since = new Date(tsNow - 90_000).toISOString();
-        try {
-          // Fetch recent events for this agent only
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const evRes = await apiClient.get<{ data: any[] }>(
-            '/ip-events',
-            { params: { deviceId: data.deviceId, pageSize: 60, from: since } },
-          ).catch(() => null);
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const events = ((evRes?.data as any)?.data ?? []) as any[];
-          const ag     = agentsRef.current.find(a => a.id === data.deviceId);
-          let hasNew   = false;
-          const newLive: LiveEvent[] = [];
-
-          for (const ev of events) {
-            const evIp = ev.ip as string | undefined;
-            if (!evIp) continue;
-
-            // Agent-to-agent peer event: update peer link, skip IP upsert
-            const srcAgentId = (ev.source_agent_id ?? ev.sourceAgentId) as number | null | undefined;
-            if (srcAgentId) {
-              const type = ((ev.source_ip_type ?? ev.sourceIpType) === 'wan' ? 'wan' : 'lan') as 'lan' | 'wan';
-              upsertPeerLink(srcAgentId, data.deviceId, type, (ev.service ?? '') as string);
-              continue;
-            }
-
-            const node = ipsRef.current.get(evIp);
-            if (node) {
-              node.lastSeen = tsNow;
-              const svc = (ev.service ?? '') as string;
-              if (svc && !node.services.includes(svc)) node.services = [...node.services, svc];
-            } else {
-              // New IP not yet on the map
-              const evType = (ev.event_type ?? ev.eventType ?? '') as string;
-              const status = evType === 'auth_failure' ? 'suspicious' : 'clean';
-              upsertIp(evIp, '??', data.deviceId, status,
-                status === 'suspicious' ? 1 : 0,
-                ev.service ? [ev.service as string] : [], 1, false);
-              hasNew = true;
-            }
-
-            // Feed live events that are < 30 s old and not already shown
-            const evId  = ev.id as number | undefined;
-            const evTs  = new Date(ev.timestamp ?? ev.created_at ?? 0).getTime();
-            if (tsNow - evTs < 30_000 && (!evId || !processedEventIdsRef.current.has(evId))) {
-              if (evId) {
-                processedEventIdsRef.current.add(evId);
-                if (processedEventIdsRef.current.size > 500) {
-                  const it = processedEventIdsRef.current.values();
-                  processedEventIdsRef.current.delete(it.next().value!);
-                }
-              }
-              const evType = (ev.event_type ?? ev.eventType ?? '') as string;
-              const svcKey = (ev.service ?? '').toLowerCase().split('/')[0];
-              const col    = DANGEROUS_SVCS.has(svcKey) ? '#ef4444'
-                : evType === 'auth_success' ? EVENT_COLORS.auth_success : EVENT_COLORS.auth_failure;
-              const liveNode = ipsRef.current.get(evIp);
-              if (liveNode && ag) spawnParticle(liveNode, ag.id, col);
-              newLive.push({
-                id:        String(evId ?? Math.random()),
-                ip:        evIp,
-                service:   (ev.service ?? '') as string,
-                country:   liveNode?.country ?? '??',
-                agentName: ag?.label ?? 'Agent',
-                time:      new Date(evTs),
-                color:     col,
-                eventType: evType === 'auth_success' ? 'auth_success' : 'auth_failure',
-              });
-            }
-          }
-
-          if (newLive.length > 0) {
-            setLiveEvents(prev => [...newLive, ...prev].slice(0, 100));
-          }
-          if (hasNew) scheduleRelayout();
-
-          // Refresh ban stats
-          const banRes = await apiClient.get<{ data: { active: number; today: number } }>(
-            '/bans/stats',
-          ).catch(() => null);
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const bs = (banRes?.data as any)?.data;
-          if (bs) setStats(s => ({ ...s, banned: bs.active, today: bs.today }));
-          setIpCount(ipsRef.current.size);
-        } catch { /* ignore */ }
-      }, 1_500);
-      agentRefreshTimersRef.current.set(data.deviceId, t);
     };
 
-    socket.on('ip:flow',             onIpFlow);
-    socket.on('ban:auto',            onBanAuto);
-    socket.on('agent:pushHeartbeat', onPushHeartbeat);
+    const onStatusChanged = (data: { deviceId?: number; wsConnected?: boolean }) => {
+      const agent = agentsRef.current.find(a => a.id === data?.deviceId);
+      if (agent && typeof data.wsConnected === 'boolean') agent.wsConnected = data.wsConnected;
+    };
+
+    socket.on(SOCKET_EVENTS.IP_EVENTS,             onIpEvents);
+    socket.on(SOCKET_EVENTS.IP_FLOW,               onIpFlow);
+    socket.on(SOCKET_EVENTS.BAN_AUTO,              onBanAuto);
+    socket.on(SOCKET_EVENTS.BAN_CREATED,           onBanCreated);
+    socket.on(SOCKET_EVENTS.BAN_LIFTED,            onBanLifted);
+    socket.on(SOCKET_EVENTS.BAN_BULK_LIFTED,       onBanBulkLifted);
+    socket.on(SOCKET_EVENTS.BAN_EXCLUDED,          onBanExcluded);
+    socket.on(SOCKET_EVENTS.BAN_EXCLUSION_REMOVED, onBanExclusionRemoved);
+    socket.on(SOCKET_EVENTS.AGENT_PUSH_HEARTBEAT,  onPushHeartbeat);
+    socket.on(SOCKET_EVENTS.AGENT_STATUS_CHANGED,  onStatusChanged);
     return () => {
-      socket.off('ip:flow',             onIpFlow);
-      socket.off('ban:auto',            onBanAuto);
-      socket.off('agent:pushHeartbeat', onPushHeartbeat);
-      // Clear any pending timers on cleanup
-      agentRefreshTimersRef.current.forEach(t => clearTimeout(t));
-      agentRefreshTimersRef.current.clear();
-      if (relayoutTimerRef.current) clearTimeout(relayoutTimerRef.current);
+      socket.off(SOCKET_EVENTS.IP_EVENTS,             onIpEvents);
+      socket.off(SOCKET_EVENTS.IP_FLOW,               onIpFlow);
+      socket.off(SOCKET_EVENTS.BAN_AUTO,              onBanAuto);
+      socket.off(SOCKET_EVENTS.BAN_CREATED,           onBanCreated);
+      socket.off(SOCKET_EVENTS.BAN_LIFTED,            onBanLifted);
+      socket.off(SOCKET_EVENTS.BAN_BULK_LIFTED,       onBanBulkLifted);
+      socket.off(SOCKET_EVENTS.BAN_EXCLUDED,          onBanExcluded);
+      socket.off(SOCKET_EVENTS.BAN_EXCLUSION_REMOVED, onBanExclusionRemoved);
+      socket.off(SOCKET_EVENTS.AGENT_PUSH_HEARTBEAT,  onPushHeartbeat);
+      socket.off(SOCKET_EVENTS.AGENT_STATUS_CHANGED,  onStatusChanged);
     };
-  }, [upsertIp, spawnParticle, spawnPeerParticle, upsertPeerLink, scheduleRelayout, socketGeneration]);
+  }, [ingestFlow, setIpStatus, spawnParticle, t, socketGeneration]);
 
   // ── Socket connection status ───────────────────────────────────────────────
 
@@ -1801,6 +1879,24 @@ export function NetMapPage() {
     return () => window.removeEventListener(SOCKET_RESYNC_EVENT, onResync);
   }, []);
 
+  // An IP changed through the drawer or another page (ban, lift, whitelist,
+  // label…): re-read that IP; several IPs at once → soft refresh.
+  useIpChanged((ip) => {
+    if (ip === null) { void softRefresh(); return; }
+    const node = ipsRef.current.get(ip);
+    if (!node) return;
+    void Promise.all([
+      ipReputationApi.getDetail(ip).catch(() => null),
+      ipLabelsApi.list().catch(() => null),
+    ]).then(([detail, labelRows]) => {
+      const status = detail?.reputation?.status;
+      if (status) setIpStatus(ip, status);
+      if (detail?.reputation) node.failures = detail.reputation.totalFailures;
+      if (labelRows) node.displayLabel = labelRows.find(l => l.ip === ip)?.label ?? null;
+      setClickedIp(prev => (prev?.ip === ip ? { ...node } : prev));
+    });
+  });
+
   // ── Wheel zoom ────────────────────────────────────────────────────────────
 
   useEffect(() => {
@@ -1821,9 +1917,18 @@ export function NetMapPage() {
     };
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
-  }, []);
+  }, [viewMode]);
 
   // ── Mouse ─────────────────────────────────────────────────────────────────
+
+  /** IP drawn by the canvas (tab view + threat filter): only those are hit-tested. */
+  const isIpDrawn = (ip: IpNode): boolean => {
+    const tabFilter = visibleAgentIdsRef.current;
+    if (tabFilter && !ip.agentIds.some(id => tabFilter.has(id))) return false;
+    return !threatOnlyRef.current || ip.status === 'banned' || ip.status === 'suspicious';
+  };
+  const isIpDrawnRef = useRef(isIpDrawn);
+  isIpDrawnRef.current = isIpDrawn;
 
   const handleMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     if (e.button !== 0) return;
@@ -1847,6 +1952,7 @@ export function NetMapPage() {
     let closestIp: IpNode | null = null;
     let closestDist = Infinity;
     for (const ip of ipsRef.current.values()) {
+      if (!isIpDrawnRef.current(ip)) continue;
       const d2 = (wx - ip.x) ** 2 + (wy - ip.y) ** 2;
       const hitR = ip.dotR + 12;
       if (d2 <= hitR * hitR && d2 < closestDist) {
@@ -1872,16 +1978,19 @@ export function NetMapPage() {
     const tr = transformRef.current;
     const wx = (mx - tr.x) / tr.k, wy = (my - tr.y) / tr.k;
 
-    // IP click → open side panel
+    // IP click → summary panel + the shared IP drawer
     for (const ip of ipsRef.current.values()) {
+      if (!isIpDrawnRef.current(ip)) continue;
       if ((wx - ip.x) ** 2 + (wy - ip.y) ** 2 <= (ip.dotR + 12) ** 2) {
-        setClickedIp(ip);
+        showIpRef.current(ip.ip);
         return;
       }
     }
 
-    // Agent click → focus
+    // Agent click → focus (agents of the active view only)
+    const tabFilter = visibleAgentIdsRef.current;
     for (const ag of agentsRef.current) {
+      if (tabFilter && !tabFilter.has(ag.id)) continue;
       if ((wx - ag.x) ** 2 + (wy - ag.y) ** 2 <= (ag.r + 24) ** 2) {
         const newSel = selectedRef.current === ag.id ? null : ag.id;
         selectedRef.current = newSel;
@@ -1904,20 +2013,65 @@ export function NetMapPage() {
 
   const resetView = useCallback(() => { transformRef.current = { x: 0, y: 0, k: 1 }; }, []);
 
+  const toggleViewMode = useCallback(() => {
+    // The IP summary panel (and the orbit pause it holds) belongs to the 2D view.
+    setClickedIp(null);
+    setTooltip(null);
+    setViewMode(prev => {
+      const next = prev === '2d' ? '3d' : '2d';
+      try { localStorage.setItem('obliguard-netmap-viewmode', next); } catch { /* storage unavailable */ }
+      return next;
+    });
+  }, []);
+
+  const searchSubmit = useCallback((e: React.FormEvent) => {
+    e.preventDefault();
+    const q = searchIp.trim();
+    if (!q) { setSearchHit(null); return; }
+    const node = ipsRef.current.get(q);
+    if (node) {
+      setSearchHit(q);
+      // Centre the node at zoom 2: screen = world × k + offset.
+      const k = 2;
+      transformRef.current = { x: sizeRef.current.w / 2 - node.x * k, y: sizeRef.current.h / 2 - node.y * k, k };
+      setTimeout(() => setSearchHit(cur => (cur === q ? null : cur)), 4000);
+    } else {
+      toast.error(t('netmap.search.notFound', { defaultValue: 'IP not on the map' }));
+    }
+    setSearchIp('');
+  }, [searchIp, t]);
+
+  const agentIpCount = (agentId: number) => [...ipsRef.current.values()].filter(n => n.agentIds.includes(agentId)).length;
+
+  /** Amber evaluate-only pill (agent panels). */
+  const evaluatePill = (
+    <span
+      className="inline-flex items-center gap-1 rounded px-1.5 py-[1px] text-[9px] font-mono uppercase tracking-wider border"
+      style={{ color: rgba(P.amber, 0.9), borderColor: rgba(P.amber, 0.35), backgroundColor: rgba(P.amber, 0.1) }}
+      title={t('evaluateOnly.badgeTooltip', { defaultValue: 'Evaluate-only mode: events are observed but no bans are created or enforced.' })}
+    >
+      <Eye size={9} />
+      {t('evaluateOnly.badge', { defaultValue: 'Evaluate-only' })}
+    </span>
+  );
+
   // ── JSX ───────────────────────────────────────────────────────────────────
 
   return (
-    <div className="flex flex-col h-[calc(100vh-4rem)] bg-[#06090f] overflow-hidden select-none">
+    <div
+      className="flex flex-col h-[calc(100vh-4rem)] bg-[color:var(--nm-space)] overflow-hidden select-none"
+      style={NETMAP_CSS_VARS as CSSProperties}
+    >
 
       {/* ── Header ──────────────────────────────────────────────────────────── */}
-      <div className="flex items-center justify-between px-5 py-2 border-b border-[#110c04] shrink-0 bg-[#070502]">
+      <div className="flex items-center justify-between px-5 py-2 border-b border-[color:var(--nm-border)] shrink-0 bg-[color:var(--nm-panel)]">
         <div className="flex items-center gap-3">
           <span className="relative flex h-2 w-2">
             <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75" />
             <span className="relative inline-flex rounded-full h-2 w-2 bg-cyan-500" />
           </span>
           <span className="font-mono text-[11px] tracking-widest text-cyan-900/50 uppercase">
-            Obliguard · Network Graph
+            {t('netmap.title', { defaultValue: 'Obliguard · Network Graph' })}
           </span>
           {selectedAgent && (
             <span className="font-mono text-[10px] text-cyan-400/70 tracking-wide ml-1">
@@ -1927,60 +2081,54 @@ export function NetMapPage() {
         </div>
         <div className="flex items-center gap-6">
           {[
-            { Icon: Shield,   label: 'AGENTS',  value: stats.agents,  c: '#22d3ee' },
-            { Icon: Ban,      label: 'BANNED',  value: stats.banned,  c: '#f87171' },
-            { Icon: Activity, label: 'TODAY',   value: stats.today,   c: '#fb923c' },
-            { Icon: Zap,      label: 'TRACKED', value: ipCount,       c: '#c084fc' },
-          ].map(({ Icon, label, value, c }) => (
-            <div key={label} className="flex items-center gap-1.5">
+            { Icon: Shield,   key: 'agents',  label: t('netmap.stats.agents', { defaultValue: 'Agents' }),   value: stats.agents, c: P.stats.agents },
+            { Icon: Ban,      key: 'banned',  label: t('netmap.stats.banned', { defaultValue: 'Banned' }),   value: stats.banned, c: P.stats.banned },
+            { Icon: Activity, key: 'today',   label: t('netmap.stats.today', { defaultValue: 'Today' }),     value: stats.today,  c: P.stats.today },
+            { Icon: Zap,      key: 'tracked', label: t('netmap.stats.tracked', { defaultValue: 'Tracked' }), value: ipCount,      c: P.stats.tracked },
+          ].map(({ Icon, key, label, value, c }) => (
+            <div key={key} className="flex items-center gap-1.5">
               <Icon size={11} style={{ color: c }} />
               <span className="font-mono text-sm font-bold" style={{ color: c }}>{value}</span>
-              <span className="font-mono text-[9px] text-slate-600 tracking-widest">{label}</span>
+              <span className="font-mono text-[9px] text-slate-600 tracking-widest uppercase">{label}</span>
             </div>
           ))}
           {/* Search IP */}
-          <form onSubmit={(e) => {
-            e.preventDefault();
-            const q = searchIp.trim();
-            if (!q) { setSearchHit(null); return; }
-            const node = ipsRef.current.get(q);
-            if (node) {
-              setSearchHit(q);
-              transformRef.current = { x: -node.x + sizeRef.current.w / 2, y: -node.y + sizeRef.current.h / 2, k: 2 };
-              setTimeout(() => setSearchHit(null), 4000);
-            } else {
-              toast.error('IP not on map');
-            }
-            setSearchIp('');
-          }} className="ml-2">
+          <form onSubmit={searchSubmit} className="ml-2">
             <input
               type="text"
               value={searchIp}
               onChange={e => setSearchIp(e.target.value)}
-              placeholder="Search IP…"
+              placeholder={t('netmap.search.placeholder', { defaultValue: 'Search IP…' })}
+              aria-label={t('netmap.search.placeholder', { defaultValue: 'Search IP…' })}
+              autoCapitalize="off" autoCorrect="off" spellCheck={false}
               className="w-28 px-2 py-0.5 rounded border border-slate-800 bg-transparent text-[11px] font-mono text-slate-400 placeholder-slate-700 focus:border-cyan-500/40 focus:outline-none"
             />
           </form>
 
           {/* Threat only toggle */}
           <button
-            onClick={() => setThreatOnly(t => !t)}
-            className={`px-2 py-0.5 rounded text-[10px] font-mono tracking-wider border transition-colors ${
+            onClick={() => setThreatOnly(v => !v)}
+            aria-pressed={threatOnly}
+            className={`px-2 py-0.5 rounded text-[10px] font-mono tracking-wider border uppercase transition-colors ${
               threatOnly
                 ? 'bg-red-500/15 text-red-400 border-red-500/30'
                 : 'text-slate-600 border-slate-800 hover:text-slate-400'
             }`}
           >
-            {threatOnly ? '⚠ THREATS' : '⚠ ALL'}
+            ⚠ {threatOnly
+              ? t('netmap.threatOnly.on', { defaultValue: 'Threats' })
+              : t('netmap.threatOnly.off', { defaultValue: 'All' })}
           </button>
 
           {/* 2D/3D toggle */}
           <button
-            onClick={() => {
-              const next = viewMode === '2d' ? '3d' : '2d';
-              setViewMode(next);
-              localStorage.setItem('obliguard-netmap-viewmode', next);
-            }}
+            onClick={toggleViewMode}
+            title={viewMode === '2d'
+              ? t('netmap.view.to3d', { defaultValue: 'Switch to the 3D view' })
+              : t('netmap.view.to2d', { defaultValue: 'Switch to the 2D view' })}
+            aria-label={viewMode === '2d'
+              ? t('netmap.view.to3d', { defaultValue: 'Switch to the 3D view' })
+              : t('netmap.view.to2d', { defaultValue: 'Switch to the 2D view' })}
             className={`px-2 py-0.5 rounded text-[10px] font-mono tracking-wider border transition-colors ${
               viewMode === '3d'
                 ? 'bg-purple-500/15 text-purple-400 border-purple-500/30'
@@ -1993,7 +2141,8 @@ export function NetMapPage() {
           <button
             onClick={() => void init()}
             className="ml-1 p-1.5 rounded border border-slate-800 text-slate-600 hover:text-cyan-400 hover:border-cyan-500/30 transition-colors"
-            title="Refresh"
+            title={t('common.refresh', { defaultValue: 'Refresh' })}
+            aria-label={t('common.refresh', { defaultValue: 'Refresh' })}
           >
             <RefreshCw size={11} className={loading ? 'animate-spin' : ''} />
           </button>
@@ -2002,7 +2151,7 @@ export function NetMapPage() {
 
       {/* ── Tab bar ──────────────────────────────────────────────────────────── */}
       {(tabs.length > 0 || activeTabId !== null) ? (
-        <div className="flex items-center gap-1 px-4 py-1.5 border-b border-[#110c04] bg-[#050302] shrink-0 overflow-x-auto">
+        <div className="flex items-center gap-1 px-4 py-1.5 border-b border-[color:var(--nm-border)] bg-[color:var(--nm-panel-deep)] shrink-0 overflow-x-auto">
           <button
             onClick={() => setActiveTab(null)}
             className={`px-3 py-1 rounded text-[11px] font-mono tracking-wide transition-colors ${
@@ -2011,7 +2160,7 @@ export function NetMapPage() {
                 : 'text-slate-600 hover:text-slate-400 border border-transparent'
             }`}
           >
-            All
+            {t('netmap.tabs.all', { defaultValue: 'All' })}
           </button>
           {[...tabs].sort((a, b) => a.sortOrder - b.sortOrder).map(tab => (
             <button
@@ -2019,11 +2168,9 @@ export function NetMapPage() {
               onClick={() => setActiveTab(tab.id)}
               onContextMenu={(e) => {
                 e.preventDefault();
-                setEditingTabId(tab.id);
-                setTabFormName(tab.name);
-                setTabFormAgentIds(new Set(tab.agentIds));
-                setShowTabModal(true);
+                setTabDialog({ tab });
               }}
+              title={t('netmap.tabs.editHint', { defaultValue: 'Right-click to edit' })}
               className={`px-3 py-1 rounded text-[11px] font-mono tracking-wide transition-colors ${
                 activeTabId === tab.id
                   ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
@@ -2035,106 +2182,47 @@ export function NetMapPage() {
             </button>
           ))}
           <button
-            onClick={() => {
-              setEditingTabId(null);
-              setTabFormName('');
-              setTabFormAgentIds(new Set());
-              setShowTabModal(true);
-            }}
+            onClick={() => setTabDialog({ tab: null })}
             className="px-2 py-1 rounded text-[11px] font-mono text-slate-700 hover:text-cyan-400 border border-transparent hover:border-cyan-500/20 transition-colors"
-            title="New tab"
+            title={t('netmap.tabs.new', { defaultValue: 'New view' })}
+            aria-label={t('netmap.tabs.new', { defaultValue: 'New view' })}
           >
             +
           </button>
         </div>
       ) : (
-        <div className="flex items-center px-4 py-1.5 border-b border-[#110c04] bg-[#050302] shrink-0">
+        <div className="flex items-center px-4 py-1.5 border-b border-[color:var(--nm-border)] bg-[color:var(--nm-panel-deep)] shrink-0">
           <button
-            onClick={() => {
-              setEditingTabId(null);
-              setTabFormName('');
-              setTabFormAgentIds(new Set());
-              setShowTabModal(true);
-            }}
+            onClick={() => setTabDialog({ tab: null })}
             className="px-3 py-1 rounded text-[11px] font-mono text-slate-700 hover:text-cyan-400 border border-dashed border-slate-800 hover:border-cyan-500/20 transition-colors"
           >
-            + Create view
+            + {t('netmap.tabs.createView', { defaultValue: 'Create view' })}
           </button>
         </div>
       )}
 
-      {/* ── Tab create/edit modal ──────────────────────────────────────────── */}
-      {showTabModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => setShowTabModal(false)}>
-          <div className="bg-[#0a0806] border border-[#1a1408] rounded-lg p-5 w-80 max-h-[70vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
-            <h3 className="text-sm font-semibold text-slate-300 mb-3">
-              {editingTabId ? 'Edit View' : 'New View'}
-            </h3>
-            <input
-              type="text"
-              value={tabFormName}
-              onChange={e => setTabFormName(e.target.value)}
-              placeholder="View name"
-              className="w-full px-3 py-1.5 rounded border border-[#1a1408] bg-[#050302] text-sm text-slate-300 placeholder-slate-700 focus:border-cyan-500/30 focus:outline-none mb-3"
-              autoFocus
-            />
-            <div className="text-[10px] text-slate-600 uppercase tracking-widest mb-2">Agents</div>
-            <div className="space-y-1 max-h-48 overflow-y-auto">
-              {agentsRef.current.map(ag => (
-                <label key={ag.id} className="flex items-center gap-2 text-xs text-slate-400 hover:text-slate-200 cursor-pointer py-0.5">
-                  <input
-                    type="checkbox"
-                    checked={tabFormAgentIds.has(ag.id)}
-                    onChange={() => {
-                      const next = new Set(tabFormAgentIds);
-                      if (next.has(ag.id)) next.delete(ag.id); else next.add(ag.id);
-                      setTabFormAgentIds(next);
-                    }}
-                    className="accent-cyan-500"
-                  />
-                  {ag.label}
-                </label>
-              ))}
-            </div>
-            <div className="flex gap-2 mt-4">
-              <button
-                onClick={() => {
-                  if (!tabFormName.trim() || tabFormAgentIds.size === 0) return;
-                  if (editingTabId) {
-                    updateTab(editingTabId, { name: tabFormName.trim(), agentIds: [...tabFormAgentIds] });
-                  } else {
-                    addTab({ name: tabFormName.trim(), agentIds: [...tabFormAgentIds] });
-                  }
-                  setShowTabModal(false);
-                }}
-                disabled={!tabFormName.trim() || tabFormAgentIds.size === 0}
-                className="px-3 py-1.5 rounded text-xs font-medium bg-cyan-500/20 text-cyan-400 border border-cyan-500/30 hover:bg-cyan-500/30 disabled:opacity-40 transition-colors"
-              >
-                {editingTabId ? 'Save' : 'Create'}
-              </button>
-              {editingTabId && (
-                <button
-                  onClick={() => { deleteTab(editingTabId); setShowTabModal(false); }}
-                  className="px-3 py-1.5 rounded text-xs font-medium text-red-400 border border-red-500/20 hover:bg-red-500/10 transition-colors"
-                >
-                  Delete
-                </button>
-              )}
-              <button
-                onClick={() => setShowTabModal(false)}
-                className="px-3 py-1.5 rounded text-xs text-slate-500 hover:text-slate-300 transition-colors"
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* ── Tab create/edit dialog ───────────────────────────────────────────── */}
+      <NetMapTabDialog
+        open={tabDialog !== null}
+        tab={tabDialog?.tab ?? null}
+        agents={agentsRef.current.map(ag => ({ id: ag.id, label: ag.label }))}
+        onClose={() => setTabDialog(null)}
+        onSave={(data) => {
+          if (tabDialog?.tab) updateTab(tabDialog.tab.id, data);
+          else addTab(data);
+          setTabDialog(null);
+        }}
+        onDelete={(id) => { deleteTab(id); setTabDialog(null); }}
+      />
 
       {/* ── Canvas area ─────────────────────────────────────────────────────── */}
       {viewMode === '3d' ? (
         <div className="flex-1 relative overflow-hidden">
-          <Suspense fallback={<div className="flex-1 flex items-center justify-center bg-[#020408] text-slate-600 text-sm">Loading 3D engine…</div>}>
+          <Suspense fallback={(
+            <div className="flex-1 h-full flex items-center justify-center bg-[color:var(--nm-space-3d)] text-slate-600 text-sm">
+              {t('netmap.loading3d', { defaultValue: 'Loading the 3D engine…' })}
+            </div>
+          )}>
             <NetMap3D
               agentsRef={agentsRef}
               ipsRef={ipsRef}
@@ -2142,8 +2230,11 @@ export function NetMapPage() {
               visibleAgentIds={visibleAgentIdsRef.current}
               threatOnly={threatOnly}
               searchHit={searchHit}
+              labels={labels3d}
               onSelectAgent={(ag) => { selectedRef.current = ag?.id ?? null; setSelectedAgent(ag); }}
-              onSelectIp={(ip) => setClickedIp(ip)}
+              // 3D has no summary panel: an IP opens the shared drawer only
+              // (a clickedIp would also hold the orbits paused).
+              onSelectIp={(ip) => { if (ip) openIpDrawer(ip.ip); }}
             />
           </Suspense>
         </div>
@@ -2165,29 +2256,38 @@ export function NetMapPage() {
         />
 
         {loading && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#030310]/90 z-10">
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-[color:var(--nm-veil)] z-10">
             <div className="w-10 h-10 border border-t-transparent border-cyan-500/40 rounded-full animate-spin mb-3" />
-            <p className="font-mono text-[10px] text-cyan-700 tracking-widest">BUILDING NETWORK GRAPH…</p>
+            <p className="font-mono text-[10px] text-cyan-700 tracking-widest uppercase">
+              {t('netmap.building', { defaultValue: 'Building the network graph…' })}
+            </p>
           </div>
         )}
 
         {/* ── Left panel ──────────────────────────────────────────────────── */}
-        <div className="absolute top-4 left-4 bg-[#070502]/95 border border-[#1a1208]/60 rounded-sm p-3 backdrop-blur-sm min-w-[152px] z-10">
+        <div className="absolute top-4 left-4 bg-[color:var(--nm-panel-glass)] border border-[color:var(--nm-panel-glass-border)] rounded-sm p-3 backdrop-blur-sm min-w-[152px] z-10">
           {selectedAgent ? (
             <>
               <div className="flex items-center justify-between mb-2">
-                <div className="font-mono text-[8px] text-slate-500 tracking-widest uppercase">Agent Focus</div>
-                <button onClick={() => { selectedRef.current = null; setSelectedAgent(null); }} className="text-slate-600 hover:text-cyan-400 transition-colors">
+                <div className="font-mono text-[8px] text-slate-500 tracking-widest uppercase">{t('netmap.panel.agentFocus', { defaultValue: 'Agent focus' })}</div>
+                <button
+                  onClick={() => { selectedRef.current = null; setSelectedAgent(null); }}
+                  className="text-slate-600 hover:text-cyan-400 transition-colors"
+                  aria-label={t('common.close', { defaultValue: 'Close' })}
+                >
                   <X size={10} />
                 </button>
               </div>
               <div className="font-mono text-[11px] text-cyan-400 mb-1 truncate font-bold">{selectedAgent.label}</div>
+              {selectedAgent.evaluateOnly && <div className="mb-1">{evaluatePill}</div>}
               <div className="font-mono text-[9px] text-slate-500">
-                {[...ipsRef.current.values()].filter(n => n.agentIds.includes(selectedAgent.id)).length} tracked IPs
+                {t('netmap.panel.trackedIps', { count: agentIpCount(selectedAgent.id), defaultValue: 'Tracked IPs: {{count}}' })}
               </div>
-              <div className="font-mono text-[9px] text-slate-500 mb-2">{selectedAgent.eventCount} events</div>
+              <div className="font-mono text-[9px] text-slate-500 mb-2">
+                {t('netmap.panel.events', { count: selectedAgent.eventCount, defaultValue: 'Events: {{count}}' })}
+              </div>
               <div className="pt-2 border-t border-slate-800/50">
-                <div className="font-mono text-[8px] text-slate-500 tracking-widest mb-1.5 uppercase">Top Threats</div>
+                <div className="font-mono text-[8px] text-slate-500 tracking-widest mb-1.5 uppercase">{t('netmap.panel.topThreats', { defaultValue: 'Top threats' })}</div>
                 {[...ipsRef.current.values()]
                   .filter(n => n.agentIds.includes(selectedAgent.id))
                   .sort((a, b) => b.failures - a.failures)
@@ -2202,35 +2302,42 @@ export function NetMapPage() {
             </>
           ) : (
             <>
-              <div className="font-mono text-[8px] text-slate-500 tracking-widest mb-2 uppercase">Flow Types</div>
+              <div className="font-mono text-[8px] text-slate-500 tracking-widest mb-2 uppercase">{t('netmap.panel.flowTypes', { defaultValue: 'Flow types' })}</div>
               {([
-                { type: 'auth_success' as const, color: EVENT_COLORS.auth_success, label: 'Success' },
-                { type: 'auth_failure' as const, color: EVENT_COLORS.auth_failure, label: 'Auth Failure' },
-                { type: 'ban'          as const, color: EVENT_COLORS.ban,          label: 'Auto-Ban' },
+                { type: 'auth_success' as const, color: EVENT_COLORS.auth_success, label: t('netmap.flow.success', { defaultValue: 'Success' }) },
+                { type: 'auth_failure' as const, color: EVENT_COLORS.auth_failure, label: t('netmap.flow.failure', { defaultValue: 'Auth failure' }) },
+                { type: 'ban'          as const, color: EVENT_COLORS.ban,          label: t('netmap.flow.ban', { defaultValue: 'Auto-ban' }) },
               ]).map(({ type, color, label }) => {
                 const on = filters.has(type);
                 return (
-                  <button key={type} onClick={() => toggleFilter(type)} className="flex items-center gap-2 py-[4px] w-full">
-                    <div className="w-5 h-0.5 shrink-0 rounded" style={{ backgroundColor: on ? color : '#1e293b', boxShadow: on ? `0 0 4px ${color}` : 'none' }} />
-                    <span className="font-mono text-[9px]" style={{ color: on ? '#94a3b8' : '#334155' }}>{label}</span>
+                  <button key={type} onClick={() => toggleFilter(type)} aria-pressed={on} className="flex items-center gap-2 py-[4px] w-full">
+                    <div className="w-5 h-0.5 shrink-0 rounded" style={{ backgroundColor: on ? color : P.chrome.swatchOff, boxShadow: on ? `0 0 4px ${color}` : 'none' }} />
+                    <span className="font-mono text-[9px]" style={{ color: on ? P.chrome.textOn : P.chrome.textOff }}>{label}</span>
                   </button>
                 );
               })}
               <div className="mt-3 pt-2 border-t border-slate-800/50">
-                <div className="font-mono text-[8px] text-slate-500 tracking-widest mb-1.5 uppercase">IP Status</div>
-                {[{ label: 'Whitelisted', color: '#22c55e' }, { label: 'Banned', color: '#ef4444' }, { label: 'Suspicious', color: '#f97316' }, { label: 'Clean', color: '#475569' }].map(({ label, color }) => (
-                  <div key={label} className="flex items-center gap-2 py-[2px]">
-                    <div className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: color }} />
-                    <span className="font-mono text-[8px] text-slate-500">{label}</span>
+                <div className="font-mono text-[8px] text-slate-500 tracking-widest mb-1.5 uppercase">{t('netmap.panel.ipStatus', { defaultValue: 'IP status' })}</div>
+                {(['whitelisted', 'banned', 'suspicious', 'clean'] as const).map(status => (
+                  <div key={status} className="flex items-center gap-2 py-[2px]">
+                    <div className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: P.status[status] }} />
+                    <span className="font-mono text-[8px] text-slate-500">{statusLabel(status)}</span>
                   </div>
                 ))}
+                <div className="flex items-center gap-2 py-[2px]">
+                  <div className="w-2 h-2 rounded-full shrink-0 border border-dashed" style={{ borderColor: rgba(P.amber, 0.9) }} />
+                  <span className="font-mono text-[8px] text-slate-500">{t('evaluateOnly.badge', { defaultValue: 'Evaluate-only' })}</span>
+                </div>
               </div>
               <div className="mt-3 pt-2 border-t border-slate-800/50">
                 <div className="font-mono text-[8px] text-slate-400 leading-[1.8]">
-                  <div>Drag · Pan</div><div>Scroll · Zoom</div><div>Click agent · Focus</div>
+                  <div>{t('netmap.help.pan', { defaultValue: 'Drag · Pan' })}</div>
+                  <div>{t('netmap.help.zoom', { defaultValue: 'Scroll · Zoom' })}</div>
+                  <div>{t('netmap.help.focus', { defaultValue: 'Click agent · Focus' })}</div>
+                  <div>{t('netmap.help.ip', { defaultValue: 'Click IP · Details' })}</div>
                 </div>
                 <button onClick={resetView} className="mt-1.5 w-full font-mono text-[8px] px-1.5 py-0.5 rounded border border-slate-800 text-slate-500 hover:text-cyan-400 hover:border-cyan-500/30 transition-colors">
-                  ⌖ Reset View
+                  ⌖ {t('netmap.resetView', { defaultValue: 'Reset view' })}
                 </button>
               </div>
             </>
@@ -2244,9 +2351,9 @@ export function NetMapPage() {
             style={{
               left: tooltip.x + 14,
               top: tooltip.y - 8,
-              backgroundColor: 'rgba(7,5,2,0.97)',
-              border: '1px solid rgba(60,45,20,0.7)',
-              boxShadow: '0 4px 24px rgba(0,0,0,0.8)',
+              backgroundColor: P.chrome.tooltip,
+              border: `1px solid ${P.chrome.tooltipBorder}`,
+              boxShadow: `0 4px 24px ${P.chrome.tooltipShadow}`,
               transform: tooltip.x > canvasSize.w * 0.70 ? 'translateX(-110%)' : undefined,
             }}
           >
@@ -2254,18 +2361,18 @@ export function NetMapPage() {
               {tooltip.flag} {tooltip.ip}
             </div>
             {[
-              { label: 'Country',  value: tooltip.country },
-              { label: 'Status',   value: tooltip.status.toUpperCase(), color: tooltip.color },
-              { label: 'Failures', value: tooltip.failures.toLocaleString(), color: '#fb923c' },
-            ].map(({ label, value, color }) => (
-              <div key={label} className="flex items-center gap-2 mb-1.5">
+              { key: 'country',  label: t('netmap.tooltip.country', { defaultValue: 'Country' }),   value: tooltip.country },
+              { key: 'status',   label: t('netmap.tooltip.status', { defaultValue: 'Status' }),    value: statusLabel(tooltip.status).toUpperCase(), color: tooltip.color },
+              { key: 'failures', label: t('netmap.tooltip.failures', { defaultValue: 'Failures' }), value: tooltip.failures.toLocaleString(), color: P.stats.today },
+            ].map(({ key, label, value, color }) => (
+              <div key={key} className="flex items-center gap-2 mb-1.5">
                 <span className="font-mono text-[11px] text-slate-500 uppercase tracking-wider w-16 shrink-0">{label}</span>
-                <span className="font-mono text-[13px]" style={{ color: color ?? '#94a3b8' }}>{value}</span>
+                <span className="font-mono text-[13px]" style={{ color: color ?? P.chrome.textOn }}>{value}</span>
               </div>
             ))}
             {tooltip.services.length > 0 && (
               <div className="flex items-start gap-2">
-                <span className="font-mono text-[11px] text-slate-500 uppercase tracking-wider w-16 shrink-0 mt-px">Services</span>
+                <span className="font-mono text-[11px] text-slate-500 uppercase tracking-wider w-16 shrink-0 mt-px">{t('netmap.tooltip.services', { defaultValue: 'Services' })}</span>
                 <span className="font-mono text-[12px] text-slate-400 leading-relaxed">
                   {tooltip.services.join(', ')}
                 </span>
@@ -2277,35 +2384,45 @@ export function NetMapPage() {
         {/* ── Pause button ──────────────────────────────────────────────────── */}
         <button
           onClick={() => setOrbitPaused(p => !p)}
-          className={`absolute bottom-3 left-3 z-20 px-2.5 py-1 rounded text-[10px] font-mono tracking-wider border transition-colors ${
+          aria-pressed={orbitPaused}
+          className={`absolute bottom-3 left-3 z-20 px-2.5 py-1 rounded text-[10px] font-mono tracking-wider uppercase border transition-colors ${
             orbitPaused
               ? 'bg-amber-500/15 text-amber-400 border-amber-500/30'
               : 'text-slate-600 border-slate-800 hover:text-slate-400 hover:border-slate-600'
           }`}
         >
-          {orbitPaused ? '▶ RESUME' : '❚❚ PAUSE'}
+          {orbitPaused
+            ? `▶ ${t('netmap.resume', { defaultValue: 'Resume' })}`
+            : `❚❚ ${t('netmap.pause', { defaultValue: 'Pause' })}`}
         </button>
 
         {/* ── Agent side panel (on click) ────────────────────────────────────── */}
         {selectedAgent && !clickedIp && (
-          <div className="absolute top-0 right-0 z-30 w-72 h-full bg-[rgba(5,12,22,0.95)] border-l border-[rgba(90,138,181,0.2)] p-4 overflow-y-auto overscroll-contain" onWheel={e => e.stopPropagation()}>
+          <div className="absolute top-0 right-0 z-30 w-72 h-full bg-[color:var(--nm-side)] border-l border-[color:var(--nm-side-border)] p-4 overflow-y-auto overscroll-contain" onWheel={e => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-4">
-              <span className="font-mono text-xs text-slate-500 uppercase tracking-widest">Agent Detail</span>
-              <button onClick={() => { selectedRef.current = null; setSelectedAgent(null); }} className="text-slate-500 hover:text-white text-lg leading-none">&times;</button>
+              <span className="font-mono text-xs text-slate-500 uppercase tracking-widest">{t('netmap.agent.title', { defaultValue: 'Agent detail' })}</span>
+              <button
+                onClick={() => { selectedRef.current = null; setSelectedAgent(null); }}
+                className="text-slate-500 hover:text-white text-lg leading-none"
+                aria-label={t('common.close', { defaultValue: 'Close' })}
+              >&times;</button>
             </div>
             <div className="font-mono text-sm font-semibold mb-1" style={{ color: selectedAgent.deviceColor }}>
               {selectedAgent.label}
             </div>
-            <div className="text-[10px] uppercase tracking-wider mb-4" style={{ color: selectedAgent.wsConnected ? '#5DCAA5' : '#E24B4A' }}>
-              {selectedAgent.wsConnected ? 'ONLINE' : 'OFFLINE'} · {selectedAgent.deviceType}
+            <div className="text-[10px] uppercase tracking-wider mb-2" style={{ color: rgba(selectedAgent.wsConnected ? P.mint : P.threat, 1) }}>
+              {selectedAgent.wsConnected
+                ? t('netmap.agent.online', { defaultValue: 'Online' })
+                : t('netmap.canvas.offline', { defaultValue: 'Offline' })} · {deviceTypeLabel(selectedAgent.deviceType)}
             </div>
-            <div className="space-y-2 text-xs mb-4">
+            {selectedAgent.evaluateOnly && <div className="mb-3">{evaluatePill}</div>}
+            <div className="space-y-2 text-xs mb-4 mt-2">
               {[
-                { label: 'Group', value: selectedAgent.groupName ?? '—' },
-                { label: 'Events', value: String(selectedAgent.eventCount) },
-                { label: 'Orbiting IPs', value: String([...ipsRef.current.values()].filter(n => n.agentIds.includes(selectedAgent.id)).length) },
+                { key: 'group',  label: t('netmap.agent.group', { defaultValue: 'Group' }),          value: selectedAgent.groupName ?? '—' },
+                { key: 'events', label: t('netmap.agent.events', { defaultValue: 'Events' }),        value: String(selectedAgent.eventCount) },
+                { key: 'ips',    label: t('netmap.agent.orbitingIps', { defaultValue: 'Orbiting IPs' }), value: String(agentIpCount(selectedAgent.id)) },
               ].map(r => (
-                <div key={r.label} className="flex justify-between">
+                <div key={r.key} className="flex justify-between">
                   <span className="text-slate-500">{r.label}</span>
                   <span className="text-slate-300 font-mono">{r.value}</span>
                 </div>
@@ -2313,16 +2430,16 @@ export function NetMapPage() {
             </div>
             {/* Recent IPs */}
             <div className="mb-4">
-              <div className="text-[9px] text-slate-600 uppercase tracking-widest mb-2">Recent IPs</div>
+              <div className="text-[9px] text-slate-600 uppercase tracking-widest mb-2">{t('netmap.agent.recentIps', { defaultValue: 'Recent IPs' })}</div>
               <div className="space-y-1 max-h-48 overflow-y-auto">
                 {[...ipsRef.current.values()]
                   .filter(n => n.agentIds.includes(selectedAgent.id))
                   .sort((a, b) => b.lastSeen - a.lastSeen)
                   .slice(0, 15)
                   .map(n => (
-                    <button key={n.key} onClick={() => setClickedIp(n)}
+                    <button key={n.key} onClick={() => showIp(n.ip)}
                       className="flex items-center gap-2 w-full text-left py-0.5 hover:bg-white/5 rounded px-1 transition-colors">
-                      <div className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: n.status === 'banned' ? '#ef4444' : n.status === 'suspicious' ? '#f59e0b' : '#82a0c3' }} />
+                      <div className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: n.status === 'clean' ? P.recentClean : statusColor(n.status) }} />
                       <span className="font-mono text-[10px] text-slate-400 truncate">{anonIp(n.ip)}</span>
                       <span className="ml-auto font-mono text-[9px] text-slate-600">{n.failures > 0 ? `${n.failures}×` : ''}</span>
                     </button>
@@ -2332,32 +2449,39 @@ export function NetMapPage() {
             <div className="space-y-1.5">
               <Link to={`/agents/${selectedAgent.id}`} onClick={() => { selectedRef.current = null; setSelectedAgent(null); }}
                 className="block w-full px-3 py-1.5 rounded text-xs font-medium text-cyan-400 border border-cyan-500/25 hover:bg-cyan-500/10 text-center transition-colors">
-                View Agent Page
+                {t('netmap.agent.viewAgent', { defaultValue: 'View agent page' })}
               </Link>
             </div>
           </div>
         )}
 
-        {/* ── IP side panel (on click) ──────────────────────────────────────── */}
+        {/* ── IP summary panel (the actions live in the shared IP drawer) ────── */}
         {clickedIp && (
-          <div className="absolute top-0 right-0 z-30 w-72 h-full bg-[rgba(5,12,22,0.95)] border-l border-[rgba(90,138,181,0.2)] p-4 overflow-y-auto overscroll-contain" onWheel={e => e.stopPropagation()}>
+          <div className="absolute top-0 right-0 z-30 w-72 h-full bg-[color:var(--nm-side)] border-l border-[color:var(--nm-side-border)] p-4 overflow-y-auto overscroll-contain" onWheel={e => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-4">
-              <span className="font-mono text-xs text-slate-500 uppercase tracking-widest">IP Detail</span>
-              <button onClick={() => setClickedIp(null)} className="text-slate-500 hover:text-white text-lg leading-none">&times;</button>
+              <span className="font-mono text-xs text-slate-500 uppercase tracking-widest">{t('netmap.ip.title', { defaultValue: 'IP detail' })}</span>
+              <button
+                onClick={() => setClickedIp(null)}
+                className="text-slate-500 hover:text-white text-lg leading-none"
+                aria-label={t('common.close', { defaultValue: 'Close' })}
+              >&times;</button>
             </div>
             <div className="font-mono text-sm font-semibold mb-1" style={{ color: clickedIp.color }}>
               {clickedIp.flag} {anonIp(clickedIp.ip)}
             </div>
-            <div className="text-[10px] uppercase tracking-wider mb-4" style={{ color: clickedIp.status === 'banned' ? '#E24B4A' : clickedIp.status === 'suspicious' ? '#F5A623' : '#5DCAA5' }}>
-              {clickedIp.status}
+            {clickedIp.displayLabel && (
+              <div className="font-mono text-[10px] text-slate-400 mb-1 truncate">{clickedIp.displayLabel}</div>
+            )}
+            <div className="text-[10px] uppercase tracking-wider mb-4" style={{ color: statusColor(clickedIp.status) }}>
+              {statusLabel(clickedIp.status)}
             </div>
             <div className="space-y-2 text-xs mb-4">
               {[
-                { label: 'Country', value: clickedIp.country },
-                { label: 'Failures', value: String(clickedIp.failures) },
-                { label: 'Events', value: String(clickedIp.eventCount) },
+                { key: 'country',  label: t('netmap.tooltip.country', { defaultValue: 'Country' }),   value: clickedIp.country },
+                { key: 'failures', label: t('netmap.tooltip.failures', { defaultValue: 'Failures' }), value: String(clickedIp.failures) },
+                { key: 'events',   label: t('netmap.agent.events', { defaultValue: 'Events' }),       value: String(clickedIp.eventCount) },
               ].map(r => (
-                <div key={r.label} className="flex justify-between">
+                <div key={r.key} className="flex justify-between">
                   <span className="text-slate-500">{r.label}</span>
                   <span className="text-slate-300 font-mono">{r.value}</span>
                 </div>
@@ -2365,19 +2489,19 @@ export function NetMapPage() {
             </div>
             {/* Per-agent per-service breakdown */}
             <div className="mb-4">
-              <div className="text-[9px] text-slate-600 uppercase tracking-widest mb-2">Connections</div>
+              <div className="text-[9px] text-slate-600 uppercase tracking-widest mb-2">{t('netmap.ip.connections', { defaultValue: 'Connections' })}</div>
               <div className="space-y-1 max-h-40 overflow-y-auto">
                 {(() => {
                   // Build breakdown: for each agent this IP touched, count per service
                   const lines: { agentName: string; service: string; count: number }[] = [];
                   for (const aid of clickedIp.agentIds) {
                     const ag = agentsRef.current.find(a => a.id === aid);
-                    const agName = ag?.label ?? `Agent #${aid}`;
+                    const agName = ag?.label ?? t('netmap.ip.agentNumber', { id: aid, defaultValue: 'Agent #{{id}}' });
                     // Count from live events matching this IP + agent
                     const svcCounts = new Map<string, number>();
                     for (const ev of liveEvents) {
-                      if (ev.ip === anonIp(clickedIp.ip) && ev.agentName === agName) {
-                        const svc = ev.service || 'unknown';
+                      if (ev.ip === clickedIp.ip && ev.agentName === agName) {
+                        const svc = ev.service || t('netmap.ip.unknownService', { defaultValue: 'unknown' });
                         svcCounts.set(svc, (svcCounts.get(svc) ?? 0) + 1);
                       }
                     }
@@ -2392,7 +2516,7 @@ export function NetMapPage() {
                     }
                   }
                   if (lines.length === 0) {
-                    return <div className="text-slate-600 text-[11px]">No connection data</div>;
+                    return <div className="text-slate-600 text-[11px]">{t('netmap.ip.noConnections', { defaultValue: 'No connection data' })}</div>;
                   }
                   return lines.sort((a, b) => b.count - a.count).map((l, i) => (
                     <div key={i} className="flex items-center gap-2 text-[11px] font-mono">
@@ -2406,25 +2530,37 @@ export function NetMapPage() {
               </div>
             </div>
             <div className="space-y-1.5">
-              <button onClick={() => { void quickBan(clickedIp.ip); setClickedIp(null); }}
-                className="w-full px-3 py-1.5 rounded text-xs font-medium bg-red-500/15 text-red-400 border border-red-500/25 hover:bg-red-500/25 transition-colors">
-                Ban IP
+              <button onClick={() => openIpDrawer(clickedIp.ip)}
+                className="w-full px-3 py-1.5 rounded text-xs font-medium text-cyan-300 bg-cyan-500/10 border border-cyan-500/30 hover:bg-cyan-500/20 transition-colors">
+                {t('netmap.ip.openDetails', { defaultValue: 'Details & actions' })}
               </button>
-              <a href={`https://www.abuseipdb.com/check/${clickedIp.ip}`} target="_blank" rel="noopener noreferrer"
+              {canBan && clickedIp.status !== 'banned' && clickedIp.status !== 'whitelisted' && (
+                <button onClick={() => void quickBan(clickedIp.ip)}
+                  className="w-full px-3 py-1.5 rounded text-xs font-medium bg-red-500/15 text-red-400 border border-red-500/25 hover:bg-red-500/25 transition-colors">
+                  {t('bans.banIpTitle', { defaultValue: 'Ban IP' })}
+                </button>
+              )}
+              {canWhitelist && clickedIp.status !== 'whitelisted' && (
+                <button onClick={() => void quickWhitelist(clickedIp.ip)}
+                  className="w-full px-3 py-1.5 rounded text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/25 hover:bg-emerald-500/20 transition-colors">
+                  {t('ipReputation.actions.whitelist', { defaultValue: 'Whitelist' })}
+                </button>
+              )}
+              <a href={`https://www.abuseipdb.com/check/${encodeURIComponent(clickedIp.ip)}`} target="_blank" rel="noopener noreferrer"
                 className="block w-full px-3 py-1.5 rounded text-xs font-medium text-slate-400 border border-slate-700 hover:border-slate-500 text-center transition-colors">
                 AbuseIPDB
               </a>
-              <a href={`https://www.shodan.io/host/${clickedIp.ip}`} target="_blank" rel="noopener noreferrer"
+              <a href={`https://www.shodan.io/host/${encodeURIComponent(clickedIp.ip)}`} target="_blank" rel="noopener noreferrer"
                 className="block w-full px-3 py-1.5 rounded text-xs font-medium text-slate-400 border border-slate-700 hover:border-slate-500 text-center transition-colors">
                 Shodan
               </a>
-              <a href={`https://www.virustotal.com/gui/ip-address/${clickedIp.ip}`} target="_blank" rel="noopener noreferrer"
+              <a href={`https://www.virustotal.com/gui/ip-address/${encodeURIComponent(clickedIp.ip)}`} target="_blank" rel="noopener noreferrer"
                 className="block w-full px-3 py-1.5 rounded text-xs font-medium text-slate-400 border border-slate-700 hover:border-slate-500 text-center transition-colors">
                 VirusTotal
               </a>
-              <Link to={`/ip-reputation?search=${clickedIp.ip}`} onClick={() => setClickedIp(null)}
+              <Link to={`/ip-reputation?search=${encodeURIComponent(clickedIp.ip)}`} onClick={() => setClickedIp(null)}
                 className="block w-full px-3 py-1.5 rounded text-xs font-medium text-cyan-400 border border-cyan-500/25 hover:bg-cyan-500/10 text-center transition-colors">
-                View in IP Reputation
+                {t('netmap.ip.viewInReputation', { defaultValue: 'View in IP Reputation' })}
               </Link>
             </div>
           </div>
@@ -2433,27 +2569,31 @@ export function NetMapPage() {
       )}
 
       {/* ── Bottom live feed ────────────────────────────────────────────────── */}
-      <div className="shrink-0 border-t border-[#110c04] bg-[#070502]">
+      <div className="shrink-0 border-t border-[color:var(--nm-border)] bg-[color:var(--nm-panel)]">
         {/* Header */}
-        <div className="flex items-center gap-2.5 px-4 py-1.5 border-b border-[#150e05]">
+        <div className="flex items-center gap-2.5 px-4 py-1.5 border-b border-[color:var(--nm-border-soft)]">
           <span className="relative flex h-2 w-2">
             <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-500 opacity-75" />
             <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500" />
           </span>
-          <span className="font-mono text-[11px] text-slate-500 tracking-widest uppercase">Live Events</span>
+          <span className="font-mono text-[11px] text-slate-500 tracking-widest uppercase">{t('netmap.live.title', { defaultValue: 'Live events' })}</span>
           <span className="ml-auto flex items-center gap-3">
-            <span className="font-mono text-[10px] text-slate-600">{liveEvents.length} captured</span>
+            <span className="font-mono text-[10px] text-slate-600">
+              {t('netmap.live.captured', { count: liveEvents.length, defaultValue: 'Captured: {{count}}' })}
+            </span>
             <Link
               to="/live-events"
               className="flex items-center gap-1 font-mono text-[10px] text-slate-600 hover:text-slate-400 transition-colors"
-              title="Open full live events page"
+              title={t('netmap.live.viewAllTitle', { defaultValue: 'Open the full live events page' })}
             >
               <ExternalLink size={11} />
-              <span>View all</span>
+              <span>{t('netmap.live.viewAll', { defaultValue: 'View all' })}</span>
             </Link>
             <span
               className={`w-2 h-2 rounded-full ${socketOk ? 'bg-cyan-500' : 'bg-red-600'}`}
-              title={socketOk ? 'Socket connected' : 'Socket disconnected'}
+              title={socketOk
+                ? t('netmap.live.socketOn', { defaultValue: 'Real-time connection active' })
+                : t('netmap.live.socketOff', { defaultValue: 'Real-time connection lost' })}
             />
           </span>
         </div>
@@ -2469,7 +2609,7 @@ export function NetMapPage() {
           }}
         >
           {liveEvents.length === 0 ? (
-            <span className="font-mono text-[11px] text-slate-700 pl-1">Monitoring for events…</span>
+            <span className="font-mono text-[11px] text-slate-700 pl-1">{t('netmap.live.empty', { defaultValue: 'Monitoring for events…' })}</span>
           ) : (
             <div className="flex flex-col gap-0.5">
               {liveEvents.map(ev => {
@@ -2494,7 +2634,9 @@ export function NetMapPage() {
                       className="uppercase text-[11px] w-12 shrink-0 tracking-wide font-bold"
                       style={{ color: ev.color }}
                     >
-                      {isBan ? '🔒 BAN' : isFailure ? 'FAIL' : 'OK'}
+                      {isBan
+                        ? `🔒 ${t('netmap.live.ban', { defaultValue: 'Ban' })}`
+                        : isFailure ? t('netmap.live.fail', { defaultValue: 'Fail' }) : t('netmap.live.ok', { defaultValue: 'OK' })}
                     </span>
                     <span
                       className={`uppercase text-[11px] w-12 shrink-0 font-semibold ${dangerSvc ? 'text-red-400' : ''}`}
@@ -2503,10 +2645,7 @@ export function NetMapPage() {
                       {(ev.service || '?').slice(0, 8).toUpperCase()}
                     </span>
                     <button
-                      onClick={() => {
-                        const ipNode = ipsRef.current.get(ev.ip);
-                        if (ipNode) setClickedIp(ipNode);
-                      }}
+                      onClick={() => showIp(ev.ip)}
                       className={`text-[12px] w-[7.5rem] shrink-0 truncate text-left hover:underline cursor-pointer ${
                         isBan ? 'line-through text-red-400/55' : isFailure ? 'text-orange-300/75' : 'text-slate-400'
                       }`}
@@ -2515,17 +2654,18 @@ export function NetMapPage() {
                     </button>
                     <span className="text-slate-700 shrink-0 text-[10px]">▸</span>
                     <span className="text-slate-500 text-[11px] shrink-0">
-                      {anonHostname(ev.agentName || 'Server')}
+                      {anonHostname(ev.agentName || t('netmap.server', { defaultValue: 'Server' }))}
                     </span>
                     {ev.failures != null && ev.failures > 0 && (
                       <span className="text-orange-700/60 text-[11px] shrink-0">{ev.failures}×</span>
                     )}
-                    {!isBan && (
+                    {!isBan && canBan && (
                       <button
                         onClick={() => void quickBan(ev.ip)}
                         disabled={banningIp === ev.ip}
                         className="ml-auto shrink-0 px-1.5 py-0.5 rounded text-[10px] font-mono border border-red-900/40 text-red-700/60 hover:text-red-400 hover:border-red-500/50 transition-colors disabled:opacity-40 leading-none"
-                        title={`Ban ${anonIp(ev.ip)}`}
+                        title={t('netmap.live.banTitle', { ip: anonIp(ev.ip), defaultValue: 'Ban {{ip}}' })}
+                        aria-label={t('netmap.live.banTitle', { ip: anonIp(ev.ip), defaultValue: 'Ban {{ip}}' })}
                       >
                         {banningIp === ev.ip ? '…' : '⛔'}
                       </button>
@@ -2537,12 +2677,12 @@ export function NetMapPage() {
               {/* Scroll-load status */}
               {liveLoadingMore && (
                 <div className="py-1.5 text-center">
-                  <span className="font-mono text-[10px] text-slate-700">Loading older events…</span>
+                  <span className="font-mono text-[10px] text-slate-700">{t('netmap.live.loadingOlder', { defaultValue: 'Loading older events…' })}</span>
                 </div>
               )}
               {!liveEventsHasMoreRef.current && liveEvents.length >= 100 && (
                 <div className="py-1.5 text-center">
-                  <span className="font-mono text-[10px] text-slate-800">— end of records —</span>
+                  <span className="font-mono text-[10px] text-slate-800">{t('netmap.live.end', { defaultValue: '— end of records —' })}</span>
                 </div>
               )}
             </div>
@@ -2551,4 +2691,9 @@ export function NetMapPage() {
       </div>
     </div>
   );
+}
+
+/** White with an alpha (particles, highlight rings, gradient cores). */
+function rgbaWhite(a: number): string {
+  return rgba(NETMAP_PALETTE.white, a);
 }

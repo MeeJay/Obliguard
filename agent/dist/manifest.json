@@ -1,0 +1,7 @@
+{
+  "version": "1.8.59",
+  "artifacts": {
+    "obliguard-agent.exe": {"sha256":"60f75c9fb5b99721933eb3320493f3252881ba3bde2e2ae2e4d4009b6447e1a6","size":7822208,"version":"1.8.59"},
+    "obliguard-agent.msi": {"sha256":"5356143862c3692d6530813416e2ada1e3a3fe785c32e949c146ee6b9d3b4bb8","size":2732032,"version":"1.8.59"}
+  }
+}

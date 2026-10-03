@@ -18,7 +18,7 @@ require (
 	github.com/tklauser/go-sysconf v0.3.12 // indirect
 	github.com/tklauser/numcpus v0.6.1 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
-	go4.org/netipx v0.0.0-20220725152314-7e7bdc8411bf // indirect
+	go4.org/netipx v0.0.0-20220725152314-7e7bdc8411bf
 	golang.org/x/exp/typeparams v0.0.0-20220218215828-6cf2b201936e // indirect
 	golang.org/x/mod v0.6.0-dev.0.20220419223038-86c51ed26bb4 // indirect
 	golang.org/x/tools v0.1.11-0.20220513221640-090b14e8501f // indirect

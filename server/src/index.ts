@@ -10,8 +10,10 @@ import { setAgentServiceIO, agentService } from './services/agent.service';
 import { setLiveAlertIO } from './services/liveAlert.service';
 import { setUserSessionsIO } from './services/userSessions.service';
 import { banEngine, banService, setBanServiceIO } from './services/ban.service';
+import { setWhitelistIO } from './services/whitelist.service';
 import { attachAgentWebSocket } from './services/agentWsGate';
 import { obligateService } from './services/obligate.service';
+import { retentionService } from './services/retention.service';
 
 async function main() {
   // 1. Run pending migrations
@@ -40,6 +42,7 @@ async function main() {
   setLiveAlertIO(io);
   setUserSessionsIO(io);
   setBanServiceIO(io);
+  setWhitelistIO(io);
 
   // ── Obliguard agent WebSocket command channel ────────────────────────────
   // The agent WS endpoint shares the REST port: attachAgentWebSocket takes over
@@ -69,21 +72,12 @@ async function main() {
     obligateService.syncCapabilitySchemas().catch(() => {});
   });
 
-  // 8. ip_events retention job — purge events older than configured days every 6 hours.
-  // Env-overridable: Obliguard's connection/auth firehose fills ip_events fast, so a
-  // shorter window (e.g. 30) keeps the table — and every query over it — lean.
-  const IP_EVENTS_RETENTION_DAYS = Number(process.env.IP_EVENTS_RETENTION_DAYS) || 90;
-  const retentionTimer = setInterval(async () => {
-    try {
-      const cutoff = new Date(Date.now() - IP_EVENTS_RETENTION_DAYS * 24 * 60 * 60 * 1000);
-      const deleted = await db('ip_events').where('timestamp', '<', cutoff).delete();
-      if (deleted > 0) {
-        logger.info(`Retention: purged ${deleted} ip_events older than ${IP_EVENTS_RETENTION_DAYS} days`);
-      }
-    } catch (err) {
-      logger.error(err, 'ip_events retention job failed');
-    }
-  }, 6 * 60 * 60 * 1000);
+  // 8. Data retention (W12-1): first pass 60 s after boot, then hourly,
+  // re-entrancy guarded. Purges ip_events, stale ip_reputation (never banned
+  // or whitelisted IPs), old inactive bans, live alerts, audit rows and
+  // orphan group/agent references, in batches. Windows are edited in
+  // Settings (app_config retention.*), env as fallback.
+  retentionService.start();
 
   // 9. Agent cleanup job — auto-delete devices whose uninstall command was delivered
   const agentCleanupTimer = setInterval(async () => {
@@ -125,6 +119,37 @@ async function main() {
     }
   }, 10 * 60 * 1000);
 
+  // 11c. Persisted offline sweep — every 60 s: approved agents whose
+  // last_seen_at is older than their grace window and that have no channel
+  // and no open offline incident are declared offline (live alert + 'down').
+  // Covers agents that never reconnect after a server restart and HTTP-push
+  // agents; the in-memory grace timer of the hub handles the live case.
+  const { obliguardHub } = await import('./services/obliguardHub.service');
+  const offlineSweepTimer = setInterval(async () => {
+    try {
+      const declared = await obliguardHub.sweepOffline();
+      if (declared > 0) logger.info(`Offline sweep: ${declared} agent(s) declared offline`);
+    } catch (err) {
+      logger.error(err, 'Offline sweep failed');
+    }
+  }, 60 * 1000);
+
+  // 11d. GeoIP backfill — first pass after 60 s, then every 15 min: queues
+  // ip_reputation rows still missing country/city/ASN (no-op when GeoIP is
+  // disabled, GEOIP_PROVIDER=none). New events are enriched on upsert.
+  const { ipReputationService } = await import('./services/ipReputation.service');
+  ipReputationService.startGeoBackfill();
+
+  // 11e. IPS dashboard snapshots (Obliance snapshotFleetDaily/Hourly): once at
+  // boot, backfilling the last 30 days / 48 hours from ip_events so a fresh
+  // deploy has trends right away, then hourly (previous + current bucket,
+  // daily and hourly tables). Idempotent: onConflict merge per (tenant, bucket).
+  const { ipsSnapshotService } = await import('./services/ipsSnapshot.service');
+  ipsSnapshotService.runAll({ backfill: true }).catch(() => {});
+  const ipsSnapshotTimer = setInterval(() => {
+    ipsSnapshotService.runAll().catch(() => {});
+  }, 60 * 60 * 1000);
+
   // 12. Graceful shutdown
   let shuttingDown = false;
   const shutdown = async (signal: string) => {
@@ -139,10 +164,13 @@ async function main() {
     }, 10_000);
     hardExit.unref();
 
-    clearInterval(retentionTimer);
+    retentionService.stop();
     clearInterval(agentCleanupTimer);
     clearInterval(banExpiryTimer);
     clearInterval(remoteBlocklistTimer);
+    clearInterval(offlineSweepTimer);
+    clearInterval(ipsSnapshotTimer);
+    ipReputationService.stopGeoBackfill();
     banEngine.stop();
     mikrotikBanSync.stopReconciler();
 

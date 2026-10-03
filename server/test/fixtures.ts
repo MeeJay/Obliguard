@@ -61,6 +61,14 @@ export const U = Object.fromEntries(USERS.map((u) => [u.username, u.id])) as Rec
 
 export const OG = { obligateUserId: 9001, userId: 9 } as const;
 
+/**
+ * Tenant admin of tenant 2 (tenant role 'admin': every capability of tenant 2,
+ * no platform role; W7-2). Kept out of USERS (whose memberships are seeded as
+ * 'user') like seed.VIEWER_B; suites that need it create it when the seed
+ * does not (suites 66/67: ensureAdminB).
+ */
+export const ADMIN_B = { id: 11, username: 'admin_b', tenant: 2, tenantRole: 'admin' } as const;
+
 /** Agent API keys: key N belongs to tenant N. */
 export const KEYS: Record<1 | 2 | 3, string> = {
   1: 'aaaaaaaa-0000-4000-8000-000000000001',

@@ -17,12 +17,12 @@ import type { IncomingMessage } from 'http';
 import type { Duplex } from 'stream';
 import { WebSocketServer } from 'ws';
 import type { WebSocket } from 'ws';
-import { db } from '../db';
 import { logger } from '../utils/logger';
 import { clientIp as requestClientIp } from '../utils/clientIp';
 import { isAgentApiKeyFormat, isDeviceUuidFormat } from '../utils/agentIdentity';
 import { agentService, warnBindingRefused, AGENT_MAX_PENDING_PER_KEY } from './agent.service';
 import { obliguardHub } from './obliguardHub.service';
+import { agentKeyService } from './agentKey.service';
 
 export type AgentUpgradeVerdict =
   | { ok: true; apiKeyId: number; tenantId: number; deviceUuid: string; clientIp: string; rowless: boolean }
@@ -38,9 +38,10 @@ export async function checkAgentUpgrade(request: IncomingMessage): Promise<Agent
   const devUuid = new URL(request.url ?? '/', 'http://localhost').searchParams.get('uuid');
   if (!isDeviceUuidFormat(devUuid)) return { ok: false, status: 400, reason: 'Invalid uuid query param' };
 
-  const keyRow = await db('agent_api_keys').where({ key: apiKey }).first('id', 'tenant_id') as
-    { id: number; tenant_id: number } | undefined;
-  if (!keyRow) return { ok: false, status: 401, reason: 'Invalid API key' };
+  // Unknown and disabled keys (is_active = false, W10-2) get the same 401.
+  const active = await agentKeyService.findActiveByValue(apiKey);
+  if (!active) return { ok: false, status: 401, reason: 'Invalid API key' };
+  const keyRow = { id: active.id, tenant_id: active.tenantId };
 
   // Any use of a valid key is recorded (throttled): 'Last used' becomes a real signal.
   agentService.touchApiKeyUsage(keyRow.id);

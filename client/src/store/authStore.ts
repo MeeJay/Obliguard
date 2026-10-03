@@ -1,5 +1,6 @@
 import { create } from 'zustand';
-import type { User, UserPermissions, PermissionLevel, Capability } from '@obliview/shared';
+import type { User, UserPermissions, PermissionLevel, CapabilityKey } from '@obliview/shared';
+import { holdsCapability } from '@obliview/shared';
 import { authApi, type LoginResult } from '../api/auth.api';
 import { connectSocket, disconnectSocket, getSocket } from '../socket/socketClient';
 import { useLiveAlertsStore } from './liveAlertsStore';
@@ -43,12 +44,16 @@ interface AuthState {
 
   // Convenience permission checkers
   isAdmin: () => boolean;
-  /** Feature capability check (admin ⇒ always true). */
-  hasCapability: (capability: Capability) => boolean;
+  /**
+   * Capability check in the current tenant (platform admin ⇒ always true): a
+   * tenant capability ('bans.create') or a legacy alias ('bans', 'monitor_rw':
+   * held when every capability it stands for is held).
+   */
+  hasCapability: (capability: CapabilityKey) => boolean;
+  /** Role in the current tenant (permission-set slug), or null. */
+  tenantRole: () => string | null;
   canCreate: () => boolean;
-  canWriteMonitor: (monitorId: number, groupId: number | null) => boolean;
   canWriteGroup: (groupId: number) => boolean;
-  getMonitorPermission: (monitorId: number, groupId: number | null) => PermissionLevel | null;
   getGroupPermission: (groupId: number) => PermissionLevel | null;
 }
 
@@ -120,6 +125,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   checkSession: async () => {
     try {
       const { user, permissions, requires2faSetup, currentTenantId, noTenantAccess, preferredTenantId } = await authApi.me();
+      const prev2faSetup = get().requires2faSetup;
       const blocked = !!noTenantAccess && user.role !== 'admin';
       set({
         user,
@@ -140,6 +146,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         // A live socket joined the previous tenant's rooms at handshake: rebuild
         // it when the session now operates another tenant.
         if (prevTenantId != null && currentTenantId != null && prevTenantId !== currentTenantId) {
+          disconnectSocket();
+        }
+        // While a forced second factor is missing the socket joins no tenant
+        // room (server side): rebuild it when that state flips either way.
+        if (prev2faSetup !== (requires2faSetup ?? false)) {
           disconnectSocket();
         }
         connectSocket();
@@ -167,37 +178,26 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   isAdmin: () => get().user?.role === 'admin',
 
-  hasCapability: (capability: Capability) => {
-    const { user, permissions } = get();
-    if (!user) return false;
-    if (user.role === 'admin') return true;
-    return permissions?.capabilities?.includes(capability) ?? false;
-  },
-
-  canCreate: () => {
-    const { user, permissions } = get();
-    if (!user) return false;
-    if (user.role === 'admin') return true;
-    return permissions?.canCreate ?? false;
-  },
-
-  canWriteMonitor: (monitorId: number, groupId: number | null) => {
+  hasCapability: (capability: CapabilityKey) => {
     const { user, permissions } = get();
     if (!user) return false;
     if (user.role === 'admin') return true;
     if (!permissions) return false;
+    // Older servers only send `capabilities` (aliases included).
+    if (!permissions.tenantCapabilities) return permissions.capabilities?.includes(capability) ?? false;
+    return holdsCapability(permissions.tenantCapabilities, capability);
+  },
 
-    // Check direct monitor permission
-    const monitorPerm = permissions.permissions[`monitor:${monitorId}`];
-    if (monitorPerm === 'rw') return true;
+  tenantRole: () => get().permissions?.tenantRole ?? null,
 
-    // Check group permission
-    if (groupId !== null) {
-      const groupPerm = permissions.permissions[`group:${groupId}`];
-      if (groupPerm === 'rw') return true;
-    }
-
-    return false;
+  // Group writes also need the tenant capability groups.manage (server rbac
+  // requireCanCreate / requireGroupWrite): a viewer in an RW team gets none.
+  canCreate: () => {
+    const { user, permissions } = get();
+    if (!user) return false;
+    if (user.role === 'admin') return true;
+    if (!get().hasCapability('groups.manage')) return false;
+    return permissions?.canCreate ?? false;
   },
 
   canWriteGroup: (groupId: number) => {
@@ -205,21 +205,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     if (!user) return false;
     if (user.role === 'admin') return true;
     if (!permissions) return false;
+    if (!get().hasCapability('groups.manage')) return false;
     return permissions.permissions[`group:${groupId}`] === 'rw';
-  },
-
-  getMonitorPermission: (monitorId: number, groupId: number | null) => {
-    const { user, permissions } = get();
-    if (!user) return null;
-    if (user.role === 'admin') return 'rw';
-    if (!permissions) return null;
-
-    const monitorPerm = permissions.permissions[`monitor:${monitorId}`];
-    const groupPerm = groupId !== null ? permissions.permissions[`group:${groupId}`] : null;
-
-    if (monitorPerm === 'rw' || groupPerm === 'rw') return 'rw';
-    if (monitorPerm === 'ro' || groupPerm === 'ro') return 'ro';
-    return null;
   },
 
   getGroupPermission: (groupId: number) => {
@@ -265,6 +252,8 @@ function onSessionResync(e: Event): void {
   const s = useAuthStore.getState();
   if (!s.user || !s.isInitialized) return;
   if (reason === 'noTenantAccess' && s.noTenantAccess) return;
+  // Already known: ProtectedRoute holds the user on the 2FA setup page.
+  if (reason === 'twoFactorSetupRequired' && s.requires2faSetup) return;
   // Mismatch / 409 caused by our own in-flight tenant switch in this tab: expected.
   if (reason === 'tenantChanged' && isTenantSwitchPending()) return;
   if (reason === 'socket') {

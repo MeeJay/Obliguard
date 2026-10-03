@@ -16,6 +16,7 @@ SERVICE_NAME="obliguard_agent"
 RC_SCRIPT="/usr/local/etc/rc.d/${SERVICE_NAME}"
 LOG_FILE="/var/log/obliguard-agent.log"
 PF_TABLE="obliguard_blocklist"
+PF_ANCHOR="obliguard"
 TLS_INSECURE="${TLS_INSECURE:-0}"
 
 # Parse args (override injected values)
@@ -166,53 +167,28 @@ if [ -f /usr/local/opnsense/version/core ]; then
   IS_OPNSENSE=1
 fi
 
+# Bans go to the table <${PF_TABLE}> of the pf anchor "${PF_ANCHOR}". The agent
+# binary installs what makes the main ruleset evaluate that anchor:
+#   - plain FreeBSD: /etc/pf.anchors/obliguard plus 'anchor "obliguard"' and
+#     'load anchor' lines appended to pf.conf (backup first, validated with
+#     pfctl -n), replacing the main-ruleset table rules of older installs;
+#   - OPNsense (pf.conf is generated): plugin hook
+#     /usr/local/etc/inc/plugins.inc.d/obliguard.inc registering the anchor at
+#     the head of the filter rules, then 'configctl filter reload'.
+# The agent re-checks this at every start and logs a warning while bans are
+# not enforced.
 if [ "$IS_OPNSENSE" = "1" ]; then
-  # OPNsense: use anchor + reload hook (pf.conf is regenerated on each change)
-  echo "  OPNsense detected — installing pf anchor + reload hook..."
-
-  # Reload hook script
-  mkdir -p /usr/local/opnsense/scripts/filter
-  cat > /usr/local/opnsense/scripts/filter/obliguard_reload.sh <<HOOKEOF
-#!/bin/sh
-# Re-apply Obliguard pf rules after OPNsense filter reload
-echo "table <${PF_TABLE}> persist
-block in quick from <${PF_TABLE}>
-block out quick to <${PF_TABLE}>" | /sbin/pfctl -a obliguard -f -
-HOOKEOF
-  chmod +x /usr/local/opnsense/scripts/filter/obliguard_reload.sh
-
-  # Configd action
-  mkdir -p /usr/local/opnsense/service/conf/actions.d
-  cat > /usr/local/opnsense/service/conf/actions.d/actions_obliguard.conf <<ACTEOF
-[reload]
-command:/usr/local/opnsense/scripts/filter/obliguard_reload.sh
-parameters:
-type:script
-message:Obliguard pf table reload
-description:Reload Obliguard IPS pf rules
-ACTEOF
-
-  service configd restart 2>/dev/null || true
-
-  # Load anchor immediately
-  echo "table <${PF_TABLE}> persist
-block in quick from <${PF_TABLE}>
-block out quick to <${PF_TABLE}>" | pfctl -a obliguard -f - 2>/dev/null || true
-
-  echo "  pf anchor 'obliguard' loaded."
-
+  echo "  OPNsense detected — installing the pf anchor plugin hook..."
 else
-  # Plain FreeBSD: append to /etc/pf.conf
-  if grep -q "$PF_TABLE" /etc/pf.conf 2>/dev/null; then
-    echo "  pf rules already present in /etc/pf.conf"
-  else
-    echo "" >> /etc/pf.conf
-    echo "# Obliguard IPS — managed automatically, do not edit" >> /etc/pf.conf
-    echo "table <${PF_TABLE}> persist" >> /etc/pf.conf
-    echo "block in quick from <${PF_TABLE}>" >> /etc/pf.conf
-    echo "block out quick to <${PF_TABLE}>" >> /etc/pf.conf
-    pfctl -f /etc/pf.conf 2>/dev/null || true
-    echo "  pf rules added to /etc/pf.conf"
+  echo "  Adding the pf anchor to pf.conf..."
+fi
+if "${INSTALL_DIR}/${BINARY_NAME}" pf-setup; then
+  PF_STATE="enforcing (anchor \"${PF_ANCHOR}\")"
+else
+  PF_STATE="NOT enforcing - see the messages above, then run: ${INSTALL_DIR}/${BINARY_NAME} pf-setup"
+  echo "  Warning: pf does not enforce bans yet."
+  if [ "$IS_OPNSENSE" != "1" ]; then
+    echo "  If pf is disabled: sysrc pf_enable=YES && service pf start"
   fi
 fi
 
@@ -228,6 +204,7 @@ echo ""
 echo " Service : $RC_SCRIPT"
 echo " Config  : $CONFIG_DIR/config.json"
 echo " Logs    : $LOG_FILE"
+echo " pf      : $PF_STATE"
 echo ""
 echo " The agent will appear in"
 echo " the Obliguard admin panel"

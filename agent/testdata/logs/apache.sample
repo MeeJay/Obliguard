@@ -1,0 +1,38 @@
+@@ parser apache
+# Apache access log (combined, vhost_combined) and error log (mod_auth_basic).
+
+@@ expect {"ip":"203.0.113.50","user":"admin"}
+203.0.113.50 - admin [15/Jan/2024:10:20:30 +0100] "GET /secret/ HTTP/1.1" 401 381 "-" "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+
+@@ expect {"ip":"203.0.113.51","user":""}
+www.example.com:443 203.0.113.51 - - [15/Jan/2024:10:20:31 +0100] "GET /secret/ HTTP/1.1" 401 381 "-" "curl/8.4.0"
+
+@@ expect {"ip":"2001:db8::51","user":"root"}
+2001:db8::51 - root [15/Jan/2024:10:20:32 +0100] "GET /secret/ HTTP/1.1" 401 381 "-" "-"
+
+@@ none
+203.0.113.52 - admin [15/Jan/2024:10:20:33 +0100] "GET /secret/ HTTP/1.1" 200 1024 "-" "Mozilla/5.0"
+
+# Injection: Apache escapes '"' in the request as \" — it cannot close the request early.
+@@ none
+203.0.113.53 - - [15/Jan/2024:10:20:34 +0100] "GET /x\" 401 \"y HTTP/1.1" 200 12 "-" "-"
+
+# Error log, Apache 2.4 (client address carries the port, also for IPv6).
+@@ expect {"ip":"203.0.113.54","user":"admin"}
+[Mon Jan 15 10:20:35.123456 2024] [auth_basic:error] [pid 1234:tid 140123456789] [client 203.0.113.54:51234] AH01617: user admin: authentication failure for "/secret/": Password Mismatch
+
+@@ expect {"ip":"203.0.113.55","user":"ghost"}
+[Mon Jan 15 10:20:36.123456 2024] [auth_basic:error] [pid 1234:tid 140123456789] [client 203.0.113.55:51235] AH01618: user ghost not found: /secret/
+
+@@ expect {"ip":"2001:db8::55","user":"admin"}
+[Mon Jan 15 10:20:37.123456 2024] [auth_basic:error] [pid 1234:tid 140123456789] [client 2001:db8::55:51236] AH01617: user admin: authentication failure for "/": Password Mismatch
+
+# Error log, Apache 2.2 (no port, no AH code).
+@@ expect {"ip":"203.0.113.56","user":"admin"}
+[Mon Jan 15 10:20:38 2024] [error] [client 203.0.113.56] user admin: authentication failure for "/secret/": Password Mismatch
+
+@@ none
+[Mon Jan 15 10:20:39.123456 2024] [core:error] [pid 1234:tid 140123456789] [client 203.0.113.57:51237] AH00126: Invalid URI in request GET /.. HTTP/1.1
+# Injection: the username repeats a [client] field; the real one comes first.
+@@ expect {"ip":"203.0.113.58","user":"x [client 198.51.100.66:1] AH01617: user y"}
+[Mon Jan 15 10:20:40.123456 2024] [auth_basic:error] [pid 1234:tid 140123456789] [client 203.0.113.58:51238] AH01618: user x [client 198.51.100.66:1] AH01617: user y not found: /

@@ -1,3 +1,4 @@
+// verify-env: NOTIFICATION_ALLOW_PRIVATE_TARGETS=1
 /**
  * 45 — W1-6 notification dispatch repair.
  *

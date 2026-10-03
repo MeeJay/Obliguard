@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { asyncHandler } from '../utils/asyncHandler';
 import { m365EnrolLimiter } from '../middleware/rateLimiter';
 import {
   getM365EnrolScript,
@@ -21,7 +22,7 @@ const router = Router();
 // exécution ne fait rien sans un jeton valide.
 router.get('/script', getM365EnrolScript);
 
-router.post('/plan', m365EnrolLimiter, getM365EnrolPlan);
+router.post('/plan', m365EnrolLimiter, asyncHandler(getM365EnrolPlan));
 router.post('/complete', m365EnrolLimiter, completeM365Enrolment);
 
 export default router;

@@ -33,9 +33,10 @@ const FIREWALL_RULE_ID_DISPLAY_RE = /^(?!-)[^\u0000-\u001f\u007f-\u009f"\\]{1,25
 /**
  * Names a custom rule never takes: the agent's ban rules (Obliguard-Block-*)
  * and netsh's "all" wildcard (delete rule name=all removes every rule).
+ * Surrounding spaces are ignored: netsh may trim "all " into the wildcard.
  */
 export function isReservedFirewallRuleName(name: string): boolean {
-  const n = name.toLowerCase();
+  const n = name.trim().toLowerCase();
   return n === 'all' || n.startsWith('obliguard-block-');
 }
 

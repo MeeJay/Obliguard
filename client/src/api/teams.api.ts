@@ -6,12 +6,27 @@ import type {
   CreateTeamRequest,
   UpdateTeamRequest,
   SetTeamMembersRequest,
-  SetTeamPermissionsRequest,
+  PermissionLevel,
+  PermissionScope,
 } from '@obliview/shared';
 
-interface TeamDetail extends UserTeam {
+/**
+ * Team permission scope: 'group' (a group and its subtree), 'agent' (one
+ * agent) or 'ungrouped' (every agent of the team's tenant without a group;
+ * scopeId 0 by convention).
+ */
+export type TeamPermissionScope = PermissionScope | 'ungrouped';
+
+/** A team grant as the server stores it (the scope may be 'ungrouped'). */
+export type TeamGrant = Omit<TeamPermission, 'scope'> & { scope: TeamPermissionScope };
+
+export interface TeamDetail extends UserTeam {
   memberIds: number[];
-  permissions: TeamPermission[];
+  permissions: TeamGrant[];
+}
+
+export interface SetTeamGrantsRequest {
+  permissions: Array<{ scope: TeamPermissionScope; scopeId: number; level: PermissionLevel }>;
 }
 
 export const teamsApi = {
@@ -50,17 +65,19 @@ export const teamsApi = {
     return res.data.data!;
   },
 
+  /** Members added must belong to the team's tenant (400 otherwise). */
   async setMembers(id: number, data: SetTeamMembersRequest): Promise<void> {
     await apiClient.put(`/teams/${id}/members`, data);
   },
 
-  async getPermissions(id: number): Promise<TeamPermission[]> {
-    const res = await apiClient.get<ApiResponse<TeamPermission[]>>(`/teams/${id}/permissions`);
+  async getPermissions(id: number): Promise<TeamGrant[]> {
+    const res = await apiClient.get<ApiResponse<TeamGrant[]>>(`/teams/${id}/permissions`);
     return res.data.data!;
   },
 
-  async setPermissions(id: number, data: SetTeamPermissionsRequest): Promise<TeamPermission[]> {
-    const res = await apiClient.put<ApiResponse<TeamPermission[]>>(`/teams/${id}/permissions`, data);
+  /** Replace every grant; each group / agent must belong to the team's tenant (400 otherwise). */
+  async setPermissions(id: number, data: SetTeamGrantsRequest): Promise<TeamGrant[]> {
+    const res = await apiClient.put<ApiResponse<TeamGrant[]>>(`/teams/${id}/permissions`, data);
     return res.data.data!;
   },
 

@@ -12,10 +12,10 @@ import (
 )
 
 const (
-	launchdLabel    = "com.obliguard.agent"
-	launchdPlist    = "/Library/LaunchDaemons/com.obliguard.agent.plist"
-	installBinPath  = "/usr/local/bin/obliguard-agent"
-	logFile         = "/var/log/obliguard-agent.log"
+	launchdLabel   = "com.obliguard.agent"
+	launchdPlist   = "/Library/LaunchDaemons/com.obliguard.agent.plist"
+	installBinPath = "/usr/local/bin/obliguard-agent"
+	logFile        = "/var/log/obliguard-agent.log"
 )
 
 // runAsService checks for "install" / "uninstall" positional arguments
@@ -32,6 +32,18 @@ func runAsService(urlFlag, keyFlag *string) bool {
 	case "uninstall":
 		uninstallLaunchdService()
 		return true
+	case "pf-setup":
+		// (Re)install the pf anchor hook: used by install-macos.sh and to
+		// repair a pf.conf rewritten by a macOS upgrade.
+		if err := pfSetupCLI(); err != nil {
+			fmt.Fprintf(os.Stderr, "pf setup: %v\n", err)
+			os.Exit(1)
+		}
+		return true
+	case "pf-cleanup":
+		// Remove the pf anchor hook (run by the remote uninstall script).
+		pfCleanupCLI()
+		return true
 	}
 	return false
 }
@@ -39,8 +51,10 @@ func runAsService(urlFlag, keyFlag *string) bool {
 // installLaunchdService:
 //  1. Initialises the agent config (saves to /etc/obliguard-agent/config.json)
 //  2. Copies the current binary to /usr/local/bin/obliguard-agent
-//  3. Writes the launchd plist
-//  4. Loads the daemon (launchctl load)
+//  3. Configures pf: anchor file /etc/pf.anchors/obliguard, anchor lines in
+//     /etc/pf.conf (backup first), pf enabled now and at boot (launchd job)
+//  4. Writes the launchd plist
+//  5. Loads the daemon (launchctl load)
 func installLaunchdService(urlArg, keyArg string) {
 	if urlArg == "" || keyArg == "" {
 		fmt.Fprintln(os.Stderr, "Usage: sudo obliguard-agent --url <URL> --key <KEY> install")
@@ -69,7 +83,17 @@ func installLaunchdService(urlArg, keyArg string) {
 		fmt.Printf("Binary installed to %s\n", installBinPath)
 	}
 
-	// ── 3. Write plist ──────────────────────────────────────────────────────
+	// ── 3. Configure pf ─────────────────────────────────────────────────────
+	// Without the anchor reference in /etc/pf.conf and pf enabled, bans land
+	// in a table no rule evaluates. A failure is not fatal: the agent retries
+	// at start and logs a warning while bans are not enforced.
+	fmt.Println("Configuring pf (anchor \"obliguard\")…")
+	if err := pfSetupCLI(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: pf setup: %v\n", err)
+		fmt.Fprintln(os.Stderr, "Bans will not be enforced until this is fixed (then run: sudo obliguard-agent pf-setup).")
+	}
+
+	// ── 4. Write plist ──────────────────────────────────────────────────────
 	plistContent := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -109,7 +133,7 @@ func installLaunchdService(urlArg, keyArg string) {
 	}
 	fmt.Printf("Plist written to %s\n", launchdPlist)
 
-	// ── 4. Load daemon ──────────────────────────────────────────────────────
+	// ── 5. Load daemon ──────────────────────────────────────────────────────
 	// Unload first in case an old version is running
 	_ = exec.Command("launchctl", "unload", launchdPlist).Run()
 
@@ -125,12 +149,16 @@ func installLaunchdService(urlArg, keyArg string) {
 	_ = cfg // config already saved
 }
 
-// uninstallLaunchdService stops and removes the launchd daemon.
+// uninstallLaunchdService stops and removes the launchd daemon and the pf
+// configuration (anchor, pf.conf lines, boot job).
 func uninstallLaunchdService() {
 	fmt.Println("Unloading launchd daemon…")
 	if err := exec.Command("launchctl", "unload", launchdPlist).Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: launchctl unload: %v\n", err)
 	}
+
+	fmt.Println("Removing pf configuration…")
+	pfCleanupCLI()
 
 	for _, path := range []string{launchdPlist, installBinPath} {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {

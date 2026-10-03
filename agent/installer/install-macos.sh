@@ -100,9 +100,23 @@ echo "[3/3] Installing service..."
 #   - Writes /etc/obliguard-agent/config.json (generates device UUID,
 #     tlsInsecureSkipVerify from --tls-insecure=0|1)
 #   - Copies itself to /usr/local/bin/obliguard-agent
+#   - Configures pf so bans are really blocked: writes /etc/pf.anchors/obliguard
+#     (ban table + block rules), appends 'anchor "obliguard"' and
+#     'load anchor "obliguard" from "/etc/pf.anchors/obliguard"' to /etc/pf.conf
+#     (backup in /etc/pf.conf.obliguard.bak, validated with pfctl -n first),
+#     reloads it and enables pf (pfctl -E), plus a launchd job
+#     (/Library/LaunchDaemons/com.obliguard.pf.plist) that re-enables pf at boot
 #   - Writes /Library/LaunchDaemons/com.obliguard.agent.plist
 #   - Runs: launchctl load <plist>
 "$TMP_BINARY" --url "$SERVER_URL" --key "$API_KEY" "$TLS_FLAG" install
+
+# Report whether pf enforces bans (the install above prints the details).
+if /sbin/pfctl -s info 2>/dev/null | grep -q 'Status: Enabled' && \
+   /sbin/pfctl -s rules 2>/dev/null | grep -q 'anchor "obliguard"'; then
+  PF_STATE="enforcing (anchor \"obliguard\")"
+else
+  PF_STATE="NOT enforcing - see the warnings above, then run: sudo obliguard-agent pf-setup"
+fi
 
 # Clean up temp binary (the binary already copied itself to /usr/local/bin/)
 rm -f "$TMP_BINARY"
@@ -114,6 +128,8 @@ echo ""
 echo " The agent is now running and"
 echo " will appear in the Obliguard"
 echo " admin panel once approved."
+echo ""
+echo " pf : $PF_STATE"
 echo ""
 echo " To uninstall:"
 echo "   sudo obliguard-agent uninstall"

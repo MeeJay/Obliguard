@@ -4,30 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { cn } from '@/utils/cn';
 import type { NotificationTypeConfig } from '@obliview/shared';
 import { DEFAULT_NOTIFICATION_TYPES } from '@obliview/shared';
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Toggle switch helper
-// ─────────────────────────────────────────────────────────────────────────────
-
-function Switch({ on, onChange, disabled = false }: { on: boolean; onChange: (v: boolean) => void; disabled?: boolean }) {
-  return (
-    <button
-      type="button"
-      onClick={() => !disabled && onChange(!on)}
-      disabled={disabled}
-      className={cn(
-        'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors',
-        on ? 'bg-accent' : 'bg-bg-tertiary border border-border',
-        disabled && 'opacity-40 cursor-not-allowed',
-      )}
-    >
-      <span className={cn(
-        'inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform',
-        on ? 'translate-x-4' : 'translate-x-0.5',
-      )} />
-    </button>
-  );
-}
+import { ToggleSwitch } from '@/components/common/ToggleSwitch';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -186,11 +163,11 @@ export function NotificationTypesPanel({
                   {!isGlobal && (
                     overriding ? (
                       <span className="inline-flex items-center rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-500">
-                        Override
+                        {t('common.override')}
                       </span>
                     ) : (
                       <span className="text-xs text-text-muted">
-                        Default
+                        {t('agents.notifType.default', { defaultValue: 'Default' })}
                       </span>
                     )
                   )}
@@ -199,10 +176,11 @@ export function NotificationTypesPanel({
               </div>
 
               {/* Switch */}
-              <Switch
-                on={val}
+              <ToggleSwitch
+                checked={val}
                 onChange={v => handleToggle(key, v)}
                 disabled={readOnly || (!isGlobal && !overriding)}
+                ariaLabel={t(labelKey)}
               />
 
               {/* Override / Reset button (not shown for global scope) */}

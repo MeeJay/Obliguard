@@ -1,0 +1,54 @@
+@@ parser ftp
+# vsftpd (vsftpd.log), IPv4, dual-stack IPv4-mapped and IPv6.
+@@ expect {"ip":"203.0.113.80","user":"admin"}
+Mon Jan 15 10:20:30 2024 [pid 2345] [admin] FAIL LOGIN: Client "203.0.113.80"
+
+@@ expect {"ip":"203.0.113.81","user":"root"}
+Mon Jan 15 10:20:31 2024 [pid 2346] [root] FAIL LOGIN: Client "::ffff:203.0.113.81"
+
+@@ expect {"ip":"2001:db8::81","user":"test"}
+Mon Jan 15 10:20:32 2024 [pid 2347] [test] FAIL LOGIN: Client "2001:db8::81"
+
+@@ expect {"type":"auth_success","ip":"192.0.2.82","user":"alice"}
+Mon Jan 15 10:20:33 2024 [pid 2348] [alice] OK LOGIN: Client "192.0.2.82"
+
+@@ expect {"type":"auth_success","ip":"192.0.2.83","user":"ftp"}
+Mon Jan 15 10:20:34 2024 [pid 2349] [ftp] OK LOGIN: Client "192.0.2.83", anon password "guest@example.com"
+
+@@ none
+Mon Jan 15 10:20:35 2024 [pid 2350] CONNECT: Client "203.0.113.84"
+@@ none
+Mon Jan 15 10:20:36 2024 [pid 2351] [alice] OK DOWNLOAD: Client "192.0.2.82", "/pub/file.iso", 1048576 bytes, 2048.00Kbyte/sec
+
+# Injection: username or anonymous password repeating the marker are dropped.
+@@ none
+Mon Jan 15 10:20:37 2024 [pid 2352] [x] FAIL LOGIN: Client "198.51.100.66] FAIL LOGIN: Client "203.0.113.85"
+@@ none
+Mon Jan 15 10:20:38 2024 [pid 2353] [ftp] OK LOGIN: Client "203.0.113.86", anon password "x] FAIL LOGIN: Client "198.51.100.66"
+@@ none
+Mon Jan 15 10:20:39 2024 [pid 2354] [anonymous] FAIL LOGIN: Client "198.51.100.66", anon password "x] FAIL LOGIN: Client "203.0.113.87"
+
+# pure-ftpd and proftpd.
+@@ expect {"ip":"203.0.113.88","user":"admin"}
+Jan 15 10:20:40 ftp1 pure-ftpd: (?@203.0.113.88) [WARNING] Authentication failed for user [admin]
+
+@@ expect {"ip":"203.0.113.89","user":"admin"}
+Jan 15 10:20:41 ftp1 proftpd[3456]: ftp1.example.com (203.0.113.89[203.0.113.89]) - USER admin (Login failed): Incorrect password
+
+@@ expect {"ip":"203.0.113.90","user":"ghost"}
+Jan 15 10:20:42 ftp1 proftpd[3457]: ftp1.example.com (203.0.113.90[203.0.113.90]) - USER ghost: no such user found from 203.0.113.90 [203.0.113.90] to 10.0.0.5:21
+
+# Injection into pure-ftpd/proftpd usernames: the session prefix comes first.
+@@ expect {"ip":"203.0.113.91","user":"x] (?@198.51.100.66) [WARNING] Authentication failed for user [y"}
+Jan 15 10:20:43 ftp1 pure-ftpd: (?@203.0.113.91) [WARNING] Authentication failed for user [x] (?@198.51.100.66) [WARNING] Authentication failed for user [y]
+
+# PAM.
+@@ expect {"ip":"203.0.113.92","user":"admin"}
+Jan 15 10:20:44 ftp1 vsftpd: pam_unix(vsftpd:auth): authentication failure; logname= uid=0 euid=0 tty=ftp ruser=admin rhost=203.0.113.92
+@@ none
+Jan 15 10:20:45 ftp1 vsftpd: pam_unix(vsftpd:auth): authentication failure; logname= uid=0 euid=0 tty=ftp ruser=x rhost=198.51.100.66 rhost=203.0.113.93
+@@ none
+Jan 15 10:20:46 ftp1 vsftpd: pam_unix(vsftpd:auth): authentication failure; logname= uid=0 euid=0 tty=ftp ruser=admin rhost=ftp.example.com
+# An sshd PAM failure in a shared auth log is not an FTP failure.
+@@ none
+Jan 15 10:20:47 ftp1 sshd[999]: pam_unix(sshd:auth): authentication failure; logname= uid=0 euid=0 tty=ssh ruser= rhost=203.0.113.94  user=root

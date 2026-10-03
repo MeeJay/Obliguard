@@ -1,0 +1,97 @@
+import type { ReactNode } from 'react';
+import { clsx } from 'clsx';
+import { InfoTip } from './Tip';
+import { useCanHover } from '@/hooks/useMediaQuery';
+
+interface Props {
+  checked: boolean;
+  onChange: (next: boolean) => void;
+  disabled?: boolean;
+  size?: 'sm' | 'md';
+  label?: ReactNode;
+  description?: ReactNode;
+  title?: string;
+  /** Accessible name of the switch when it has no visible `label` (a
+   * wrapping element's aria-label does not name the control). */
+  ariaLabel?: string;
+  /** Id(s) of the element(s) that describe the switch (e.g. why it is
+   * disabled / inherited). */
+  ariaDescribedBy?: string;
+}
+
+/**
+ * iOS-style toggle switch. Drop-in replacement for checkbox inputs used
+ * to represent booleans. Accessible (role="switch", aria-checked).
+ *
+ * Positioning is done with inline styles rather than Tailwind utility
+ * classes to avoid ambiguous absolute-anchoring bugs where the knob ends
+ * up at the wrong edge of the track.
+ *
+ * Touch (Obliance docs/obli-mobile.md §5): an invisible hit area grows the
+ * track to ≥ 40 px tall without moving the layout, and `title` (a hover-only
+ * tooltip) is also offered as a tap-to-open (i) next to the label.
+ */
+export function ToggleSwitch({
+  checked, onChange, disabled = false, size = 'md', label, description, title, ariaLabel, ariaDescribedBy,
+}: Props) {
+  // Geometry (px). Chosen so the knob has a 2px visual padding from the
+  // track edge in both OFF and ON positions.
+  const G = size === 'sm'
+    ? { trackW: 32, trackH: 16, knob: 12, pad: 2 }
+    : { trackW: 40, trackH: 20, knob: 16, pad: 2 };
+  const translateX = checked ? G.trackW - G.knob - G.pad : G.pad;
+  const canHover = useCanHover();
+  // Mouse: the native title tooltip (unchanged). Touch: title never shows,
+  // so the same text is reachable through an (i) popover.
+  const hint = title && !canHover
+    ? <InfoTip content={title} className="ml-1 align-middle" />
+    : null;
+
+  const toggle = (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={ariaLabel}
+      aria-describedby={ariaDescribedBy}
+      disabled={disabled}
+      onClick={(e) => { e.stopPropagation(); if (!disabled) onChange(!checked); }}
+      title={title}
+      style={{ width: G.trackW, height: G.trackH }}
+      className={clsx(
+        'relative rounded-full transition-colors shrink-0 border',
+        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60',
+        // Invisible touch hit area (≥ 40 px tall), layout unchanged.
+        "coarse:after:absolute coarse:after:-inset-x-2 coarse:after:-inset-y-3 coarse:after:content-['']",
+        checked ? 'bg-accent border-accent' : 'bg-bg-tertiary border-transparent',
+        disabled && 'opacity-50 cursor-not-allowed',
+      )}
+    >
+      <span
+        className="absolute rounded-full bg-white shadow-sm transition-transform"
+        style={{
+          top: (G.trackH - G.knob) / 2 - 1, // -1 to compensate for the 1px border
+          left: 0,
+          width: G.knob,
+          height: G.knob,
+          transform: `translateX(${translateX}px)`,
+        }}
+      />
+    </button>
+  );
+
+  if (!label && !description) {
+    if (!hint) return toggle;
+    return <span className="inline-flex items-center gap-1">{toggle}{hint}</span>;
+  }
+
+  return (
+    <label className={clsx('flex items-start gap-2.5', disabled ? 'cursor-not-allowed' : 'cursor-pointer')}>
+      {toggle}
+      <span className="flex flex-col min-w-0">
+        {label && <span className="text-sm text-text-primary">{label}{hint}</span>}
+        {description && <span className="text-xs text-text-muted">{description}{!label && hint}</span>}
+      </span>
+    </label>
+  );
+}

@@ -15,6 +15,12 @@ import {
 
 const BCRYPT_COST = 4;
 
+/**
+ * Read-only member of tenant 2 (tenant role 'viewer', migration 035; W6-1).
+ * Kept out of fixtures.USERS so suites enumerating USERS are unchanged.
+ */
+export const VIEWER_B = { id: 10, username: 'viewer_b', tenant: 2 } as const;
+
 export async function seedFixtures(knex: Knex): Promise<void> {
   // 1. Tenants (id 1 'Default' comes from migration 001, inserted with an
   //    explicit id that never advances tenants_id_seq — see 14#1).
@@ -42,12 +48,24 @@ export async function seedFixtures(knex: Knex): Promise<void> {
     });
   }
 
-  // 3. Memberships (all 'member')
+  // 3. Memberships (all 'user': the legacy 'member' role, migration 035)
   for (const u of USERS) {
     for (const t of u.tenants) {
-      await knex('user_tenants').insert({ user_id: u.id, tenant_id: t, role: 'member' });
+      await knex('user_tenants').insert({ user_id: u.id, tenant_id: t, role: 'user' });
     }
   }
+
+  // 3b. viewer_b: read-only member of tenant 2
+  await knex('users').insert({
+    id: VIEWER_B.id,
+    username: VIEWER_B.username,
+    password_hash: hash,
+    role: 'user',
+    is_active: true,
+    email: `${VIEWER_B.username}@verify.test`,
+    enrollment_version: 2,
+  });
+  await knex('user_tenants').insert({ user_id: VIEWER_B.id, tenant_id: VIEWER_B.tenant, role: 'viewer' });
 
   // 4. Agent API keys: key N belongs to tenant N
   for (const n of [1, 2, 3] as const) {
@@ -251,6 +269,8 @@ export interface CreateUserOpts {
   username?: string;
   role?: 'admin' | 'user';
   tenants?: number[];
+  /** Role of the memberships (default 'user'; 'member' = legacy value). */
+  tenantRole?: string;
   email?: string;
 }
 
@@ -266,7 +286,7 @@ export async function createUser(k: Knex, o: CreateUserOpts = {}): Promise<{ id:
     enrollment_version: 2,
   }).returning('id') as Array<{ id: number }>;
   for (const t of o.tenants ?? []) {
-    await k('user_tenants').insert({ user_id: r.id, tenant_id: t, role: 'member' });
+    await k('user_tenants').insert({ user_id: r.id, tenant_id: t, role: o.tenantRole ?? 'user' });
   }
   return { id: r.id, username };
 }

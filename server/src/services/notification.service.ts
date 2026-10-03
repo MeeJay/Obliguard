@@ -1,15 +1,22 @@
+import type { Knex } from 'knex';
 import { db } from '../db';
 import type {
   NotificationChannel,
   NotificationBinding,
-  NotificationTypeConfig,
   OverrideMode,
   NotificationEventFields,
   NotificationKind,
 } from '@obliview/shared';
-import { DEFAULT_NOTIFICATION_TYPES, NOTIFICATION_REDACTED, MASTER_TENANT_ID, isMasterTenant } from '@obliview/shared';
+import { NOTIFICATION_REDACTED, MASTER_TENANT_ID, isMasterTenant } from '@obliview/shared';
 import type { NotificationPayload } from '../notifications/types';
 import { getPlugin } from '../notifications/registry';
+import {
+  configHasPlaintextSecrets,
+  openChannelConfig,
+  sealChannelConfig,
+  secretFieldsFor,
+  unreadableSecretFields,
+} from '../notifications/secretFields';
 import { smtpServerService } from './smtpServer.service';
 import { config } from '../config';
 import { logger } from '../utils/logger';
@@ -45,7 +52,33 @@ interface BindingRow {
   scope: string;
   scope_id: number | null;
   override_mode: string;
+  tenant_id: number;
 }
+
+/** A binding with the tenant it belongs to (migration 034). */
+export type TenantNotificationBinding = NotificationBinding & { tenantId: number };
+
+/** Who a delivery was for (notification_log.tenant_id / scope / scope_id). */
+export interface NotificationLogContext {
+  tenantId?: number | null;
+  scope?: 'global' | 'group' | 'agent' | null;
+  scopeId?: number | null;
+}
+
+// One-shot re-encryption of legacy plaintext channel secrets, started on the
+// first access of the service, in the background (a failure is logged, never
+// thrown; configs left plaintext are sealed on their next write).
+let reencryption: Promise<number> | null = null;
+
+function startReencryption(): void {
+  if (reencryption) return;
+  reencryption = notificationService.reencryptSecrets().catch((err) => {
+    logger.warn({ err }, 'Notification secret re-encryption failed');
+    return 0;
+  });
+}
+
+const BINDING_COLUMNS = ['b.id', 'b.channel_id', 'b.scope', 'b.scope_id', 'b.override_mode', 'b.tenant_id'] as const;
 
 // A channel shared to another tenant is visible there (so its admins can bind
 // it to their groups/agents) but its secrets are not: every config key that
@@ -63,9 +96,8 @@ function parseConfig(raw: unknown): Record<string, unknown> {
 
 function redactConfig(type: string, raw: unknown): Record<string, unknown> {
   const cfg = parseConfig(raw);
-  const passwordFields = new Set(
-    (getPlugin(type)?.configFields ?? []).filter((f) => f.type === 'password').map((f) => f.key),
-  );
+  // The plugin's password fields plus its other secret keys (secretFields.ts).
+  const passwordFields = new Set(secretFieldsFor(type));
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(cfg)) {
     out[k] = passwordFields.has(k) || SECRET_KEY_TEST.test(k) ? NOTIFICATION_REDACTED : v;
@@ -76,6 +108,8 @@ function redactConfig(type: string, raw: unknown): Record<string, unknown> {
 /**
  * `currentTenantId` is the caller's tenant (request handlers). Background jobs
  * omit it and get the full config. The Default tenant owns every channel.
+ * Owners get the secret fields decrypted (they are sealed at rest, see
+ * notifications/secretFields); a non-owner gets them redacted.
  */
 function rowToChannel(row: ChannelRow, currentTenantId?: number): NotificationChannel {
   const isOwner = currentTenantId === undefined
@@ -85,7 +119,7 @@ function rowToChannel(row: ChannelRow, currentTenantId?: number): NotificationCh
     id: row.id,
     name: row.name,
     type: row.type,
-    config: isOwner ? parseConfig(row.config) : redactConfig(row.type, row.config),
+    config: isOwner ? openChannelConfig(row.type, parseConfig(row.config)) : redactConfig(row.type, row.config),
     isEnabled: row.is_enabled,
     createdBy: row.created_by,
     tenantId: row.tenant_id,
@@ -99,13 +133,14 @@ function rowToChannel(row: ChannelRow, currentTenantId?: number): NotificationCh
   return ch;
 }
 
-function rowToBinding(row: BindingRow): NotificationBinding {
+function rowToBinding(row: BindingRow): TenantNotificationBinding {
   return {
     id: row.id,
     channelId: row.channel_id,
     scope: row.scope as NotificationBinding['scope'],
     scopeId: row.scope_id,
     overrideMode: row.override_mode as OverrideMode,
+    tenantId: row.tenant_id,
   };
 }
 
@@ -115,6 +150,20 @@ function visibleChannelIdsQuery(tenantId: number) {
     .select('id')
     .where('tenant_id', tenantId)
     .orWhereIn('id', db('notification_channel_tenants').select('channel_id').where({ tenant_id: tenantId }));
+}
+
+/**
+ * Resolution filter for the bindings of a non-Default tenant: a merge/replace
+ * row only counts while its channel is still visible to the tenant (a revoked
+ * share stops the tenant's alerts from reaching the former sharer's channel).
+ * Exclude rows always count. The Default tenant's rows are never filtered.
+ */
+function onlyVisibleChannels(qb: Knex.QueryBuilder, tenantId: number, column = 'channel_id'): void {
+  if (isMasterTenant(tenantId)) return;
+  const modeColumn = column.includes('.') ? `${column.split('.')[0]}.override_mode` : 'override_mode';
+  qb.where(function () {
+    this.where(modeColumn, 'exclude').orWhereIn(column, visibleChannelIdsQuery(tenantId));
+  });
 }
 
 // ── IPS message builders ─────────────────────────────────────────────────────
@@ -203,6 +252,7 @@ export const notificationService = {
   // ── Channel CRUD ──
 
   async getAllChannels(tenantId: number): Promise<NotificationChannel[]> {
+    startReencryption();
     // Own channels + channels shared to this tenant via the junction table
     const rows = await db<ChannelRow>('notification_channels')
       .where(function () {
@@ -221,6 +271,7 @@ export const notificationService = {
    * caller's tenant so a channel they do not own comes back redacted.
    */
   async getChannelById(id: number, currentTenantId?: number): Promise<NotificationChannel | null> {
+    startReencryption();
     if (!Number.isInteger(id) || id <= 0) return null;
     const row = await db<ChannelRow>('notification_channels').where({ id }).first();
     return row ? rowToChannel(row, currentTenantId) : null;
@@ -233,6 +284,7 @@ export const notificationService = {
     isEnabled?: boolean;
     createdBy?: number;
   }, tenantId: number): Promise<NotificationChannel> {
+    startReencryption();
     const plugin = getPlugin(data.type);
     if (!plugin) throw new Error(`Unknown notification type: ${data.type}`);
 
@@ -240,7 +292,7 @@ export const notificationService = {
       .insert({
         name: data.name,
         type: data.type,
-        config: JSON.stringify(data.config) as unknown as Record<string, unknown>,
+        config: JSON.stringify(sealChannelConfig(data.type, data.config)) as unknown as Record<string, unknown>,
         is_enabled: data.isEnabled ?? true,
         created_by: data.createdBy ?? null,
         tenant_id: tenantId,
@@ -255,17 +307,22 @@ export const notificationService = {
     config?: Record<string, unknown>;
     isEnabled?: boolean;
   }, currentTenantId?: number): Promise<NotificationChannel | null> {
+    startReencryption();
     const updateData: Record<string, unknown> = { updated_at: new Date() };
     if (data.name !== undefined) updateData.name = data.name;
+    const current = await db<ChannelRow>('notification_channels').where({ id }).first();
+    const stored = parseConfig(current?.config);
     if (data.config !== undefined) {
-      // A form that round-trips a masked value must never overwrite the stored secret.
-      const current = await db<ChannelRow>('notification_channels').where({ id }).first();
-      const stored = parseConfig(current?.config);
+      // A form that round-trips a masked value must never overwrite the stored
+      // secret (kept as stored, i.e. sealed); new secret values are sealed.
       const merged: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(data.config)) {
         merged[k] = v === NOTIFICATION_REDACTED ? stored[k] : v;
       }
-      updateData.config = JSON.stringify(merged);
+      updateData.config = JSON.stringify(sealChannelConfig(current?.type ?? '', merged));
+    } else if (current && configHasPlaintextSecrets(current.type, stored)) {
+      // Any write also seals legacy plaintext secrets left in place.
+      updateData.config = JSON.stringify(sealChannelConfig(current.type, stored));
     }
     if (data.isEnabled !== undefined) updateData.is_enabled = data.isEnabled;
 
@@ -279,6 +336,31 @@ export const notificationService = {
   async deleteChannel(id: number): Promise<boolean> {
     const count = await db('notification_channels').where({ id }).del();
     return count > 0;
+  },
+
+  /**
+   * Seals the legacy plaintext secrets of every channel config. Idempotent:
+   * configs without plaintext secrets are left alone. Each row is re-read
+   * under a row lock, so a concurrent update is never overwritten; updated_at
+   * is left alone (not a user change). Returns the number of rows sealed.
+   */
+  async reencryptSecrets(): Promise<number> {
+    const candidates = await db<ChannelRow>('notification_channels').select('id', 'type', 'config');
+    let sealed = 0;
+    for (const c of candidates) {
+      if (!configHasPlaintextSecrets(c.type, parseConfig(c.config))) continue;
+      await db.transaction(async (trx) => {
+        const row = await trx<ChannelRow>('notification_channels').where({ id: c.id }).forUpdate().first('id', 'type', 'config');
+        if (!row) return;
+        const cfg = parseConfig(row.config);
+        if (!configHasPlaintextSecrets(row.type, cfg)) return;
+        await trx('notification_channels').where({ id: row.id })
+          .update({ config: JSON.stringify(sealChannelConfig(row.type, cfg)) });
+        sealed++;
+      });
+    }
+    if (sealed > 0) logger.info({ count: sealed }, 'Notification channel secrets encrypted at rest');
+    return sealed;
   },
 
   // ── Cross-tenant channel sharing ──
@@ -309,6 +391,11 @@ export const notificationService = {
    * For all other channels, returns config as-is (backward-compat).
    */
   async resolveChannelConfig(channel: NotificationChannel): Promise<Record<string, unknown>> {
+    // Secrets come decrypted from rowToChannel; one still sealed could not be.
+    const unreadable = unreadableSecretFields(channel.type, channel.config);
+    if (unreadable.length > 0) {
+      throw new Error(`Channel secret cannot be decrypted (${unreadable.join(', ')}): CREDENTIAL_ENCRYPTION_KEY / SESSION_SECRET changed?`);
+    }
     if (channel.type === 'smtp' && channel.config.smtpServerId) {
       const server = await smtpServerService.getTransportConfig(Number(channel.config.smtpServerId));
       if (!server) throw new Error(`SMTP server #${channel.config.smtpServerId} not found`);
@@ -325,66 +412,100 @@ export const notificationService = {
     return channel.config;
   },
 
-  async testChannel(id: number): Promise<void> {
+  /** `tenantId`: the caller's tenant, recorded in notification_log (default: the channel's). */
+  async testChannel(id: number, tenantId?: number): Promise<void> {
     const channel = await this.getChannelById(id);
     if (!channel) throw new Error('Channel not found');
 
     const plugin = getPlugin(channel.type);
     if (!plugin) throw new Error(`No plugin for type: ${channel.type}`);
 
+    const ctx: NotificationLogContext = { tenantId: tenantId ?? channel.tenantId };
     try {
       const resolvedConfig = await this.resolveChannelConfig(channel);
       await plugin.sendTest(resolvedConfig);
-      await this.logNotification(channel.id, 'test', true, 'Test notification');
+      await this.logNotification(channel.id, 'test', true, 'Test notification', undefined, ctx);
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : 'Unknown error';
-      await this.logNotification(channel.id, 'test', false, 'Test notification', errMsg);
+      await this.logNotification(channel.id, 'test', false, 'Test notification', errMsg, ctx);
       throw error;
     }
   },
 
   // ── Bindings ──
+  //
+  // Every binding belongs to a tenant (notification_bindings.tenant_id,
+  // migration 034). Group/agent bindings carry the tenant of their target. A
+  // 'global' binding covers the agents of its own tenant only, except a
+  // global binding of the Default tenant, which covers every tenant (the
+  // platform on-call channel, owner decision).
 
-  /** Raw bindings of one scope (resolution engine; not tenant-filtered). */
-  async getBindings(scope: string, scopeId: number | null): Promise<NotificationBinding[]> {
+  /**
+   * Raw bindings of one scope (resolution engine). `tenantId` narrows them to
+   * one tenant (plus the Default tenant's rows): the resolvers pass the
+   * tenant of the device / group, so a stale row left by a device moved to
+   * another tenant never fires.
+   */
+  async getBindings(scope: string, scopeId: number | null, tenantId?: number | null): Promise<TenantNotificationBinding[]> {
     const q = db<BindingRow>('notification_bindings').where({ scope });
     if (scopeId === null) q.whereNull('scope_id');
     else q.where('scope_id', scopeId);
-    const rows = await q;
+    if (tenantId !== undefined && tenantId !== null) {
+      // The target tenant's rows (on a still-visible channel), plus the
+      // Default tenant's: legacy rows made from Default on another tenant's
+      // target before bindings were tenant-checked (migration 034 keeps them
+      // as Default rows so they keep firing).
+      q.where(function () {
+        this.where('tenant_id', MASTER_TENANT_ID);
+        if (!isMasterTenant(tenantId)) {
+          this.orWhere(function () {
+            this.where('tenant_id', tenantId);
+            onlyVisibleChannels(this, tenantId);
+          });
+        }
+      });
+    }
+    const rows = await q.orderBy('id');
     return rows.map(rowToBinding);
   },
 
   /**
-   * Global bindings that apply to agents of `tenantId`. Bindings carry no
-   * tenant: a global binding belongs to its channel's owner. A Default-owned
-   * channel bound globally covers every tenant (platform on-call channel);
-   * another tenant's global binding covers only its own agents.
-   * `tenantId` null (unknown owner) keeps every global binding.
+   * Global bindings that apply to agents of `tenantId`: the tenant's own
+   * global bindings plus the Default tenant's. `tenantId` null (unknown
+   * owner) gets the Default tenant's only.
    */
-  async getGlobalBindingsForTenant(tenantId: number | null): Promise<NotificationBinding[]> {
-    const q = db<BindingRow>('notification_bindings as b')
-      .join('notification_channels as c', 'c.id', 'b.channel_id')
+  async getGlobalBindingsForTenant(tenantId: number | null): Promise<TenantNotificationBinding[]> {
+    const own = tenantId !== null && !isMasterTenant(tenantId) ? tenantId : null;
+    const rows = await db<BindingRow>('notification_bindings as b')
       .where('b.scope', 'global')
       .whereNull('b.scope_id')
-      .select('b.id', 'b.channel_id', 'b.scope', 'b.scope_id', 'b.override_mode');
-    if (tenantId !== null) q.whereIn('c.tenant_id', [MASTER_TENANT_ID, tenantId]);
-    const rows = await q;
+      .where(function () {
+        this.where('b.tenant_id', MASTER_TENANT_ID);
+        if (own !== null) {
+          this.orWhere(function () {
+            this.where('b.tenant_id', own);
+            onlyVisibleChannels(this, own, 'b.channel_id');
+          });
+        }
+      })
+      .orderBy('b.id')
+      .select(...BINDING_COLUMNS);
     return rows.map(rowToBinding);
   },
 
   /**
-   * Bindings visible to the caller tenant, optionally narrowed to one scope
-   * (and scope id). Global rows: channel visible to the tenant and owned by
-   * it or by Default (a global binding covers its owner's agents). Group/agent
-   * rows: target owned by the tenant. The Default tenant sees every row.
+   * Bindings of the caller tenant, optionally narrowed to one scope (and
+   * scope id). A tenant sees only its own rows (group/agent rows: on a target
+   * it still owns). The Default tenant sees every tenant's rows (god view),
+   * each with its tenantId so the UI can tell its own from the others.
    */
   async listBindingsForTenant(
     tenantId: number,
     scope?: BindingScope,
     scopeId?: number | null,
-  ): Promise<NotificationBinding[]> {
+  ): Promise<TenantNotificationBinding[]> {
     const q = db<BindingRow>('notification_bindings as b')
-      .select('b.id', 'b.channel_id', 'b.scope', 'b.scope_id', 'b.override_mode')
+      .select(...BINDING_COLUMNS)
       .orderBy('b.id');
     if (scope) {
       q.where('b.scope', scope);
@@ -392,14 +513,9 @@ export const notificationService = {
       else if (scopeId !== undefined) q.where('b.scope_id', scopeId);
     }
     if (!isMasterTenant(tenantId)) {
+      q.where('b.tenant_id', tenantId);
       q.where(function () {
-        this.where(function () {
-          // Only global rows that actually cover this tenant (owner = tenant
-          // or Default, see getGlobalBindingsForTenant) on a visible channel.
-          this.where('b.scope', 'global')
-            .whereIn('b.channel_id', visibleChannelIdsQuery(tenantId))
-            .whereIn('b.channel_id', db('notification_channels').select('id').whereIn('tenant_id', [MASTER_TENANT_ID, tenantId]));
-        })
+        this.where('b.scope', 'global')
           .orWhere(function () {
             this.where('b.scope', 'group')
               .whereIn('b.scope_id', db('monitor_groups').select('id').where({ tenant_id: tenantId }));
@@ -414,41 +530,70 @@ export const notificationService = {
     return rows.map(rowToBinding);
   },
 
-  async addBinding(channelId: number, scope: string, scopeId: number | null, overrideMode: OverrideMode = 'merge'): Promise<NotificationBinding> {
-    // Upsert in code, NOT via .onConflict(): Postgres treats a NULL scope_id
-    // (global scope) as distinct in the unique index, so ON CONFLICT never
-    // matched a global binding and every "enable globally" inserted a duplicate.
-    const existing = await db<BindingRow>('notification_bindings')
-      .where({ channel_id: channelId, scope })
+  /**
+   * Create or update the binding of `tenantId` (the operating tenant). Upsert
+   * in code, NOT via .onConflict(): the unique index is on an expression
+   * (COALESCE(scope_id, 0)), which ON CONFLICT cannot target by columns, and
+   * a NULL scope_id (global scope) never matched the old column constraint,
+   * so every "enable globally" inserted a duplicate. A concurrent insert that
+   * loses the race against the unique index (23505) becomes an update.
+   */
+  async addBinding(
+    channelId: number,
+    scope: string,
+    scopeId: number | null,
+    tenantId: number,
+    overrideMode: OverrideMode = 'merge',
+  ): Promise<TenantNotificationBinding> {
+    const findExisting = () => db<BindingRow>('notification_bindings')
+      .where({ channel_id: channelId, scope, tenant_id: tenantId })
       .modify((qb) => {
         if (scopeId === null) qb.whereNull('scope_id');
         else qb.where('scope_id', scopeId);
       })
       .first();
-    if (existing) {
+    const updateExisting = async (id: number): Promise<TenantNotificationBinding> => {
       const [row] = await db<BindingRow>('notification_bindings')
-        .where({ id: existing.id })
+        .where({ id })
         .update({ override_mode: overrideMode })
         .returning('*');
       return rowToBinding(row);
+    };
+
+    const existing = await findExisting();
+    if (existing) return updateExisting(existing.id);
+    try {
+      const [row] = await db<BindingRow>('notification_bindings')
+        .insert({
+          tenant_id: tenantId,
+          channel_id: channelId,
+          scope,
+          scope_id: scopeId,
+          override_mode: overrideMode,
+        })
+        .returning('*');
+      return rowToBinding(row);
+    } catch (err) {
+      if ((err as { code?: string }).code !== '23505') throw err;
+      const raced = await findExisting();
+      if (!raced) throw err;
+      return updateExisting(raced.id);
     }
-    const [row] = await db<BindingRow>('notification_bindings')
-      .insert({
-        channel_id: channelId,
-        scope,
-        scope_id: scopeId,
-        override_mode: overrideMode,
-      })
-      .returning('*');
-    return rowToBinding(row);
   },
 
-  async removeBinding(channelId: number, scope: string, scopeId: number | null): Promise<boolean> {
+  /**
+   * Remove a binding. Global scope: only the row of `tenantId` (a tenant
+   * never removes another tenant's global binding). Group/agent scope: the
+   * caller has checked that the target is its own; every row on it goes
+   * (stale rows of a previous owner included).
+   */
+  async removeBinding(channelId: number, scope: string, scopeId: number | null, tenantId: number): Promise<boolean> {
     const count = await db('notification_bindings')
       .where({ channel_id: channelId, scope })
       .modify((qb) => {
         if (scopeId === null) qb.whereNull('scope_id');
         else qb.where('scope_id', scopeId);
+        if (scope === 'global') qb.where('tenant_id', tenantId);
       })
       .del();
     return count > 0;
@@ -564,7 +709,8 @@ export const notificationService = {
 
     // 1. Global bindings that apply to the group's tenant
     const groupTenant = await db('monitor_groups').where({ id: scopeId }).first('tenant_id') as { tenant_id: number | null } | undefined;
-    const globalBindings = await this.getGlobalBindingsForTenant(groupTenant?.tenant_id ?? null);
+    const tenantId = groupTenant?.tenant_id ?? null;
+    const globalBindings = await this.getGlobalBindingsForTenant(tenantId);
     applyBindingsWithSources(globalBindings, 'global', null, 'Global', false);
 
     // 2. Parent chain (ancestors of this group, self excluded)
@@ -575,7 +721,7 @@ export const notificationService = {
       .select('ancestor_id');
 
     for (const row of ancestorRows) {
-      const groupBindings = await this.getBindings('group', row.ancestor_id);
+      const groupBindings = await this.getBindings('group', row.ancestor_id, tenantId);
       const groupRow = await db('monitor_groups').where({ id: row.ancestor_id }).first('name');
       applyBindingsWithSources(
         groupBindings,
@@ -587,7 +733,7 @@ export const notificationService = {
     }
 
     // 3. Direct bindings at this scope
-    const directBindings = await this.getBindings(scope, scopeId);
+    const directBindings = await this.getBindings(scope, scopeId, tenantId);
     applyBindingsWithSources(directBindings, scope, scopeId, 'Direct', true);
 
     // Enrich with channel name/type
@@ -618,7 +764,8 @@ export const notificationService = {
 
     // 1. Global bindings that apply to the group's tenant
     const groupTenant = await db('monitor_groups').where({ id: groupId }).first('tenant_id') as { tenant_id: number | null } | undefined;
-    const globalBindings = await this.getGlobalBindingsForTenant(groupTenant?.tenant_id ?? null);
+    const tenantId = groupTenant?.tenant_id ?? null;
+    const globalBindings = await this.getGlobalBindingsForTenant(tenantId);
     channelIds = this._applyBindings(channelIds, globalBindings);
 
     // 2. Group chain (root → leaf, including self via depth >= 0)
@@ -628,7 +775,7 @@ export const notificationService = {
       .select('ancestor_id');
 
     for (const row of ancestorRows) {
-      const groupBindings = await this.getBindings('group', row.ancestor_id);
+      const groupBindings = await this.getBindings('group', row.ancestor_id, tenantId);
       channelIds = this._applyBindings(channelIds, groupBindings);
     }
 
@@ -637,7 +784,8 @@ export const notificationService = {
 
   /**
    * Resolve which channels should fire for a given agent device.
-   * Chain: Global → Agent Group ancestors (root→leaf) → Agent-level bindings.
+   * Chain: Global (the device tenant's + the Default tenant's) → Agent Group
+   * ancestors (root→leaf) → Agent-level bindings, all of the device's tenant.
    */
   async resolveChannelsForAgent(deviceId: number): Promise<number[]> {
     let channelIds: Set<number> = new Set();
@@ -657,13 +805,13 @@ export const notificationService = {
         .select('ancestor_id');
 
       for (const row of ancestorRows) {
-        const groupBindings = await this.getBindings('group', row.ancestor_id);
+        const groupBindings = await this.getBindings('group', row.ancestor_id, device.tenant_id);
         channelIds = this._applyBindings(channelIds, groupBindings);
       }
     }
 
     // 3. Agent-level bindings
-    const agentBindings = await this.getBindings('agent', deviceId);
+    const agentBindings = device ? await this.getBindings('agent', deviceId, device.tenant_id) : [];
     channelIds = this._applyBindings(channelIds, agentBindings);
 
     return Array.from(channelIds);
@@ -752,7 +900,7 @@ export const notificationService = {
         .select('ancestor_id');
 
       for (const row of ancestorRows) {
-        const groupBindings = await this.getBindings('group', row.ancestor_id);
+        const groupBindings = await this.getBindings('group', row.ancestor_id, device.tenant_id);
         const groupRow = await db('monitor_groups').where({ id: row.ancestor_id }).first('name') as { name: string } | undefined;
         applyBindingsWithSources(
           groupBindings,
@@ -765,7 +913,7 @@ export const notificationService = {
     }
 
     // 3. Agent-level bindings
-    const agentBindings = await this.getBindings('agent', deviceId);
+    const agentBindings = device ? await this.getBindings('agent', deviceId, device.tenant_id) : [];
     applyBindingsWithSources(agentBindings, 'agent', deviceId, 'Direct', true);
 
     // Enrich with channel name/type
@@ -786,82 +934,17 @@ export const notificationService = {
   },
 
   /**
-   * Resolve the effective notification types for an agent device.
-   * Chain: device notification_types → group agentGroupConfig.notificationTypes (ancestor chain) → system defaults.
-   * Each field uses the first non-null value found in the chain.
+   * Resolve the effective notification types for an agent device through the
+   * IPS settings cascade (W13): default → global → tenant → group chain →
+   * agent, each field on its own. The legacy columns (agent_devices
+   * .notification_types, agent_group_config, agent_global_config) are kept in
+   * sync by every write path but no longer read here.
    */
   async resolveNotificationTypesForDevice(deviceId: number): Promise<{
     global: boolean; down: boolean; up: boolean; threat: boolean; attack: boolean;
   }> {
-    // Accumulated values — undefined means "not yet resolved"
-    let global: boolean | undefined;
-    let down:   boolean | undefined;
-    let up:     boolean | undefined;
-    let threat: boolean | undefined;
-    let attack: boolean | undefined;
-
-    const applyConfig = (cfg: NotificationTypeConfig | null | undefined) => {
-      if (!cfg) return;
-      if (global === undefined && cfg.global !== null && cfg.global !== undefined) global = cfg.global;
-      if (down   === undefined && cfg.down   !== null && cfg.down   !== undefined) down   = cfg.down;
-      if (up     === undefined && cfg.up     !== null && cfg.up     !== undefined) up     = cfg.up;
-      if (threat === undefined && cfg.threat !== null && cfg.threat !== undefined) threat = cfg.threat;
-      if (attack === undefined && cfg.attack !== null && cfg.attack !== undefined) attack = cfg.attack;
-    };
-
-    // 1. Device-level override
-    const deviceRow = await db('agent_devices')
-      .where({ id: deviceId })
-      .select('group_id', 'notification_types')
-      .first() as { group_id: number | null; notification_types: unknown } | undefined;
-
-    if (deviceRow?.notification_types) {
-      const nt = typeof deviceRow.notification_types === 'string'
-        ? JSON.parse(deviceRow.notification_types)
-        : deviceRow.notification_types as NotificationTypeConfig;
-      applyConfig(nt);
-    }
-
-    // 2. Walk up the group hierarchy (leaf → root)
-    if (deviceRow?.group_id) {
-      const ancestorRows = await db('group_closure')
-        .where('descendant_id', deviceRow.group_id)
-        .orderBy('depth', 'asc')
-        .select('ancestor_id');
-
-      for (const row of ancestorRows) {
-        const groupRow = await db('monitor_groups')
-          .where({ id: row.ancestor_id })
-          .select('agent_group_config')
-          .first() as { agent_group_config: unknown } | undefined;
-        if (groupRow?.agent_group_config) {
-          const cfg = typeof groupRow.agent_group_config === 'string'
-            ? JSON.parse(groupRow.agent_group_config)
-            : groupRow.agent_group_config as { notificationTypes?: NotificationTypeConfig | null };
-          applyConfig(cfg.notificationTypes);
-        }
-      }
-    }
-
-    // 3. Global agent defaults (from app_config agent_global_config)
-    if (global === undefined || down === undefined || up === undefined || threat === undefined || attack === undefined) {
-      const { appConfigService } = await import('./appConfig.service');
-      const globalTypes = await appConfigService.getResolvedAgentNotificationTypes();
-      if (global === undefined) global = globalTypes.global;
-      if (down   === undefined) down   = globalTypes.down;
-      if (up     === undefined) up     = globalTypes.up;
-      if (threat === undefined) threat = globalTypes.threat;
-      if (attack === undefined) attack = globalTypes.attack;
-    }
-
-    // 4. Hardcoded system defaults for any still-unresolved fields
-    return {
-      global: global ?? DEFAULT_NOTIFICATION_TYPES.global,
-      down:   down   ?? DEFAULT_NOTIFICATION_TYPES.down,
-      up:     up     ?? DEFAULT_NOTIFICATION_TYPES.up,
-      threat: threat ?? DEFAULT_NOTIFICATION_TYPES.threat,
-      attack: attack ?? DEFAULT_NOTIFICATION_TYPES.attack,
-    };
+    const { agentConfigService } = await import('./agentConfig.service');
+    return agentConfigService.resolveNotificationTypesForDevice(deviceId);
   },
 
   /**
@@ -969,7 +1052,10 @@ export const notificationService = {
       .whereIn('id', channelIds)
       .where({ is_enabled: true });
 
-    await this._dispatch(channels, payload, `agent_${kind ?? 'status_change'}`, `device "${deviceName}"`);
+    const deviceTenant = await db('agent_devices').where({ id: deviceId }).first('tenant_id') as { tenant_id: number | null } | undefined;
+    await this._dispatch(channels, payload, `agent_${kind ?? 'status_change'}`, `device "${deviceName}"`, {
+      tenantId: deviceTenant?.tenant_id ?? null, scope: 'agent', scopeId: deviceId,
+    });
   },
 
   /**
@@ -990,14 +1076,24 @@ export const notificationService = {
       .whereIn('id', channelIds)
       .where({ is_enabled: true });
 
-    await this._dispatch(channels, enrichedPayload, 'group_status_change', `group "${groupName}"`);
+    const groupTenant = await db('monitor_groups').where({ id: groupId }).first('tenant_id') as { tenant_id: number | null } | undefined;
+    await this._dispatch(channels, enrichedPayload, 'group_status_change', `group "${groupName}"`, {
+      tenantId: groupTenant?.tenant_id ?? null, scope: 'group', scopeId: groupId,
+    });
   },
 
   /**
    * Send one payload to every channel. A failing channel (plugin error, SMTP
    * server gone, log insert error) never stops the others.
    */
-  async _dispatch(channels: ChannelRow[], payload: IpsNotificationPayload, eventType: string, label: string): Promise<void> {
+  async _dispatch(
+    channels: ChannelRow[],
+    payload: IpsNotificationPayload,
+    eventType: string,
+    label: string,
+    ctx: NotificationLogContext = {},
+  ): Promise<void> {
+    startReencryption();
     for (const row of channels) {
       const channel = rowToChannel(row);
       const plugin = getPlugin(channel.type);
@@ -1009,11 +1105,11 @@ export const notificationService = {
       try {
         const resolvedConfig = await this.resolveChannelConfig(channel);
         await plugin.send(resolvedConfig, payload);
-        await this.logNotification(channel.id, eventType, true, payload.message);
+        await this.logNotification(channel.id, eventType, true, payload.message, undefined, ctx);
         logger.info(`Notification sent: ${channel.name} (${channel.type}) for ${label}`);
       } catch (error) {
         const errMsg = error instanceof Error ? error.message : 'Unknown error';
-        await this.logNotification(channel.id, eventType, false, payload.message, errMsg);
+        await this.logNotification(channel.id, eventType, false, payload.message, errMsg, ctx);
         logger.error(`Notification failed: ${channel.name} (${channel.type}) for ${label}: ${errMsg}`);
       }
     }
@@ -1026,6 +1122,7 @@ export const notificationService = {
     success: boolean,
     message?: string,
     error?: string,
+    ctx: NotificationLogContext = {},
   ): Promise<void> {
     try {
       await db('notification_log').insert({
@@ -1034,6 +1131,9 @@ export const notificationService = {
         success,
         message: message ? message.slice(0, 2000) : null,
         error: error ? error.slice(0, 2000) : null,
+        tenant_id: ctx.tenantId ?? null,
+        scope: ctx.scope ?? null,
+        scope_id: ctx.scopeId ?? null,
       });
     } catch (err) {
       logger.warn({ err, channelId, eventType }, 'Failed to write notification_log row');

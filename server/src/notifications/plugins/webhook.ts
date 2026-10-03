@@ -1,5 +1,6 @@
 import type { NotificationPlugin } from '../types';
 import type { IpsNotificationPayload } from '../../services/notification.service';
+import { assertNotificationTarget, guardedFetch } from './outbound';
 
 export const webhookPlugin: NotificationPlugin = {
   type: 'webhook',
@@ -17,11 +18,12 @@ export const webhookPlugin: NotificationPlugin = {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (config.secret) headers['Authorization'] = String(config.secret);
 
-    const res = await fetch(String(config.url), {
+    // Public targets only, unless NOTIFICATION_ALLOW_PRIVATE_TARGETS=true.
+    const target = await assertNotificationTarget(String(config.url ?? ''), { privateByDefault: false });
+    const res = await guardedFetch(target, {
       method: 'POST',
       headers,
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(10000),
     });
     if (!res.ok) throw new Error(`Webhook returned ${res.status}`);
   },

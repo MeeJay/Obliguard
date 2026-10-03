@@ -1,6 +1,7 @@
 import type { NotificationPlugin } from '../types';
 import type { IpsNotificationPayload } from '../../services/notification.service';
 import { statusIcon, STATUS_COLORS_HEX } from '../statusIcons';
+import { assertPinnedHost, guardedFetch, DISCORD_HOSTS } from './outbound';
 
 // Payload text comes partly from agent logs (usernames, hostnames): escape
 // Discord markdown and break @everyone/@here so a crafted value cannot
@@ -53,11 +54,11 @@ export const discordPlugin: NotificationPlugin = {
     const body: Record<string, unknown> = { embeds: [embed], allowed_mentions: { parse: [] } };
     if (config.username) body.username = config.username;
 
-    const res = await fetch(String(config.webhookUrl), {
+    const target = assertPinnedHost(String(config.webhookUrl ?? ''), DISCORD_HOSTS, 'Discord');
+    const res = await guardedFetch(target, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(10000),
     });
     if (!res.ok) throw new Error(`Discord returned ${res.status}: ${await res.text()}`);
   },

@@ -1,4 +1,4 @@
-import type { SettingsKey } from './settingsDefaults';
+import type { WindowsFirewallBackend } from './settingsDefaults';
 
 export const USER_ROLES = ['admin', 'user'] as const;
 export type UserRole = (typeof USER_ROLES)[number];
@@ -28,6 +28,16 @@ export interface LiveAlertData {
   stableKey: string | null;
   read: boolean;
   createdAt: string;
+  /** ISO time the alert was marked read, or null. */
+  readAt?: string | null;
+  /** Incident fields (migration 034); null / 1 for a plain alert. */
+  incidentKind?: string | null;
+  deviceId?: number | null;
+  resolvedAt?: string | null;
+  /** How many times the open incident was raised (1 = once). */
+  occurrences?: number;
+  /** ISO time of the last raise, or null. */
+  updatedAt?: string | null;
 }
 
 export interface User {
@@ -69,8 +79,6 @@ export interface MonitorGroup {
   parentId: number | null;
   sortOrder: number;
   isGeneral: boolean;
-  /** @deprecated Obliview leftover, ignored by the server (group notifications removed). */
-  groupNotifications?: boolean;
   /**
    * Evaluate-only (dry-run) mode. When true, this group and all its descendant
    * groups + agents observe events but never create or enforce auto-bans.
@@ -144,6 +152,9 @@ export interface NotificationBinding {
   scope: 'global' | 'group' | 'agent';
   scopeId: number | null;
   overrideMode: OverrideMode;
+  /** Tenant the binding belongs to (migration 034). The Default tenant's
+   *  global binding covers every tenant; any other tenant's covers its own. */
+  tenantId?: number;
 }
 
 export interface NotificationPluginMeta {
@@ -161,19 +172,7 @@ export interface NotificationConfigField {
   required?: boolean;
 }
 
-// ============================================
-// Settings types
-// ============================================
-export type SettingsScope = 'global' | 'group';
-
-export interface SettingValue {
-  value: number;
-  source: SettingsScope | 'default';
-  sourceId: number | null;
-  sourceName: string;
-}
-
-export type ResolvedSettings = Record<SettingsKey, SettingValue>;
+// Settings types: see settingsDefaults.ts (IPS settings cascade, W13).
 
 // ============================================
 // API types
@@ -197,8 +196,6 @@ export interface CreateGroupRequest {
   parentId?: number | null;
   sortOrder?: number;
   isGeneral?: boolean;
-  /** @deprecated Ignored by the server (group notifications removed). */
-  groupNotifications?: boolean;
   kind?: 'agent';
 }
 
@@ -208,8 +205,6 @@ export interface UpdateGroupRequest {
   parentId?: number | null;
   sortOrder?: number;
   isGeneral?: boolean;
-  /** @deprecated Ignored by the server (group notifications removed). */
-  groupNotifications?: boolean;
   evaluateOnly?: boolean;
 }
 
@@ -380,7 +375,8 @@ export const DEFAULT_AGENT_GLOBAL_CONFIG: Required<{
 // Team & Permission types
 // ============================================
 export type PermissionLevel = 'ro' | 'rw';
-export type PermissionScope = 'group' | 'agent';
+/** Team grant scope. 'ungrouped' = the tenant's agents without a group (scopeId 0 by convention). */
+export type PermissionScope = 'group' | 'agent' | 'ungrouped';
 
 export interface UserTeam {
   id: number;
@@ -401,39 +397,240 @@ export interface TeamPermission {
   level: PermissionLevel;
 }
 
+// ============================================
+// RBAC: tenant capability catalogue (W6-1)
+// ============================================
+//
+// A tenant member's role (user_tenants.role) is the slug of a permission set
+// (permission_sets.slug). Role 'admin' holds every tenant capability; any
+// other slug holds the capabilities of its set; an unknown slug holds none.
+// Platform admins (users.role = 'admin') hold everything everywhere.
+// Tenant role drives WHAT a member may do; team permissions drive WHERE.
+
+/** Every tenant capability, in display order. The single source of truth. */
+export const TENANT_CAPABILITY_KEYS = [
+  'ips.view',
+  'bans.create',
+  'bans.lift',
+  'bans.promote',
+  'bans.wipe',
+  'whitelist.write',
+  'ip.labels',
+  'ip.reputation.clear',
+  'templates.write',
+  'agents.manage',
+  'agents.update',
+  'agents.delete',
+  'agents.keys',
+  'agents.approve',
+  'firewall.rules.read',
+  'firewall.rules.write',
+  'groups.manage',
+  'notifications.manage',
+  'settings',
+  'integrations.mikrotik',
+  'integrations.m365',
+  'rate_limit.write',
+  'remote_blocklists',
+  'users.manage',
+  'audit.read',
+] as const;
+
+export type TenantCapability = typeof TENANT_CAPABILITY_KEYS[number];
+
+export type TenantCapabilityCategory =
+  | 'ips' | 'bans' | 'agents' | 'firewall' | 'policies' | 'integrations' | 'administration';
+
+export interface TenantCapabilityInfo {
+  key: TenantCapability;
+  category: TenantCapabilityCategory;
+  /** i18n key of the label (English fallback in `label`). */
+  labelKey: string;
+  label: string;
+  /** Only meaningful on the Default tenant (platform-wide effect). */
+  defaultTenantOnly?: boolean;
+}
+
+/** i18n key of a capability label: dots become underscores (no nesting). */
+function capLabelKey(key: TenantCapability): string {
+  return `permissionSets.caps.${key.replace(/\./g, '_')}`;
+}
+
+function capInfo(
+  key: TenantCapability,
+  category: TenantCapabilityCategory,
+  label: string,
+  defaultTenantOnly?: boolean,
+): TenantCapabilityInfo {
+  return defaultTenantOnly
+    ? { key, category, labelKey: capLabelKey(key), label, defaultTenantOnly }
+    : { key, category, labelKey: capLabelKey(key), label };
+}
+
+/** The capability catalogue (key, category, label), served by /permission-sets/capabilities. */
+export const TENANT_CAPABILITIES: readonly TenantCapabilityInfo[] = [
+  capInfo('ips.view', 'ips', 'View IP activity, bans and reputation'),
+  capInfo('ip.labels', 'ips', 'Manage IP labels'),
+  capInfo('ip.reputation.clear', 'ips', 'Clear IP reputation data'),
+  capInfo('whitelist.write', 'ips', 'Manage the whitelist'),
+  capInfo('bans.create', 'bans', 'Create bans'),
+  capInfo('bans.lift', 'bans', 'Lift and exclude bans'),
+  capInfo('bans.promote', 'bans', 'Promote bans to global', true),
+  capInfo('bans.wipe', 'bans', 'Wipe all bans and IP data', true),
+  capInfo('agents.manage', 'agents', 'Edit agents and send commands'),
+  capInfo('agents.update', 'agents', 'Update agents (update now / retry)'),
+  capInfo('agents.approve', 'agents', 'Approve or refuse pending agents'),
+  capInfo('agents.delete', 'agents', 'Delete and uninstall agents'),
+  capInfo('agents.keys', 'agents', 'Manage agent enrolment keys'),
+  capInfo('groups.manage', 'agents', 'Create, edit and delete groups'),
+  capInfo('firewall.rules.read', 'firewall', 'View host firewall rules'),
+  capInfo('firewall.rules.write', 'firewall', 'Edit host firewall rules'),
+  capInfo('templates.write', 'policies', 'Manage service templates'),
+  capInfo('rate_limit.write', 'policies', 'Manage network rate limits'),
+  capInfo('remote_blocklists', 'policies', 'Manage remote blocklists'),
+  capInfo('integrations.mikrotik', 'integrations', 'Manage MikroTik routers'),
+  capInfo('integrations.m365', 'integrations', 'Manage Microsoft 365 guard'),
+  capInfo('notifications.manage', 'administration', 'Manage notification channels'),
+  capInfo('settings', 'administration', 'Change tenant settings'),
+  capInfo('users.manage', 'administration', 'Manage users and teams'),
+  capInfo('audit.read', 'administration', 'Read the audit log'),
+];
+
+/** Capability categories in display order (i18n key + English fallback). */
+export const TENANT_CAPABILITY_CATEGORIES: readonly { key: TenantCapabilityCategory; labelKey: string; label: string }[] = [
+  { key: 'ips', labelKey: 'permissionSets.categories.ips', label: 'IP intelligence' },
+  { key: 'bans', labelKey: 'permissionSets.categories.bans', label: 'Bans' },
+  { key: 'agents', labelKey: 'permissionSets.categories.agents', label: 'Agents and groups' },
+  { key: 'firewall', labelKey: 'permissionSets.categories.firewall', label: 'Host firewall' },
+  { key: 'policies', labelKey: 'permissionSets.categories.policies', label: 'Policies' },
+  { key: 'integrations', labelKey: 'permissionSets.categories.integrations', label: 'Integrations' },
+  { key: 'administration', labelKey: 'permissionSets.categories.administration', label: 'Administration' },
+];
+
+/** Tenant role holding every capability (never looked up in permission_sets). */
+export const TENANT_ROLE_ADMIN = 'admin';
+/** Default role of a new membership. */
+export const TENANT_ROLE_DEFAULT = 'user';
+/** Read-only role; also where an unknown Obligate role slug lands. */
+export const TENANT_ROLE_VIEWER = 'viewer';
+/** Legacy role value (before migration 035): accepted as a write alias of 'user'. */
+export const LEGACY_TENANT_ROLE_MEMBER = 'member';
+
+/** Seeded permission sets that cannot be renamed or deleted. */
+export const PROTECTED_PERMISSION_SETS = [TENANT_ROLE_ADMIN, TENANT_ROLE_DEFAULT, TENANT_ROLE_VIEWER] as const;
+
+/** A tenant role: 'admin' or the slug of a permission set. */
+export type TenantRole = string;
+
+/** Maps the legacy 'member' role to 'user'; any other value is returned unchanged. */
+export function normalizeTenantRole(role: string): string {
+  return role === LEGACY_TENANT_ROLE_MEMBER ? TENANT_ROLE_DEFAULT : role;
+}
+
+export function isTenantCapability(key: unknown): key is TenantCapability {
+  return typeof key === 'string' && (TENANT_CAPABILITY_KEYS as readonly string[]).includes(key);
+}
+
 /**
- * Feature-level capabilities. These are the keys Obliguard registers with
- * Obligate (obligate.service.syncCapabilitySchemas) and that flow back into
- * team_permissions.capabilities on SSO login. They gate WHAT a non-admin may do
- * (viewing is granted to any tenant member; these govern mutations).
- * Admins implicitly hold all of them.
+ * Legacy feature capabilities (pre-W6-1 runtime keys, also the schema keys
+ * registered with Obligate). Kept for one release as ALIASES: each maps to a
+ * set of tenant capabilities (CAPABILITY_ALIASES) and is held when ALL of them
+ * are held. Existing route guards keep using them until they are re-gated.
  */
 export const CAPABILITIES = {
-  /** Manage agent devices (edit/delete/command, firewall rules). */
+  /** Manage agent devices (edit/delete/command, firewall rules). Alias. */
   MONITOR_RW: 'monitor_rw',
-  /** Create / edit / delete / move groups. */
+  /** Same as monitor_rw under its Obliguard name. Alias. */
+  AGENTS_RW: 'agents_rw',
+  /** Create / edit / delete / move groups. Alias. */
   GROUP_RW: 'group_rw',
-  /** Manage whitelist entries. */
+  /** Manage whitelist entries. Alias. */
   WHITELIST: 'whitelist',
-  /** Create / lift / promote bans. */
+  /** Create / lift bans. Alias. */
   BANS: 'bans',
 } as const;
 
 export type Capability = typeof CAPABILITIES[keyof typeof CAPABILITIES];
 
+/** Tenant capabilities each legacy capability stands for. */
+export const CAPABILITY_ALIASES: Readonly<Record<Capability, readonly TenantCapability[]>> = {
+  monitor_rw: ['agents.manage', 'agents.update', 'firewall.rules.read'],
+  agents_rw: ['agents.manage', 'agents.update', 'firewall.rules.read'],
+  group_rw: ['groups.manage'],
+  whitelist: ['whitelist.write'],
+  bans: ['bans.create', 'bans.lift'],
+};
+
+/** Every legacy (alias) capability. */
 export const ALL_CAPABILITIES: Capability[] = [
   CAPABILITIES.MONITOR_RW,
+  CAPABILITIES.AGENTS_RW,
   CAPABILITIES.GROUP_RW,
   CAPABILITIES.WHITELIST,
   CAPABILITIES.BANS,
 ];
 
+/** A capability as a guard names it: a tenant capability or a legacy alias. */
+export type CapabilityKey = TenantCapability | Capability;
+
+export function isCapabilityAlias(key: unknown): key is Capability {
+  return typeof key === 'string' && Object.prototype.hasOwnProperty.call(CAPABILITY_ALIASES, key);
+}
+
+/** Tenant capabilities a key stands for: itself, an alias's set, or [] when unknown. */
+export function expandCapability(key: string): TenantCapability[] {
+  if (isTenantCapability(key)) return [key];
+  if (isCapabilityAlias(key)) return [...CAPABILITY_ALIASES[key]];
+  return [];
+}
+
+/** Expands a list of tenant capabilities / aliases; unknown keys are dropped. */
+export function expandCapabilities(keys: Iterable<string>): TenantCapability[] {
+  const out = new Set<TenantCapability>();
+  for (const k of keys) for (const c of expandCapability(k)) out.add(c);
+  return TENANT_CAPABILITY_KEYS.filter((c) => out.has(c));
+}
+
+/** Whether `held` (tenant capabilities) satisfies `key` (all of an alias's set). Unknown key: false. */
+export function holdsCapability(held: Iterable<string>, key: string): boolean {
+  const need = expandCapability(key);
+  if (need.length === 0) return false;
+  const set = held instanceof Set ? held as Set<string> : new Set(held);
+  return need.every((c) => set.has(c));
+}
+
+/** The legacy aliases `held` (tenant capabilities) satisfies. */
+export function satisfiedCapabilityAliases(held: Iterable<string>): Capability[] {
+  const set = new Set(held);
+  return ALL_CAPABILITIES.filter((a) => holdsCapability(set, a));
+}
+
+/**
+ * Seed content of the protected permission sets (migration 035). Editable
+ * afterwards (the admin set is informational: role 'admin' holds everything).
+ */
+export const DEFAULT_PERMISSION_SET_CAPABILITIES: Readonly<Record<'admin' | 'user' | 'viewer', readonly TenantCapability[]>> = {
+  admin: TENANT_CAPABILITY_KEYS,
+  user: TENANT_CAPABILITY_KEYS.filter((c) => ![
+    'agents.delete', 'agents.keys', 'firewall.rules.write', 'users.manage', 'settings',
+    'notifications.manage', 'bans.promote', 'bans.wipe', 'audit.read',
+  ].includes(c)),
+  viewer: ['ips.view', 'firewall.rules.read'],
+};
+
 export interface UserPermissions {
   canCreate: boolean;
   teams: number[];
   permissions: Record<string, PermissionLevel>;
-  /** Feature capabilities the user holds (admin ⇒ all). */
-  capabilities: Capability[];
+  /**
+   * Capabilities the user holds in the current tenant: the tenant capabilities
+   * plus the legacy aliases they satisfy (platform admin ⇒ all).
+   */
+  capabilities: CapabilityKey[];
+  /** Role in the current tenant ('admin' for a platform admin; null without membership). */
+  tenantRole?: TenantRole | null;
+  /** Tenant capabilities held in the current tenant (no aliases). */
+  tenantCapabilities?: TenantCapability[];
 }
 
 // ============================================
@@ -471,6 +668,8 @@ export interface CreateUserRequest {
   password: string;
   displayName?: string | null;
   role?: UserRole;
+  /** Role in the operating tenant for a delegated creation (users.manage). Default 'user'. */
+  tenantRole?: TenantRole;
 }
 
 export interface UpdateUserRequest {
@@ -558,6 +757,10 @@ export interface AgentGroupConfig {
 // ============================================
 // Agent types
 // ============================================
+/**
+ * @deprecated The /agent/keys list no longer returns the full key (W10-2):
+ * use AgentKeyView (list) / AgentKeyCreated (create).
+ */
 export interface AgentApiKey {
   id: number;
   name: string;
@@ -566,6 +769,32 @@ export interface AgentApiKey {
   createdAt: string;
   lastUsedAt: string | null;
   deviceCount?: number;
+}
+
+/** An agent enrolment key as listed to admins (W10-2): never the full value. */
+export interface AgentKeyView {
+  id: number;
+  tenantId: number;
+  name: string;
+  /** First 8 + last 4 characters, e.g. "1a2b3c4d…9f0e". */
+  keyMasked: string;
+  isActive: boolean;
+  revokedAt: string | null;
+  revokedBy: number | null;
+  defaultGroupId: number | null;
+  defaultGroupName: string | null;
+  createdBy: number | null;
+  createdAt: string;
+  lastUsedAt: string | null;
+  /** Devices bound to the key (any status). */
+  deviceCount: number;
+  /** Pending devices enrolled with the key. */
+  pendingCount: number;
+}
+
+/** POST /agent/keys result: the only list-shaped response carrying the full key. */
+export interface AgentKeyCreated extends AgentKeyView {
+  key: string;
 }
 
 export interface AgentDisplayConfig {
@@ -623,11 +852,6 @@ export interface AgentDevice {
   agentVersion: string | null;
   apiKeyId: number | null;
   status: 'pending' | 'approved' | 'refused' | 'suspended';
-  /**
-   * @deprecated Obliview leftover: no longer returned nor accepted by the
-   * server (offline alerts follow the 'down' notification type).
-   */
-  heartbeatMonitoring?: boolean;
   checkIntervalSeconds: number;
   /** Raw device-level value. null = not set at device level = inherit from group/global. */
   maxMissedPushes: number | null;
@@ -640,8 +864,6 @@ export interface AgentDevice {
   overrideGroupSettings: boolean;
   resolvedSettings: {
     checkIntervalSeconds: number;
-    /** @deprecated No longer returned by the server. */
-    heartbeatMonitoring?: boolean;
     maxMissedPushes: number;
   };
   groupSettings: AgentGroupConfig | null;
@@ -670,6 +892,11 @@ export interface AgentDevice {
   wanMatchingEnabled: boolean;
   /** True when the agent has an active WebSocket command channel to the server. */
   wsConnected: boolean;
+  /**
+   * Team-level access of the caller to this agent (RBAC-8): 'rw' without team
+   * restriction. Combine with the tenant capabilities client-side.
+   */
+  accessLevel?: PermissionLevel;
   /**
    * Effective evaluate-only (dry-run) state: true if this device's own flag is set
    * OR it inherits the flag from an ancestor group. In this mode the agent observes
@@ -718,7 +945,10 @@ export interface AgentDevice {
   lastOnlineAt?: string | null;
   /** Last time the offline grace period expired. */
   lastOfflineAt?: string | null;
-  /** Capabilities reported in the heartbeat (e.g. 'tls_unverified'). */
+  /**
+   * Capabilities reported in the heartbeat (e.g. 'tls_unverified', 'cidr',
+   * 'ratelimit' when the active firewall backend enforces rate limits).
+   */
   capabilities?: string[];
   /** Latest update attempt, or null when none was ever recorded. */
   update?: AgentUpdateAttemptInfo | null;
@@ -758,6 +988,13 @@ export interface MikroTikCredentials {
   lastApiConnectedAt: string | null;
   lastApiError: string | null;
   lastSyslogAt: string | null;
+  /**
+   * SHA-256 fingerprint (AA:BB:... hex) of the API-SSL certificate, pinned on
+   * the first successful TLS login (trust on first use). Null = not pinned yet.
+   */
+  tlsFingerprint: string | null;
+  /** True when the last connection was refused because the certificate no longer matches the pin. */
+  tlsFingerprintMismatch: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -786,6 +1023,12 @@ export interface UpdateMikroTikCredentialsRequest {
   syslogIdentifier?: string;
   addressListName?: string;
   importAddressLists?: string | null;
+  /**
+   * Forget the pinned API-SSL fingerprint: the next successful TLS login pins
+   * the certificate the router presents then (after a deliberate certificate
+   * change). Changing the host or port also forgets it.
+   */
+  resetTlsFingerprint?: boolean;
 }
 
 // ============================================
@@ -934,11 +1177,11 @@ export interface Tenant {
 export interface TenantMembership {
   tenantId: number;
   userId: number;
-  role: 'admin' | 'member';
+  role: TenantRole;
 }
 
 export interface TenantWithRole extends Tenant {
-  role: 'admin' | 'member';
+  role: TenantRole;
 }
 
 export interface UserTenantAssignment {
@@ -946,7 +1189,7 @@ export interface UserTenantAssignment {
   tenantName: string;
   tenantSlug: string;
   isMember: boolean;
-  role: 'admin' | 'member';
+  role: TenantRole;
 }
 
 // ============================================
@@ -975,6 +1218,8 @@ export interface ServiceTemplate {
   mode: ServiceTemplateMode;
   /** NULL = platform-wide; non-null = tenant-scoped custom template */
   tenantId: number | null;
+  /** Owning tenant's name (list rows, W10-5); null for platform templates. */
+  tenantName?: string | null;
   /**
    * When set, this is a "local" template visible only on one agent or group.
    * ownerScope = 'agent' | 'group', ownerScopeId = device or group id.
@@ -1093,6 +1338,8 @@ export interface IpEvent {
   /** When true, event was matched by a 'track' mode template and is excluded from ban counting */
   trackOnly: boolean;
   tenantId: number | null;
+  /** Tenant name of the reporting agent (GET /ip-events rows, W10-5). */
+  tenantName?: string | null;
   createdAt: string;
   /**
    * ID of the agent whose LAN/WAN IP matches the event source.
@@ -1143,6 +1390,14 @@ export interface IpReputation {
    * Only meaningful for non-admin tenant views.
    */
   clearedForTenant?: boolean;
+  /**
+   * Tenant attribution (list rows, W10-5): the attacked tenants within the
+   * caller's read scope. tenantId / tenantName is the single attacked tenant
+   * (null when several); on the banned list it is the ban owner (null = global).
+   */
+  tenantIds?: number[];
+  tenantId?: number | null;
+  tenantName?: string | null;
 }
 
 export type IpStatus = 'banned' | 'whitelisted' | 'suspicious' | 'clean';
@@ -1151,7 +1406,13 @@ export type IpStatus = 'banned' | 'whitelisted' | 'suspicious' | 'clean';
 // Obliguard — Ban types
 // ============================================
 export type BanScope = 'global' | 'tenant' | 'group' | 'agent';
-export type BanType = 'auto' | 'manual';
+/**
+ * auto = BanEngine detection, manual = a user, external = another Obli app
+ * (/api/external-bans, see originApp), remote = imported from a remote
+ * blocklist or a MikroTik address-list (see originRef). Only 'auto' bans are
+ * contributed to obli.tools (owner decision 7).
+ */
+export type BanType = 'auto' | 'manual' | 'external' | 'remote';
 
 export interface IpBan {
   id: number;
@@ -1182,6 +1443,14 @@ export interface IpBan {
   bannedAt: string;
   expiresAt: string | null;
   isActive: boolean;
+  /** The Obli app that pushed an 'external' ban (e.g. 'oblihub'); null otherwise. */
+  originApp?: string | null;
+  /**
+   * Source of a 'remote' ban: 'blocklist:<id>' (remote blocklist) or
+   * 'mikrotik:<deviceId>' (router address-list import). A tenant that neither
+   * owns the router nor is Default only gets 'mikrotik'.
+   */
+  originRef?: string | null;
   /**
    * True when the calling tenant has created a per-tenant exclusion for this global ban.
    * The ban stays globally active; agents of this tenant won't enforce it.
@@ -1265,6 +1534,8 @@ export interface RateLimitPolicy {
   scope: RateLimitScope;
   scopeId: number | null;
   tenantId: number | null;
+  /** Owning tenant's name (list rows, W10-5); null for global policies. */
+  tenantName?: string | null;
   enabled: boolean;
   /** TCP destination port the limit applies to. null = all inbound TCP. */
   port: number | null;
@@ -1292,6 +1563,15 @@ export interface CreateRateLimitPolicyRequest {
   action?: RateLimitAction;
   banTtlSeconds?: number | null;
 }
+
+/**
+ * Body of PATCH /rate-limit-policies/:id: any subset of the create fields.
+ * An explicit null clears port / banMultiplier / banTtlSeconds.
+ */
+export type UpdateRateLimitPolicyRequest = Partial<CreateRateLimitPolicyRequest>;
+
+/** Global rate-limit switch: 'off' (default) delivers no limit to any agent. */
+export type RateLimitEnforcement = 'on' | 'off';
 
 /**
  * A resolved rate limit rule sent to the agent for firewall enforcement.
@@ -1419,6 +1699,11 @@ export interface ObliguardPushResponse {
    */
   rateLimits?: RateLimitRule[];
   command?: string;
+  /**
+   * Windows firewall backend preference (settings cascade, W13), sent to
+   * Windows agents only. Absent = the agent keeps its current backend.
+   */
+  firewallBackend?: WindowsFirewallBackend;
 }
 
 // ============================================
@@ -1452,4 +1737,49 @@ export interface FirewallCommandResponse {
   error?: string;
   rules?: FirewallRule[];
   platform?: string;
+}
+
+// ============================================
+// Agent command queue (W14-1)
+// ============================================
+
+/**
+ * Commands queued for an agent (agent_commands, migration 042). 'update' is not
+ * queued: it is an update request ruled by the update policy (C17).
+ */
+export const AGENT_COMMAND_TYPES = ['uninstall', 'restart', 'firewall_resync'] as const;
+export type AgentCommandType = typeof AGENT_COMMAND_TYPES[number];
+
+/**
+ * queued -> sent -> acked -> succeeded | failed; expired = never delivered
+ * before its deadline. A legacy delivery (agent without 'cmdqueue') stays
+ * 'sent' with legacy = true: such agents never acknowledge.
+ */
+export const AGENT_COMMAND_STATUSES = ['queued', 'sent', 'acked', 'succeeded', 'failed', 'expired'] as const;
+export type AgentCommandStatus = typeof AGENT_COMMAND_STATUSES[number];
+
+/** Heartbeat capability of agents that take 'command' frames and send 'command_ack'. */
+export const AGENT_COMMAND_CAPABILITY = 'cmdqueue';
+
+/** Socket.io event: { deviceId, command: AgentCommand } (owning tenant + Default). Same value as SOCKET_EVENTS.AGENT_COMMAND_UPDATED. */
+export const AGENT_COMMAND_SOCKET_EVENT = 'agent:commandUpdated';
+
+export interface AgentCommand {
+  id: number;
+  deviceId: number;
+  tenantId: number;
+  type: AgentCommandType;
+  payload: Record<string, unknown>;
+  status: AgentCommandStatus;
+  /** What the agent reported (message, error, counters), bounded server-side. */
+  result: Record<string, unknown> | null;
+  /** Delivered through the legacy config frame (no acknowledgement possible). */
+  legacy: boolean;
+  createdBy: number | null;
+  createdByName: string | null;
+  createdAt: string;
+  sentAt: string | null;
+  ackedAt: string | null;
+  finishedAt: string | null;
+  expiresAt: string | null;
 }

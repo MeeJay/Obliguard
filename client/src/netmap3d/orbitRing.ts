@@ -1,5 +1,6 @@
 import * as THREE from 'three';
-import { ORBIT_RING_GAP_3D, AGENT_RADIUS, SCALE } from './constants3d';
+import { ORBIT_RING_GAP_3D, AGENT_RADIUS, SCALE, PALETTE_3D } from './constants3d';
+import { IPS_PER_ORBIT_RING } from '../netmap/constants';
 
 const GOLDEN_ANGLE = 2.399963;
 
@@ -18,7 +19,7 @@ export function createOrbitRings(ringCount: number): THREE.Group {
       points.map(p => new THREE.Vector3(p.x, 0, p.y)),
     );
     const mat = new THREE.LineBasicMaterial({
-      color: 0x3388cc,
+      color: PALETTE_3D.orbitRing,
       transparent: true,
       opacity: 0.10,
       depthWrite: false,
@@ -33,6 +34,16 @@ export function createOrbitRings(ringCount: number): THREE.Group {
   }
 
   return group;
+}
+
+/** Free the rings of a group made by createOrbitRings (after removing it). */
+export function disposeOrbitRings(group: THREE.Group): void {
+  for (const child of group.children) {
+    if (child instanceof THREE.LineLoop) {
+      child.geometry.dispose();
+      (child.material as THREE.Material).dispose();
+    }
+  }
 }
 
 /**
@@ -50,7 +61,7 @@ export function getOrbitPosition3D(
   if (r3d <= 0) return agentPos.clone();
 
   // Ring index for inclination
-  const ringCount = Math.max(1, Math.ceil(totalSlots / 20));
+  const ringCount = Math.max(1, Math.ceil(totalSlots / IPS_PER_ORBIT_RING));
   const ringIndex = orbitSlot % ringCount;
   const inclX = (ringIndex * GOLDEN_ANGLE * 0.15) % (Math.PI * 0.4);
   const inclZ = (ringIndex * GOLDEN_ANGLE * 0.1) % (Math.PI * 0.3);

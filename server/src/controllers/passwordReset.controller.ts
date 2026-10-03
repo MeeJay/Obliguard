@@ -2,6 +2,7 @@ import type { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { passwordResetService } from '../services/passwordReset.service';
 import { AppError } from '../middleware/errorHandler';
+import { auditService } from '../services/audit.service';
 
 const forgotSchema = z.object({ email: z.string().email() });
 const validateSchema = z.object({ token: z.string().min(1) });
@@ -41,8 +42,20 @@ export const passwordResetController = {
       const parsed = resetSchema.safeParse(req.body);
       if (!parsed.success) throw new AppError(400, parsed.error.errors[0]?.message ?? 'Invalid input');
 
-      const ok = await passwordResetService.resetPassword(parsed.data.token, parsed.data.newPassword);
-      if (!ok) throw new AppError(400, 'Invalid or expired reset token');
+      const account = await passwordResetService.resetPassword(parsed.data.token, parsed.data.newPassword);
+      if (!account) {
+        // Instance-level row; never the token nor the password.
+        await auditService.logReq(req, { action: 'auth.password_reset', tenantId: null, userId: null, username: null, targetType: 'user', details: { reason: 'invalid_or_expired_link' }, success: false });
+        throw new AppError(400, 'Invalid or expired reset token');
+      }
+      await auditService.logReq(req, {
+        action: 'auth.password_reset',
+        tenantId: null,
+        userId: account.userId,
+        username: account.username,
+        targetType: 'user',
+        targetId: account.userId,
+      });
 
       res.json({ success: true, message: 'Password reset successfully' });
     } catch (err) {

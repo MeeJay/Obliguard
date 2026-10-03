@@ -375,7 +375,11 @@ describe('27 agent channel (A5)', () => {
     const x = await createDevice(h.db, { tenantId: 2, keyId: 2 });
     const wx = fake();
     await obliguardHub.register(x.uuid, 2, 2, '127.0.0.1', wx as any);
-    assert.equal((await mb.del(`/api/agent/devices/${x.id}`)).status, 200);
+    // Owner decision 12 (_defaults.txt): the 'user' set (member_b) lacks
+    // agents.delete since the W7-2 re-gating; a tenant-2 admin deletes.
+    assert.equal((await mb.del(`/api/agent/devices/${x.id}`)).status, 403);
+    assert.equal(wx.closed?.code, undefined, 'a refused delete keeps the channel open');
+    assert.equal((await (await h.adminIn(2)).del(`/api/agent/devices/${x.id}`)).status, 200);
     assert.equal(wx.closed?.code, 4003);
     assert.equal(wx.closed?.reason, 'Device deleted');
   });

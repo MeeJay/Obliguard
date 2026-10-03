@@ -84,6 +84,7 @@ async function pollDevice(device: PollDevice): Promise<void> {
       useTls: device.apiUseTls,
       username: device.apiUsername,
       password,
+      deviceId: device.deviceId,
     });
   } catch (err) {
     logger.warn({ err, deviceId: device.deviceId }, 'MikroTik log poll: connection failed');

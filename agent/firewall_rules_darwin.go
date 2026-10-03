@@ -32,4 +32,3 @@ func (m *DarwinRuleManager) DeleteRule(_ string) error {
 func (m *DarwinRuleManager) ToggleRule(_ string, _ bool) error {
 	return fmt.Errorf("pf does not support enabling/disabling individual rules")
 }
-

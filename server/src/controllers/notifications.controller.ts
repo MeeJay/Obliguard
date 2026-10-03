@@ -5,6 +5,16 @@ import { notificationService } from '../services/notification.service';
 import { smtpServerService } from '../services/smtpServer.service';
 import { getPluginMetas } from '../notifications/registry';
 import { AppError } from '../middleware/errorHandler';
+import { resolveRequestAgent } from '../services/agentScope.service';
+import { auditService } from '../services/audit.service';
+
+/**
+ * A channel config for the audit trail: its field NAMES only. Values are bot
+ * tokens, webhook URLs (often carrying a secret), passwords: never recorded.
+ */
+function configFieldNames(config: unknown): string[] {
+  return config && typeof config === 'object' && !Array.isArray(config) ? Object.keys(config).slice(0, 50) : [];
+}
 import type {
   CreateChannelInput,
   UpdateChannelInput,
@@ -22,8 +32,10 @@ import type {
 //   - assertChannelVisible: owner, Default, or a tenant the channel is shared
 //     to. Read, test and group/agent bindings ("targeted use").
 //   - assertChannelOwnedByCaller: owner or Default only. Edit, delete,
-//     sharing and global bindings (a global binding belongs to the channel's
-//     owner: the bindings table carries no tenant).
+//     sharing and global bindings. A global binding belongs to the operating
+//     tenant (notification_bindings.tenant_id) and covers that tenant's
+//     agents (Default's: every tenant); a recipient of a shared channel may
+//     still not bind it globally.
 //
 // A channel the caller cannot see is a 404, the same shape as "does not
 // exist", so foreign channel ids do not leak.
@@ -75,6 +87,16 @@ async function assertScopeTargetInTenant(scope: 'global' | 'group' | 'agent', sc
   }
 }
 
+/**
+ * An agent binding target also follows the caller's team grants (RBAC-8):
+ * 404 for an agent the user is not granted, 403 for a read-only one.
+ */
+async function assertAgentTargetWritable(req: Request, scope: 'global' | 'group' | 'agent', scopeId: number | null): Promise<void> {
+  if (scope !== 'agent') return;
+  const r = await resolveRequestAgent(req, scopeId, 'write');
+  if (!r.ok) throw new AppError(r.status, r.error);
+}
+
 /** An SMTP channel may only reference an SMTP server of the operating tenant. */
 async function assertSmtpServerUsable(type: string, config: Record<string, unknown> | undefined, tenantId: number): Promise<void> {
   if (type !== 'smtp' || !config || config.smtpServerId === undefined || config.smtpServerId === '') return;
@@ -91,6 +113,7 @@ async function assertBindingAllowed(data: AddBindingInput, req: Request): Promis
   }
   await assertChannelVisible(data.channelId, req);
   await assertScopeTargetInTenant(data.scope, data.scopeId, req.tenantId);
+  await assertAgentTargetWritable(req, data.scope, data.scopeId);
 }
 
 export const notificationsController = {
@@ -137,6 +160,10 @@ export const notificationsController = {
         ...data,
         createdBy: req.session.userId!,
       }, req.tenantId);
+      await auditService.logReq(req, {
+        action: 'notification_channel.created', targetType: 'notification_channel', targetId: channel.id,
+        details: { name: channel.name, type: channel.type, configFields: configFieldNames(data.config) },
+      });
       res.status(201).json({ success: true, data: channel });
     } catch (err: unknown) {
       if (err instanceof Error && err.message.includes('Unknown notification')) {
@@ -158,6 +185,14 @@ export const notificationsController = {
       await assertSmtpServerUsable(current.type, data.config, req.tenantId);
       const channel = await notificationService.updateChannel(id, data, req.tenantId);
       if (!channel) throw new AppError(404, 'Channel not found');
+      await auditService.logReq(req, {
+        action: 'notification_channel.updated', targetType: 'notification_channel', targetId: id,
+        details: {
+          name: channel.name, type: channel.type,
+          fields: Object.keys((data ?? {}) as object).filter((k) => k !== 'config'),
+          configFields: configFieldNames((data as { config?: unknown }).config),
+        },
+      });
       res.json({ success: true, data: channel });
     } catch (err) {
       next(err);
@@ -169,8 +204,13 @@ export const notificationsController = {
     try {
       const id = parseId(req.params.id);
       await assertChannelOwnedByCaller(id, req);
+      const before = await notificationService.getChannelById(id);
       const deleted = await notificationService.deleteChannel(id);
       if (!deleted) throw new AppError(404, 'Channel not found');
+      await auditService.logReq(req, {
+        action: 'notification_channel.deleted', targetType: 'notification_channel', targetId: id,
+        details: { name: before?.name ?? null, type: before?.type ?? null },
+      });
       res.json({ success: true, message: 'Channel deleted' });
     } catch (err) {
       next(err);
@@ -182,7 +222,7 @@ export const notificationsController = {
     try {
       const id = parseId(req.params.id);
       await assertChannelVisible(id, req);
-      await notificationService.testChannel(id);
+      await notificationService.testChannel(id, req.tenantId);
       res.json({ success: true, message: 'Test notification sent' });
     } catch (err: unknown) {
       if (err instanceof Error && !(err instanceof AppError)) {
@@ -219,6 +259,10 @@ export const notificationsController = {
         if (known.length !== requested.length) throw new AppError(400, 'Unknown tenant id');
       }
       await notificationService.setChannelTenants(id, requested);
+      await auditService.logReq(req, {
+        action: 'notification_channel.shared', targetType: 'notification_channel', targetId: id,
+        details: { name: channel.name, tenantIds: requested },
+      });
       res.json({ success: true, message: 'Channel tenants updated' });
     } catch (err) {
       next(err);
@@ -228,7 +272,8 @@ export const notificationsController = {
   // ── Bindings ──
 
   // GET /api/notifications/bindings?scope=global|group|agent&scopeId=N
-  // Without scope: every binding visible to the caller tenant.
+  // Without scope: every binding of the caller tenant (Default: of every
+  // tenant, each row carries its tenantId).
   async listBindings(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const { scope, scopeId } = req.query as unknown as ListBindingsQuery;
@@ -248,8 +293,14 @@ export const notificationsController = {
         data.channelId,
         data.scope,
         data.scopeId,
+        req.tenantId,
         data.overrideMode,
       );
+      await auditService.logReq(req, {
+        action: 'notification_binding.added', targetType: 'notification_channel', targetId: data.channelId,
+        deviceId: data.scope === 'agent' ? data.scopeId ?? null : null,
+        details: { scope: data.scope, scopeId: data.scopeId ?? null, overrideMode: data.overrideMode ?? null },
+      });
       res.status(201).json({ success: true, data: binding });
     } catch (err) {
       next(err);
@@ -267,8 +318,16 @@ export const notificationsController = {
         // allowed, even once the channel is no longer shared to it: otherwise
         // a revoked share would leave a binding the tenant cannot clean up.
         await assertScopeTargetInTenant(data.scope, data.scopeId, req.tenantId);
+        await assertAgentTargetWritable(req, data.scope, data.scopeId);
       }
-      const removed = await notificationService.removeBinding(data.channelId, data.scope, data.scopeId);
+      const removed = await notificationService.removeBinding(data.channelId, data.scope, data.scopeId, req.tenantId);
+      if (removed) {
+        await auditService.logReq(req, {
+          action: 'notification_binding.removed', targetType: 'notification_channel', targetId: data.channelId,
+          deviceId: data.scope === 'agent' ? data.scopeId ?? null : null,
+          details: { scope: data.scope, scopeId: data.scopeId ?? null },
+        });
+      }
       res.json({ success: true, message: removed ? 'Binding removed' : 'Binding not found' });
     } catch (err) {
       next(err);

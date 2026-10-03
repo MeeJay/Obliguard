@@ -42,6 +42,49 @@ export const apiLimiter = rateLimit({
   },
 });
 
+// MFA verify limiter — applied to /profile/2fa/verify and /profile/2fa/resend-email.
+// Keyed by IP only (no username in the body at that point).
+// More generous than the login limiter: the attacker must first have a valid
+// username+password AND a live pendingMfaUserId session to even reach this endpoint.
+// 50 attempts / 15 minutes is enough to survive testing while still blocking automation.
+export const MFA_IP_MAX_FAILURES = 50;
+export const MFA_ACCOUNT_MAX_FAILURES = 10;
+export const MFA_WINDOW_MS = 15 * 60 * 1000;
+
+export const mfaLimiter = rateLimit({
+  windowMs: MFA_WINDOW_MS,     // 15-minute window
+  max: MFA_IP_MAX_FAILURES,    // 50 failed attempts per 15 minutes per IP
+  skipSuccessfulRequests: true,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    error: 'Too many verification attempts, please try again later',
+  },
+});
+
+// MFA verify limiter keyed on the ACCOUNT (the pending 2FA user), not the IP.
+// An IP-keyed limit alone does not bound a TOTP / email-code brute force: the
+// attacker already knows the password and can open a new pending session at
+// will, from as many addresses as they have. 10 wrong codes per 15 minutes
+// per account keeps a 6-digit code out of reach; the worst an attacker can do
+// with it is delay that one account's sign-in (and they hold its password).
+// Applied to /profile/2fa/verify only, after mfaLimiter.
+export const mfaAccountLimiter = rateLimit({
+  windowMs: MFA_WINDOW_MS,
+  max: MFA_ACCOUNT_MAX_FAILURES,
+  skipSuccessfulRequests: true,
+  standardHeaders: true,
+  legacyHeaders: false,
+  // No pending 2FA user: the controller answers 400, nothing to guess.
+  skip: (req) => !req.session?.pendingMfaUserId,
+  keyGenerator: (req) => `mfa-user:${req.session?.pendingMfaUserId}`,
+  message: {
+    success: false,
+    error: 'Too many verification attempts, please try again later',
+  },
+});
+
 // Login-specific limiter — stricter window to slow down brute-force attempts.
 //
 // Key = IP + username so that:
@@ -81,6 +124,11 @@ export const authLimiter = rateLimit({
 // controller sets res.locals.currentPasswordRejected before answering 400, so
 // validation errors and successful changes cost nothing. Once the budget is
 // spent every request answers 429 until the window slides.
+//
+// The second-factor management routes (TOTP setup/disable, e-mail codes
+// setup/disable) share this budget: their proof is the current password or a
+// current authenticator code, and both are guesses a stolen cookie must pay
+// for from the same allowance (the controller sets the same flag).
 export const CURRENT_PASSWORD_MAX_FAILURES = 5;
 export const CURRENT_PASSWORD_WINDOW_MS = 15 * 60 * 1000;
 

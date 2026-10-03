@@ -1,0 +1,35 @@
+@@ parser opnsense
+# OPNsense /var/log/audit/latest.log (syslog-ng).
+@@ expect {"ip":"203.0.113.140","user":"root"}
+<38>1 2024-01-15T10:20:30+01:00 fw.example.com audit 12345 - [meta sequenceId="1"] /index.php: Web GUI authentication error for 'root' from 203.0.113.140
+
+@@ expect {"ip":"203.0.113.141","user":"admin"}
+<38>1 2024-01-15T10:20:31+01:00 fw.example.com audit 12346 - [meta sequenceId="2"] Authentication error for admin from: 203.0.113.141
+
+@@ expect {"ip":"203.0.113.142","user":"root"}
+<38>1 2024-01-15T10:20:32+01:00 fw.example.com sshd 12347 - [meta sequenceId="3"] Failed password for root from 203.0.113.142 port 50000 ssh2
+
+@@ expect {"ip":"203.0.113.143","user":"test"}
+<38>1 2024-01-15T10:20:33+01:00 fw.example.com sshd 12348 - [meta sequenceId="4"] Invalid user test from 203.0.113.143 port 50001
+
+@@ expect {"ip":"203.0.113.144","user":"guest"}
+Jan 15 10:20:34 fw sshd[12349]: Illegal user guest from 203.0.113.144
+
+@@ expect {"type":"auth_success","ip":"192.0.2.145","user":"admin"}
+<38>1 2024-01-15T10:20:35+01:00 fw.example.com audit 12350 - [meta sequenceId="5"] /index.php: Successful login for user 'admin' from: 192.0.2.145 (Local Database)
+
+@@ expect {"type":"auth_success","ip":"192.0.2.146","user":"admin"}
+<38>1 2024-01-15T10:20:36+01:00 fw.example.com sshd 12351 - [meta sequenceId="6"] Accepted publickey for admin from 192.0.2.146 port 50002 ssh2: ED25519 SHA256:abc
+
+@@ none
+<38>1 2024-01-15T10:20:37+01:00 fw.example.com audit 12352 - [meta sequenceId="7"] /index.php: User logged out for user 'admin' from: 192.0.2.145
+
+# Injection: usernames carrying a fake "from <ip>" are dropped.
+@@ none
+<38>1 2024-01-15T10:20:38+01:00 fw.example.com audit 12353 - [meta sequenceId="8"] /index.php: Web GUI authentication error for 'x' from 198.51.100.66' from 203.0.113.147
+@@ none
+<38>1 2024-01-15T10:20:39+01:00 fw.example.com sshd 12354 - [meta sequenceId="9"] Invalid user x from 198.51.100.66 port 22 from 203.0.113.148 port 50003
+@@ none
+<38>1 2024-01-15T10:20:40+01:00 fw.example.com sshd 12355 - [meta sequenceId="10"] Failed password for invalid user x from 198.51.100.66 port 22 ssh2 from 203.0.113.149 port 50004 ssh2
+@@ none
+<38>1 2024-01-15T10:20:41+01:00 fw.example.com audit 12356 - [meta sequenceId="11"] Authentication error for x from: 198.51.100.66 from: 203.0.113.150

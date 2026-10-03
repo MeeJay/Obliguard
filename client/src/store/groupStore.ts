@@ -27,23 +27,15 @@ function findAncestorIds(nodes: GroupTreeNode[], targetId: number, path: number[
   return null;
 }
 
-interface GroupStats {
-  uptimePct: number;
-  total: number;
-  up: number;
-}
-
 interface GroupStore {
   groups: Map<number, MonitorGroup>;
   tree: GroupTreeNode[];
-  groupStats: Record<number, GroupStats>;
   collapsedGroupIds: Set<number>;
   isLoading: boolean;
 
   // Actions
   fetchGroups: () => Promise<void>;
   fetchTree: () => Promise<void>;
-  fetchGroupStats: () => Promise<void>;
   addGroup: (group: MonitorGroup) => void;
   updateGroup: (id: number, data: Partial<MonitorGroup>) => void;
   removeGroup: (id: number) => void;
@@ -58,13 +50,11 @@ interface GroupStore {
   getGroup: (id: number) => MonitorGroup | undefined;
   getGroupList: () => MonitorGroup[];
   getRootGroups: () => MonitorGroup[];
-  getGroupStats: (id: number) => GroupStats | undefined;
 }
 
 export const useGroupStore = create<GroupStore>((set, get) => ({
   groups: new Map(),
   tree: [],
-  groupStats: {},
   collapsedGroupIds: loadCollapsed(),
   isLoading: false,
 
@@ -84,15 +74,6 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
     try {
       const tree = await groupsApi.tree();
       set({ tree });
-    } catch {
-      // ignore
-    }
-  },
-
-  fetchGroupStats: async () => {
-    try {
-      const stats = await groupsApi.getStats();
-      set({ groupStats: stats });
     } catch {
       // ignore
     }
@@ -179,5 +160,5 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
   getGroupList: () => Array.from(get().groups.values()),
   getRootGroups: () =>
     Array.from(get().groups.values()).filter((g) => g.parentId === null),
-  getGroupStats: (id) => get().groupStats[id],
+
 }));

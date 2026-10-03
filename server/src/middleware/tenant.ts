@@ -1,4 +1,6 @@
 import type { Request, Response, NextFunction } from 'express';
+import type { Knex } from 'knex';
+import { isMasterTenant } from '@obliview/shared';
 import { AppError } from './errorHandler';
 import { tenantService } from '../services/tenant.service';
 
@@ -40,6 +42,15 @@ export function invalidateTenantAccess(userId: number): void {
   for (const key of accessCache.keys()) {
     if (key.startsWith(prefix)) accessCache.delete(key);
   }
+}
+
+/**
+ * Drop the tenant-access cache of a user whose memberships were revoked (SSO
+ * reconcile): the next request re-reads user_tenants instead of serving a
+ * cached grant for up to TTL_MS.
+ */
+export function invalidateUserTenantCache(userId: number): void {
+  invalidateTenantAccess(userId);
 }
 
 /** Drop every cached decision about a tenant (created or deleted). */
@@ -117,4 +128,56 @@ export async function requireTenant(req: Request, res: Response, next: NextFunct
   } catch (err) {
     next(err);
   }
+}
+
+// ── Read scope (god view) ────────────────────────────────────────────────────
+
+/**
+ * Tenants an operational read covers (decision 5, Obliance model):
+ *   - 'all': the Default tenant without tenant chips (god view);
+ *   - a list: the chips picked on Default (`?tenants=1,2`), or the operating
+ *     tenant alone anywhere else. The platform role grants nothing extra: a
+ *     platform admin standing on a customer tenant sees that tenant only.
+ * An empty list matches nothing (no usable tenant).
+ */
+export type ReadTenants = 'all' | number[];
+
+/** Most tenant ids a `?tenants=` filter keeps. */
+const MAX_TENANT_FILTER = 100;
+
+/** `?tenants=1,2` (god view tenant chips): unique positive int4 ids; undefined when absent or empty. */
+export function parseTenantIds(raw: unknown): number[] | undefined {
+  if (typeof raw !== 'string' || raw.trim() === '') return undefined;
+  const ids = [...new Set(raw.split(',').slice(0, MAX_TENANT_FILTER)
+    .map((v) => v.trim())
+    .filter((v) => /^[1-9][0-9]{0,9}$/.test(v))
+    .map(Number)
+    .filter((n) => n <= 2147483647))];
+  return ids.length > 0 ? ids : undefined;
+}
+
+/**
+ * ReadTenants of an operating tenant and an optional chip filter (for the
+ * services, which receive tenantId + tenantIds from their controllers). The
+ * filter is ignored outside Default: it can only narrow the god view.
+ */
+export function readTenantsFor(
+  tenantId: number | null | undefined,
+  requested?: readonly number[] | null,
+): ReadTenants {
+  if (typeof tenantId !== 'number' || !Number.isSafeInteger(tenantId) || tenantId <= 0) return [];
+  if (!isMasterTenant(tenantId)) return [tenantId];
+  return requested && requested.length > 0 ? [...new Set(requested)] : 'all';
+}
+
+/** ReadTenants of a request (after requireTenant): req.tenantId + `?tenants=`. */
+export function resolveReadTenants(req: Request): ReadTenants {
+  const query = (req.query ?? {}) as Record<string, unknown>;
+  return readTenantsFor(req.tenantId, parseTenantIds(query.tenants));
+}
+
+/** Restricts `column` (a tenant_id) to the read tenants; 'all' adds nothing. */
+export function whereReadTenants<Q extends Knex.QueryBuilder>(q: Q, column: string, tenants: ReadTenants): Q {
+  if (tenants === 'all') return q;
+  return q.whereIn(column, tenants) as Q;
 }

@@ -291,7 +291,7 @@ func TestNetshArgv(t *testing.T) {
 	if name, dir, err := netshParseRuleID("a::b::out"); err != nil || name != "a::b" || dir != "out" {
 		t.Fatalf("netsh id with '::' in the name: %q %q %v", name, dir, err)
 	}
-	for _, id := range []string{"all", "ALL::in", "Obliguard-Block-in::in", "obliguard-block-out", "::in", `x"::in`} {
+	for _, id := range []string{"all", "ALL::in", "Obliguard-Block-in::in", "obliguard-block-out", "all ::in", " ALL", " Obliguard-Block-1", "::in", `x"::in`} {
 		if _, _, err := netshParseRuleID(id); err == nil {
 			t.Errorf("netsh id %q accepted", id)
 		}
@@ -333,5 +333,14 @@ func TestHandleFirewallCommandValidates(t *testing.T) {
 	resp = runFwCommand(t, f, "firewall_toggle", map[string]any{"ruleId": "Rule::in", "enabled": false})
 	if !resp.Success || len(f.toggled) != 1 {
 		t.Fatalf("toggle: %+v", resp)
+	}
+}
+
+// The server (firewall.controller.ts CAP_FW_REMOTE_PORT) only forwards a
+// remotePort to agents that advertise this exact capability.
+func TestFirewallRuleCapabilities(t *testing.T) {
+	caps := firewallRuleCapabilities()
+	if len(caps) != 1 || caps[0] != "fw_remote_port" {
+		t.Fatalf("firewallRuleCapabilities() = %v, want [fw_remote_port]", caps)
 	}
 }

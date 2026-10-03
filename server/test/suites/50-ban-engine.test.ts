@@ -215,6 +215,21 @@ describe('50 ban engine correctness', () => {
     assert.ok(row.lifted_at);
   });
 
+  lotIt('D4', '50.11 a legacy masked subnet row counts as a duplicate; a group ban with a foreign tenant never applies', async () => {
+    // Legacy form (MikroTik import): the prefix in the inet mask, no cidr_prefix.
+    await insertBan(h.db, { ip: '198.18.59.0/24', scope: 'tenant', tenantId: 2, originTenantId: 2 });
+    const r = await (await h.as('member_b')).post('/api/bans', { ip: '198.18.59.0', cidrPrefix: 24 });
+    assert.equal(r.status, 409);
+    assert.equal(
+      (await h.db('ip_bans').whereRaw("ip <<= '198.18.59.0/24'::inet").where({ is_active: true })).length, 1,
+    );
+
+    const d = await tenantBDevice();
+    const g = nextIp();
+    await insertBan(h.db, { ip: g, scope: 'group', scopeId: d.groupId, tenantId: 3, originTenantId: 3 });
+    assert.ok(!(await addOf(d.uuid, 2)).add.map(hostOf).includes(g));
+  });
+
   lotIt('D4', '50.10 external bans never reactivate a lifted or scoped row', async () => {
     const ext = (ip: string) => banService.createFromExternal({
       ip, reason: 'verify', sourceApp: 'oblihub', expiresAt: new Date(Date.now() + 3600_000), masterTenantId: 1,

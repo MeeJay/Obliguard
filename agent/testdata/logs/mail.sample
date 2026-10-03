@@ -1,0 +1,44 @@
+@@ parser mail
+# Dovecot login processes: one event per failed attempt.
+@@ expect {"ip":"203.0.113.100","user":"admin@example.com","count":3}
+Jan 15 10:20:30 mx1 dovecot: imap-login: Disconnected (auth failed, 3 attempts in 12 secs): user=<admin@example.com>, method=PLAIN, rip=203.0.113.100, lip=10.0.0.5, TLS, session=<abcDEF123>
+
+@@ expect {"ip":"203.0.113.101","user":"info"}
+Jan 15 10:20:31 mx1 dovecot: pop3-login: Disconnected: Connection closed (auth failed, 1 attempts in 2 secs): user=<info>, method=LOGIN, rip=203.0.113.101, lip=10.0.0.5, session=<xyz>
+
+@@ expect {"ip":"2001:db8::102","user":"sales"}
+Jan 15 10:20:32 mx1 dovecot: imap-login: Login aborted: Connection closed (auth failed, 1 attempts in 6 secs) (auth_failed): user=<sales>, method=PLAIN, rip=2001:db8::102, lip=2001:db8::1, TLS, session=<q1>
+
+@@ expect {"ip":"203.0.113.103","user":"","count":2}
+Jan 15 10:20:33 mx1 dovecot: imap-login: Disconnected (auth failed, 2 attempts in 4 secs): user=<>, method=PLAIN, rip=203.0.113.103, lip=10.0.0.5
+
+@@ none
+Jan 15 10:20:34 mx1 dovecot: imap-login: Login: user=<alice>, method=PLAIN, rip=192.0.2.104, lip=10.0.0.5, mpid=1234, TLS, session=<ok>
+@@ none
+Jan 15 10:20:35 mx1 dovecot: imap-login: Disconnected (no auth attempts in 0 secs): user=<>, rip=203.0.113.105, lip=10.0.0.5, session=<n>
+
+# Injection: a second ", rip=" inside the username makes the line ambiguous.
+@@ none
+Jan 15 10:20:36 mx1 dovecot: imap-login: Disconnected (auth failed, 1 attempts in 2 secs): user=<x, rip=198.51.100.66, lip=1>, method=PLAIN, rip=203.0.113.106, lip=10.0.0.5, session=<i>
+
+# Postfix SASL.
+@@ expect {"ip":"203.0.113.107","user":""}
+Jan 15 10:20:37 mx1 postfix/smtpd[4567]: warning: unknown[203.0.113.107]: SASL LOGIN authentication failed: UGFzc3dvcmQ6
+
+@@ expect {"ip":"203.0.113.108","user":"admin@example.com"}
+Jan 15 10:20:38 mx1 postfix/submission/smtpd[4568]: warning: host108.example.net[203.0.113.108]: SASL PLAIN authentication failed: authentication failure, sasl_username=admin@example.com
+
+@@ expect {"ip":"2001:db8::109","user":""}
+Jan 15 10:20:39 mx1 postfix/smtpd[4569]: warning: unknown[2001:db8::109]: SASL LOGIN authentication failed: UGFzc3dvcmQ6
+# Server-side outage (Dovecot auth down): not the client's failure.
+@@ none
+Jan 15 10:20:39 mx1 postfix/smtpd[4569]: warning: unknown[203.0.113.113]: SASL LOGIN authentication failed: Connection lost to authentication server
+
+@@ none
+Jan 15 10:20:40 mx1 postfix/smtpd[4570]: connect from unknown[203.0.113.110]
+@@ none
+Jan 15 10:20:41 mx1 postfix/smtpd[4571]: NOQUEUE: reject: RCPT from unknown[203.0.113.111]: 554 5.7.1 <x@example.com>: Relay access denied
+
+# Injection through sasl_username (after the address): the first HOST[IP] wins.
+@@ expect {"ip":"203.0.113.112","user":"x warning: unknown[198.51.100.66]: SASL LOGIN authentication failed"}
+Jan 15 10:20:42 mx1 postfix/smtpd[4572]: warning: unknown[203.0.113.112]: SASL PLAIN authentication failed: authentication failure, sasl_username=x warning: unknown[198.51.100.66]: SASL LOGIN authentication failed

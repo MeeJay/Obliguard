@@ -25,6 +25,7 @@ import { createRouterOSClient } from './routerosClient';
 import type { RouterOSClient } from './routerosClient';
 import { mikrotikDeviceService } from './mikrotikDevice.service';
 import { isUnsafeBanId } from '../banSafetyAudit';
+import { liveAlertService, incidentStableKey } from '../liveAlert.service';
 
 /** Comment prefix of the entries Obliguard adds (RouterOSClient.banIP default 'Obliguard auto-ban'). */
 const OBLIGUARD_ENTRY_TAG = 'Obliguard';
@@ -130,8 +131,62 @@ async function connect(deviceId: number): Promise<{ client: RouterOSClient; list
     useTls: cfg.useTls,
     username: cfg.username,
     password: cfg.password,
+    // Pin the API-SSL certificate per router, not per host:port.
+    deviceId: cfg.deviceId,
   });
   return { client, listName: cfg.addressListName };
+}
+
+// ── Sync failure alerts (W6-2) ───────────────────────────────────────────────
+// A router the server cannot sync raises one 'mikrotik_sync_failed' incident
+// per router and direction ('push': ban delivery / reconciliation,
+// 'import': address-list import), resolved by the next success of the same
+// direction (separate keys: a working push never hides a failing import).
+
+export type MikrotikSyncDirection = 'push' | 'import';
+
+function mikrotikSyncKey(deviceId: number, direction: MikrotikSyncDirection): string {
+  return incidentStableKey('mikrotik_sync_failed', `device:${deviceId}:${direction}`);
+}
+
+/** Keys known to have no open incident (in memory): a healthy router costs no query per success. */
+const syncHealthy = new Set<string>();
+
+/** Raise (or bump) the router's sync-failure incident. Never throws. */
+export async function reportMikrotikSyncFailure(deviceId: number, direction: MikrotikSyncDirection, msg: string): Promise<void> {
+  const key = mikrotikSyncKey(deviceId, direction);
+  syncHealthy.delete(key);
+  try {
+    const dev = await db('agent_devices').where({ id: deviceId })
+      .first('tenant_id', 'name', 'hostname', 'status') as
+      { tenant_id: number; name: string | null; hostname: string; status: string } | undefined;
+    if (!dev || dev.status !== 'approved') return;
+    const label = dev.name || dev.hostname || `#${deviceId}`;
+    await liveAlertService.raiseIncident({
+      tenantId: dev.tenant_id,
+      kind: 'mikrotik_sync_failed',
+      stableKey: key,
+      deviceId,
+      severity: 'warning',
+      title: direction === 'push' ? `MikroTik ban sync failed: ${label}` : `MikroTik import failed: ${label}`,
+      message: `${label}: ${msg.slice(0, 300)}`,
+      link: `/agents/${deviceId}`,
+    });
+  } catch (err) {
+    logger.warn({ err, deviceId }, 'MikroTik: sync failure alert failed');
+  }
+}
+
+/** Resolve the router's sync-failure incident of `direction`, if any. Never throws. */
+export async function resolveMikrotikSyncFailure(deviceId: number, direction: MikrotikSyncDirection): Promise<void> {
+  const key = mikrotikSyncKey(deviceId, direction);
+  if (syncHealthy.has(key)) return;
+  try {
+    await liveAlertService.resolveIncidents({ stableKey: key, deviceId });
+    syncHealthy.add(key);
+  } catch (err) {
+    logger.warn({ err, deviceId }, 'MikroTik: sync alert resolve failed');
+  }
 }
 
 async function markConnected(deviceId: number): Promise<void> {
@@ -139,12 +194,14 @@ async function markConnected(deviceId: number): Promise<void> {
     last_api_connected_at: new Date(),
     last_api_error: null,
   });
+  await resolveMikrotikSyncFailure(deviceId, 'push');
 }
 
 async function markError(deviceId: number, msg: string): Promise<void> {
   await db('mikrotik_credentials').where('device_id', deviceId).update({
     last_api_error: msg,
   }).catch(() => {});
+  await reportMikrotikSyncFailure(deviceId, 'push', msg);
 }
 
 async function pushToDevice(
@@ -195,6 +252,62 @@ async function listEntries(client: RouterOSClient, listName: string): Promise<Ad
     if (entry.id && entry.address) entries.push(entry);
   }
   return entries;
+}
+
+/** Upper bound of one router's purge (connect + print + removes); a slow router never blocks a tenant deletion. */
+const PURGE_DEVICE_TIMEOUT_MS = 60_000;
+/** RouterOS ids removed per `remove` command (comma-separated `.id` list). */
+const PURGE_REMOVE_BATCH = 100;
+
+/** Result of purging one tenant's routers (tenant deletion, C13). */
+export interface MikrotikPurgeResult {
+  /** Routers of the tenant with stored API credentials. */
+  devices: number;
+  /** Obliguard-tagged address-list entries removed. */
+  removed: number;
+  /** Routers that could not be cleaned (unreachable, list unreadable, timeout). */
+  failed: Array<{ deviceId: number; error: string }>;
+}
+
+/**
+ * Remove every Obliguard-tagged entry from one router's address-list.
+ * Operator entries (no Obliguard comment tag) stay. Without readable
+ * comments nothing is removed: an entry cannot be told apart from an
+ * operator's, and the bans that would identify it are about to be deleted.
+ */
+async function purgeDevice(deviceId: number): Promise<number> {
+  const conn = await connect(deviceId);
+  // purgeTenant joined the credentials: gone meanwhile, report the router.
+  if (!conn) throw new Error('API credentials missing');
+  const { client, listName } = conn;
+  try {
+    const entries = await listEntries(client, listName);
+    if (!entries) throw new Error('Address-list unreadable');
+    const ids = entries.filter((e) => e.comment.startsWith(OBLIGUARD_ENTRY_TAG)).map((e) => e.id);
+    let removed = 0;
+    for (let i = 0; i < ids.length; i += PURGE_REMOVE_BATCH) {
+      const batch = ids.slice(i, i + PURGE_REMOVE_BATCH);
+      const res = await client.sendCommand(['/ip/firewall/address-list/remove', `=.id=${batch.join(',')}`]);
+      const trap = res.find((s) => s[0] === '!trap');
+      if (trap) {
+        const msg = trap.find((w) => w.startsWith('=message='))?.slice(9) ?? 'remove refused';
+        throw new Error(`Address-list remove failed: ${msg}`);
+      }
+      removed += batch.length;
+    }
+    return removed;
+  } finally {
+    client.close();
+  }
+}
+
+function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const t = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} timed out after ${Math.round(ms / 1000)} s`)), ms);
+    timer.unref?.();
+  });
+  return Promise.race([p, t]).finally(() => { if (timer) clearTimeout(timer); });
 }
 
 let reconcileTimer: ReturnType<typeof setInterval> | null = null;
@@ -344,6 +457,39 @@ export const mikrotikBanSync = {
     } finally {
       reconciling = false;
     }
+  },
+
+  /**
+   * Tenant deletion (C13): remove the entries Obliguard added (comment tag)
+   * from the address-list of every router of `tenantId`, whatever its status
+   * (a suspended router still holds its last list). Routers run in parallel,
+   * each bounded by PURGE_DEVICE_TIMEOUT_MS. Best effort and never throws: a
+   * router that cannot be reached is reported in `failed` (its entries stay;
+   * the operator removes them by their 'Obliguard' comment) and the deletion
+   * goes on. No sync incident is raised: the router is about to be deleted.
+   */
+  async purgeTenant(tenantId: number): Promise<MikrotikPurgeResult> {
+    const rows = await db('agent_devices as d')
+      .join('mikrotik_credentials as c', 'c.device_id', 'd.id')
+      .where('d.tenant_id', tenantId)
+      .where('d.device_type', 'mikrotik')
+      .select('d.id') as Array<{ id: number }>;
+    const result: MikrotikPurgeResult = { devices: rows.length, removed: 0, failed: [] };
+    const settled = await Promise.allSettled(
+      rows.map((r) => withTimeout(purgeDevice(r.id), PURGE_DEVICE_TIMEOUT_MS, 'MikroTik purge')),
+    );
+    settled.forEach((s, i) => {
+      const deviceId = rows[i].id;
+      if (s.status === 'fulfilled') {
+        result.removed += s.value;
+      } else {
+        const error = s.reason instanceof Error ? s.reason.message : String(s.reason);
+        result.failed.push({ deviceId, error });
+        logger.warn({ err: s.reason, deviceId, tenantId }, `MikroTik tenant purge failed: ${error}`);
+      }
+    });
+    logger.info({ tenantId, ...result, failed: result.failed.length }, 'MikroTik tenant purge complete');
+    return result;
   },
 
   /** Start the periodic reconciler (every 60 min). */

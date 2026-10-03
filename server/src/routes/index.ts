@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { requireTenant } from '../middleware/tenant';
+import { require2faSetup } from '../middleware/require2faSetup';
 import authRoutes from './auth.routes';
 import tenantRoutes from './tenant.routes';
 import groupsRoutes from './groups.routes';
@@ -33,6 +34,7 @@ import rateLimitPoliciesRoutes from './rateLimitPolicies.routes';
 import externalBansRoutes from './externalBans.routes';
 import m365Routes from './m365.routes';
 import m365EnrolRoutes from './m365Enrol.routes';
+import auditRoutes from './audit.routes';
 
 const router = Router();
 
@@ -62,6 +64,10 @@ router.use('/tenant', tenantRoutes);
 const tenantRouter = Router();
 tenantRouter.use(requireAuth);
 tenantRouter.use(requireTenant);
+// force_2fa (app_config) enforced server-side: an account without a second
+// factor gets 403 twoFactorSetupRequired here. /auth, /profile and
+// /profile/2fa are mounted above, outside this router, so they stay reachable.
+tenantRouter.use(require2faSetup);
 
 // Infrastructure (retained from Obliview base)
 tenantRouter.use('/groups', groupsRoutes);
@@ -84,6 +90,9 @@ tenantRouter.use('/mikrotik', mikrotikRoutes);
 tenantRouter.use('/m365', m365Routes);
 tenantRouter.use('/remote-blocklists', remoteBlocklistRoutes);
 tenantRouter.use('/rate-limit-policies', rateLimitPoliciesRoutes);
+
+// Administration
+tenantRouter.use('/audit-log', auditRoutes);    // audit trail (audit.read; Default = god view)
 
 router.use('/', tenantRouter);
 

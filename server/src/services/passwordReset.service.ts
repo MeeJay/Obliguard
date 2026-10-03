@@ -97,7 +97,8 @@ export const passwordResetService = {
   },
 
   /** Consume a raw token and update the user's password. */
-  async resetPassword(rawToken: string, newPassword: string): Promise<boolean> {
+  /** Resets the password; returns the account (for the audit row) or null for a bad token. */
+  async resetPassword(rawToken: string, newPassword: string): Promise<{ userId: number; username: string } | null> {
     const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
     const row = await db('password_reset_tokens as t')
       .join('users as u', 'u.id', 't.user_id')
@@ -106,9 +107,9 @@ export const passwordResetService = {
       .where('t.expires_at', '>', new Date())
       // Tokens issued before SSO accounts were excluded must not work either.
       .where((q) => q.whereNull('u.foreign_source').orWhereNot('u.foreign_source', 'obligate'))
-      .first('t.id', 't.user_id') as { id: number; user_id: number } | undefined;
+      .first('t.id', 't.user_id', 'u.username') as { id: number; user_id: number; username: string } | undefined;
 
-    if (!row) return false;
+    if (!row) return null;
 
     const newHash = await hashPassword(newPassword);
 
@@ -117,6 +118,6 @@ export const passwordResetService = {
       await trx('password_reset_tokens').where({ id: row.id }).update({ used_at: new Date() });
     });
 
-    return true;
+    return { userId: row.user_id, username: row.username };
   },
 };

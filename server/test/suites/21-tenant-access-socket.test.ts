@@ -64,7 +64,7 @@ describe('21 tenant access — sockets (A1)', () => {
     assert.ok(s.ok);
     if (!s.ok) return;
     assert.ok((await socketIdsIn(`tenant:${tid}`)).includes(s.socket.id!));
-    assert.equal((await admin2.del(`/api/tenants/${tid}`)).status, 200);
+    assert.equal((await admin2.del(`/api/tenants/${tid}`, { confirmName: 'Sock' })).status, 200);
     await waitFor(() => serverDisconnect(s.events), 1000);
     const r = await a1.get('/api/bans');
     assert.equal(r.status, 403);

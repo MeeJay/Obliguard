@@ -1,5 +1,6 @@
 import type { NotificationPlugin } from '../types';
 import type { IpsNotificationPayload } from '../../services/notification.service';
+import { assertPinnedHost, guardedFetch, TEAMS_HOSTS } from './outbound';
 
 // Adaptive Card TextBlocks and facts render a Markdown subset. Payload text
 // partly comes from agent logs (usernames, hostnames): escape the Markdown
@@ -167,11 +168,11 @@ export const teamsPlugin: NotificationPlugin = {
   async send(config, payload: IpsNotificationPayload) {
     const body = buildAdaptiveCard(payload);
 
-    const res = await fetch(String(config.webhookUrl), {
+    const target = assertPinnedHost(String(config.webhookUrl ?? ''), TEAMS_HOSTS, 'Teams');
+    const res = await guardedFetch(target, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(10000),
     });
 
     if (!res.ok) {

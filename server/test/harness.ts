@@ -28,6 +28,7 @@ import { setAgentServiceIO } from '../src/services/agent.service';
 import { setLiveAlertIO } from '../src/services/liveAlert.service';
 import { setUserSessionsIO } from '../src/services/userSessions.service';
 import { setBanServiceIO } from '../src/services/ban.service';
+import { setWhitelistIO } from '../src/services/whitelist.service';
 import { invalidateUserState } from '../src/middleware/sessionUserGuard';
 import { getProtectedAddresses } from '../src/utils/protectedIps';
 import { PASSWORD, VERIFY_HOST, VERIFY_ORIGIN, OBLIGATE_API_KEY, KEYS, D } from './fixtures';
@@ -37,7 +38,7 @@ import type { FakeObligate, RecordedRequest } from './fakeObligate';
 import { adapters } from './adapters';
 
 /** Exact mirror of the set*IO(io) calls of index.ts main() (00#4). */
-export const WIRED_IO_SETTERS = ['setAgentServiceIO', 'setLiveAlertIO', 'setUserSessionsIO', 'setBanServiceIO'] as const;
+export const WIRED_IO_SETTERS = ['setAgentServiceIO', 'setLiveAlertIO', 'setUserSessionsIO', 'setBanServiceIO', 'setWhitelistIO'] as const;
 
 // ── HTTP client ──────────────────────────────────────────────────────────────
 
@@ -68,9 +69,24 @@ export class Client {
   readonly jar = new Map<string, string>();
   readonly xff = nextXff();
 
+  /**
+   * Password used to answer a 401 TWO_FACTOR_REQUIRED step-up prompt (W11-2),
+   * like the browser's TwoFactorPromptModal does. Set by h.login(); clients
+   * from loginStep1() keep null and see the raw 401.
+   */
+  stepUpPassword: string | null = null;
+
   constructor(readonly port: number, readonly defaultHost: string = VERIFY_HOST) {}
 
-  request(method: string, path: string, opts: RequestOpts = {}): Promise<Res> {
+  /** Sends the request; on a step-up prompt, confirms by password and replays once. */
+  async request(method: string, path: string, opts: RequestOpts = {}): Promise<Res> {
+    const res = await this.rawRequest(method, path, opts);
+    if (res.status !== 401 || res.json?.code !== 'TWO_FACTOR_REQUIRED' || this.stepUpPassword === null) return res;
+    const ok = await this.rawRequest('POST', '/api/profile/2fa/step-up', { body: { method: 'password', password: this.stepUpPassword } });
+    return ok.status === 200 ? this.rawRequest(method, path, opts) : res;
+  }
+
+  rawRequest(method: string, path: string, opts: RequestOpts = {}): Promise<Res> {
     const bodyText = opts.body === undefined ? undefined : JSON.stringify(opts.body);
     const headers: Record<string, string> = {
       host: opts.host ?? this.defaultHost,
@@ -335,6 +351,7 @@ export async function startHarness(opts: { obligate?: boolean } = {}): Promise<H
   setLiveAlertIO(io);
   setUserSessionsIO(io);
   setBanServiceIO(io);
+  setWhitelistIO(io);
   adapters.agentWs?.attach(server);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   // Pre-warm the protected set (A2) so no timed check pays for its first build.
@@ -372,6 +389,7 @@ export async function startHarness(opts: { obligate?: boolean } = {}): Promise<H
       if (res.status !== 200 || !res.json?.success || res.json?.data?.requires2fa) {
         throw new Error(`login(${username}) failed: ${res.status} ${res.text.slice(0, 200)}`);
       }
+      client.stepUpPassword = password;
       return client;
     },
 

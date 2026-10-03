@@ -1,5 +1,6 @@
 import type { NotificationPlugin } from '../types';
 import type { IpsNotificationPayload } from '../../services/notification.service';
+import { assertPinnedHost, guardedFetch, SLACK_HOSTS } from './outbound';
 
 // Slack mrkdwn control characters: &, < and > build links and mentions
 // (<!channel>, <url|text>). Payload text partly comes from agent logs, so
@@ -48,11 +49,11 @@ export const slackPlugin: NotificationPlugin = {
     };
     if (config.channel) body.channel = config.channel;
 
-    const res = await fetch(String(config.webhookUrl), {
+    const target = assertPinnedHost(String(config.webhookUrl ?? ''), SLACK_HOSTS, 'Slack');
+    const res = await guardedFetch(target, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(10000),
     });
     if (!res.ok) throw new Error(`Slack returned ${res.status}`);
   },

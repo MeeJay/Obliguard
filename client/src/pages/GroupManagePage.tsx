@@ -17,6 +17,10 @@ import { groupsApi } from '@/api/groups.api';
 import { useGroupStore } from '@/store/groupStore';
 import { Button } from '@/components/common/Button';
 import { Input } from '@/components/common/Input';
+import { IconButton } from '@/components/common/IconButton';
+import { PageContainer } from '@/components/common/PageContainer';
+import { PageHeader } from '@/components/common/PageHeader';
+import { useConfirm } from '@/components/common/ConfirmDialog';
 import { GroupPicker } from '@/components/common/GroupPicker';
 import { NotificationBindingsPanel } from '@/components/notifications/NotificationBindingsPanel';
 import { cn } from '@/utils/cn';
@@ -87,6 +91,7 @@ function findNodeById(nodes: GroupTreeNode[], id: number): GroupTreeNode | null 
 export function GroupManagePage() {
   const { fetchGroups, fetchTree, tree } = useGroupStore();
   const { t } = useTranslation();
+  const confirmAction = useConfirm();
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [form, setForm] = useState<GroupFormData>(emptyForm);
@@ -156,7 +161,7 @@ export function GroupManagePage() {
   };
 
   const handleDelete = async (id: number, name: string) => {
-    if (!confirm(t('groups.confirmDelete', { name }))) {
+    if (!(await confirmAction({ message: t('groups.confirmDelete', { name }), danger: true }))) {
       return;
     }
     try {
@@ -256,14 +261,17 @@ export function GroupManagePage() {
   };
 
   return (
-    <div className="p-6 min-w-0">
-      <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-semibold text-text-primary">{t('nav.groups')}</h1>
-        <Button size="sm" onClick={() => openCreate()}>
-          <Plus size={16} className="mr-1.5" />
-          {t('groups.new')}
-        </Button>
-      </div>
+    <PageContainer>
+      <PageHeader
+        className="mb-6"
+        title={t('nav.groups')}
+        actions={(
+          <Button size="sm" onClick={() => openCreate()}>
+            <Plus size={16} className="mr-1.5" />
+            {t('groups.new')}
+          </Button>
+        )}
+      />
 
       {/* Form */}
       {showForm && (
@@ -369,7 +377,7 @@ export function GroupManagePage() {
           <NotificationBindingsPanel
             scope="group"
             scopeId={editingId}
-            title={`Notifications for "${form.name}"`}
+            title={t('groups.notificationsFor', { name: form.name, defaultValue: 'Notifications for "{{name}}"' })}
           />
         </div>
       )}
@@ -483,7 +491,7 @@ export function GroupManagePage() {
           </DndContext>
         )}
       </div>
-    </div>
+    </PageContainer>
   );
 }
 
@@ -531,7 +539,7 @@ function DraggableGroupRow({
       <div
         {...attributes}
         {...listeners}
-        className="text-text-muted opacity-0 group-hover:opacity-100 cursor-grab active:cursor-grabbing touch-none"
+        className="text-text-muted can-hover:opacity-0 can-hover:group-hover:opacity-100 focus-visible:opacity-100 cursor-grab active:cursor-grabbing touch-none"
       >
         <GripVertical size={14} />
       </div>
@@ -551,27 +559,30 @@ function DraggableGroupRow({
           {t('groups.generalBadge')}
         </span>
       )}
-      <button
+      <IconButton
+        label={t('groups.addSubGroup', 'Add sub-group')}
+        icon={<Plus size={14} />}
         onClick={() => openCreate(node.id)}
-        className="p-1 text-text-muted hover:text-accent opacity-0 group-hover:opacity-100"
-        title="Add sub-group"
-      >
-        <Plus size={14} />
-      </button>
-      <button
+        variant="plain"
+        size="sm"
+        className="hover:text-accent can-hover:opacity-0 can-hover:group-hover:opacity-100 focus-visible:opacity-100"
+      />
+      <IconButton
+        label={t('common.edit')}
+        icon={<Pencil size={14} />}
         onClick={() => openEdit(node)}
-        className="p-1 text-text-muted hover:text-text-primary opacity-0 group-hover:opacity-100"
-        title={t('common.edit')}
-      >
-        <Pencil size={14} />
-      </button>
-      <button
+        variant="plain"
+        size="sm"
+        className="can-hover:opacity-0 can-hover:group-hover:opacity-100 focus-visible:opacity-100"
+      />
+      <IconButton
+        label={t('common.delete')}
+        icon={<Trash2 size={14} />}
         onClick={() => handleDelete(node.id, node.name)}
-        className="p-1 text-text-muted hover:text-status-down opacity-0 group-hover:opacity-100"
-        title={t('common.delete')}
-      >
-        <Trash2 size={14} />
-      </button>
+        variant="plain"
+        size="sm"
+        className="hover:text-status-down can-hover:opacity-0 can-hover:group-hover:opacity-100 focus-visible:opacity-100"
+      />
     </div>
   );
 }
@@ -624,6 +635,7 @@ function DropOnGroup({
   groupId: number;
   depth: number;
 }) {
+  const { t } = useTranslation();
   const { setNodeRef, isOver } = useDroppable({
     id: `group-child-drop-${groupId}`,
     data: { type: 'group-target', groupId },
@@ -640,7 +652,7 @@ function DropOnGroup({
           className="absolute inset-x-3 top-0 h-5 rounded bg-accent/15 text-accent text-[10px] flex items-center z-20 pointer-events-none"
           style={{ paddingLeft: `${(depth + 1) * 24 + 12}px` }}
         >
-          Move here as child
+          {t('groups.manage.moveAsChild', { defaultValue: 'Move here as child' })}
         </div>
       )}
     </div>

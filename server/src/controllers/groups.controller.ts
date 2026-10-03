@@ -9,13 +9,34 @@ import { isAgentUpdatePolicy } from '../utils/agentUpdate';
 import { agentService, invalidateAgentUpdatePolicyCache } from '../services/agent.service';
 import { logger } from '../utils/logger';
 import { emitToTenantAudience } from '../utils/socketRooms';
+import { dashboardService } from '../services/dashboard.service';
+import { auditService } from '../services/audit.service';
+import { requestAgentScope, scopeAgentIds } from '../services/agentScope.service';
 import type { AgentGroupConfig, MonitorGroup } from '@obliview/shared';
-import { MASTER_TENANT_ID } from '@obliview/shared';
+import { MASTER_TENANT_ID, SOCKET_EVENTS } from '@obliview/shared';
 
-/** Keys accepted in PATCH /groups/:id/agent-config (agentGroupConfig). */
+/**
+ * Keys accepted in PATCH /groups/:id/agent-config (agentGroupConfig), the
+ * compat endpoint of the IPS settings cascade (W13-1): pushIntervalSeconds
+ * (= checkIntervalSeconds), maxMissedPushes and notificationTypes become group
+ * settings rows (groupService.updateAgentGroupConfig, validated: 400);
+ * updatePolicy stays in the C17 storage (owner directive).
+ */
 const AGENT_GROUP_CONFIG_KEYS = ['pushIntervalSeconds', 'maxMissedPushes', 'notificationTypes', 'updatePolicy'] as const;
 
 const FOREIGN_GROUP_READ_ONLY = 'This group belongs to another tenant: read-only from the Default tenant';
+
+/**
+ * Group creation by a non-platform-admin (groups.manage is checked by the
+ * route): the tenant admin (team scope bypassed, W7-1), a team of the
+ * operating tenant with canCreate, or RW on the parent group (a sub-group of a
+ * group the user may already write).
+ */
+async function canCreateGroup(userId: number, tenantId: number, parentId: number | null): Promise<boolean> {
+  if (await permissionService.bypassesTeamScope(userId, false, tenantId)) return true;
+  if (await permissionService.canCreate(userId, false, tenantId)) return true;
+  return parentId != null && await permissionService.canWriteGroup(userId, parentId, false, tenantId);
+}
 
 /**
  * Load a group bound to the operating tenant (owner model, A5): reads may
@@ -86,6 +107,24 @@ export const groupsController = {
     }
   },
 
+  /**
+   * GET /dashboard/groups — per-group dashboard cards (W8-4): agents,
+   * connected, events / failures / bans of the last 24 h. Groups follow the
+   * list() visibility, agents and their events the team agent scope.
+   */
+  async stats(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const visibleGroups = req.session.role === 'admin'
+        ? 'all' as const
+        : await permissionService.getVisibleGroupIds(req.session.userId!, false, req.tenantId);
+      const visibleAgents = scopeAgentIds(await requestAgentScope(req));
+      const data = await dashboardService.getGroupStats(req.tenantId, visibleGroups, visibleAgents);
+      res.json({ success: true, data });
+    } catch (err) {
+      next(err);
+    }
+  },
+
   async getById(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const id = parseInt(req.params.id, 10);
@@ -118,6 +157,11 @@ export const groupsController = {
         if (verdict !== 'ok') throw new AppError(400, 'Parent group not found');
       }
 
+      if (req.session.role !== 'admin'
+        && !(await canCreateGroup(req.session.userId!, req.tenantId, data.parentId ?? null))) {
+        throw new AppError(403, 'Insufficient permissions');
+      }
+
       const group = await groupService.create(data, req.tenantId);
 
       // Auto-assign RW to the creator's teams of this tenant that have canCreate
@@ -131,7 +175,11 @@ export const groupsController = {
       }
 
       // Broadcast via Socket.io (owning tenant + Default)
-      emitToTenantAudience(req.app.get('io'), group.tenantId ?? req.tenantId, 'group:created', { group });
+      emitToTenantAudience(req.app.get('io'), group.tenantId ?? req.tenantId, SOCKET_EVENTS.GROUP_CREATED, { group });
+      await auditService.logReq(req, {
+        action: 'group.created', targetType: 'group', targetId: group.id,
+        details: { name: group.name, parentId: group.parentId ?? null },
+      });
 
       res.status(201).json({ success: true, data: group });
     } catch (err) {
@@ -149,7 +197,11 @@ export const groupsController = {
 
       if (!group) throw new AppError(404, 'Group not found');
 
-      emitToTenantAudience(req.app.get('io'), group.tenantId ?? req.tenantId, 'group:updated', { group });
+      emitToTenantAudience(req.app.get('io'), group.tenantId ?? req.tenantId, SOCKET_EVENTS.GROUP_UPDATED, { group });
+      await auditService.logReq(req, {
+        action: 'group.updated', targetType: 'group', targetId: id,
+        details: { name: group.name, fields: Object.keys(data ?? {}) },
+      });
 
       res.json({ success: true, data: group });
     } catch (err) {
@@ -168,7 +220,8 @@ export const groupsController = {
 
       // Also check write permission on target parent if non-admin
       const isAdmin = req.session.role === 'admin';
-      if (!isAdmin && newParentId !== null) {
+      if (!isAdmin && newParentId !== null
+        && !(await permissionService.bypassesTeamScope(req.session.userId!, false, req.tenantId))) {
         const canWriteTarget = await permissionService.canWriteGroup(req.session.userId!, newParentId, false, req.tenantId);
         if (!canWriteTarget) throw new AppError(403, 'No write permission on target group');
       }
@@ -176,7 +229,11 @@ export const groupsController = {
       const group = await groupService.move(id, newParentId);
       if (!group) throw new AppError(404, 'Group not found');
 
-      emitToTenantAudience(req.app.get('io'), group.tenantId ?? req.tenantId, 'group:moved', { group });
+      emitToTenantAudience(req.app.get('io'), group.tenantId ?? req.tenantId, SOCKET_EVENTS.GROUP_MOVED, { group });
+      await auditService.logReq(req, {
+        action: 'group.moved', targetType: 'group', targetId: id,
+        details: { name: group.name, newParentId },
+      });
 
       res.json({ success: true, data: group });
     } catch (err: unknown) {
@@ -197,7 +254,8 @@ export const groupsController = {
       const deleted = await groupService.delete(id);
       if (!deleted) throw new AppError(404, 'Group not found');
 
-      emitToTenantAudience(req.app.get('io'), owner?.tenantId ?? req.tenantId, 'group:deleted', { groupId: id });
+      emitToTenantAudience(req.app.get('io'), owner?.tenantId ?? req.tenantId, SOCKET_EVENTS.GROUP_DELETED, { groupId: id });
+      await auditService.logReq(req, { action: 'group.deleted', targetType: 'group', targetId: id, details: { name: owner?.name ?? null } });
 
       res.json({ success: true, message: 'Group deleted' });
     } catch (err) {
@@ -222,10 +280,21 @@ export const groupsController = {
         if (verdict === 'forbidden') throw new AppError(403, FOREIGN_GROUP_READ_ONLY);
         if (verdict !== 'ok') throw new AppError(404, 'Group not found');
       }
+      // A team member (no tenant-admin bypass) needs RW on every reordered group:
+      // the group pages offer Position to groups.manage holders (W10-4).
+      if (req.session.role !== 'admin'
+        && !(await permissionService.bypassesTeamScope(req.session.userId!, false, req.tenantId))) {
+        for (const item of items) {
+          if (!(await permissionService.canWriteGroup(req.session.userId!, item.id, false, req.tenantId))) {
+            throw new AppError(403, 'No write permission on this group');
+          }
+        }
+      }
       await groupService.reorder(items, req.tenantId);
 
       // Reordering is tenant-local (drag-and-drop of the operating tenant).
-      emitToTenantAudience(req.app.get('io'), req.tenantId, 'group:reordered', { items });
+      emitToTenantAudience(req.app.get('io'), req.tenantId, SOCKET_EVENTS.GROUP_REORDERED, { items });
+      await auditService.logReq(req, { action: 'group.reordered', targetType: 'group', details: { groups: items.map((i) => i.id) } });
 
       res.json({ success: true, message: 'Groups reordered' });
     } catch (err) {
@@ -233,11 +302,14 @@ export const groupsController = {
     }
   },
 
-  /** PATCH /groups/:id/agent-config — update agent group config (thresholds + group settings) */
+  /**
+   * PATCH /groups/:id/agent-config — update agent group config (thresholds +
+   * group settings). groups.manage (route) on a group of the operating tenant;
+   * the update policy itself stays platform-admin only (owner directive C17).
+   */
   async updateAgentGroupConfig(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const groupId = parseInt(req.params.id, 10);
-      if (req.session.role !== 'admin') throw new AppError(403, 'Admin only');
 
       // Operating tenant only, no platform-admin bypass (C17-1): read-only
       // from the Default tenant (403), invisible elsewhere (404).
@@ -261,6 +333,9 @@ export const groupsController = {
         for (const k of AGENT_GROUP_CONFIG_KEYS) {
           if (k in src) out[k] = src[k];
         }
+        if ('updatePolicy' in out && req.session.role !== 'admin') {
+          throw new AppError(403, 'The agent update policy is managed by platform administrators');
+        }
         if ('updatePolicy' in out && out.updatePolicy !== null && !isAgentUpdatePolicy(out.updatePolicy)) {
           throw new AppError(400, 'Invalid updatePolicy');
         }
@@ -280,6 +355,17 @@ export const groupsController = {
       }
       if (agentThresholds !== undefined) {
         updated = (await groupService.updateAgentThresholds(groupId, agentThresholds as any)) ?? updated;
+      }
+      if (clean !== undefined || agentThresholds !== undefined) {
+        await auditService.logReq(req, {
+          action: 'group.agent_config_updated', targetType: 'group', targetId: groupId,
+          details: {
+            name: group.name,
+            ...(clean !== undefined ? { config: clean } : {}),
+            ...(agentThresholds !== undefined ? { thresholdsChanged: true } : {}),
+            ...(clean && 'updatePolicy' in clean ? { updatePolicyFrom: group.agentGroupConfig?.updatePolicy ?? null } : {}),
+          },
+        });
       }
 
       res.json({ success: true, data: updated });

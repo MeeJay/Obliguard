@@ -1,0 +1,32 @@
+@@ parser iis
+# IIS W3C log with the default field set (IIS 8.5+). Header lines yield nothing.
+#Software: Microsoft Internet Information Services 10.0
+#Version: 1.0
+#Date: 2024-01-15 09:00:00
+#Fields: date time s-ip cs-method cs-uri-stem cs-uri-query s-port cs-username c-ip cs(User-Agent) cs(Referer) sc-status sc-substatus sc-win32-status time-taken
+
+@@ expect {"ip":"203.0.113.60","user":"admin"}
+2024-01-15 10:20:30 10.0.0.5 POST /owa/auth.owa - 443 admin 203.0.113.60 Mozilla/5.0+(Windows+NT+10.0;+Win64;+x64) - 401 1 1326 15
+
+@@ expect {"ip":"203.0.113.61","user":""}
+2024-01-15 10:20:31 10.0.0.5 GET /secure/ - 443 - 203.0.113.61 curl/8.4.0 - 401 3 5 2
+
+@@ expect {"ip":"2001:db8::61","user":"CORP\\svc"}
+2024-01-15 10:20:32 10.0.0.5 GET /ews/exchange.asmx - 443 CORP\svc 2001:db8::61 python-requests/2.31 - 401 1 2148074252 4
+
+# Anonymous challenge (401.2) and the NTLM handshake step are not attempts.
+@@ none
+2024-01-15 10:20:33 10.0.0.5 GET /secure/ - 443 - 203.0.113.62 Mozilla/5.0 - 401 2 5 1
+@@ none
+2024-01-15 10:20:34 10.0.0.5 GET /secure/ - 443 - 203.0.113.63 Mozilla/5.0 - 401 1 2148074254 1
+@@ none
+2024-01-15 10:20:35 10.0.0.5 GET /secure/ - 443 admin 203.0.113.64 Mozilla/5.0 - 200 0 0 31
+
+# The old regex captured cs(User-Agent) as the client: a User-Agent that is an
+# address must never be taken for c-ip.
+@@ expect {"ip":"203.0.113.65","user":""}
+2024-01-15 10:20:36 10.0.0.5 GET / - 80 - 203.0.113.65 198.51.100.66 - 401 1 1326 3
+
+# Wrong column count (corrupted line): ignored.
+@@ none
+2024-01-15 10:20:37 10.0.0.5 GET / - 80 - 203.0.113.66 - 401 1 1326

@@ -1,6 +1,7 @@
 import { Router } from 'express';
+import { asyncHandler } from '../utils/asyncHandler';
 import { requireAuth } from '../middleware/auth';
-import { requireRole } from '../middleware/rbac';
+import { requireCapability } from '../middleware/rbac';
 import { requireTenant } from '../middleware/tenant';
 import {
   createM365Tenant,
@@ -14,13 +15,14 @@ import {
 const router = Router();
 
 // Un tenant M365 détient les identifiants d'accès à la messagerie d'un client :
-// sa gestion est réservée aux administrateurs du tenant Obliguard.
+// sa gestion demande la capacité integrations.m365 dans le tenant Obliguard
+// (W7-2), et chaque :id est limité au tenant courant (contrôleur).
 router.use(requireAuth);
 router.use(requireTenant);
-router.use(requireRole('admin'));
+router.use(requireCapability('integrations.m365'));
 
 router.post('/', createM365Tenant);
-router.get('/:id', getM365Tenant);
+router.get('/:id', asyncHandler(getM365Tenant));
 router.patch('/:id', updateM365Tenant);
 router.post('/:id/enrol', issueM365Enrolment);
 router.post('/:id/verify', verifyM365Tenant);

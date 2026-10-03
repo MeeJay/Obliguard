@@ -1,5 +1,5 @@
 import { Navigate, Outlet, useLocation } from 'react-router-dom';
-import type { Capability } from '@obliview/shared';
+import type { CapabilityKey } from '@obliview/shared';
 import { useAuthStore } from '@/store/authStore';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { NoTenantPage } from '@/pages/NoTenantPage';
@@ -8,13 +8,22 @@ import { NoTenantPage } from '@/pages/NoTenantPage';
 const REQUIRED_ENROLLMENT_VERSION = 2;
 
 interface ProtectedRouteProps {
+  /** Hard role gate: only users with this exact platform role pass. */
   requiredRole?: string;
-  /** Gate the route on a feature capability (admin ⇒ always allowed). */
-  requiredCapability?: Capability;
+  /** Gate the route on one capability (platform admin ⇒ always allowed). */
+  requiredCapability?: CapabilityKey;
+  /**
+   * Capability gate, ANY-OF (Obliance ProtectedRoute): passes when the user is
+   * platform admin or holds at least one of the listed capabilities in the
+   * current tenant (tenant capabilities or legacy aliases, see
+   * authStore.hasCapability). Used for pages a tenant admin / delegated role
+   * may reach. When several gates are passed, all of them must pass.
+   */
+  requiredCapabilities?: readonly CapabilityKey[];
 }
 
-export function ProtectedRoute({ requiredRole, requiredCapability }: ProtectedRouteProps) {
-  const { user, isInitialized, hasCapability, noTenantAccess } = useAuthStore();
+export function ProtectedRoute({ requiredRole, requiredCapability, requiredCapabilities }: ProtectedRouteProps) {
+  const { user, isInitialized, hasCapability, noTenantAccess, requires2faSetup } = useAuthStore();
   const location = useLocation();
 
   if (!isInitialized) {
@@ -50,11 +59,23 @@ export function ProtectedRoute({ requiredRole, requiredCapability }: ProtectedRo
     return <NoTenantPage />;
   }
 
+  // force_2fa: until a second factor is set up the server answers 403
+  // twoFactorSetupRequired on every tenant API, so the only useful page is the
+  // profile's 2FA section. Obligate (og_) accounts never get the flag.
+  if (requires2faSetup && location.pathname !== '/profile' && location.pathname !== '/enroll') {
+    return <Navigate to="/profile?setup2fa=1" replace />;
+  }
+
   if (requiredRole && user.role !== requiredRole) {
     return <Navigate to="/" replace />;
   }
 
   if (requiredCapability && !hasCapability(requiredCapability)) {
+    return <Navigate to="/" replace />;
+  }
+
+  if (requiredCapabilities && requiredCapabilities.length > 0
+    && !requiredCapabilities.some((c) => hasCapability(c))) {
     return <Navigate to="/" replace />;
   }
 

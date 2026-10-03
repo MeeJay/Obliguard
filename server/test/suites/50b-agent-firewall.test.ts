@@ -69,6 +69,7 @@ describe('50b agent firewall backends, CIDR and ban safety (W3-2)', () => {
     const fwd = read('agent/firewall_firewalld.go');
     assert.match(fwd, /fwdNetSetName = "obliguard_net"/);
     assert.match(fwd, /"hash:net"/);
+    assert.match(fwd, /planIntervalSet\(/, 'firewalld refuses overlapping hash:net entries');
 
     assert.match(read('agent/firewall_netsh.go'), /canonicalBanEntry\(/);
     assert.match(read('agent/firewall_pf.go'), /canonicalBanEntry\(/);
@@ -101,9 +102,18 @@ describe('50b agent firewall backends, CIDR and ban safety (W3-2)', () => {
     assert.match(cmd, /go purgeUnsafeBans\(cfg, fw\)/);
   });
 
-  lotIt('W3-2', '50b.4 heartbeat advertises the cidr capability', () => {
+  lotIt('W3-2', '50b.4 heartbeat advertises the cidr capability (and the W3-3 rule capabilities)', () => {
     assert.match(read('agent/firewall.go'), /capCIDR = "cidr"/);
-    assert.match(read('agent/cmd_ws.go'), /Capabilities:\s*append\(agentCapabilities\(\), firewallCapabilities\(fw\)\.\.\.\)/);
+    const cmdSrc = read('agent/cmd_ws.go').replace(/\r/g, '');
+    let caps = /Capabilities:\s*(.*)/.exec(cmdSrc)?.[1] ?? '';
+    // W14-1 moved the list into heartbeatCapabilities(fw) (also covered by
+    // cmd_ws_test.go): follow the helper, the same calls must be in it.
+    if (/heartbeatCapabilities\(fw\)/.test(caps)) {
+      caps = /func heartbeatCapabilities\(fw FirewallManager\) \[\]string \{([\s\S]*?)\n\}/.exec(cmdSrc)?.[1] ?? '';
+    }
+    assert.match(caps, /agentCapabilities\(\)/);
+    assert.match(caps, /firewallCapabilities\(fw\)\.\.\./);
+    assert.match(caps, /firewallRuleCapabilities\(\)\.\.\./, 'fw_remote_port must reach the server (W3-3)');
   });
 
   lotIt('W3-2', '50b.5 go test of the firewall backends and ban safety', (t) => {

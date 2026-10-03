@@ -1,8 +1,13 @@
 import type { Config } from 'tailwindcss';
+import plugin from 'tailwindcss/plugin';
 
 export default {
   content: ['./index.html', './src/**/*.{js,ts,jsx,tsx}'],
   darkMode: 'class',
+  // NOTE: Obliance also sets future.hoverOnlyWhenSupported. Not enabled here
+  // yet: many Obliguard pages still reveal row actions with
+  // `opacity-0 group-hover:opacity-100`, which would leave them invisible on
+  // touch screens. Enable it once those use the can-hover: pattern below.
   theme: {
     extend: {
       colors: {
@@ -84,7 +89,34 @@ export default {
         ],
         mono: ['JetBrains Mono', 'Fira Code', 'Consolas', 'monospace'],
       },
+      // Sheet / drawer entrance animations used by components/common/Modal,
+      // Drawer and ActionMenu (mirrors Obliance). Opt-in classes only.
+      keyframes: {
+        'obli-fade-in':        { from: { opacity: '0' }, to: { opacity: '1' } },
+        'obli-slide-in-left':  { from: { transform: 'translateX(-100%)' }, to: { transform: 'translateX(0)' } },
+        'obli-slide-in-right': { from: { transform: 'translateX(100%)' },  to: { transform: 'translateX(0)' } },
+        'obli-slide-in-up':    { from: { transform: 'translateY(100%)' },  to: { transform: 'translateY(0)' } },
+      },
+      animation: {
+        'obli-fade-in':        'obli-fade-in 150ms ease-out',
+        'obli-slide-in-left':  'obli-slide-in-left 200ms ease-out',
+        'obli-slide-in-right': 'obli-slide-in-right 200ms ease-out',
+        'obli-slide-in-up':    'obli-slide-in-up 200ms ease-out',
+      },
     },
   },
-  plugins: [],
+  plugins: [
+    // Obli mobile guidelines §4 — input-capability variants (same as Obliance).
+    //   coarse:     → @media (pointer: coarse)          (touch: bigger targets)
+    //   can-hover:  → @media (hover: hover) and (pointer: fine)
+    //                 (things that must only exist with a mouse, e.g.
+    //                  `can-hover:opacity-0 can-hover:group-hover:opacity-100`)
+    // Declared as plugin variants rather than `theme.screens` raw entries on
+    // purpose: object screens make Tailwind disable every `max-*` / `min-*`
+    // variant (and drop screen sorting). Default breakpoints are untouched.
+    plugin(({ addVariant }) => {
+      addVariant('coarse', '@media (pointer: coarse)');
+      addVariant('can-hover', '@media (hover: hover) and (pointer: fine)');
+    }),
+  ],
 } satisfies Config;

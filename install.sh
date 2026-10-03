@@ -78,8 +78,8 @@ else
   echo "  → .env already exists, skipping."
 fi
 
-# Create custom directory structure
-mkdir -p custom/scripts custom/.ssh
+# Create the custom directory mounted at /custom (kept for compatibility)
+mkdir -p custom
 
 echo "→ Starting Obliguard..."
 echo ""

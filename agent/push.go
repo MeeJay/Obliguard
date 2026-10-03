@@ -74,7 +74,7 @@ type pushResponse struct {
 	BanList    *banListDelta                 `json:"banList,omitempty"`
 	Whitelist  []string                      `json:"whitelist,omitempty"`
 	Services   map[string]AgentServiceConfig `json:"services,omitempty"`
-	RateLimits []RateLimitRule               `json:"rateLimits,omitempty"`
+	RateLimits *[]RateLimitRule              `json:"rateLimits,omitempty"`
 	Command    string                        `json:"command,omitempty"`
 }
 
@@ -151,16 +151,16 @@ func push(cfg *Config, lw *LogWatcher, fw FirewallManager) {
 			log.Printf("Push interval updated to %ds", cfg.CheckIntervalSeconds)
 		}
 
-		// Apply firewall ban delta
+		// Apply firewall ban delta (adds through the ban-safety guard, removes canonical)
 		if result.BanList != nil {
-			for _, ip := range result.BanList.Add {
+			for _, ip := range banSafetyFor(cfg.ServerURL).Filter(result.BanList.Add) {
 				if err := fw.BanIP(ip); err != nil {
 					log.Printf("Firewall ban %s: %v", ip, err)
 				} else {
 					log.Printf("Firewall: banned %s", ip)
 				}
 			}
-			for _, ip := range result.BanList.Remove {
+			for _, ip := range canonicalBanList(result.BanList.Remove) {
 				if err := fw.UnbanIP(ip); err != nil {
 					log.Printf("Firewall unban %s: %v", ip, err)
 				} else {
@@ -172,14 +172,9 @@ func push(cfg *Config, lw *LogWatcher, fw FirewallManager) {
 			}
 		}
 
-		// Apply per-IP rate limiting rules (no-op on backends that don't support it)
-		if fw.IsRateLimitSupported() {
-			if err := fw.ApplyRateLimits(result.RateLimits); err != nil {
-				log.Printf("Firewall: apply rate limits: %v", err)
-			} else if len(result.RateLimits) > 0 {
-				log.Printf("Firewall: applied %d rate limit rule(s)", len(result.RateLimits))
-			}
-		}
+		// Per-IP rate limiting, same semantics as the WS config frame: absent =
+		// unchanged, [] = clear, identical set skipped.
+		applyRateLimitsFrame(cfg, fw, result.RateLimits)
 
 		// Forward updated service configs to the log watcher
 		if lw != nil && len(result.Services) > 0 {

@@ -2,11 +2,11 @@
  * 06 — manual ban target validation: prefix floor (/16 IPv4, /48 IPv6),
  * strict parsing, protected addresses. One network per assertion.
  *
- * Owner decision (wave 1): manual subnet bans are refused with a 400 "not
- * enforced by the agents yet" until D4.1 (owner answer 4). The [A2] checks
- * assert exactly that at the floor: 400 + "not enforced", never "too broad",
- * no row. The 201-at-floor halves are tagged [D4]; D4.1 amends the [A2]
- * at-floor assertions in its landing commit, citing owner answer 4.
+ * Owner decision (wave 1): manual subnet bans were refused with a 400 "not
+ * enforced by the agents yet" until D4.1 (owner answer 4). D4.1 landed in
+ * wave W3 (agents enforce CIDR natively), so per owner answer 4 the [A2]
+ * at-floor checks now assert 201 at the floor and still never "too broad".
+ * The [D4] halves check the stored row.
  */
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -17,7 +17,6 @@ import { lotIt } from '../lots';
 import { nextIp } from '../seed';
 
 const TOO_BROAD = /too broad/i;
-const NOT_ENFORCED = /not enforced/i;
 
 describe('06 ban validation', () => {
   let h: Harness;
@@ -38,32 +37,32 @@ describe('06 ban validation', () => {
     assert.equal((await intersecting('198.18.0.0/15')).length, 0);
   });
 
-  lotIt('A2', '06.2 a /16 IPv4 is at the floor: refused as "not enforced", never "too broad"', async () => {
+  lotIt('A2', '06.2 a /16 IPv4 is at the floor: accepted, never "too broad"', async () => {
+    // Amended by D4.1 (owner answer 4): subnets at the floor are now banned.
     const r = await post({ ip: '198.19.0.0', cidrPrefix: 16 });
-    assert.equal(r.status, 400);
+    assert.equal(r.status, 201, JSON.stringify(r.json));
     assert.doesNotMatch(String(r.json?.error ?? ''), TOO_BROAD);
-    assert.match(String(r.json?.error), NOT_ENFORCED);
-    assert.equal((await intersecting('198.19.0.0/16')).length, 0);
+    // Leave no row behind so 06.2b stays independent.
+    await intersecting('198.19.0.0/16').del();
   });
 
   lotIt('D4', '06.2b a /16 IPv4 subnet ban is stored', async () => {
-    // Independent of 06.2: always posts (06.2 leaves no row behind).
+    // Independent of 06.2: always posts (06.2 deletes the row it creates).
     const r = await post({ ip: '198.19.0.0', cidrPrefix: 16 });
     assert.equal(r.status, 201);
     const rows = await h.db('ip_bans').whereRaw("host(ip) = '198.19.0.0' AND (masklen(ip) = 16 OR cidr_prefix = 16)");
     assert.equal(rows.length, 1);
   });
 
-  lotIt('A2', '06.3 IPv6: /47 is too broad, /48 is at the floor ("not enforced")', async () => {
+  lotIt('A2', '06.3 IPv6: /47 is too broad, /48 is at the floor (accepted)', async () => {
     const a = await post({ ip: '2001:db8:10::', cidrPrefix: 47 });
     assert.equal(a.status, 400);
     assert.match(String(a.json?.error), TOO_BROAD);
     assert.equal((await intersecting('2001:db8:10::/47')).length, 0);
+    // Amended by D4.1 (owner answer 4): the /48 floor is now banned.
     const b = await post({ ip: '2001:db8:1::', cidrPrefix: 48 });
-    assert.equal(b.status, 400);
+    assert.equal(b.status, 201, JSON.stringify(b.json));
     assert.doesNotMatch(String(b.json?.error ?? ''), TOO_BROAD);
-    assert.match(String(b.json?.error), NOT_ENFORCED);
-    assert.equal((await intersecting('2001:db8:1::/48')).length, 0);
   });
 
   lotIt('D4', '06.3b a /48 IPv6 subnet ban is stored', async () => {

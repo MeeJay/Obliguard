@@ -50,7 +50,7 @@ const SUITE_TIMEOUT_MS = Number(process.env.VERIFY_SUITE_TIMEOUT_MS) || 240_000;
 const WORK = path.join(os.tmpdir(), `obliguard-verify-${process.pid}-${Date.now()}`);
 
 const RESERVED_KEYS = new Set(['DATABASE_URL', 'OBLIGUARD_VERIFY', 'SESSION_SECRET', 'NODE_ENV', 'VERIFY_ADMIN_URL', 'VERIFY_REPORT_FILE']);
-const SCRUB_RE = /^(DATABASE_|DB_|SESSION_|APP_|CLIENT_ORIGIN|SSO_|FORCE_HTTPS|DISABLE_2FA|BAN_|AGENT_|MANUAL_SUBNET_|OBLIGATE_|IP_EVENTS_|DEFAULT_ADMIN_|PORT$|LISTEN_PORT|NODE_ENV|OBLIGUARD_|CREDENTIAL_)/;
+const SCRUB_RE = /^(DATABASE_|DB_|SESSION_|APP_|CLIENT_ORIGIN|SSO_|FORCE_HTTPS|DISABLE_2FA|BAN_|AGENT_|MANUAL_SUBNET_|OBLIGATE_|IP_EVENTS_|DEFAULT_ADMIN_|PORT$|LISTEN_PORT|NODE_ENV|OBLIGUARD_|CREDENTIAL_|GEOIP_)/;
 
 interface EmbeddedPostgresLike {
   initialise(): Promise<void>;
@@ -254,6 +254,8 @@ function childEnv(suiteUrl: string, adminUrl: string, reportFile: string, extra:
     BAN_MIN_PREFIX_V6: '48',
     AGENT_KEY_BINDING: 'strict',
     AGENT_MAX_PENDING_PER_KEY: '500',
+    // Never let a suite send a public IP to a real GeoIP provider (63-geoip injects a fake one).
+    GEOIP_PROVIDER: 'none',
   });
   Object.assign(env, extra);
   return env;

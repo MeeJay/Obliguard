@@ -208,7 +208,7 @@ describe('20 tenant access (A1)', () => {
     assert.equal((await a1.get('/api/bans')).status, 200);
     assert.equal((await c1.get('/api/bans')).status, 200);
 
-    assert.equal((await admin2.del(`/api/tenants/${tid}`)).status, 200);
+    assert.equal((await admin2.del(`/api/tenants/${tid}`, { confirmName: 'Doomed' })).status, 200);
 
     const r = await a1.get('/api/bans');
     assert.equal(r.status, 403);

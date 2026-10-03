@@ -93,6 +93,28 @@
       </Directory>
     </StandardDirectory>
 
+    <!--
+      Uninstall cleanup: once the service is stopped, the agent binary removes
+      every firewall object it created (WFP filters, sublayer and provider,
+      netsh Obliguard-Block-N rules, obliguard-banlist.txt) and, with the purge
+      option, its data under %ProgramData%\ObliguardAgent (config.json,
+      agent.log, update directory). Deferred, as SYSTEM, before RemoveFiles
+      deletes the binary. Skipped on a major upgrade (UPGRADINGPRODUCTCODE): the new
+      version keeps the bans and the config. Return="ignore": a cleanup
+      failure never blocks the uninstall.
+    -->
+    <CustomAction Id="AgentCleanup"
+                  FileRef="AgentExeFile"
+                  ExeCommand="cleanup-firewall --purge"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <InstallExecuteSequence>
+      <Custom Action="AgentCleanup" After="StopServices"
+              Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+    </InstallExecuteSequence>
+
     <Feature Id="Main">
       <ComponentRef Id="AgentExe" />
       <ComponentRef Id="AgentConfig" />

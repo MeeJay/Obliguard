@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react';
-import { LogOut, Download, ShieldOff, ShieldAlert } from 'lucide-react';
+import { LogOut, Download, Menu, ShieldOff, ShieldAlert } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useAuthStore } from '@/store/authStore';
 import { useTenantStore } from '@/store/tenantStore';
 import { useSocketStore } from '@/store/socketStore';
+import { useUiStore } from '@/store/uiStore';
+import { useLayoutMode } from '@/hooks/useMediaQuery';
 import apiClient from '@/api/client';
 import type { ApiResponse } from '@obliview/shared';
 import { anonUsername } from '@/utils/anonymize';
@@ -12,6 +14,7 @@ import { NotificationCenter } from './NotificationCenter';
 import { TenantSwitcher } from './TenantSwitcher';
 import { UserAvatar } from '@/components/common/UserAvatar';
 import { Logo } from '@/components/common/Logo';
+import { IconButton } from '@/components/common/IconButton';
 import { cn } from '@/utils/cn';
 
 /** True when running inside the native desktop app overlay. */
@@ -46,6 +49,13 @@ export function Header() {
   const { user, logout } = useAuthStore();
   const { status: socketStatus } = useSocketStore();
   const [connectedApps, setConnectedApps] = useState<ConnectedAppEntry[]>([]);
+  // Phone / tablet shell (< 1024 px): the sidebar is an off-canvas drawer
+  // opened by the hamburger slot below (AppLayout renders the Drawer).
+  const mobileNavOpen = useUiStore((s) => s.mobileNavOpen);
+  const toggleMobileNav = useUiStore((s) => s.toggleMobileNav);
+  const layoutMode = useLayoutMode();
+  const isDesktop = layoutMode === 'desktop';
+  const isPhone = layoutMode === 'phone';
 
   // Security chips data — Obliguard-specific (shows active bans + suspicious IPs)
   const [activeBans, setActiveBans] = useState<number | null>(null);
@@ -115,11 +125,37 @@ export function Header() {
   const displayedUsername = anonUsername(rawName);
 
   return (
-    <header className="flex h-13 shrink-0 items-center gap-3 bg-bg-secondary px-4" style={{ height: 52 }}>
+    <header
+      className={cn(
+        'flex shrink-0 items-center gap-3 bg-bg-secondary',
+        // Safe areas (0 on desktop → identical px-4 / 52 px).
+        'pt-safe pl-[max(1rem,var(--safe-left))] pr-[max(1rem,var(--safe-right))]',
+        'max-md:gap-2 max-md:pl-[max(0.75rem,var(--safe-left))] max-md:pr-[max(0.75rem,var(--safe-right))]',
+      )}
+      style={{ height: 'calc(52px + var(--safe-top, 0px))' }}
+    >
+      {/* Hamburger slot — opens the sidebar drawer below 1024 px. */}
+      {!isDesktop && (
+        <IconButton
+          label={t('header.openMenu', { defaultValue: 'Open menu' })}
+          icon={<Menu className="h-5 w-5" />}
+          size="md"
+          onClick={toggleMobileNav}
+          aria-expanded={mobileNavOpen}
+          aria-haspopup="dialog"
+          className="-ml-1.5 shrink-0"
+        />
+      )}
+
       {/* Logo — always visible in the topbar so it stays accessible regardless
-          of sidebar state (pinned, collapsed, floating). */}
-      <Link to="/" className="flex items-center gap-2 shrink-0">
-        <Logo className="h-8 w-auto max-w-[160px] object-contain" />
+          of sidebar state (pinned, collapsed, floating). Phone: the square
+          mark only. */}
+      <Link to="/" className="flex items-center gap-2 shrink-0" aria-label="Obliguard">
+        {isPhone ? (
+          <img src="/favicon.svg" alt="Obliguard" className="h-8 w-8" />
+        ) : (
+          <Logo className="h-8 w-auto max-w-[160px] object-contain" />
+        )}
       </Link>
 
       {/* Tenant selector — sits left of the app switcher, preserving the
@@ -128,9 +164,11 @@ export function Header() {
 
       {/* App switcher pills — only show the current app + apps the user can
           actually reach (returned by /api/auth/connected-apps). Unreachable
-          apps are hidden entirely rather than greyed out. */}
+          apps are hidden entirely rather than greyed out. Below 1024 px the
+          pills scroll inside the remaining width; phones (< 768 px) have no
+          room for them next to the hamburger, tenant and account. */}
       {!isNativeApp && (
-        <nav className="flex items-center gap-1 rounded-lg bg-bg-hover p-1 ml-1">
+        <nav className="flex items-center gap-1 rounded-lg bg-bg-hover p-1 ml-1 max-lg:min-w-0 max-lg:overflow-x-auto max-lg:scrollbar-none max-lg:[&>button]:shrink-0 max-md:hidden">
           {switcherApps.map((app) => {
             const isCurrent = app.self === true || app.appType === CURRENT_APP;
             return (
@@ -157,7 +195,7 @@ export function Header() {
         </nav>
       )}
 
-      <div className="ml-auto flex items-center gap-3">
+      <div className="ml-auto flex shrink-0 items-center gap-3 max-md:gap-1.5">
         {/* Security chips — Obliguard-specific (active bans + suspicious IPs) */}
         {(activeBans !== null || suspicious !== null) && (
           <div className="hidden sm:flex items-center gap-1.5">
@@ -188,7 +226,7 @@ export function Header() {
         {!isNativeApp && (
           <Link
             to="/download"
-            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-[13px] font-medium text-text-muted hover:bg-bg-hover hover:text-text-primary transition-colors"
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-[13px] font-medium text-text-muted hover:bg-bg-hover hover:text-text-primary transition-colors max-lg:hidden"
           >
             <Download size={14} />
             {t('nav.downloadApp')}
@@ -204,7 +242,7 @@ export function Header() {
                                               t('header.socketDisconnected')
           }
           className={cn(
-            'flex h-7 w-7 items-center justify-center rounded-md transition-opacity',
+            'flex h-7 w-7 items-center justify-center rounded-md transition-opacity coarse:h-10 coarse:w-10',
             socketStatus !== 'connected' && 'cursor-pointer hover:opacity-70',
             socketStatus === 'connected'  && 'cursor-default',
           )}
@@ -224,17 +262,20 @@ export function Header() {
 
         {user && (
           <>
-            <div className="flex items-center gap-2 pl-1.5 pr-3 py-1 rounded-lg bg-bg-hover">
+            {/* Phone: avatar only (name and role need the room). */}
+            <div className="flex items-center gap-2 pl-1.5 pr-3 py-1 rounded-lg bg-bg-hover max-md:p-1">
               <UserAvatar avatar={user.avatar} username={username} size={28} />
-              <span className="text-[13px] font-medium text-text-primary">{displayedUsername}</span>
-              <span className="text-[10px] font-mono uppercase tracking-wider text-accent pl-2 border-l border-border-light">
+              <span className="text-[13px] font-medium text-text-primary max-md:hidden">{displayedUsername}</span>
+              <span className="text-[10px] font-mono uppercase tracking-wider text-accent pl-2 border-l border-border-light max-md:hidden">
                 {user.role}
               </span>
             </div>
+            {/* Phone: Sign out lives in the sidebar drawer. */}
             <button
               onClick={logout}
               title={t('nav.signOut')}
-              className="flex h-7 w-7 items-center justify-center rounded-md text-text-muted hover:bg-bg-hover hover:text-text-primary transition-colors"
+              aria-label={t('nav.signOut')}
+              className="flex h-7 w-7 items-center justify-center rounded-md text-text-muted hover:bg-bg-hover hover:text-text-primary transition-colors coarse:h-10 coarse:w-10 max-md:hidden"
             >
               <LogOut size={15} />
             </button>

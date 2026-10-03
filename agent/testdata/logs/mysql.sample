@@ -1,0 +1,24 @@
+@@ parser mysql
+@@ expect {"ip":"203.0.113.120","user":"root"}
+2024-01-15T10:20:30.123456Z 8 [Note] [MY-010926] [Server] Access denied for user 'root'@'203.0.113.120' (using password: YES)
+
+@@ expect {"ip":"203.0.113.121","user":"admin"}
+2024-01-15 10:20:31 21 [Warning] Access denied for user 'admin'@'203.0.113.121' (using password: NO)
+
+@@ expect {"ip":"203.0.113.122","user":"sa"}
+2024-01-15T10:20:32.000000Z 9 [Note] [MY-010926] [Server] Access denied for user 'sa'@'::ffff:203.0.113.122' (using password: YES)
+
+@@ expect {"ip":"2001:db8::123","user":"app"}
+2024-01-15T10:20:33.000000Z 10 [Note] [MY-010926] [Server] Access denied for user 'app'@'2001:db8::123' (using password: YES)
+
+# Host names (name resolution on) cannot be banned.
+@@ none
+2024-01-15T10:20:34.000000Z 11 [Note] [MY-010926] [Server] Access denied for user 'root'@'localhost' (using password: YES)
+@@ none
+2024-01-15T10:20:35.000000Z 0 [System] [MY-010931] [Server] /usr/sbin/mysqld: ready for connections. Version: '8.0.36'  socket: '/var/run/mysqld/mysqld.sock'  port: 3306
+
+# Injection: the username carries a fake 'user'@'host' pair.
+@@ none
+2024-01-15T10:20:36.000000Z 12 [Note] [MY-010926] [Server] Access denied for user 'x'@'198.51.100.66' (using password: YES) 'y'@'203.0.113.124' (using password: YES)
+@@ none
+2024-01-15T10:20:37.000000Z 13 [Note] [MY-010926] [Server] Access denied for user 'x'@'198.51.100.66'@'203.0.113.125' (using password: YES)

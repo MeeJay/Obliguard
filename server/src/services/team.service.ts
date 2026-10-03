@@ -1,7 +1,7 @@
 import { db } from '../db';
 import type { UserTeam, TeamPermission } from '@obliview/shared';
 import { isMasterTenant } from '@obliview/shared';
-import { AppError } from '../middleware/errorHandler';
+import { codedError } from '../utils/errorCodes';
 import { TEAM_PERMISSION_SCOPES } from '../validators/team.schema';
 
 type TeamPermissionScope = typeof TEAM_PERMISSION_SCOPES[number];
@@ -20,7 +20,7 @@ interface TeamRow {
 interface PermissionRow {
   id: number;
   team_id: number;
-  scope: 'group' | 'agent';
+  scope: TeamPermissionScope;
   scope_id: number;
   level: 'ro' | 'rw';
 }
@@ -41,13 +41,14 @@ function rowToTeam(row: TeamRow): UserTeam {
 /** The tenant a team belongs to (404 when the team does not exist). */
 async function resolveTeamTenantId(teamId: number): Promise<number> {
   const team = await db('user_teams').where({ id: teamId }).select('tenant_id').first() as { tenant_id: number } | undefined;
-  if (!team) throw new AppError(404, 'Team not found');
+  if (!team) throw codedError(404, 'TEAM_NOT_FOUND', 'Team not found');
   return team.tenant_id;
 }
 
 /**
  * Team grants are tenant-bound: every group / agent a team is granted must
  * belong to the team's own tenant (the Default tenant included: no bypass).
+ * 'ungrouped' names no entity (the team tenant's agents without a group).
  */
 async function assertScopesInTenant(
   perms: Array<{ scope: TeamPermissionScope; scopeId: number }>,
@@ -57,11 +58,11 @@ async function assertScopesInTenant(
   const agentIds = [...new Set(perms.filter((p) => p.scope === 'agent').map((p) => p.scopeId))];
   if (groupIds.length > 0) {
     const rows = await db('monitor_groups').whereIn('id', groupIds).where({ tenant_id: tenantId }).select('id');
-    if (rows.length !== groupIds.length) throw new AppError(400, 'Group not found in the team tenant');
+    if (rows.length !== groupIds.length) throw codedError(400, 'TEAM_SCOPE_OUTSIDE_TENANT', 'Group not found in the team tenant');
   }
   if (agentIds.length > 0) {
     const rows = await db('agent_devices').whereIn('id', agentIds).where({ tenant_id: tenantId }).select('id');
-    if (rows.length !== agentIds.length) throw new AppError(400, 'Agent not found in the team tenant');
+    if (rows.length !== agentIds.length) throw codedError(400, 'TEAM_SCOPE_OUTSIDE_TENANT', 'Agent not found in the team tenant');
   }
 }
 
@@ -69,7 +70,8 @@ function rowToPermission(row: PermissionRow): TeamPermission {
   return {
     id: row.id,
     teamId: row.team_id,
-    scope: row.scope,
+    // 'ungrouped' is a server scope the shared PermissionScope does not list yet.
+    scope: row.scope as TeamPermission['scope'],
     scopeId: row.scope_id,
     level: row.level,
   };
@@ -140,12 +142,25 @@ export const teamService = {
     return rows.map((r) => r.user_id);
   },
 
+  /**
+   * Replace the members of a team. A member added now must belong to the
+   * team's tenant (400 otherwise): a team only grants rights inside its
+   * tenant. Members already in the team are kept as they are.
+   */
   async setMembers(teamId: number, userIds: number[]): Promise<void> {
+    const tenantId = await resolveTeamTenantId(teamId);
+    const wanted = [...new Set(userIds)];
+    const current = new Set<number>((await this.getMembers(teamId)).map(Number));
+    const added = wanted.filter((uid) => !current.has(uid));
+    if (added.length > 0) {
+      const members = await db('user_tenants').whereIn('user_id', added).where({ tenant_id: tenantId }).pluck('user_id');
+      if (members.length !== added.length) throw codedError(400, 'TEAM_USER_OUTSIDE_TENANT', 'User is not a member of the team tenant');
+    }
     await db.transaction(async (trx) => {
       await trx('team_memberships').where({ team_id: teamId }).del();
-      if (userIds.length > 0) {
+      if (wanted.length > 0) {
         await trx('team_memberships').insert(
-          userIds.map((uid) => ({ team_id: teamId, user_id: uid })),
+          wanted.map((uid) => ({ team_id: teamId, user_id: uid })),
         );
       }
     });
@@ -188,9 +203,11 @@ export const teamService = {
 
     const merged = new Map<string, { scope: TeamPermissionScope; scopeId: number; level: 'ro' | 'rw' }>();
     for (const p of permissions) {
-      const key = `${p.scope}:${p.scopeId}`;
+      // 'ungrouped' is a single pseudo-scope: its id is always 0.
+      const scopeId = p.scope === 'ungrouped' ? 0 : p.scopeId;
+      const key = `${p.scope}:${scopeId}`;
       const existing = merged.get(key);
-      if (!existing || (existing.level === 'ro' && p.level === 'rw')) merged.set(key, { ...p });
+      if (!existing || (existing.level === 'ro' && p.level === 'rw')) merged.set(key, { ...p, scopeId });
     }
     const list = [...merged.values()];
     await assertScopesInTenant(list, tenantId);
@@ -209,6 +226,7 @@ export const teamService = {
       }
       const rows = await trx<PermissionRow>('team_permissions')
         .where({ team_id: teamId })
+        .whereIn('scope', [...TEAM_PERMISSION_SCOPES])
         .orderBy('scope')
         .orderBy('scope_id');
       return rows.map(rowToPermission);
@@ -223,6 +241,7 @@ export const teamService = {
     level: 'ro' | 'rw',
   ): Promise<TeamPermission> {
     const tenantId = await resolveTeamTenantId(teamId);
+    if (scope === 'ungrouped') scopeId = 0;
     await assertScopesInTenant([{ scope, scopeId }], tenantId);
     const [row] = await db<PermissionRow>('team_permissions')
       .insert({ team_id: teamId, scope, scope_id: scopeId, level })

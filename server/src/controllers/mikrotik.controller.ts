@@ -7,7 +7,13 @@ import { mikrotikBanSync } from '../services/mikrotik/mikrotikBanSync.service';
 import { mikrotikImport } from '../services/mikrotik/mikrotikImport.service';
 import { parseMikroTikSyslog } from '../services/mikrotik/syslogParser';
 import { agentService, markMikrotikSeen } from '../services/agent.service';
-import { checkDeviceAccess } from '../services/deviceAccess.service';
+import { checkRequestDeviceAccess } from '../services/deviceAccess.service';
+import { auditService } from '../services/audit.service';
+
+/** Audit row of a router action (linked to the router's agent row; never a credential value). */
+function auditRouter(req: Request, deviceId: number, action: string, details: Record<string, unknown> = {}, success = true): Promise<void> {
+  return auditService.logReq(req, { action, targetType: 'agent', targetId: deviceId, deviceId, success, details });
+}
 import type { AgentIpEvent } from '@obliview/shared';
 
 /**
@@ -17,7 +23,7 @@ import type { AgentIpEvent } from '@obliview/shared';
  * 404 for a non-MikroTik device. Returns the device id, or null (answered).
  */
 async function requireOwnMikrotik(req: Request, res: Response): Promise<number | null> {
-  const r = await checkDeviceAccess(req.params.id, req.tenantId, 'write');
+  const r = await checkRequestDeviceAccess(req, req.params.id, 'write');
   if (!r.ok) {
     res.status(r.status).json({ error: r.error });
     return null;
@@ -29,10 +35,11 @@ async function requireOwnMikrotik(req: Request, res: Response): Promise<number |
   return r.row.id;
 }
 
+/** POST /mikrotik: a new router in the operating tenant (integrations.mikrotik, route). */
 export async function createMikroTikDevice(req: Request, res: Response): Promise<void> {
   try {
-    const tenantId = (req as any).tenantId as number;
-    const userId = (req as any).userId as number;
+    const tenantId = req.tenantId;
+    const userId = req.session.userId!;
 
     const { name, hostname, groupId, apiHost, apiPort, apiUseTls, apiUsername, apiPassword, syslogIdentifier, addressListName } = req.body;
 
@@ -52,6 +59,9 @@ export async function createMikroTikDevice(req: Request, res: Response): Promise
       tenantId,
       userId,
     );
+    await auditRouter(req, result.deviceId, 'mikrotik.created', {
+      name, hostname, apiHost, apiPort: apiPort ?? null, apiUseTls: apiUseTls ?? null, apiUsername, groupId: groupId ?? null,
+    });
 
     res.status(201).json(result);
   } catch (err) {
@@ -69,6 +79,7 @@ export async function getMikroTikCredentials(req: Request, res: Response): Promi
       res.status(404).json({ error: 'MikroTik credentials not found' });
       return;
     }
+    await auditRouter(req, deviceId, 'mikrotik.credentials_viewed');
     res.json(creds);
   } catch (err) {
     res.status(500).json({ error: 'Internal error' });
@@ -80,6 +91,10 @@ export async function updateMikroTikCredentials(req: Request, res: Response): Pr
     const deviceId = await requireOwnMikrotik(req, res);
     if (deviceId === null) return;
     await mikrotikDeviceService.updateCredentials(deviceId, req.body);
+    // Field names only: the values (password, token) are never audited.
+    await auditRouter(req, deviceId, 'mikrotik.credentials_updated', {
+      fields: Object.keys((req.body ?? {}) as object).slice(0, 50),
+    });
     res.json({ ok: true });
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Unknown error';
@@ -103,6 +118,7 @@ export async function syncMikroTikBans(req: Request, res: Response): Promise<voi
     const deviceId = await requireOwnMikrotik(req, res);
     if (deviceId === null) return;
     const result = await mikrotikBanSync.fullSync(deviceId);
+    await auditRouter(req, deviceId, 'mikrotik.bans_synced');
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: 'Internal error' });
@@ -133,6 +149,7 @@ export async function debugMikroTikLogs(req: Request, res: Response): Promise<vo
     const client = await createRouterOSClient({
       host: cfg.host, port: cfg.port, useTls: cfg.useTls,
       username: cfg.username, password: cfg.password,
+      deviceId,
     });
     // Try to get raw response first for debugging
     const rawResult = await client.sendCommand(['/log/print']);
@@ -159,9 +176,11 @@ export async function debugMikroTikLogs(req: Request, res: Response): Promise<vo
   }
 }
 
+/** POST /mikrotik/import/poll: one import cycle over every tenant's routers (platform admin, route). */
 export async function pollMikroTikImport(req: Request, res: Response): Promise<void> {
   try {
     await mikrotikImport.pollNow();
+    await auditService.logReq(req, { action: 'mikrotik.import_polled', targetType: 'mikrotik_import', tenantId: null });
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: 'Internal error' });

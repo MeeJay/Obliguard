@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Outlet, useNavigate } from 'react-router-dom';
+import { Outlet, useLocation, useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { Sidebar } from './Sidebar';
 import { Header } from './Header';
 import { DesktopUpdateBanner } from './DesktopUpdateBanner';
 import { LiveAlerts } from './LiveAlerts';
 import { GlobalAddAgentModal } from './GlobalAddAgentModal';
-import { useUiStore } from '@/store/uiStore';
+import { IpDetailDrawer } from '@/components/ip/IpDetailDrawer';
+import { TwoFactorGate } from '@/components/common/TwoFactorGate';
+import { Drawer } from '@/components/common/Drawer';
+import { useUiStore, useEffectiveSidebar } from '@/store/uiStore';
 import { useTenantStore } from '@/store/tenantStore';
 import { useAgentDevicesPolling } from '@/store/agentStore';
 import { useSocket } from '@/hooks/useSocket';
@@ -21,8 +25,12 @@ import { cn } from '@/utils/cn';
  *   │ Sidebar  │ <Outlet />                       │
  *   │ 260/64px │                                  │
  *   └──────────┴──────────────────────────────────┘
+ *
+ * Below 1024 px the sidebar leaves the body row and becomes an off-canvas
+ * Drawer opened by the Header hamburger (Obliance AppLayout drawer branch).
  */
 export function AppLayout() {
+  const { t } = useTranslation();
   // Global socket subscriptions — always active regardless of which page is open
   useSocket();
   // Agent devices of the operating tenant (sidebar tree, group pages): 30 s
@@ -58,12 +66,28 @@ export function AppLayout() {
     sidebarOpen,
     sidebarWidth,
     setSidebarWidth,
-    sidebarFloating,
-    sidebarCollapsed,
+    mobileNavOpen,
+    setMobileNavOpen,
   } = useUiStore();
+  // Effective mode: drawer below 1024 px, rail by default below 1280 px, no
+  // floating / mouse resize on a touch screen. Never persisted.
+  const sidebar = useEffectiveSidebar();
   const dragging = useRef(false);
   const startX = useRef(0);
   const startWidth = useRef(0);
+
+  // ── Off-canvas drawer (phone / tablet) ────────────────────────────────────
+  // Closes on every navigation (location.key changes even when the same link
+  // is tapped again) and whenever the layout leaves drawer mode, so it never
+  // pops back open after a resize / rotation.
+  const location = useLocation();
+  useEffect(() => {
+    setMobileNavOpen(false);
+  }, [location.key, setMobileNavOpen]);
+  useEffect(() => {
+    if (!sidebar.isDrawer) setMobileNavOpen(false);
+  }, [sidebar.isDrawer, setMobileNavOpen]);
+  const closeMobileNav = useCallback(() => setMobileNavOpen(false), [setMobileNavOpen]);
 
   // ── Body row top offset (for floating sidebar anchor) ─────────────────────
   // The floating sidebar is `position: fixed` and must drop down from BELOW
@@ -87,9 +111,10 @@ export function AppLayout() {
   const [floatVisible, setFloatVisible] = useState(false);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Reset floating visibility whenever the (effective) mode is toggled off
   useEffect(() => {
-    if (!sidebarFloating) setFloatVisible(false);
-  }, [sidebarFloating]);
+    if (!sidebar.floating) setFloatVisible(false);
+  }, [sidebar.floating]);
 
   const showFloat = useCallback(() => {
     if (hideTimer.current) clearTimeout(hideTimer.current);
@@ -131,7 +156,10 @@ export function AppLayout() {
   );
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden bg-bg-primary">
+    // h-screen fallback only where dvh is unsupported (WebView < 108): a plain
+    // 'h-screen h-dvh' pair would let vh win (Tailwind orders same-property
+    // utilities alphabetically).
+    <div className="flex h-dvh supports-[not(height:100dvh)]:h-screen flex-col overflow-hidden bg-bg-primary">
 
       {/* Full-width topbar — always on top of the sidebar so logo + tenant
           selector stay visible regardless of sidebar state (collapsed,
@@ -142,7 +170,7 @@ export function AppLayout() {
       {/* Body row — sidebar + main content side by side, below the topbar */}
       <div ref={bodyRowRef} className="flex flex-1 overflow-hidden">
 
-        {sidebarFloating ? (
+        {sidebar.isDrawer ? null : sidebar.floating ? (
           <>
             {/* Invisible hover-trigger strip on the far left edge of the body
                 row (topbar excluded so logo/tenant remain clickable). */}
@@ -167,10 +195,13 @@ export function AppLayout() {
             >
               <Sidebar />
 
-              <div
-                onMouseDown={handleMouseDown}
-                className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-accent/30 active:bg-accent/50 transition-colors z-10"
-              />
+              {/* Resize handle — still usable in floating mode */}
+              {sidebar.resizable && (
+                <div
+                  onMouseDown={handleMouseDown}
+                  className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-accent/30 active:bg-accent/50 transition-colors z-10"
+                />
+              )}
             </div>
           </>
         ) : (
@@ -181,13 +212,14 @@ export function AppLayout() {
               !sidebarOpen && 'w-0 overflow-hidden',
             )}
             style={sidebarOpen
-              ? { width: sidebarCollapsed ? '64px' : `${sidebarWidth}px` }
+              ? { width: sidebar.collapsed ? '64px' : `${sidebarWidth}px` }
               : undefined}
           >
             <Sidebar />
 
-            {/* Resize handle — disabled while collapsed (fixed 64 px width). */}
-            {sidebarOpen && !sidebarCollapsed && (
+            {/* Resize handle — disabled while collapsed (fixed 64 px width)
+                and on touch screens (no mouse to drag it with). */}
+            {sidebarOpen && sidebar.resizable && (
               <div
                 onMouseDown={handleMouseDown}
                 className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-accent/30 active:bg-accent/50 transition-colors z-10"
@@ -196,8 +228,11 @@ export function AppLayout() {
           </div>
         )}
 
-        {/* Main content */}
-        <main className="flex-1 overflow-y-auto flex flex-col">
+        {/* Main content — min-w-0 so a wide page (tables, toolbars) scrolls
+            inside itself instead of widening the whole layout; safe-area
+            padding keeps content clear of the gesture bar / notch (0 on
+            desktop). */}
+        <main className="flex min-w-0 flex-1 flex-col overflow-y-auto px-safe pb-safe">
           {/* Keyed on the tenant: every page remounts after a switch, so no
               state or listener of the previous tenant survives. */}
           <Outlet key={currentTenantId ?? 'none'} />
@@ -205,11 +240,32 @@ export function AppLayout() {
 
       </div>
 
+      {/* Phone / tablet navigation: the sidebar as an off-canvas drawer,
+          opened by the hamburger in the Header. The Drawer closes itself on
+          backdrop tap, Escape and Android back. */}
+      {sidebar.isDrawer && (
+        <Drawer
+          open={mobileNavOpen}
+          onClose={closeMobileNav}
+          side="left"
+          ariaLabel={t('nav.navigation', 'Navigation')}
+          bodyClassName="flex flex-col overflow-hidden p-0"
+        >
+          <Sidebar variant="drawer" onRequestClose={closeMobileNav} />
+        </Drawer>
+      )}
+
       {/* Live alert toasts */}
       <LiveAlerts />
 
       {/* Global Add Agent modal (triggered from sidebar / dashboard) */}
       <GlobalAddAgentModal />
+
+      {/* The single IP detail drawer: opened by ?ip= on any page (useIpDrawer) */}
+      <IpDetailDrawer />
+
+      {/* Step-up prompt of sensitive actions (401 TWO_FACTOR_REQUIRED, api/client.ts) */}
+      <TwoFactorGate />
     </div>
   );
 }

@@ -1,10 +1,13 @@
 import { useRef, useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Bell, X, Trash2, CheckCheck } from 'lucide-react';
-import { useLiveAlertsStore, countUnread } from '@/store/liveAlertsStore';
+import { useTranslation } from 'react-i18next';
+import { Bell, X, Trash2, CheckCheck, WifiOff, ShieldAlert, ListX, Router, ArrowUpCircle, UserPlus } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
+import { useLiveAlertsStore, countUnread, openAlertLink } from '@/store/liveAlertsStore';
 import type { LiveAlert, AlertSeverity } from '@/store/liveAlertsStore';
 import { useTenantStore } from '@/store/tenantStore';
 import { cn } from '@/utils/cn';
+import type { TFunction } from 'i18next';
 
 const SEVERITY_STYLES: Record<AlertSeverity, { bar: string; dot: string; title: string }> = {
   down:    { bar: 'border-l-red-500',   dot: 'bg-red-500',   title: 'text-red-400'   },
@@ -13,12 +16,36 @@ const SEVERITY_STYLES: Record<AlertSeverity, { bar: string; dot: string; title: 
   info:    { bar: 'border-l-blue-500',  dot: 'bg-blue-500',  title: 'text-blue-400'  },
 };
 
-function timeAgo(iso: string): string {
+/** Icon of each incident kind raised by the server (liveAlert.service LIVE_ALERT_INCIDENT_KINDS). */
+const INCIDENT_ICONS: Record<string, LucideIcon> = {
+  agent_offline: WifiOff,
+  ban_burst: ShieldAlert,
+  blocklist_sync_failed: ListX,
+  mikrotik_sync_failed: Router,
+  agent_update_failed: ArrowUpCircle,
+  agent_pending: UserPlus,
+};
+
+/** The incident kind's icon, or the severity dot for a plain alert. Shared with the toasts. */
+export function AlertKindIcon({ alert, className }: { alert: LiveAlert; className?: string }) {
+  const { t } = useTranslation();
+  const Icon = alert.incidentKind ? INCIDENT_ICONS[alert.incidentKind] : undefined;
+  const styles = SEVERITY_STYLES[alert.severity] ?? SEVERITY_STYLES.info;
+  if (!Icon) return <span className={cn('mt-1.5 h-2 w-2 shrink-0 rounded-full', styles.dot, className)} />;
+  const label = t(`notifications.incidentKinds.${alert.incidentKind}`, alert.incidentKind ?? '');
+  return (
+    <span className={cn('mt-0.5 inline-flex shrink-0', styles.title, className)} title={label} role="img" aria-label={label}>
+      <Icon size={14} aria-hidden="true" />
+    </span>
+  );
+}
+
+function timeAgo(iso: string, t: TFunction): string {
   const diff = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
-  if (diff < 60) return `${diff}s ago`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  return `${Math.floor(diff / 86400)}d ago`;
+  if (diff < 60) return t('notifications.center.secondsAgo', { n: diff, defaultValue: '{{n}}s ago' });
+  if (diff < 3600) return t('notifications.center.minutesAgo', { n: Math.floor(diff / 60), defaultValue: '{{n}}m ago' });
+  if (diff < 86400) return t('notifications.center.hoursAgo', { n: Math.floor(diff / 3600), defaultValue: '{{n}}h ago' });
+  return t('notifications.center.daysAgo', { n: Math.floor(diff / 86400), defaultValue: '{{n}}d ago' });
 }
 
 // ─── Single alert row ─────────────────────────────────────────────────────────
@@ -31,7 +58,10 @@ interface AlertRowProps {
 }
 
 function AlertRow({ alert, showTenantBadge, onRead, onRemove }: AlertRowProps) {
-  const styles = SEVERITY_STYLES[alert.severity];
+  const { t } = useTranslation();
+  const styles = SEVERITY_STYLES[alert.severity] ?? SEVERITY_STYLES.info;
+  // An incident raised again keeps one row: show the repeat count and last time.
+  const repeats = alert.occurrences ?? 1;
   return (
     <div
       className={cn(
@@ -42,7 +72,7 @@ function AlertRow({ alert, showTenantBadge, onRead, onRemove }: AlertRowProps) {
       )}
       onClick={() => onRead(alert)}
     >
-      <span className={cn('mt-1.5 h-2 w-2 shrink-0 rounded-full', styles.dot)} />
+      <AlertKindIcon alert={alert} />
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-1.5">
           <p className={cn('text-sm font-semibold truncate', styles.title)}>
@@ -54,7 +84,12 @@ function AlertRow({ alert, showTenantBadge, onRead, onRemove }: AlertRowProps) {
         </div>
         <p className="text-xs text-text-muted mt-0.5 truncate">{alert.message}</p>
         <div className="flex items-center gap-1.5 mt-1 flex-wrap">
-          <p className="text-xs text-text-muted/60">{timeAgo(alert.createdAt)}</p>
+          <p className="text-xs text-text-muted/60">{timeAgo(alert.updatedAt ?? alert.createdAt, t)}</p>
+          {repeats > 1 && (
+            <span className="text-[10px] bg-bg-hover text-text-muted px-1.5 py-0.5 rounded-full font-medium" title={t('notifications.raisedTimes', { count: repeats, defaultValue_one: 'Raised {{count}} time', defaultValue_other: 'Raised {{count}} times' })}>
+              ×{repeats}
+            </span>
+          )}
           {/* Tenant badge: shown in Global tab for alerts from other tenants */}
           {showTenantBadge && alert.tenantName && (
             <span className="text-[10px] bg-accent/20 text-accent px-1.5 py-0.5 rounded-full font-medium">
@@ -66,7 +101,7 @@ function AlertRow({ alert, showTenantBadge, onRead, onRemove }: AlertRowProps) {
       <button
         className="shrink-0 text-text-muted hover:text-text-primary transition-colors mt-0.5"
         onClick={(e) => { e.stopPropagation(); onRemove(alert.id); }}
-        title="Dismiss"
+        title={t('common.dismiss', { defaultValue: 'Dismiss' })}
       >
         <X size={12} />
       </button>
@@ -109,6 +144,7 @@ function Toggle({ enabled, onChange, label }: ToggleProps) {
 type Tab = 'local' | 'global';
 
 export function NotificationCenter() {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState<Tab>('local');
 
@@ -163,22 +199,11 @@ export function NotificationCenter() {
    */
   const handleAlertClick = async (alert: LiveAlert) => {
     await markAlertRead(alert.id);
-
-    if (alert.tenantId && alert.tenantId !== currentTenantId) {
-      // Switch tenant session on the server, then do a full page navigation.
-      // A client-side navigate() leaves stale store data in memory; a hard
-      // redirect reloads the app fresh with the new tenant context — same as F5.
-      await useTenantStore.getState().setCurrentTenant(alert.tenantId);
-      setOpen(false);
-      window.location.href = alert.navigateTo ?? '/';
-      return;
-    }
-
-    // Same-tenant: normal client-side navigation
-    if (alert.navigateTo) {
-      setOpen(false);
-      navigate(alert.navigateTo);
-    }
+    const otherTenant = !!alert.tenantId && alert.tenantId !== currentTenantId;
+    if (otherTenant || alert.navigateTo) setOpen(false);
+    // Another tenant: switch, then a full reload (no stale tenant data);
+    // same tenant: client-side navigation to the incident's deep link.
+    await openAlertLink(alert, navigate);
   };
 
   const isAnyEnabled = localEnabled || multiTenantEnabled;
@@ -189,7 +214,7 @@ export function NotificationCenter() {
       <button
         ref={buttonRef}
         onClick={() => setOpen((v) => !v)}
-        title="Notification Center"
+        title={t('notifications.center.title', { defaultValue: 'Notification Center' })}
         className="relative flex items-center gap-1.5 text-sm text-text-secondary hover:text-text-primary transition-colors"
       >
         <Bell
@@ -212,12 +237,12 @@ export function NotificationCenter() {
           {/* Header */}
           <div className="px-4 py-3 border-b border-border space-y-2">
             <div className="flex items-center justify-between">
-              <h3 className="text-sm font-semibold text-text-primary">Notifications</h3>
+              <h3 className="text-sm font-semibold text-text-primary">{t('nav.notifications')}</h3>
               <div className="flex items-center gap-2">
                 {tabAlerts.some((a) => !a.read) && (
                   <button
                     onClick={markAllRead}
-                    title="Mark all as read"
+                    title={t('notifications.center.markAllRead', { defaultValue: 'Mark all as read' })}
                     className="text-text-muted hover:text-text-primary transition-colors"
                   >
                     <CheckCheck size={14} />
@@ -226,7 +251,7 @@ export function NotificationCenter() {
                 {tabAlerts.length > 0 && (
                   <button
                     onClick={clearAll}
-                    title="Clear local notifications"
+                    title={t('notifications.center.clearLocal', { defaultValue: 'Clear local notifications' })}
                     className="text-text-muted hover:text-text-primary transition-colors"
                   >
                     <Trash2 size={14} />
@@ -234,6 +259,8 @@ export function NotificationCenter() {
                 )}
                 <button
                   onClick={() => setOpen(false)}
+                  title={t('common.close')}
+                  aria-label={t('common.close')}
                   className="text-text-muted hover:text-text-primary transition-colors"
                 >
                   <X size={14} />
@@ -244,20 +271,22 @@ export function NotificationCenter() {
             {/* Tab bar — visible only in multi-tenant mode */}
             {isMultiTenant && (
               <div className="flex gap-1">
-                {(['local', 'global'] as const).map((t) => {
-                  const badgeCount = t === 'local' ? localUnread : totalUnread;
+                {(['local', 'global'] as const).map((k) => {
+                  const badgeCount = k === 'local' ? localUnread : totalUnread;
                   return (
                     <button
-                      key={t}
-                      onClick={() => setTab(t)}
+                      key={k}
+                      onClick={() => setTab(k)}
                       className={cn(
                         'flex-1 text-xs py-1 rounded-md transition-colors',
-                        tab === t
+                        tab === k
                           ? 'bg-accent text-white font-medium'
                           : 'text-text-muted hover:text-text-primary hover:bg-bg-hover',
                       )}
                     >
-                      {t === 'local' ? 'Local' : 'All Tenants'}
+                      {k === 'local'
+                        ? t('notifications.center.tabLocal', { defaultValue: 'Local' })
+                        : t('notifications.center.tabAllTenants', { defaultValue: 'All Tenants' })}
                       {badgeCount > 0 && (
                         <span className="ml-1 opacity-80">({badgeCount})</span>
                       )}
@@ -272,14 +301,18 @@ export function NotificationCenter() {
               <Toggle
                 enabled={localEnabled}
                 onChange={setLocalEnabled}
-                label={localEnabled ? 'Local pop-ups on' : 'Local pop-ups off'}
+                label={localEnabled
+                  ? t('notifications.center.localPopupsOn', { defaultValue: 'Local pop-ups on' })
+                  : t('notifications.center.localPopupsOff', { defaultValue: 'Local pop-ups off' })}
               />
             )}
             {tab === 'global' && isMultiTenant && (
               <Toggle
                 enabled={multiTenantEnabled}
                 onChange={setMultiTenantEnabled}
-                label={multiTenantEnabled ? 'All-tenant pop-ups on' : 'All-tenant pop-ups off'}
+                label={multiTenantEnabled
+                  ? t('notifications.center.allTenantPopupsOn', { defaultValue: 'All-tenant pop-ups on' })
+                  : t('notifications.center.allTenantPopupsOff', { defaultValue: 'All-tenant pop-ups off' })}
               />
             )}
           </div>
@@ -289,7 +322,7 @@ export function NotificationCenter() {
             {tabAlerts.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-10 text-text-muted gap-2">
                 <Bell size={24} className="opacity-30" />
-                <p className="text-sm">No notifications</p>
+                <p className="text-sm">{t('notifications.center.empty', { defaultValue: 'No notifications' })}</p>
               </div>
             ) : (
               tabAlerts.map((alert) => (
@@ -309,7 +342,7 @@ export function NotificationCenter() {
           {tabAlerts.length > 0 && (
             <div className="border-t border-border px-4 py-2">
               <p className="text-xs text-text-muted/60 text-center">
-                {tabAlerts.length} notification{tabAlerts.length !== 1 ? 's' : ''}
+                {t('notifications.center.count', { count: tabAlerts.length, defaultValue_one: '{{count}} notification', defaultValue_other: '{{count}} notifications' })}
               </p>
             </div>
           )}

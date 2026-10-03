@@ -26,16 +26,36 @@ package main
 // decision; if outbound blocking or live-session teardown is ever needed, add a
 // companion block filter at FWPM_LAYER_INBOUND_TRANSPORT_V4/V6.
 //
+// CIDR: a host entry is an address/mask condition (/32, /128); a network is a
+// range condition (first..last address, FWP_MATCH_RANGE), the form every
+// Windows release accepts at the ALE layers. Filters of networks written as an
+// address/mask by older agents are replaced at start.
+//
+// RESTART: the banlist file (written atomically) is the persisted filter set —
+// filter ids are derived from the canonical entry (ruleID), so the file names
+// exactly the filters this agent owns. At start every filter of our provider or
+// sublayer that is not one of them (entry no longer banned, duplicate,
+// unrecognized condition, older CIDR form) is stale and deleted by the first
+// Flush. The desired set is capped at wfpMaxFilters entries.
+//
+// FALLBACK: if WFP cannot be opened, DetectFirewall falls back to the netsh
+// backend; this file then arms netshFallbackPurge so the persistent filters of
+// an earlier WFP run (invisible to netsh) are removed once netsh enforces.
+//
+// SWITCH: the server may select the backend ("firewallBackend": auto | wfp |
+// netsh, see firewall.go). winBackendSwitcher at the end of this file migrates
+// the ban set at runtime in both directions: the new backend enforces and is
+// verified first, then the old backend's rules are removed.
+//
 // Name() stays "windows" so the server keeps keying on firewallBanned +
 // firewallName. GetBannedIPs() enumerates the ACTUAL enforced set from WFP.
-// Rate limiting still runs through WinDivert (firewall_ratelimit_windows.go);
-// escalation bans land here via BanIP/Flush.
+// Rate limiting is not supported on Windows (owner decision 23, no WinDivert):
+// this backend does not advertise the 'ratelimit' capability.
 //
 // Concurrency: all shared state (desired/applied maps) is guarded by mu; the WFP
 // session (which is not goroutine-safe) is serialized by opMu. This fixes the
 // unguarded-map race the netsh backend had between the heartbeat goroutine
-// (GetBannedIPs), the ban-delta goroutine (BanIP/UnbanIP/Flush) and the
-// WinDivert escalation goroutines.
+// (GetBannedIPs) and the ban-delta goroutine (BanIP/UnbanIP/Flush).
 // ─────────────────────────────────────────────────────────────────────────────
 
 import (
@@ -55,6 +75,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/tailscale/wf"
+	"go4.org/netipx"
 	"golang.org/x/sys/windows"
 )
 
@@ -86,6 +107,17 @@ const wfpBatchSize = 4096
 
 // Safety re-enumeration cadence — keeps the applied mirror provably == WFP.
 const wfpResyncInterval = 10 * time.Minute
+
+// wfpMaxFilters bounds the desired set (one kernel filter per entry, and the
+// maps that mirror it in the agent). Bans beyond it are refused and reported
+// as not enforced, so the server keeps them pending instead of losing them.
+const wfpMaxFilters = 100000
+
+// wf.New is retried while the Base Filtering Engine is still starting (boot).
+const (
+	wfpOpenAttempts = 3
+	wfpOpenRetry    = 2 * time.Second
+)
 
 // FWP_E_* result codes (returned by wf as syscall.Errno).
 const (
@@ -214,6 +246,8 @@ func wfpBanlistPath() string {
 type wfpOp struct {
 	add bool
 	key string
+	// staleID: delete this filter id (stale filter, see enumerate).
+	staleID *wf.RuleID
 }
 
 // WFPFirewall enforces bans as persistent WFP block filters.
@@ -223,8 +257,21 @@ type WFPFirewall struct {
 	mu      sync.Mutex              // guards desired + applied (held only briefly)
 	desired map[string]netip.Prefix // canonical key → masked prefix (what SHOULD be enforced)
 	applied map[string]wf.RuleID    // canonical key → RuleID currently in WFP (mirror of enforced set)
+	stale   []wf.RuleID             // filters of ours to delete (see enumerate)
 
 	opMu sync.Mutex // serializes slow WFP engine ops (Flush txn, enumerate)
+	// closed is set (under opMu) when the backend is retired after a switch to
+	// netsh: the session is closed, every later engine op is refused.
+	closed bool
+	// stop ends backgroundLoop (closed by retire).
+	stop     chan struct{}
+	stopOnce sync.Once
+
+	// handover is set while a switch to netsh builds the netsh rules: the
+	// startup reconcile must not delete them meanwhile. Guarded by handoverMu,
+	// held across reconcile's check-and-delete.
+	handoverMu sync.Mutex
+	handover   bool
 }
 
 // newWFPFirewall opens the BFE engine and ensures the persistent provider +
@@ -232,11 +279,32 @@ type WFPFirewall struct {
 // quickly; the (potentially heavy) migration runs in the background because the
 // persistent filters already enforce, so there is no coverage gap.
 func newWFPFirewall() (FirewallManager, error) {
-	sess, err := wf.New(&wf.Options{
-		Name:        "Obliguard",
-		Description: "Obliguard IPS ban enforcement",
-		Dynamic:     false, // persistent objects survive process exit
-	})
+	f, err := openWFPFirewall()
+	if err != nil {
+		// DetectFirewall falls back to netsh: let it drop the filters of an
+		// earlier WFP run once it enforces the banlist itself.
+		netshFallbackPurge = purgeWFPAfterNetshFallback
+		return nil, err
+	}
+	go f.backgroundLoop()
+	return f, nil
+}
+
+func openWFPFirewall() (*WFPFirewall, error) {
+	var sess *wf.Session
+	var err error
+	for attempt := 1; attempt <= wfpOpenAttempts; attempt++ {
+		sess, err = wf.New(&wf.Options{
+			Name:        "Obliguard",
+			Description: "Obliguard IPS ban enforcement",
+			Dynamic:     false, // persistent objects survive process exit
+		})
+		if err == nil || errors.Is(err, windows.ERROR_ACCESS_DENIED) || attempt == wfpOpenAttempts {
+			break
+		}
+		log.Printf("Firewall(WFP): open failed (%v) — retrying in %s", err, wfpOpenRetry)
+		time.Sleep(wfpOpenRetry)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -244,38 +312,101 @@ func newWFPFirewall() (FirewallManager, error) {
 		sess:    sess,
 		desired: make(map[string]netip.Prefix),
 		applied: make(map[string]wf.RuleID),
+		stop:    make(chan struct{}),
 	}
 	if err := f.ensureInfra(); err != nil {
 		sess.Close()
 		return nil, err
 	}
 
-	// Seed applied+desired SYNCHRONOUSLY from the live WFP filters before
-	// returning. Persistent filters from a prior boot/crash are already
-	// dropping traffic before the agent even started, so GetBannedIPs() must
-	// reflect that enforced set from t=0 — otherwise the first heartbeat would
-	// report firewallBanned=[] and the server could not see stale filters to
-	// remove until a later cycle. The heavier banlist/netsh merge + verify runs
-	// in the background (backgroundLoop → reconcile), where a delay is harmless
-	// (it can only cause re-adds, never a coverage gap).
+	// Seed applied SYNCHRONOUSLY from the live WFP filters before returning.
+	// Persistent filters from a prior boot/crash are already dropping traffic
+	// before the agent even started, so GetBannedIPs() must reflect that
+	// enforced set from t=0 — otherwise the first heartbeat would report
+	// firewallBanned=[] and the server could not see stale filters to remove
+	// until a later cycle.
+	//
+	// desired comes from the banlist file (the persisted filter set): filters
+	// that are not in it are stale and deleted by the first Flush. Without a
+	// banlist (first WFP start, file removed) or with an empty one, the live
+	// filters are adopted instead (fail-closed: never drop bans on missing
+	// information). The legacy netsh merge + verify runs in the background
+	// (backgroundLoop → reconcile), where a delay is harmless.
 	f.opMu.Lock()
-	existing, eerr := f.enumerate()
+	existing, stale, eerr := f.enumerate()
 	if eerr != nil {
 		log.Printf("Firewall(WFP): initial enumerate failed: %v", eerr)
-		existing = map[string]wf.RuleID{}
+		existing, stale = map[string]wf.RuleID{}, nil
 	}
+	banlist, hasBanlist := readWFPBanlist(wfpBanlistPath())
 	f.mu.Lock()
 	for k, id := range existing {
 		f.applied[k] = id
-		if _, p, e := canon(k); e == nil {
-			f.desired[k] = p
+	}
+	f.stale = stale
+	if hasBanlist && len(banlist) > 0 {
+		for k, p := range banlist {
+			f.addDesiredLocked(k, p)
+		}
+	} else {
+		for k := range existing {
+			if _, p, e := canon(k); e == nil {
+				f.addDesiredLocked(k, p)
+			}
+		}
+	}
+	removed := 0
+	for k := range f.applied {
+		if _, ok := f.desired[k]; !ok {
+			removed++
 		}
 	}
 	f.mu.Unlock()
 	f.opMu.Unlock()
-
-	go f.backgroundLoop()
+	if removed > 0 || len(stale) > 0 {
+		log.Printf("Firewall(WFP): %d filter(s) not in the banlist and %d stale filter(s) will be removed", removed, len(stale))
+	}
+	// The caller starts backgroundLoop once this backend enforces
+	// (newWFPFirewall at start, winBackendSwitcher.activate after a switch).
 	return f, nil
+}
+
+// readWFPBanlist parses the banlist file (CRLF, blanks and garbage tolerated).
+func readWFPBanlist(path string) (map[string]netip.Prefix, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false
+	}
+	out := make(map[string]netip.Prefix)
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if k, p, e := canon(line); e == nil {
+			out[k] = p
+		}
+	}
+	return out, true
+}
+
+// addDesiredLocked adds an entry unless the cap is reached. Caller holds mu.
+func (f *WFPFirewall) addDesiredLocked(key string, p netip.Prefix) bool {
+	if _, ok := f.desired[key]; ok {
+		return true
+	}
+	if len(f.desired) >= wfpMaxFilters {
+		return false
+	}
+	f.desired[key] = p
+	return true
+}
+
+// purgeWFPAfterNetshFallback removes our WFP objects once the netsh fallback
+// enforces the banlist (see netshFallbackPurge).
+func purgeWFPAfterNetshFallback() {
+	cleanupWFP(func(format string, args ...any) {
+		log.Printf("Firewall(netsh): purge of earlier WFP filters — "+format, args...)
+	})
 }
 
 func (f *WFPFirewall) ensureInfra() error {
@@ -307,14 +438,20 @@ func (f *WFPFirewall) ensureInfra() error {
 func (f *WFPFirewall) Name() string      { return "windows" }
 func (f *WFPFirewall) IsAvailable() bool { return f != nil && f.sess != nil }
 
+// BackendKind reports the WFP-native backend (capability 'wfp', firewall.go).
+func (f *WFPFirewall) BackendKind() string { return fwBackendWFP }
+
 func (f *WFPFirewall) BanIP(ip string) error {
 	key, p, err := canon(ip)
 	if err != nil {
 		return fmt.Errorf("wfp ban: parse %q: %w", ip, err)
 	}
 	f.mu.Lock()
-	f.desired[key] = p
+	ok := f.addDesiredLocked(key, p)
 	f.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("wfp ban %s: filter limit reached (%d)", key, wfpMaxFilters)
+	}
 	return nil
 }
 
@@ -346,6 +483,9 @@ func (f *WFPFirewall) GetBannedIPs() ([]string, error) {
 func (f *WFPFirewall) Flush() error {
 	f.opMu.Lock()
 	defer f.opMu.Unlock()
+	if f.closed {
+		return errWFPClosed
+	}
 
 	f.mu.Lock()
 	want := make(map[string]netip.Prefix, len(f.desired))
@@ -356,9 +496,15 @@ func (f *WFPFirewall) Flush() error {
 	for k, v := range f.applied {
 		have[k] = v
 	}
+	stale := append([]wf.RuleID(nil), f.stale...)
 	f.mu.Unlock()
 
-	ops := make([]wfpOp, 0)
+	// Stale deletes first: a CIDR filter in the older address/mask form has
+	// the same id as its range replacement, which is added further down.
+	ops := make([]wfpOp, 0, len(stale))
+	for i := range stale {
+		ops = append(ops, wfpOp{staleID: &stale[i]})
+	}
 	for k := range want {
 		if _, ok := have[k]; !ok {
 			ops = append(ops, wfpOp{add: true, key: k})
@@ -374,7 +520,8 @@ func (f *WFPFirewall) Flush() error {
 	}
 
 	handle := sessHandle(f.sess)
-	totalAdd, totalDel := 0, 0
+	totalAdd, totalDel, staleDel := 0, 0, 0
+	staleDone := make(map[wf.RuleID]bool)
 	for start := 0; start < len(ops); start += wfpBatchSize {
 		end := start + wfpBatchSize
 		if end > len(ops) {
@@ -386,6 +533,11 @@ func (f *WFPFirewall) Flush() error {
 		}
 		f.mu.Lock()
 		for _, o := range committed {
+			if o.staleID != nil {
+				staleDone[*o.staleID] = true
+				staleDel++
+				continue
+			}
 			if o.add {
 				f.applied[o.key] = ruleID(o.key)
 				totalAdd++
@@ -397,9 +549,23 @@ func (f *WFPFirewall) Flush() error {
 		f.mu.Unlock()
 	}
 
+	if len(stale) > 0 {
+		// Keep the stale ids that could not be deleted for the next Flush
+		// (f.stale may have been replaced by a resync meanwhile: filter it).
+		f.mu.Lock()
+		left := f.stale[:0]
+		for _, id := range f.stale {
+			if !staleDone[id] {
+				left = append(left, id)
+			}
+		}
+		f.stale = left
+		f.mu.Unlock()
+	}
+
 	f.persistBanlist()
-	if totalAdd > 0 || totalDel > 0 {
-		log.Printf("Firewall(WFP): committed +%d / -%d filters (%d enforced)", totalAdd, totalDel, f.appliedCount())
+	if totalAdd > 0 || totalDel > 0 || staleDel > 0 {
+		log.Printf("Firewall(WFP): committed +%d / -%d filters, %d stale removed (%d enforced)", totalAdd, totalDel, staleDel, f.appliedCount())
 	}
 	return nil
 }
@@ -447,7 +613,12 @@ func (f *WFPFirewall) commitBatch(handle windows.Handle, batch []wfpOp, want map
 func (f *WFPFirewall) runOps(batch []wfpOp, want map[string]netip.Prefix, have map[string]wf.RuleID, stopOnErr bool) (applied []wfpOp, firstErr error) {
 	for _, o := range batch {
 		var err error
-		if o.add {
+		if o.staleID != nil {
+			err = f.sess.DeleteRule(*o.staleID)
+			if isNotFound(err) {
+				err = nil
+			}
+		} else if o.add {
 			err = f.sess.AddRule(buildRule(o.key, want[o.key]))
 			if isAlreadyExists(err) {
 				err = nil
@@ -472,9 +643,53 @@ func (f *WFPFirewall) runOps(batch []wfpOp, want map[string]netip.Prefix, have m
 	return applied, firstErr
 }
 
+// wfpRemoteMatch is the remote-address condition for one entry: a host is an
+// address/mask (/32, /128 — the form older agents wrote, kept so their
+// filters stay valid), a network is a range of its first..last address
+// (FWP_MATCH_RANGE).
+func wfpRemoteMatch(p netip.Prefix) *wf.Match {
+	p = p.Masked()
+	if p.IsSingleIP() {
+		return &wf.Match{Field: wf.FieldIPRemoteAddress, Op: wf.MatchTypeEqual, Value: p}
+	}
+	return &wf.Match{Field: wf.FieldIPRemoteAddress, Op: wf.MatchTypeRange, Value: netipx.RangeOfPrefix(p)}
+}
+
+// wfpMatchPrefix maps a remote-address condition read back from WFP to the
+// entry it enforces. current is false for a valid but outdated form (network
+// as address/mask), which is replaced. ok is false for anything else.
+func wfpMatchPrefix(m *wf.Match) (p netip.Prefix, current, ok bool) {
+	if m == nil || m.Field != wf.FieldIPRemoteAddress {
+		return netip.Prefix{}, false, false
+	}
+	switch v := m.Value.(type) {
+	case netip.Prefix:
+		if m.Op != wf.MatchTypeEqual || !v.IsValid() {
+			return netip.Prefix{}, false, false
+		}
+		v = v.Masked()
+		return v, v.IsSingleIP(), true
+	case netip.Addr:
+		if m.Op != wf.MatchTypeEqual || !v.IsValid() {
+			return netip.Prefix{}, false, false
+		}
+		v = v.Unmap()
+		return netip.PrefixFrom(v, v.BitLen()), true, true
+	case netipx.IPRange:
+		if m.Op != wf.MatchTypeRange {
+			return netip.Prefix{}, false, false
+		}
+		pr, isPrefix := v.Prefix()
+		if !isPrefix {
+			return netip.Prefix{}, false, false
+		}
+		return pr.Masked(), !pr.IsSingleIP(), true
+	}
+	return netip.Prefix{}, false, false
+}
+
 // buildRule constructs a persistent terminating BLOCK filter for one prefix at
-// the matching inbound ALE layer. The tailscale/wf library marshals the
-// netip.Prefix to FWP_V4_ADDR_AND_MASK or FWP_V6_ADDR_AND_MASK itself.
+// the matching inbound ALE layer (see wfpRemoteMatch for the condition).
 func buildRule(key string, p netip.Prefix) *wf.Rule {
 	layer := wf.LayerALEAuthRecvAcceptV6
 	if p.Addr().Is4() {
@@ -491,11 +706,7 @@ func buildRule(key string, p netip.Prefix) *wf.Rule {
 		Persistent:  true,
 		HardAction:  true, // FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT — non-overridable
 		Action:      wf.ActionBlock,
-		Conditions: []*wf.Match{{
-			Field: wf.FieldIPRemoteAddress,
-			Op:    wf.MatchTypeEqual,
-			Value: p,
-		}},
+		Conditions:  []*wf.Match{wfpRemoteMatch(p)},
 	}
 }
 
@@ -511,7 +722,7 @@ func (f *WFPFirewall) persistBanlist() {
 	if len(keys) > 0 {
 		data += "\n"
 	}
-	if err := os.WriteFile(wfpBanlistPath(), []byte(data), 0644); err != nil {
+	if err := writeFileAtomic(wfpBanlistPath(), []byte(data), 0644); err != nil {
 		log.Printf("Firewall(WFP): failed to save banlist: %v", err)
 	}
 }
@@ -524,32 +735,56 @@ func (f *WFPFirewall) appliedCount() int {
 
 // ── Enumeration (authoritative read from WFP) ────────────────────────────────
 
-// enumerate reads all filters under our provider straight from the engine.
-// Caller must hold opMu.
-func (f *WFPFirewall) enumerate() (map[string]wf.RuleID, error) {
+// errWFPClosed: the backend was retired by a switch to netsh.
+var errWFPClosed = errors.New("wfp: backend retired")
+
+// enumerate reads all filters of our provider or sublayer straight from the
+// engine. Caller must hold opMu.
+func (f *WFPFirewall) enumerate() (map[string]wf.RuleID, []wf.RuleID, error) {
+	if f.closed {
+		return nil, nil, errWFPClosed
+	}
 	rules, err := f.sess.Rules()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	out := make(map[string]wf.RuleID)
+	cur, stale := classifyWFPRules(rules)
+	return cur, stale, nil
+}
+
+// classifyWFPRules splits our filters into the enforced entries (canonical
+// key → filter id) and the stale filter ids to delete: an unrecognized
+// condition, a network in the older address/mask form, an id that is not
+// ruleID(key) (so the add/delete-by-recompute bookkeeping cannot track it), or
+// a second filter for the same entry. Filters of other providers are ignored.
+func classifyWFPRules(rules []*wf.Rule) (map[string]wf.RuleID, []wf.RuleID) {
+	cur := make(map[string]wf.RuleID)
+	var stale []wf.RuleID
 	for _, r := range rules {
-		if r.Provider != obliProviderID || len(r.Conditions) != 1 {
+		if r == nil || (r.Provider != obliProviderID && r.Sublayer != obliSublayerID) {
 			continue
 		}
-		c := r.Conditions[0]
-		if c.Field != wf.FieldIPRemoteAddress {
+		if len(r.Conditions) != 1 {
+			stale = append(stale, r.ID)
 			continue
 		}
-		switch v := c.Value.(type) {
-		case netip.Prefix:
-			key, _ := canonFromPrefix(v)
-			out[key] = r.ID
-		case netip.Addr:
-			key, _ := canonFromPrefix(netip.PrefixFrom(v, v.BitLen()))
-			out[key] = r.ID
+		p, current, ok := wfpMatchPrefix(r.Conditions[0])
+		if !ok || !current {
+			stale = append(stale, r.ID)
+			continue
 		}
+		key, _ := canonFromPrefix(p)
+		if r.ID != ruleID(key) {
+			stale = append(stale, r.ID)
+			continue
+		}
+		if _, dup := cur[key]; dup {
+			stale = append(stale, r.ID)
+			continue
+		}
+		cur[key] = r.ID
 	}
-	return out, nil
+	return cur, stale
 }
 
 // ── Startup reconcile + non-destructive netsh migration ──────────────────────
@@ -558,31 +793,21 @@ func (f *WFPFirewall) backgroundLoop() {
 	f.reconcile()
 	t := time.NewTicker(wfpResyncInterval)
 	defer t.Stop()
-	for range t.C {
-		f.resync()
+	for {
+		select {
+		case <-f.stop:
+			return
+		case <-t.C:
+			f.resync()
+		}
 	}
 }
 
 func (f *WFPFirewall) reconcile() {
-	// (Step 1 — adopting persistent filters already in WFP from a prior
-	// boot/crash — was done synchronously in newWFPFirewall so GetBannedIPs is
-	// correct from t=0. applied+desired are already seeded here.)
-
-	// 2. Merge the shared banlist file (v4/v6/CIDR via netip, not the v4-only
-	//    ipPattern). This also covers IPs held in the old grouped netsh rules,
-	//    since the netsh backend wrote them to this same file.
-	if data, rerr := os.ReadFile(wfpBanlistPath()); rerr == nil {
-		for _, line := range strings.Split(string(data), "\n") {
-			if strings.TrimSpace(line) == "" {
-				continue
-			}
-			if k, p, e := canon(line); e == nil {
-				f.mu.Lock()
-				f.desired[k] = p
-				f.mu.Unlock()
-			}
-		}
-	}
+	// (Steps 1 and 2 — adopting the live filters and loading the banlist
+	// file, which also holds the IPs of the old grouped netsh rules since the
+	// netsh backend wrote the same file — were done synchronously in
+	// openWFPFirewall so GetBannedIPs is correct from t=0.)
 
 	// 3. Merge legacy per-IP netsh rules (Obliguard-Block-A-B-C-D-*, IPv4 only)
 	//    into desired so those IPs get WFP filters before we remove the netsh
@@ -591,7 +816,7 @@ func (f *WFPFirewall) reconcile() {
 	for _, ip := range legacy.getLegacyIPs() {
 		if k, p, e := canon(ip); e == nil {
 			f.mu.Lock()
-			f.desired[k] = p
+			f.addDesiredLocked(k, p)
 			f.mu.Unlock()
 		}
 	}
@@ -604,7 +829,7 @@ func (f *WFPFirewall) reconcile() {
 	// 5. Verify by re-reading WFP, then — and ONLY then — remove netsh rules.
 	//    If verification is incomplete we keep netsh (double-enforced, never
 	//    under-enforced) and retry on the next start.
-	verify, verr := f.enumLocked()
+	verify, _, verr := f.enumLocked()
 	if verr == nil {
 		f.mu.Lock()
 		missing := 0
@@ -620,9 +845,15 @@ func (f *WFPFirewall) reconcile() {
 			// on a large ruleset that probe errors/truncates and returned false,
 			// which left ~70 grouped rules (and their MpsSvc/BFE cost) in place
 			// alongside the WFP filters. Both deleters are idempotent no-ops.
-			legacy.deleteGroupedRules()
-			legacy.cleanupLegacyRules()
-			log.Printf("Firewall(WFP): migration — cleared any legacy netsh ban rules")
+			// Skipped once a switch to netsh started (those rules are the new
+			// backend's).
+			f.handoverMu.Lock()
+			if !f.handover && !f.isClosed() {
+				legacy.deleteGroupedRules()
+				legacy.cleanupLegacyRules()
+				log.Printf("Firewall(WFP): migration — cleared any legacy netsh ban rules")
+			}
+			f.handoverMu.Unlock()
 		} else {
 			log.Printf("Firewall(WFP): verify incomplete (%d desired filters missing) — keeping netsh rules, will retry next start", missing)
 		}
@@ -646,7 +877,7 @@ func (f *WFPFirewall) reconcile() {
 // our provider) and is converged away by the Flush below.
 func (f *WFPFirewall) resync() {
 	f.opMu.Lock()
-	applied, err := f.enumerate()
+	applied, stale, err := f.enumerate()
 	if err != nil {
 		f.opMu.Unlock()
 		log.Printf("Firewall(WFP): resync enumerate failed: %v", err)
@@ -654,9 +885,11 @@ func (f *WFPFirewall) resync() {
 	}
 	f.mu.Lock()
 	f.applied = applied
+	f.stale = stale
 	// Converge if desired and applied differ in EITHER direction (pending add
-	// or pending delete). Equal length + desired ⊆ applied ⇒ the sets are equal.
-	needFlush := len(f.desired) != len(applied)
+	// or pending delete), or a stale filter appeared. Equal length + desired ⊆
+	// applied ⇒ the sets are equal.
+	needFlush := len(stale) > 0 || len(f.desired) != len(applied)
 	if !needFlush {
 		for k := range f.desired {
 			if _, ok := applied[k]; !ok {
@@ -676,23 +909,246 @@ func (f *WFPFirewall) resync() {
 }
 
 // enumLocked runs enumerate under opMu.
-func (f *WFPFirewall) enumLocked() (map[string]wf.RuleID, error) {
+func (f *WFPFirewall) enumLocked() (map[string]wf.RuleID, []wf.RuleID, error) {
 	f.opMu.Lock()
 	defer f.opMu.Unlock()
 	return f.enumerate()
 }
 
-// ── Rate limiting (delegates to the WinDivert path) ──────────────────────────
+// ── Rate limiting (not supported) ────────────────────────────────────────────
 //
-// WinDivert stays the rate limiter; WFP is the ban enforcer. Escalation bans
-// call BanIP/Flush on this backend (see firewall_ratelimit_windows.go), which
-// buffers into desired and commits as a WFP filter.
+// WFP is allow/block only and the WinDivert prototype is gone (owner decision
+// 23): rate limiting is reported unsupported and rate-limit frames are ignored
+// (see applyRateLimitsFrame in cmd_ws.go).
 
-func (f *WFPFirewall) IsRateLimitSupported() bool {
-	return winDivertDLLPath() != ""
+func (f *WFPFirewall) IsRateLimitSupported() bool { return false }
+
+func (f *WFPFirewall) ApplyRateLimits(_ []RateLimitRule) error { return nil }
+
+// ── Backend switch (server "firewallBackend", firewall.go) ───────────────────
+//
+// A switch runs under the switchableFirewall write lock: no ban delta reaches
+// either backend meanwhile, and the heartbeat keeps reporting the old backend,
+// which keeps enforcing until the new one is verified. The banlist file is
+// shared by both backends; on a failed switch it is rewritten from the old
+// backend's set, so a restart never loads the partial set of an aborted switch.
+
+func init() { fwSwitchOps = winBackendSwitcher{} }
+
+type winBackendSwitcher struct{}
+
+func (winBackendSwitcher) kindOf(fw FirewallManager) string {
+	switch fw.(type) {
+	case *WFPFirewall:
+		return fwBackendWFP
+	case *WindowsFirewall:
+		return fwBackendNetsh
+	}
+	return "none"
 }
 
-func (f *WFPFirewall) ApplyRateLimits(rules []RateLimitRule) error {
-	winRL.setFW(f)
-	return winRL.apply(rules)
+func (winBackendSwitcher) armWFPPurge() { netshFallbackPurge = purgeWFPAfterNetshFallback }
+
+func (winBackendSwitcher) activate(fw FirewallManager) {
+	if f, ok := fw.(*WFPFirewall); ok {
+		go f.backgroundLoop()
+	}
+}
+
+func (winBackendSwitcher) migrate(old FirewallManager, to string) (FirewallManager, error) {
+	// Commit the pending deltas first: the set to move is what the old
+	// backend was asked to enforce.
+	if err := old.Flush(); err != nil {
+		log.Printf("Firewall: switch — flush of the current backend: %v", err)
+	}
+	want := switchBanSet(old)
+	switch to {
+	case fwBackendWFP:
+		return migrateToWFP(old, want)
+	case fwBackendNetsh:
+		return migrateToNetsh(old, want)
+	}
+	return nil, fmt.Errorf("unknown backend %q", to)
+}
+
+// switchBanSet returns the canonical entries a backend is asked to enforce
+// (desired set, including entries a failed apply left pending).
+func switchBanSet(fw FirewallManager) map[string]netip.Prefix {
+	out := make(map[string]netip.Prefix)
+	add := func(s string) {
+		if k, p, err := canon(s); err == nil {
+			out[k] = p
+		}
+	}
+	switch f := fw.(type) {
+	case *WFPFirewall:
+		f.mu.Lock()
+		for k := range f.desired {
+			add(k)
+		}
+		f.mu.Unlock()
+	case *WindowsFirewall:
+		f.mu.Lock()
+		f.loadCache()
+		for k := range f.cache {
+			add(k)
+		}
+		f.mu.Unlock()
+	default:
+		cur, _ := fw.GetBannedIPs()
+		for _, k := range cur {
+			add(k)
+		}
+	}
+	return out
+}
+
+// switchMissing lists the entries of want that fw does not report enforced.
+func switchMissing(want map[string]netip.Prefix, fw FirewallManager) []string {
+	got := make(map[string]bool)
+	cur, _ := fw.GetBannedIPs()
+	for _, s := range cur {
+		if k, _, err := canon(s); err == nil {
+			got[k] = true
+		}
+	}
+	var missing []string
+	for k := range want {
+		if !got[k] {
+			missing = append(missing, k)
+		}
+	}
+	sort.Strings(missing)
+	return missing
+}
+
+// writeSwitchBanlist rewrites the shared banlist file with a ban set.
+func writeSwitchBanlist(want map[string]netip.Prefix) {
+	keys := make([]string, 0, len(want))
+	for k := range want {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	data := strings.Join(keys, "\n")
+	if len(keys) > 0 {
+		data += "\n"
+	}
+	if err := writeFileAtomic(wfpBanlistPath(), []byte(data), 0644); err != nil {
+		log.Printf("Firewall: switch — failed to restore the banlist: %v", err)
+	}
+}
+
+// migrateToWFP: WFP filters for the whole set, verified by enumeration, then
+// the netsh rules are removed.
+func migrateToWFP(old FirewallManager, want map[string]netip.Prefix) (FirewallManager, error) {
+	nw, err := openWFPFirewall()
+	if err != nil {
+		return nil, fmt.Errorf("WFP init: %w", err)
+	}
+	// Enforce exactly the old backend's set (not what the banlist file or
+	// filters of an earlier WFP run hold).
+	nw.mu.Lock()
+	nw.desired = make(map[string]netip.Prefix, len(want))
+	for k, p := range want {
+		nw.addDesiredLocked(k, p)
+	}
+	nw.mu.Unlock()
+	if err := nw.Flush(); err != nil {
+		nw.retire(true)
+		writeSwitchBanlist(want)
+		return nil, fmt.Errorf("WFP flush: %w", err)
+	}
+	// Re-read the engine: the applied mirror must be what WFP holds.
+	nw.resync()
+	if missing := switchMissing(want, nw); len(missing) > 0 {
+		nw.retire(true)
+		writeSwitchBanlist(want)
+		return nil, fmt.Errorf("%d of %d entries not enforced by WFP (first: %s)", len(missing), len(want), missing[0])
+	}
+	if nf, ok := old.(*WindowsFirewall); ok {
+		nf.deleteGroupedRules()
+		nf.cleanupLegacyRules()
+		log.Printf("Firewall: switch — netsh ban rules removed, WFP enforces %d entries", len(want))
+	}
+	return nw, nil
+}
+
+// migrateToNetsh: netsh grouped rules for the whole set, verified (no group
+// left unapplied), then the WFP filters are removed.
+func migrateToNetsh(old FirewallManager, want map[string]netip.Prefix) (FirewallManager, error) {
+	nf := &WindowsFirewall{}
+	if !nf.IsAvailable() {
+		return nil, errors.New("netsh not available")
+	}
+	oldWFP, _ := old.(*WFPFirewall)
+	if oldWFP != nil {
+		oldWFP.setHandover(true)
+	}
+	nf.mu.Lock()
+	nf.loadCache()
+	nf.cache = make(map[string]bool, len(want))
+	for k := range want {
+		nf.cache[k] = true
+	}
+	nf.dirty = true
+	// The WFP filters are removed below, once netsh is verified, not by the
+	// first Flush (netshFallbackPurge).
+	nf.wfpPurged = true
+	nf.mu.Unlock()
+
+	err := nf.Flush()
+	missing := switchMissing(want, nf)
+	if err != nil || len(missing) > 0 {
+		nf.deleteGroupedRules()
+		if oldWFP != nil {
+			oldWFP.setHandover(false)
+			oldWFP.persistBanlist()
+		} else {
+			writeSwitchBanlist(want)
+		}
+		if err == nil {
+			err = fmt.Errorf("%d of %d entries not enforced by netsh (first: %s)", len(missing), len(want), missing[0])
+		}
+		return nil, err
+	}
+	if oldWFP != nil {
+		oldWFP.retire(true)
+		log.Printf("Firewall: switch — WFP filters removed, netsh enforces %d entries", len(want))
+	}
+	return nf, nil
+}
+
+// setHandover marks a switch to netsh in progress (see WFPFirewall.handover).
+func (f *WFPFirewall) setHandover(on bool) {
+	f.handoverMu.Lock()
+	f.handover = on
+	f.handoverMu.Unlock()
+}
+
+func (f *WFPFirewall) isClosed() bool {
+	f.opMu.Lock()
+	defer f.opMu.Unlock()
+	return f.closed
+}
+
+// retire stops the background loop and closes the session; with purge, every
+// filter of the Obliguard provider/sublayer is removed (the other backend
+// enforces the set by then, or the switch was aborted before it began).
+func (f *WFPFirewall) retire(purge bool) {
+	if f.stop != nil {
+		f.stopOnce.Do(func() { close(f.stop) })
+	}
+	f.opMu.Lock()
+	if !f.closed {
+		f.closed = true
+		if f.sess != nil {
+			f.sess.Close()
+		}
+	}
+	f.opMu.Unlock()
+	if purge {
+		cleanupWFP(func(format string, args ...any) {
+			log.Printf("Firewall: switch — WFP cleanup: "+format, args...)
+		})
+	}
 }

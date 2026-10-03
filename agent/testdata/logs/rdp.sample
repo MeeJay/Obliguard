@@ -1,0 +1,22 @@
+@@ parser rdp
+# Lines in the format built by the Windows Security log poller (eventlog_windows.go).
+@@ expect {"ip":"203.0.113.130","user":"Administrator"}
+EventID:4625 Account Name: Administrator Source Network Address: 203.0.113.130
+
+@@ expect {"ip":"2001:db8::131","user":"j doe"}
+EventID:4625 Account Name: j doe Source Network Address: 2001:db8::131
+
+@@ expect {"ip":"203.0.113.132","user":""}
+EventID:4625 Account Name:  Source Network Address: 203.0.113.132
+
+@@ expect {"type":"auth_success","ip":"192.0.2.133","user":"alice"}
+EventID:4624 Account Name: alice Source Network Address: 192.0.2.133
+
+@@ none
+EventID:4625 Account Name: bob Source Network Address: -
+@@ none
+EventID:4634 Account Name: bob Source Network Address: 203.0.113.134
+
+# Injection: the account name carries its own address field.
+@@ none
+EventID:4625 Account Name: x Source Network Address: 198.51.100.66 Source Network Address: 203.0.113.135

@@ -10,7 +10,7 @@ import crypto from 'crypto';
 import { db } from '../../db';
 import { logger } from '../../utils/logger';
 import { encryptSecret, decryptSecret } from '../../utils/crypto';
-import { createRouterOSClient } from './routerosClient';
+import { createRouterOSClient, TLS_FINGERPRINT_MISMATCH_PREFIX } from './routerosClient';
 import type { CreateMikroTikDeviceRequest, UpdateMikroTikCredentialsRequest, MikroTikCredentials } from '@obliview/shared';
 
 export const mikrotikDeviceService = {
@@ -96,16 +96,33 @@ export const mikrotikDeviceService = {
       lastApiConnectedAt: row.last_api_connected_at?.toISOString() ?? null,
       lastApiError: row.last_api_error,
       lastSyslogAt: row.last_syslog_at?.toISOString() ?? null,
+      tlsFingerprint: row.tls_fingerprint ?? null,
+      tlsFingerprintMismatch: typeof row.last_api_error === 'string'
+        && row.last_api_error.startsWith(TLS_FINGERPRINT_MISMATCH_PREFIX),
       createdAt: row.created_at.toISOString(),
       updatedAt: row.updated_at.toISOString(),
     };
   },
 
   /**
-   * Update MikroTik credentials.
+   * Update MikroTik credentials. A new host or port, or
+   * `resetTlsFingerprint: true` (admin action after a deliberate certificate
+   * change), forgets the pinned API-SSL fingerprint: the next successful TLS
+   * login pins the certificate presented then.
    */
   async updateCredentials(deviceId: number, data: UpdateMikroTikCredentialsRequest): Promise<void> {
     const updates: Record<string, unknown> = { updated_at: new Date() };
+    const current = await db('mikrotik_credentials').where('device_id', deviceId)
+      .first('api_host', 'api_port', 'last_api_error') as { api_host: string; api_port: number; last_api_error: string | null } | undefined;
+    const endpointChanged = !!current && (
+      (data.apiHost !== undefined && data.apiHost !== current.api_host)
+      || (data.apiPort !== undefined && Number(data.apiPort) !== Number(current.api_port)));
+    if (data.resetTlsFingerprint === true || endpointChanged) {
+      updates.tls_fingerprint = null;
+      // The refusal no longer applies: the next connection pins again.
+      if (current?.last_api_error?.startsWith(TLS_FINGERPRINT_MISMATCH_PREFIX)) updates.last_api_error = null;
+      logger.info({ deviceId, reason: endpointChanged ? 'endpoint changed' : 'reset' }, 'MikroTik API-SSL fingerprint pin cleared');
+    }
 
     if (data.apiHost !== undefined) updates.api_host = data.apiHost;
     if (data.apiPort !== undefined) updates.api_port = data.apiPort;
@@ -150,6 +167,7 @@ export const mikrotikDeviceService = {
         useTls: row.api_use_tls,
         username: row.api_username,
         password,
+        deviceId,
       });
       const identity = await client.testConnection();
       client.close();
@@ -180,6 +198,7 @@ export const mikrotikDeviceService = {
     const row = await db('mikrotik_credentials').where('device_id', deviceId).first();
     if (!row) return null;
     return {
+      deviceId,
       host: row.api_host as string,
       port: row.api_port as number,
       useTls: row.api_use_tls as boolean,
