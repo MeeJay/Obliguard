@@ -89,6 +89,10 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
 # (logs go to stdout) and listens on an unprivileged port (PORT, default 3001).
 # The old root entrypoint (symlink of /custom/.ssh into /root/.ssh for the
 # Obliview SSH features) is gone with openssh-client: nothing used those keys.
+# Compatibility shim for containers still configured with /entrypoint.sh
+# (created from the old root image): it only execs the command.
+COPY server/docker-entrypoint-compat.sh /entrypoint.sh
+RUN chmod 755 /entrypoint.sh
 USER node
 WORKDIR /app/server
 CMD ["node", "dist/src/index.js"]

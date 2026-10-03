@@ -80,7 +80,13 @@ describe('102 release tooling and container hardening (W14-4)', () => {
     assert.ok(!prod.slice(userAt + 1).some((l) => /^(RUN|COPY|ADD)\s/i.test(l)), 'no RUN/COPY after USER node');
     assert.ok(!prod.some((l) => /openssh|apk add/i.test(l)), 'no extra packages (openssh-client dropped)');
     assert.ok(!prod.some((l) => /^ENTRYPOINT\s/i.test(l)), 'no root entrypoint script');
-    assert.ok(!prod.some((l) => /entrypoint\.sh/.test(l)), 'docker-entrypoint.sh not shipped');
+    // Only the exec-only compatibility shim may be shipped as /entrypoint.sh
+    // (containers created from the old root image still reference it).
+    const eps = prod.filter((l) => /entrypoint\.sh/.test(l));
+    assert.ok(eps.every((l) => /^COPY\s+server\/docker-entrypoint-compat\.sh\s+\/entrypoint\.sh$/.test(l) || /^RUN\s+chmod\s+755\s+\/entrypoint\.sh$/.test(l)),`only the compat shim is shipped: ${eps.join(' | ')}`);
+    const shim = fs.readFileSync(path.join(REPO, 'server/docker-entrypoint-compat.sh'), 'utf8');
+    assert.ok(!/\b(rm|ln|chown|chmod|su|sudo|mkdir)\b/.test(shim.replace(/^#.*$/gm, '')), 'compat shim does nothing but exec');
+    assert.match(shim, /exec "\$@"/, 'compat shim execs the command');
     const installs = prod.filter((l) => /npm (install|ci)\b/.test(l));
     assert.ok(installs.length > 0, 'production dependencies installed');
     for (const l of installs) assert.match(l, /--omit=dev/, `production install omits dev dependencies: ${l}`);
